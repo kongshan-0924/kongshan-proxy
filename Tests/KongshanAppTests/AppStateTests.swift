@@ -640,6 +640,94 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(try dnsURLs(from: attempts[1]), customDNSSettings)
     }
 
+    func testDashboardMonitoringKeepsSixtyPointsAndIsIdempotent() async throws {
+        let streams = DashboardStreamFixture(sampleCount: 65)
+        let fixture = try await makeModeFixture(
+            initialMode: .systemProxy,
+            clashClientFactory: { controller, secret in
+                ClashAPIClient(
+                    controller: controller,
+                    secret: secret,
+                    streamFactory: streams.stream(for:)
+                )
+            }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        fixture.state.startDashboardMonitoring()
+        fixture.state.startDashboardMonitoring()
+        try await waitUntil {
+            fixture.state.trafficHistory.count == 60 && fixture.state.activeConnectionCount == 2
+        }
+
+        XCTAssertEqual(fixture.state.uploadRate, 64)
+        XCTAssertEqual(fixture.state.downloadRate, 128)
+        XCTAssertEqual(fixture.state.trafficHistory.first?.upload, 5)
+        XCTAssertEqual(fixture.state.trafficHistory.last?.download, 128)
+        XCTAssertEqual(fixture.state.coreMemory, 4_194_304)
+        XCTAssertNotNil(fixture.state.runtimeStartedAt)
+        XCTAssertEqual(streams.requestCount(path: "/traffic"), 1)
+        XCTAssertEqual(streams.requestCount(path: "/connections"), 1)
+
+        fixture.state.stopDashboardMonitoring()
+        try await waitUntil { streams.terminationCount == 2 }
+        await fixture.state.stop()
+    }
+
+    func testDashboardMonitoringDoesNothingWhileProxyIsOff() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let streams = DashboardStreamFixture(sampleCount: 1)
+        let storage = Storage(rootDirectory: root)
+        let state = AppState(
+            storage: storage,
+            systemProxyManager: SystemProxyManager(storage: storage) { _, _ in
+                ProcessResult(exitCode: 0, stdout: "", stderr: "")
+            },
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            clashClientFactory: { controller, secret in
+                ClashAPIClient(
+                    controller: controller,
+                    secret: secret,
+                    streamFactory: streams.stream(for:)
+                )
+            },
+            automaticallyInitialize: false
+        )
+
+        state.startDashboardMonitoring()
+        try await Task.sleep(for: .milliseconds(30))
+
+        XCTAssertTrue(streams.requests.isEmpty)
+        XCTAssertTrue(state.trafficHistory.isEmpty)
+    }
+
+    func testDashboardStreamFailureWarnsAndProxyStopCancelsRemainingStream() async throws {
+        let streams = DashboardStreamFixture(sampleCount: 0, failTraffic: true)
+        let fixture = try await makeModeFixture(
+            initialMode: .systemProxy,
+            clashClientFactory: { controller, secret in
+                ClashAPIClient(
+                    controller: controller,
+                    secret: secret,
+                    streamFactory: streams.stream(for:)
+                )
+            }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        fixture.state.startDashboardMonitoring()
+        try await waitUntil {
+            fixture.state.warnings.contains { $0.contains("流量推送已断开") }
+        }
+        XCTAssertEqual(fixture.state.status, .on)
+
+        await fixture.state.stop()
+
+        XCTAssertEqual(fixture.state.status, .off)
+        try await waitUntil { streams.terminationCount == 2 }
+    }
+
     private func makeRunningFixture(
         failOnceFor: [String]? = nil,
         healthFailures: Set<Int> = []
@@ -695,7 +783,8 @@ final class AppStateTests: XCTestCase {
         initialMode: ProxyMode,
         tunStartError: Error? = nil,
         tunStopError: Error? = nil,
-        tunStartFailureCalls: Set<Int> = []
+        tunStartFailureCalls: Set<Int> = [],
+        clashClientFactory: AppState.ClashClientFactory? = nil
     ) async throws -> ModeFixture {
         let root = temporaryDirectory()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -735,6 +824,7 @@ final class AppStateTests: XCTestCase {
             privilegedLauncher: privileged,
             runtimeFactory: { runtime },
             healthVerifier: { _ in },
+            clashClientFactory: clashClientFactory,
             automaticallyInitialize: false
         )
         state.nodes = [ProxyNode(
@@ -849,6 +939,18 @@ final class AppStateTests: XCTestCase {
         var clash = try RuntimeSecrets.availableHighPort()
         while clash == mixed { clash = try RuntimeSecrets.availableHighPort() }
         return RuntimeParameters(mixedPort: mixed, clashPort: clash, secret: try RuntimeSecrets.secret())
+    }
+
+    private func waitUntil(
+        _ condition: () -> Bool,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        for _ in 0..<100 {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("Timed out waiting for condition", file: file, line: line)
     }
 
     private var singBoxURL: URL {
@@ -1044,6 +1146,61 @@ private enum ModeTestError: Error {
     case startFailed
     case stopFailed
     case recoveryFailed
+}
+
+private enum DashboardStreamError: Error {
+    case disconnected
+}
+
+private final class DashboardStreamFixture: @unchecked Sendable {
+    private let lock = NSLock()
+    private let sampleCount: Int
+    private let failTraffic: Bool
+    private var storedRequests: [URLRequest] = []
+    private var storedTerminationCount = 0
+
+    init(sampleCount: Int, failTraffic: Bool = false) {
+        self.sampleCount = sampleCount
+        self.failTraffic = failTraffic
+    }
+
+    var requests: [URLRequest] {
+        lock.withLock { storedRequests }
+    }
+
+    var terminationCount: Int {
+        lock.withLock { storedTerminationCount }
+    }
+
+    func requestCount(path: String) -> Int {
+        requests.filter { $0.url?.path == path }.count
+    }
+
+    func stream(for request: URLRequest) -> AsyncThrowingStream<Data, Error> {
+        lock.withLock { storedRequests.append(request) }
+        return AsyncThrowingStream { continuation in
+            continuation.onTermination = { [weak self] _ in
+                guard let self else { return }
+                lock.withLock { storedTerminationCount += 1 }
+            }
+            switch request.url?.path {
+            case "/traffic":
+                if failTraffic {
+                    continuation.finish(throwing: DashboardStreamError.disconnected)
+                } else {
+                    for index in 0..<sampleCount {
+                        continuation.yield(Data("{\"up\":\(index),\"down\":\(index * 2)}".utf8))
+                    }
+                }
+            case "/connections":
+                continuation.yield(Data(
+                    #"{"downloadTotal":0,"uploadTotal":0,"connections":[{},{}],"memory":4194304}"#.utf8
+                ))
+            default:
+                continuation.finish(throwing: DashboardStreamError.disconnected)
+            }
+        }
+    }
 }
 
 private actor HealthGate {

@@ -2,11 +2,27 @@ import Foundation
 import KongshanCore
 import Observation
 
+struct TrafficPoint: Identifiable, Equatable, Sendable {
+    let id: UUID
+    let timestamp: Date
+    let upload: Int64
+    let download: Int64
+
+    init(id: UUID = UUID(), timestamp: Date, upload: Int64, download: Int64) {
+        self.id = id
+        self.timestamp = timestamp
+        self.upload = upload
+        self.download = download
+    }
+}
+
 @MainActor
 @Observable
 final class AppState {
     typealias RuntimeFactory = @Sendable () throws -> RuntimeParameters
     typealias HealthVerifier = @Sendable (ClashAPIClient) async throws -> Void
+    typealias ClashClientFactory = @Sendable (URL, String) -> ClashAPIClient
+    typealias NowProvider = @Sendable () -> Date
 
     enum Status: Equatable {
         case off
@@ -31,6 +47,13 @@ final class AppState {
     private(set) var activeMode: ProxyMode?
     var tunSettings: TunSettings = .defaults
     var dnsSettings: DNSSettings = .defaults
+    private(set) var uploadRate: Int64 = 0
+    private(set) var downloadRate: Int64 = 0
+    private(set) var activeConnectionCount = 0
+    private(set) var coreMemory: UInt64 = 0
+    private(set) var coreVersion = "—"
+    private(set) var runtimeStartedAt: Date?
+    private(set) var trafficHistory: [TrafficPoint] = []
     private(set) var isApplyingRouting = false
 
     @ObservationIgnored private let storage: Storage
@@ -41,9 +64,13 @@ final class AppState {
     @ObservationIgnored private let privilegedLauncher: any PrivilegedLaunching
     @ObservationIgnored private let runtimeFactory: RuntimeFactory
     @ObservationIgnored private let healthVerifier: HealthVerifier
+    @ObservationIgnored private let clashClientFactory: ClashClientFactory
+    @ObservationIgnored private let now: NowProvider
     @ObservationIgnored private var clashAPIClient: ClashAPIClient?
     @ObservationIgnored private var runtime: RuntimeParameters?
     @ObservationIgnored private var currentConfig: Data?
+    @ObservationIgnored private var dashboardTasks: [Task<Void, Never>] = []
+    @ObservationIgnored private var isDashboardVisible = false
 
     init(
         storage: Storage = Storage(),
@@ -54,6 +81,8 @@ final class AppState {
         privilegedLauncher: (any PrivilegedLaunching)? = nil,
         runtimeFactory: RuntimeFactory? = nil,
         healthVerifier: HealthVerifier? = nil,
+        clashClientFactory: ClashClientFactory? = nil,
+        now: @escaping NowProvider = Date.init,
         automaticallyInitialize: Bool = true
     ) {
         let binaryURL = Self.singBoxBinaryURL()
@@ -68,6 +97,10 @@ final class AppState {
         )
         self.runtimeFactory = runtimeFactory ?? Self.makeRuntimeParameters
         self.healthVerifier = healthVerifier ?? Self.waitUntilHealthy
+        self.clashClientFactory = clashClientFactory ?? { controller, secret in
+            ClashAPIClient(controller: controller, secret: secret)
+        }
+        self.now = now
 
         if automaticallyInitialize {
             Task { await initialize() }
@@ -162,9 +195,9 @@ final class AppState {
             guard check.exitCode == 0 else {
                 throw AppStateError.coreCheckFailed(check.stderr)
             }
-            let client = ClashAPIClient(
-                controller: URL(string: "http://127.0.0.1:\(runtime.clashPort)")!,
-                secret: runtime.secret
+            let client = clashClientFactory(
+                URL(string: "http://127.0.0.1:\(runtime.clashPort)")!,
+                runtime.secret
             )
             switch requestedMode {
             case .systemProxy:
@@ -186,6 +219,8 @@ final class AppState {
             mixedPort = requestedMode == .systemProxy ? runtime.mixedPort : nil
             activeMode = requestedMode
             status = .on
+            markRuntimeStarted()
+            resumeDashboardMonitoringIfNeeded()
         } catch {
             switch requestedMode {
             case .systemProxy:
@@ -218,6 +253,7 @@ final class AppState {
             status = .off
             return
         }
+        suspendDashboardMonitoring()
         status = .stopping
         errorMessage = nil
         switch activeMode {
@@ -226,6 +262,7 @@ final class AppState {
                 try await systemProxyManager.restore()
             } catch {
                 setFailure("恢复系统代理失败：\(error.localizedDescription)")
+                resumeDashboardMonitoringIfNeeded()
                 return
             }
             await singBoxProcess.stop()
@@ -234,6 +271,7 @@ final class AppState {
                 try await privilegedLauncher.stop()
             } catch {
                 setFailure("停止 TUN 失败：\(error.localizedDescription)")
+                resumeDashboardMonitoringIfNeeded()
                 return
             }
         }
@@ -445,6 +483,7 @@ final class AppState {
 
             switch activeMode {
             case .systemProxy:
+                suspendDashboardMonitoring()
                 do {
                     try await singBoxProcess.restart(config: newConfig)
                     try await healthVerifier(client)
@@ -491,6 +530,8 @@ final class AppState {
                 to: storage.rootDirectory.appending(path: "config.json")
             )
             errorMessage = nil
+            markRuntimeStarted()
+            resumeDashboardMonitoringIfNeeded()
         } catch {
             errorMessage = "应用分流规则失败：\(error.localizedDescription)"
         }
@@ -546,6 +587,8 @@ final class AppState {
                 to: storage.rootDirectory.appending(path: "config.json")
             )
             errorMessage = nil
+            markRuntimeStarted()
+            resumeDashboardMonitoringIfNeeded()
         } catch {
             tunSettings = oldTunSettings
             errorMessage = "应用 TUN 设置失败：\(error.localizedDescription)"
@@ -590,6 +633,7 @@ final class AppState {
 
             switch activeMode {
             case .systemProxy:
+                suspendDashboardMonitoring()
                 do {
                     try await singBoxProcess.restart(config: newConfig)
                     try await healthVerifier(client)
@@ -621,10 +665,22 @@ final class AppState {
                 to: storage.rootDirectory.appending(path: "config.json")
             )
             errorMessage = nil
+            markRuntimeStarted()
+            resumeDashboardMonitoringIfNeeded()
         } catch {
             dnsSettings = oldDNSSettings
             errorMessage = "应用 DNS 设置失败：\(error.localizedDescription)"
         }
+    }
+
+    func startDashboardMonitoring() {
+        isDashboardVisible = true
+        resumeDashboardMonitoringIfNeeded()
+    }
+
+    func stopDashboardMonitoring() {
+        isDashboardVisible = false
+        suspendDashboardMonitoring()
     }
 
     func dismissError() {
@@ -716,6 +772,8 @@ final class AppState {
             currentConfig = config
             status = .on
             errorMessage = "应用\(operation)失败，已恢复旧配置：\(updateError.localizedDescription)"
+            markRuntimeStarted()
+            resumeDashboardMonitoringIfNeeded()
         } catch {
             await singBoxProcess.stop()
             let restoreMessage: String
@@ -738,12 +796,14 @@ final class AppState {
         client: ClashAPIClient,
         operation: String
     ) async -> Bool {
+        suspendDashboardMonitoring()
         do {
             try await privilegedLauncher.stop()
             activeMode = nil
         } catch {
             status = .on
             errorMessage = "应用\(operation)失败，旧 TUN 配置仍在运行：\(error.localizedDescription)"
+            resumeDashboardMonitoringIfNeeded()
             return false
         }
 
@@ -779,6 +839,8 @@ final class AppState {
                 currentConfig = oldConfig
                 status = .on
                 errorMessage = "应用\(operation)失败，已恢复旧 TUN 配置：\(updateError.localizedDescription)"
+                markRuntimeStarted()
+                resumeDashboardMonitoringIfNeeded()
                 return false
             } catch let rollbackError {
                 if oldConfigurationStarted {
@@ -799,6 +861,98 @@ final class AppState {
     private func replaceNodes(_ newNodes: [ProxyNode], for sourceID: UUID) {
         nodes.removeAll { $0.sourceID == sourceID }
         nodes.append(contentsOf: newNodes)
+    }
+
+    private func resumeDashboardMonitoringIfNeeded() {
+        guard isDashboardVisible,
+              status == .on,
+              let client = clashAPIClient,
+              dashboardTasks.isEmpty else {
+            return
+        }
+
+        let trafficTask = Task { [weak self] in
+            do {
+                let stream = await client.trafficStream()
+                for try await sample in stream {
+                    guard !Task.isCancelled else { return }
+                    self?.receiveTraffic(sample)
+                }
+                if !Task.isCancelled {
+                    self?.dashboardStreamEnded("流量推送已断开")
+                }
+            } catch {
+                if !Task.isCancelled {
+                    self?.dashboardStreamEnded("流量推送已断开：\(error.localizedDescription)")
+                }
+            }
+        }
+        let connectionTask = Task { [weak self] in
+            do {
+                let stream = await client.connectionStream()
+                for try await snapshot in stream {
+                    guard !Task.isCancelled else { return }
+                    self?.activeConnectionCount = snapshot.connectionCount
+                    self?.coreMemory = snapshot.memory
+                }
+                if !Task.isCancelled {
+                    self?.dashboardStreamEnded("连接推送已断开")
+                }
+            } catch {
+                if !Task.isCancelled {
+                    self?.dashboardStreamEnded("连接推送已断开：\(error.localizedDescription)")
+                }
+            }
+        }
+        let versionTask = Task { [weak self] in
+            guard let version = try? await client.version(), !Task.isCancelled else { return }
+            self?.coreVersion = version
+        }
+        dashboardTasks = [trafficTask, connectionTask, versionTask]
+    }
+
+    private func suspendDashboardMonitoring() {
+        dashboardTasks.forEach { $0.cancel() }
+        dashboardTasks.removeAll()
+    }
+
+    private func receiveTraffic(_ sample: TrafficSample) {
+        uploadRate = sample.up
+        downloadRate = sample.down
+        trafficHistory.append(TrafficPoint(
+            timestamp: now(),
+            upload: sample.up,
+            download: sample.down
+        ))
+        if trafficHistory.count > 60 {
+            trafficHistory.removeFirst(trafficHistory.count - 60)
+        }
+    }
+
+    private func dashboardStreamEnded(_ message: String) {
+        guard isDashboardVisible, status == .on else { return }
+        if warnings.last != message { warnings.append(message) }
+    }
+
+    private func markRuntimeStarted() {
+        runtimeStartedAt = now()
+        uploadRate = 0
+        downloadRate = 0
+        activeConnectionCount = 0
+        coreMemory = 0
+        coreVersion = "—"
+        trafficHistory.removeAll(keepingCapacity: true)
+    }
+
+    private func clearDashboardRuntime() {
+        suspendDashboardMonitoring()
+        uploadRate = 0
+        downloadRate = 0
+        activeConnectionCount = 0
+        coreMemory = 0
+        coreVersion = "—"
+        runtimeStartedAt = nil
+        trafficHistory.removeAll(keepingCapacity: false)
     }
 
     private func generateConfiguration(
@@ -860,6 +1014,7 @@ final class AppState {
     }
 
     private func clearRuntimeState() {
+        clearDashboardRuntime()
         runtime = nil
         clashAPIClient = nil
         currentConfig = nil

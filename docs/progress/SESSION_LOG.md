@@ -359,3 +359,13 @@
 - 风险/注意事项：当前 data 层不自动重连，防止后台无界循环；Task 4/5 必须按页面可见性创建和取消。真实 URLSession 与打包内核的长期流留到 Dashboard 集成/最终验收。
 - 下一步：Task 4 实现 Dashboard AppState 生命周期、有界 60 点缓冲和 Swift Charts UI。
 - 下一位 Agent 如何接手：从 M4 计划 Task 4 Step 1 开始，为 AppState 注入 stream client/factory，严禁用 Timer 或 REST 轮询。
+
+## 2026-07-20 — M4 Task 4 Dashboard 实时指标与 60 秒曲线
+
+- 已完成：先写有界 60 点、幂等订阅、离线禁止建流、断线 warning 与停止取消测试并观察 API 缺失；实现 AppState 会话生命周期、运行元数据和 Swift Charts Dashboard。
+- 修改文件：`Sources/kongshan/AppState.swift`、新增 `Sources/kongshan/DashboardView.swift`、`Sources/kongshan/MainWindowView.swift`、`Tests/KongshanAppTests/AppStateTests.swift`、M4 计划与全部项目记录。
+- 测试结果：RED 因 `ClashClientFactory`/Dashboard 状态与生命周期 API 缺失而编译失败；GREEN 为 Dashboard 3/3、全量 107/107，debug/release 构建、arm64 和 codesign strict 通过。
+- 当前状态：Dashboard 只在页面可见且代理开启时建立 traffic/connections WebSocket；离开、停止或配置重载均取消，曲线严格保留最近 60 点。
+- 风险/注意事项：无节点 release App 启动后进程稳定且 CPU 0.0%，未生成运行文件或启动内核；菜单栏 UIElement 仍无法由当前桌面可访问性工具附着，因此本节无自动视觉截图。
+- 下一步：Task 5 实现有界内核日志存储、实时日志页、等级切换与安全导出。
+- 下一位 Agent 如何接手：从 M4 计划 Task 5 Step 1 写 KernelLogStore RED；内存上限 2000 行，导出不得包含 config、secret 或订阅 URL。
