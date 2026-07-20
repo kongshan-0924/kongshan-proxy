@@ -349,3 +349,13 @@
 - 风险/注意事项：自动测试只用 networksetup 记录器与 fake TUN launcher；没有发起管理员授权或真实 DoH 查询。磁盘完全不可写时的落盘后置失败需最终审视。
 - 下一步：Task 3 实现三类 Clash WebSocket 流与一次 version REST。
 - 下一位 Agent 如何接手：从 M4 计划 Task 3 Step 1 开始，底层流必须可注入、可取消，secret 仅放 Bearer 内存 header。
+
+## 2026-07-20 — M4 Task 3 Clash API WebSocket 流模型
+
+- 已完成：先写三端点 URL/Bearer/payload、坏消息、取消传播和 version 测试并观察 API 缺失；实现 URLSession WebSocket 到 typed AsyncThrowingStream 的桥接。
+- 修改文件：`Sources/KongshanCore/ClashAPIClient.swift`、`Tests/KongshanCoreTests/ClashStreamingTests.swift`、`Tests/KongshanCoreTests/ClashAPIClientTests.swift`、M4 计划与全部项目记录。
+- 测试结果：RED 因 traffic/connection/log stream 与 version 不存在；GREEN 为 streaming 5/5、REST 5/5、全量 104/104，`swift build` 和 diff check 通过。
+- 当前状态：traffic 解码 up/down，connections 解码数量/内存，logs 映射等级/时间；consumer cancel 会关闭底层 stream。
+- 风险/注意事项：当前 data 层不自动重连，防止后台无界循环；Task 4/5 必须按页面可见性创建和取消。真实 URLSession 与打包内核的长期流留到 Dashboard 集成/最终验收。
+- 下一步：Task 4 实现 Dashboard AppState 生命周期、有界 60 点缓冲和 Swift Charts UI。
+- 下一位 Agent 如何接手：从 M4 计划 Task 4 Step 1 开始，为 AppState 注入 stream client/factory，严禁用 Timer 或 REST 轮询。

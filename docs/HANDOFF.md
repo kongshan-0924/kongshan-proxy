@@ -1,9 +1,9 @@
 # 项目交接
 
-- 已完成：M4 Task 2；DNS 旧设置兼容、离线持久化、system/TUN 在线事务与回滚、诊断配置更新，以及原生 DNS 高级设置界面。
-- 修改文件：`Sources/kongshan/AppState.swift`、`MainWindowView.swift`、`Tests/KongshanAppTests/AppStateTests.swift`、M4 计划与全部记录。
-- 测试结果：RED 因 `dnsSettings/applyDNSSettings` 缺失；GREEN 为 DNS AppState 5/5、全量 99/99；release arm64 组装、严格 codesign 与 diff check 通过。
-- 当前状态：Task 2 完成；统一 config helper 确保启动/分流/TUN/DNS 四条路径都使用当前 DNS，在线失败恢复旧内核配置与旧设置。
-- 风险/注意事项：system 模式 UI 已明确不接管 macOS 全局 DNS；真实 DNS 泄漏和 DoH 连通仍未冒充通过。设置落盘发生磁盘级故障的极端事务需在最终故障注入审视。
-- 下一步：M4 Task 3 实现 Clash API WebSocket 流模型与 version API。
-- 接手方式：从 M4 计划 Task 3 Step 1 写 stream factory fake 测试；必须证明消费取消会关闭底层 WebSocket。
+- 已完成：M4 Task 3；实现 `/traffic`、`/connections`、`/logs` 三类 typed WebSocket 流、URLSession AsyncThrowingStream 桥接与 version REST 返回。
+- 修改文件：`Sources/KongshanCore/ClashAPIClient.swift`、`Tests/KongshanCoreTests/ClashStreamingTests.swift`、`ClashAPIClientTests.swift`、M4 计划及全部记录。
+- 测试结果：RED 为 stream/version API 缺失；GREEN 为 streaming 5/5、REST 5/5、全量 104/104，debug build 与 diff check 通过。
+- 当前状态：Task 3 完成；ws/wss URL、Bearer、traffic/connection/log 解码、坏 payload 与消费取消均自动覆盖，secret 不进入 query。
+- 风险/注意事项：流不做无限自动重连；页面层需负责可见生命周期。当前只完成数据层，Dashboard 尚未建立真实订阅。
+- 下一步：M4 Task 4 接入 AppState Dashboard 会话与 Swift Charts 60 秒曲线。
+- 接手方式：从 M4 计划 Task 4 Step 1 开始；测试需证明离线不建流、重复 appear 幂等、disappear/stop 均取消。

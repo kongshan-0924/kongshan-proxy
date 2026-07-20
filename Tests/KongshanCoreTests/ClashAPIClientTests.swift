@@ -41,8 +41,10 @@ final class ClashAPIClientTests: XCTestCase {
         let client = makeClient()
 
         try await client.health()
+        let version = try await client.version()
 
-        XCTAssertEqual(StubURLProtocol.state.requests.first?.url?.path, "/version")
+        XCTAssertEqual(version, "1.13.14")
+        XCTAssertTrue(StubURLProtocol.state.requests.allSatisfy { $0.url?.path == "/version" })
     }
 
     func testDelayRejectsHTTPError() async {
