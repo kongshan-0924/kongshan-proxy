@@ -59,3 +59,13 @@
 - 风险/注意事项：当前 UI 仅为工程冒烟骨架，代理功能尚未接入。
 - 下一步：Task 2 定义节点模型和手动 Hysteria2 表单校验。
 - 下一位 Agent 如何接手：从 M1 计划 Task 2 Step 1 开始，严格先写失败测试。
+
+## 2026-07-20 — M1 Task 2 节点模型与手动 Hysteria2
+
+- 已完成：先写有效节点、空字段、端口和带宽边界测试并观察缺少类型的预期失败；实现 Codable/Hashable/Sendable 节点与 transport 模型、手动 Hysteria2 表单和中文可读错误。
+- 修改文件：`Sources/KongshanCore/Models.swift`、`Sources/KongshanCore/ManualHysteria2.swift`、`Tests/KongshanCoreTests/ManualHysteria2Tests.swift`、M1 计划与记录。
+- 测试结果：RED 因 `ManualHysteria2` 不存在而失败；GREEN 为定向 4/4、全量 5/5 通过，无编译警告。
+- 当前状态：Task 2 完成，手动 Hysteria2 可生成经过 trim 和边界校验的统一节点。
+- 风险/注意事项：尚未生成 sing-box outbound；字段映射在 Task 3/4 完成。
+- 下一步：Task 3 实现 Clash YAML 五类协议转换与不支持类型跳过。
+- 下一位 Agent 如何接手：从 M1 计划 Task 3 Step 1 写 YAML fixture 失败测试。
