@@ -159,3 +159,13 @@
 - 风险/注意事项：尚未使用用户真实订阅/节点，也未真实改写当前 Mac 系统代理；不得将自动测试作为这些项目已验收的证据。
 - 下一步：人工执行 M1 真实网络验收；或先为 M2 分流编写设计与分步实施计划。
 - 下一位 Agent 如何接手：先读 HANDOFF、`docs/acceptance/M1.md` 和 M1 计划；如做人工验收，在首次真实代理切换前与用户确认网络环境和恢复路径。
+
+## 2026-07-20 — M2 分流实施计划
+
+- 已完成：对照官方 1.13 route/rule-set 文档与内置 CLI 确认字段、本地 `.srs` 验证命令和无完整 reload API；实时确认三个官方 rule-set URL 为 HTTP 200；将 M2 拆为 7 个 TDD Task。
+- 修改文件：新增 `docs/superpowers/plans/2026-07-20-kongshan-m2.md`；更新 HANDOFF、PROGRESS、NEXT_STEPS 与本日志。
+- 测试结果：官方 `geosite-cn.srs`、`geoip-cn.srs`、`geosite-category-ads-all.srs` 均返回 HTTP 200；`sing-box rule-set decompile --help` 可用；计划尚未修改产品代码。
+- 当前状态：M2 实施计划就绪，Task 1 尚未开始。
+- 风险/注意事项：不使用已移除的旧 geosite/geoip 数据库字段；完整 route 变更用快速重启，不假设不存在的热重载 API。
+- 下一步：使用 executing-plans + TDD 执行 M2 Task 1 routing 值类型。
+- 下一位 Agent 如何接手：从 M2 计划第一个未勾选步骤开始，每个 Task 代码、测试和记录同提交。
