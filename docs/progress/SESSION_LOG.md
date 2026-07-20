@@ -49,3 +49,13 @@
 - 风险/注意事项：真实系统代理切换仍只做明确人工验收，自动测试使用命令记录器，避免开发期间断网。
 - 下一步：调用 executing-plans，执行 Task 1 工程骨架的红-绿测试流程。
 - 下一位 Agent 如何接手：打开 M1 计划，从第一个未勾选步骤执行；每个 Task 完成即写日志和提交。
+
+## 2026-07-20 — M1 Task 1 原生工程骨架
+
+- 已完成：先写 AppIdentity 测试并观察缺少 `Package.swift` 的预期失败；随后建立 Swift 6/macOS 14 SwiftPM 工程，锁定 Yams 6.2.2，创建 MenuBarExtra、独立 Window、Info.plist 和应用身份常量。
+- 修改文件：`Package.swift`、`Package.resolved`、`Sources/KongshanCore/AppIdentity.swift`、`Sources/kongshan/*`、`Resources/Info.plist`、`Tests/KongshanCoreTests/AppIdentityTests.swift`、M1 计划与记录。
+- 测试结果：RED 为 `Could not find Package.swift`；GREEN 为 `swift test` 1/1 通过、`swift build` 成功、`plutil -lint` 通过，无编译警告。
+- 当前状态：Task 1 完成，可生成原生 arm64 debug 可执行文件。
+- 风险/注意事项：当前 UI 仅为工程冒烟骨架，代理功能尚未接入。
+- 下一步：Task 2 定义节点模型和手动 Hysteria2 表单校验。
+- 下一位 Agent 如何接手：从 M1 计划 Task 2 Step 1 开始，严格先写失败测试。
