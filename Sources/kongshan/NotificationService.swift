@@ -7,9 +7,13 @@ protocol NotificationSending: Sendable {
 
 enum NotificationServiceError: Error, LocalizedError {
     case permissionDenied
+    case unavailableHost
 
     var errorDescription: String? {
-        "本地通知权限未开启"
+        switch self {
+        case .permissionDenied: "本地通知权限未开启"
+        case .unavailableHost: "当前运行环境无法发送本地通知"
+        }
     }
 }
 
@@ -21,6 +25,9 @@ final class NotificationService: NotificationSending, @unchecked Sendable {
     }
 
     func send(title: String, body: String) async throws {
+        guard providedCenter != nil || Bundle.main.bundleURL.pathExtension == "app" else {
+            throw NotificationServiceError.unavailableHost
+        }
         let center = providedCenter ?? .current()
         let settings = await center.notificationSettings()
         switch settings.authorizationStatus {

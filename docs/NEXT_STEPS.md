@@ -1,6 +1,6 @@
 # 下一步
 
-1. 执行 M4 Task 8：先写 10 秒滚动窗口、主动停止不重启、system/TUN 重启和第 4 次终止通知测试。
-2. 用 `DispatchSourceProcess(.exit)` 监听精确 PID；主动 stop、模式切换、规则/DNS reload 前先取消 monitor。
-3. system 崩溃重启不得重复写系统代理；TUN 自动测试只用 fake launcher/monitor，真实重启仍会明确请求管理员授权。
-4. 真实节点 Dashboard/日志、管理员授权/TUN 与 DNS 泄漏验收继续按 acceptance 人工边界保留。
+1. 执行 M4 Task 9：先运行缺失的 `scripts/verify_m4.sh`，记录预期失败，再实现一键完整自动验收。
+2. 无节点 Release App 启动稳定后多次采样 CPU/RSS，验证 RSS <150 MB、无持续 CPU 活跃、无 WebSocket/内核/recovery/FIFO 残留，并确保脚本主动终止 App。
+3. 完成 README、`docs/acceptance/M4.md` 与第三方声明，写清构建、权限、数据目录、恢复方法和限制。
+4. 真实订阅/节点、系统代理、TUN、DNS leak、登录项批准、崩溃通知、24h Instruments 与 Energy Impact 必须继续标为人工验收。

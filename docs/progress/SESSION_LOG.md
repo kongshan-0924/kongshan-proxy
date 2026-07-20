@@ -399,3 +399,13 @@
 - 风险/注意事项：自动测试全部用 actor fake；未真实注册或注销本机登录项。非 `.app` 测试宿主返回 notFound，避免 XCTest 接触系统服务。
 - 下一步：Task 8 实现普通/TUN 内核事件驱动退出监控与 10 秒最多 3 次崩溃自愈。
 - 下一位 Agent 如何接手：从 M4 计划 Task 8 Step 1 开始；普通模式可用普通用户假内核退出测试，TUN 只能 fake，主动 stop/reload 必须先取消 monitor。
+
+## 2026-07-20 — M4 Task 8 普通/TUN 内核崩溃自愈
+
+- 已完成：先写 10 秒滚动限流、精确 PID 退出事件、取消抑制、currentPID、真实普通内核 SIGKILL、主动停止、重启失败和 fake TUN 第 4 次终止测试；实现统一崩溃自愈状态机。
+- 修改文件：新增 `Sources/KongshanCore/CrashRestartLimiter.swift`、`Sources/KongshanCore/ProcessExitMonitor.swift`、`Tests/KongshanCoreTests/CrashRestartTests.swift`；修改 SingBoxProcess、AppState、NotificationService、AppStateTests、SingBoxProcessTests、M4 计划与全部项目记录。
+- 测试结果：RED 因 limiter/monitor/currentPID/AppState 注入缺失；首次完整 AppState 回归发现主动 DNS/分流重载误判并触发额外重启，修复后 AppState 42/42、全量 137/137，release arm64、codesign strict、diff check 与无节点冒烟通过。
+- 当前状态：普通/TUN 均用 `DispatchSourceProcess(.exit)` 监听精确 PID；主动 stop/reload 先取消，成功/回滚后绑定新 PID；10 秒前 3 次自动重启，第 4 次清理接管并通知。
+- 风险/注意事项：真实普通用户 sing-box SIGKILL 路径已验证且未重复写 networksetup；TUN 仍只用 fake launcher/monitor，真实 root PID 监听、授权重启和通知需人工。非 `.app` 测试宿主已硬禁止真实通知中心。
+- 下一步：Task 9 编写 `verify_m4.sh`、性能采样、README/M4 验收记录，并区分自动与真实人工边界。
+- 下一位 Agent 如何接手：从 M4 计划 Task 9 Step 1 开始；脚本只能无节点启动，不得注册登录项、改 networksetup、请求 TUN 或通知权限，最终行必须为 `M4 automated verification passed`。

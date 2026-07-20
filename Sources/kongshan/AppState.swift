@@ -90,6 +90,7 @@ final class AppState {
     @ObservationIgnored private let ruleSetService: RuleSetService
     @ObservationIgnored private let systemProxyManager: SystemProxyManager
     @ObservationIgnored private let singBoxProcess: SingBoxProcess
+    @ObservationIgnored private let processExitMonitor: any ProcessExitMonitoring
     @ObservationIgnored private let privilegedLauncher: any PrivilegedLaunching
     @ObservationIgnored private let runtimeFactory: RuntimeFactory
     @ObservationIgnored private let healthVerifier: HealthVerifier
@@ -106,6 +107,9 @@ final class AppState {
     @ObservationIgnored private var isDashboardVisible = false
     @ObservationIgnored private var logTask: Task<Void, Never>?
     @ObservationIgnored private var isLogsVisible = false
+    @ObservationIgnored private var monitoredCorePID: Int32?
+    @ObservationIgnored private var crashRestartLimiter = CrashRestartLimiter()
+    @ObservationIgnored private var isHandlingCoreCrash = false
 
     init(
         storage: Storage = Storage(),
@@ -113,6 +117,7 @@ final class AppState {
         ruleSetService: RuleSetService? = nil,
         systemProxyManager: SystemProxyManager? = nil,
         singBoxProcess: SingBoxProcess? = nil,
+        processExitMonitor: (any ProcessExitMonitoring)? = nil,
         kernelLogStore: KernelLogStore? = nil,
         subscriptionUpdateScheduler: SubscriptionUpdateScheduler? = nil,
         notificationSender: (any NotificationSending)? = nil,
@@ -139,6 +144,7 @@ final class AppState {
             logStore: resolvedLogStore,
             logErrorHandler: logWarningRelay.send
         )
+        self.processExitMonitor = processExitMonitor ?? ProcessExitMonitor()
         self.privilegedLauncher = privilegedLauncher ?? PrivilegedLauncher(
             storage: storage,
             binaryURL: binaryURL,
@@ -230,10 +236,13 @@ final class AppState {
             return
         }
 
+        await cancelCoreExitMonitoring()
+        crashRestartLimiter.reset()
         status = .starting
         errorMessage = nil
         let requestedMode = preferredMode
         var tunStarted = false
+        var startedPID: Int32?
         do {
             let prepared = try await ruleSetService.prepare(includeAds: routingSettings.blockAds)
             warnings.append(contentsOf: prepared.warnings)
@@ -268,9 +277,11 @@ final class AppState {
                     port: Int(runtime.mixedPort),
                     bypassDomains: routingSettings.systemProxyBypassEntries
                 )
+                startedPID = await singBoxProcess.currentPID
             case .tun:
-                _ = try await privilegedLauncher.start(config: config)
+                let record = try await privilegedLauncher.start(config: config)
                 tunStarted = true
+                startedPID = record.pid
                 try await healthVerifier(client)
             }
 
@@ -281,6 +292,11 @@ final class AppState {
             activeMode = requestedMode
             status = .on
             markRuntimeStarted()
+            if let startedPID {
+                await armCoreExitMonitoring(pid: startedPID)
+            } else {
+                warnings.append("无法监控内核退出：启动后没有可用 PID")
+            }
             resumeDashboardMonitoringIfNeeded()
             resumeLogMonitoringIfNeeded()
         } catch {
@@ -296,6 +312,7 @@ final class AppState {
                         activeMode = .tun
                         currentConfig = nil
                         mixedPort = nil
+                        if let startedPID { await armCoreExitMonitoring(pid: startedPID) }
                         setFailure(
                             "TUN 启动失败且无法停止：\(error.localizedDescription)；\(stopError.localizedDescription)"
                         )
@@ -311,10 +328,13 @@ final class AppState {
     func stop() async {
         guard !isBusy, status != .off else { return }
         guard let activeMode else {
+            await cancelCoreExitMonitoring()
             clearRuntimeState()
             status = .off
             return
         }
+        let previousPID = monitoredCorePID
+        await cancelCoreExitMonitoring()
         suspendDashboardMonitoring()
         suspendLogMonitoring()
         status = .stopping
@@ -325,6 +345,7 @@ final class AppState {
                 try await systemProxyManager.restore()
             } catch {
                 setFailure("恢复系统代理失败：\(error.localizedDescription)")
+                if let previousPID { await armCoreExitMonitoring(pid: previousPID) }
                 resumeDashboardMonitoringIfNeeded()
                 resumeLogMonitoringIfNeeded()
                 return
@@ -335,6 +356,7 @@ final class AppState {
                 try await privilegedLauncher.stop()
             } catch {
                 setFailure("停止 TUN 失败：\(error.localizedDescription)")
+                if let previousPID { await armCoreExitMonitoring(pid: previousPID) }
                 resumeDashboardMonitoringIfNeeded()
                 resumeLogMonitoringIfNeeded()
                 return
@@ -382,6 +404,7 @@ final class AppState {
             return status == .off
         } else {
             do {
+                await cancelCoreExitMonitoring()
                 try await privilegedLauncher.recoverIfNeeded()
                 try await systemProxyManager.recoverIfNeeded()
                 clearRuntimeState()
@@ -607,6 +630,7 @@ final class AppState {
             case .systemProxy:
                 suspendDashboardMonitoring()
                 suspendLogMonitoring()
+                await cancelCoreExitMonitoring()
                 do {
                     try await singBoxProcess.restart(config: newConfig)
                     try await healthVerifier(client)
@@ -647,6 +671,9 @@ final class AppState {
 
             routingSettings = settings
             currentConfig = newConfig
+            if activeMode == .systemProxy {
+                await armRunningSystemCoreIfAvailable()
+            }
             try await persistRoutingSettings()
             try await storage.writeAtomically(
                 ConfigGenerator.diagnosticSnapshot(from: newConfig),
@@ -760,6 +787,7 @@ final class AppState {
             case .systemProxy:
                 suspendDashboardMonitoring()
                 suspendLogMonitoring()
+                await cancelCoreExitMonitoring()
                 do {
                     try await singBoxProcess.restart(config: newConfig)
                     try await healthVerifier(client)
@@ -785,6 +813,9 @@ final class AppState {
 
             dnsSettings = settings
             currentConfig = newConfig
+            if activeMode == .systemProxy {
+                await armRunningSystemCoreIfAvailable()
+            }
             try await persistSettings()
             try await storage.writeAtomically(
                 ConfigGenerator.diagnosticSnapshot(from: newConfig),
@@ -948,6 +979,7 @@ final class AppState {
             status = .on
             errorMessage = "应用\(operation)失败，已恢复旧配置：\(updateError.localizedDescription)"
             markRuntimeStarted()
+            await armRunningSystemCoreIfAvailable()
             resumeDashboardMonitoringIfNeeded()
             resumeLogMonitoringIfNeeded()
         } catch {
@@ -972,6 +1004,8 @@ final class AppState {
         client: ClashAPIClient,
         operation: String
     ) async -> Bool {
+        let previousPID = monitoredCorePID
+        await cancelCoreExitMonitoring()
         suspendDashboardMonitoring()
         suspendLogMonitoring()
         do {
@@ -980,27 +1014,31 @@ final class AppState {
         } catch {
             status = .on
             errorMessage = "应用\(operation)失败，旧 TUN 配置仍在运行：\(error.localizedDescription)"
+            if let previousPID { await armCoreExitMonitoring(pid: previousPID) }
             resumeDashboardMonitoringIfNeeded()
             resumeLogMonitoringIfNeeded()
             return false
         }
 
-        var newConfigurationStarted = false
+        var newConfigurationRecord: PrivilegedProcessRecord?
         do {
-            _ = try await privilegedLauncher.start(config: newConfig)
-            newConfigurationStarted = true
+            let record = try await privilegedLauncher.start(config: newConfig)
+            newConfigurationRecord = record
             activeMode = .tun
             try await healthVerifier(client)
+            currentConfig = newConfig
+            await armCoreExitMonitoring(pid: record.pid)
             return true
         } catch {
             let updateError = error
-            if newConfigurationStarted {
+            if let newConfigurationRecord {
                 do {
                     try await privilegedLauncher.stop()
                     activeMode = nil
                 } catch let stopError {
                     currentConfig = newConfig
                     activeMode = .tun
+                    await armCoreExitMonitoring(pid: newConfigurationRecord.pid)
                     setFailure(
                         "新 TUN 配置健康检查失败且无法停止：\(updateError.localizedDescription)；\(stopError.localizedDescription)"
                     )
@@ -1008,21 +1046,22 @@ final class AppState {
                 }
             }
 
-            var oldConfigurationStarted = false
+            var oldConfigurationRecord: PrivilegedProcessRecord?
             do {
-                _ = try await privilegedLauncher.start(config: oldConfig)
-                oldConfigurationStarted = true
+                let record = try await privilegedLauncher.start(config: oldConfig)
+                oldConfigurationRecord = record
                 activeMode = .tun
                 try await healthVerifier(client)
                 currentConfig = oldConfig
                 status = .on
                 errorMessage = "应用\(operation)失败，已恢复旧 TUN 配置：\(updateError.localizedDescription)"
                 markRuntimeStarted()
+                await armCoreExitMonitoring(pid: record.pid)
                 resumeDashboardMonitoringIfNeeded()
                 resumeLogMonitoringIfNeeded()
                 return false
             } catch let rollbackError {
-                if oldConfigurationStarted {
+                if oldConfigurationRecord != nil {
                     try? await privilegedLauncher.stop()
                 } else {
                     // start 失败时默认 launcher 也会清理临时记录；再次 stop 是幂等安全网。
@@ -1231,12 +1270,132 @@ final class AppState {
         throw AppStateError.coreHealthFailed(lastError?.localizedDescription ?? "未知错误")
     }
 
+    private func armCoreExitMonitoring(pid: Int32) async {
+        await cancelCoreExitMonitoring()
+        monitoredCorePID = pid
+        do {
+            try await processExitMonitor.monitor(pid: pid) { [weak self] exitedPID in
+                Task { @MainActor [weak self] in
+                    await self?.handleUnexpectedCoreExit(pid: exitedPID)
+                }
+            }
+        } catch {
+            if monitoredCorePID == pid { monitoredCorePID = nil }
+            warnings.append("无法监控内核退出：\(error.localizedDescription)")
+        }
+    }
+
+    private func armRunningSystemCoreIfAvailable() async {
+        guard let pid = await singBoxProcess.currentPID else {
+            warnings.append("无法监控内核退出：运行中的系统代理没有可用 PID")
+            return
+        }
+        await armCoreExitMonitoring(pid: pid)
+    }
+
+    private func cancelCoreExitMonitoring() async {
+        monitoredCorePID = nil
+        await processExitMonitor.cancel()
+    }
+
+    private func handleUnexpectedCoreExit(pid: Int32) async {
+        guard monitoredCorePID == pid,
+              !isHandlingCoreCrash,
+              status == .on,
+              let mode = activeMode,
+              let config = currentConfig,
+              let client = clashAPIClient else {
+            return
+        }
+
+        isHandlingCoreCrash = true
+        defer { isHandlingCoreCrash = false }
+        await cancelCoreExitMonitoring()
+        suspendDashboardMonitoring()
+        suspendLogMonitoring()
+
+        guard crashRestartLimiter.allowsRestart(at: now()) else {
+            await finishCoreCrash(
+                mode: mode,
+                message: "内核在 10 秒内连续崩溃，已达到最多 3 次自动重启限制"
+            )
+            return
+        }
+
+        warnings.append("检测到内核意外退出（PID \(pid)），正在自动重启")
+        status = .starting
+        errorMessage = nil
+        do {
+            let restartedPID: Int32
+            switch mode {
+            case .systemProxy:
+                try await singBoxProcess.start(config: config)
+                try await healthVerifier(client)
+                guard let pid = await singBoxProcess.currentPID else {
+                    throw AppStateError.missingRuntimeState
+                }
+                restartedPID = pid
+            case .tun:
+                try await privilegedLauncher.recoverIfNeeded()
+                let record = try await privilegedLauncher.start(config: config)
+                try await healthVerifier(client)
+                restartedPID = record.pid
+            }
+
+            activeMode = mode
+            status = .on
+            markRuntimeStarted()
+            await armCoreExitMonitoring(pid: restartedPID)
+            resumeDashboardMonitoringIfNeeded()
+            resumeLogMonitoringIfNeeded()
+        } catch {
+            await finishCoreCrash(
+                mode: mode,
+                message: "内核崩溃后自动重启失败：\(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func finishCoreCrash(mode: ProxyMode, message: String) async {
+        var cleanupMessage: String?
+        switch mode {
+        case .systemProxy:
+            if await singBoxProcess.currentPID != nil {
+                await singBoxProcess.stop()
+            }
+            do {
+                try await systemProxyManager.restore()
+            } catch {
+                cleanupMessage = "系统代理恢复失败：\(error.localizedDescription)"
+            }
+        case .tun:
+            do {
+                try await privilegedLauncher.recoverIfNeeded()
+            } catch {
+                cleanupMessage = "TUN 清理失败：\(error.localizedDescription)"
+            }
+        }
+
+        clearRuntimeState()
+        let failureMessage = [message, cleanupMessage].compactMap { $0 }.joined(separator: "；")
+        setFailure(failureMessage)
+        do {
+            try await notificationSender.send(
+                title: "kongshan 内核已停止",
+                body: failureMessage
+            )
+        } catch {
+            warnings.append("通知未发送：\(error.localizedDescription)")
+        }
+    }
+
     private func setFailure(_ message: String) {
         status = .failed(message)
         errorMessage = message
     }
 
     private func clearRuntimeState() {
+        monitoredCorePID = nil
         clearDashboardRuntime()
         suspendLogMonitoring()
         runtime = nil

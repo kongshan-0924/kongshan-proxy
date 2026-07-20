@@ -58,10 +58,14 @@ final class SingBoxProcessTests: XCTestCase {
         try await core.start(config: Data("{}".utf8))
 
         let running = await core.isRunning
+        let runningPID = await core.currentPID
         XCTAssertTrue(running)
+        XCTAssertNotNil(runningPID)
         await core.stop()
         let stopped = await core.isRunning
+        let stoppedPID = await core.currentPID
         XCTAssertFalse(stopped)
+        XCTAssertNil(stoppedPID)
     }
 
     func testRestartReplacesRunningProcessWithNewConfig() async throws {

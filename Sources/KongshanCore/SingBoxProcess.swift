@@ -38,6 +38,11 @@ public actor SingBoxProcess {
 
     public var isRunning: Bool { process?.isRunning == true }
 
+    public var currentPID: Int32? {
+        guard let process, process.isRunning else { return nil }
+        return process.processIdentifier
+    }
+
     public func check(config: Data, timeout: TimeInterval = 10) async throws -> ProcessResult {
         try await ProcessRunner.run(
             executable: binaryURL,
@@ -48,7 +53,11 @@ public actor SingBoxProcess {
     }
 
     public func start(config: Data) throws {
-        guard process?.isRunning != true else { return }
+        if let process {
+            guard !process.isRunning else { return }
+            clearStreams()
+            self.process = nil
+        }
 
         let process = Process()
         let inputPipe = Pipe()

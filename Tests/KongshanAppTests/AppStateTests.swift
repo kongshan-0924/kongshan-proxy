@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import ServiceManagement
 import XCTest
@@ -1096,6 +1097,105 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(requests, [true])
     }
 
+    func testDefaultNotificationServiceRejectsNonApplicationTestHost() async {
+        do {
+            try await NotificationService().send(title: "test", body: "must not send")
+            XCTFail("Expected notification host protection")
+        } catch NotificationServiceError.unavailableHost {
+            // Expected: XCTest must never access the real notification center.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testUnexpectedSystemCoreExitRestartsWithoutRewritingProxyAndStopDoesNotRestart() async throws {
+        let notifications = FakeNotificationSender()
+        let fixture = try await makeRunningFixture(notificationSender: notifications)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let startedPID = await fixture.core.currentPID
+        let initialPID = try XCTUnwrap(startedPID)
+        let initialNetworkCalls = await fixture.network.arguments
+
+        XCTAssertEqual(Darwin.kill(initialPID, SIGKILL), 0)
+        try await waitUntilAsync {
+            guard let currentPID = await fixture.core.currentPID else { return false }
+            return currentPID != initialPID && fixture.state.status == .on
+        }
+
+        let restartedNetworkCalls = await fixture.network.arguments
+        let restartHealthCount = await fixture.health.callCount
+        let restartNotificationCount = await notifications.count
+        XCTAssertEqual(restartedNetworkCalls, initialNetworkCalls)
+        XCTAssertEqual(restartHealthCount, 2)
+        XCTAssertEqual(restartNotificationCount, 0)
+
+        await fixture.state.stop()
+        try await Task.sleep(for: .milliseconds(150))
+        let stoppedPID = await fixture.core.currentPID
+        let stoppedHealthCount = await fixture.health.callCount
+        XCTAssertEqual(fixture.state.status, .off)
+        XCTAssertNil(stoppedPID)
+        XCTAssertEqual(stoppedHealthCount, 2)
+    }
+
+    func testSystemCrashRestartFailureRestoresProxyAndNotifies() async throws {
+        let notifications = FakeNotificationSender()
+        let fixture = try await makeRunningFixture(
+            healthFailures: [2],
+            notificationSender: notifications
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let startedPID = await fixture.core.currentPID
+        let initialPID = try XCTUnwrap(startedPID)
+
+        XCTAssertEqual(Darwin.kill(initialPID, SIGKILL), 0)
+        try await waitUntilAsync {
+            if case .failed = fixture.state.status { return true }
+            return false
+        }
+
+        let stoppedPID = await fixture.core.currentPID
+        let notificationCount = await notifications.count
+        XCTAssertNil(fixture.state.activeMode)
+        XCTAssertNil(stoppedPID)
+        XCTAssertEqual(notificationCount, 1)
+        let networkCalls = await fixture.network.arguments
+        XCTAssertTrue(networkCalls.contains(["-setwebproxystate", "Wi-Fi", "off"]))
+    }
+
+    func testTUNRestartsThreeTimesThenFourthCrashCleansUpAndNotifies() async throws {
+        let monitor = FakeProcessExitMonitor()
+        let notifications = FakeNotificationSender()
+        let fixture = try await makeModeFixture(
+            initialMode: .tun,
+            processExitMonitor: monitor,
+            notificationSender: notifications
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        for expectedStartCount in 2...4 {
+            await monitor.fireCurrent()
+            try await waitUntilAsync {
+                await fixture.privileged.startedConfigs().count == expectedStartCount
+                    && fixture.state.status == .on
+            }
+        }
+
+        await monitor.fireCurrent()
+        try await waitUntilAsync {
+            if case .failed = fixture.state.status { return true }
+            return false
+        }
+
+        let tunActive = await fixture.privileged.isActive()
+        let startedConfigCount = await fixture.privileged.startedConfigs().count
+        let notificationCount = await notifications.count
+        XCTAssertNil(fixture.state.activeMode)
+        XCTAssertFalse(tunActive)
+        XCTAssertEqual(startedConfigCount, 4)
+        XCTAssertEqual(notificationCount, 1)
+    }
+
     private static let updatedSubscriptionYAML = """
     proxies:
       - {name: updated, type: ss, server: 2.2.2.2, port: 443, cipher: aes-128-gcm, password: updated}
@@ -1108,7 +1208,9 @@ final class AppStateTests: XCTestCase {
 
     private func makeRunningFixture(
         failOnceFor: [String]? = nil,
-        healthFailures: Set<Int> = []
+        healthFailures: Set<Int> = [],
+        processExitMonitor: (any ProcessExitMonitoring)? = nil,
+        notificationSender: (any NotificationSending)? = nil
     ) async throws -> RunningFixture {
         let root = temporaryDirectory()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1133,6 +1235,8 @@ final class AppStateTests: XCTestCase {
             ),
             systemProxyManager: SystemProxyManager(storage: storage, runner: network.run(arguments:timeout:)),
             singBoxProcess: core,
+            processExitMonitor: processExitMonitor,
+            notificationSender: notificationSender,
             runtimeFactory: { runtime },
             healthVerifier: health.verify(client:),
             automaticallyInitialize: false
@@ -1162,7 +1266,9 @@ final class AppStateTests: XCTestCase {
         tunStartError: Error? = nil,
         tunStopError: Error? = nil,
         tunStartFailureCalls: Set<Int> = [],
-        clashClientFactory: AppState.ClashClientFactory? = nil
+        clashClientFactory: AppState.ClashClientFactory? = nil,
+        processExitMonitor: (any ProcessExitMonitoring)? = nil,
+        notificationSender: (any NotificationSending)? = nil
     ) async throws -> ModeFixture {
         let root = temporaryDirectory()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1199,6 +1305,8 @@ final class AppStateTests: XCTestCase {
             ),
             systemProxyManager: SystemProxyManager(storage: storage, runner: network.run(arguments:timeout:)),
             singBoxProcess: core,
+            processExitMonitor: processExitMonitor,
+            notificationSender: notificationSender,
             privilegedLauncher: privileged,
             runtimeFactory: { runtime },
             healthVerifier: { _ in },
@@ -1329,6 +1437,18 @@ final class AppStateTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(10))
         }
         XCTFail("Timed out waiting for condition", file: file, line: line)
+    }
+
+    private func waitUntilAsync(
+        _ condition: () async -> Bool,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        for _ in 0..<200 {
+            if await condition() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("Timed out waiting for async condition", file: file, line: line)
     }
 
     private var singBoxURL: URL {
@@ -1464,6 +1584,7 @@ private actor FakePrivilegedLauncher: PrivilegedLaunching {
     private var active = false
     private var configs: [Data] = []
     private var startCallCount = 0
+    private var recoverCallCount = 0
 
     init(
         root: URL,
@@ -1510,6 +1631,7 @@ private actor FakePrivilegedLauncher: PrivilegedLaunching {
     }
 
     func recoverIfNeeded() async throws {
+        recoverCallCount += 1
         if let recoverError { throw recoverError }
         active = false
         try? FileManager.default.removeItem(at: markerURL)
@@ -1518,6 +1640,32 @@ private actor FakePrivilegedLauncher: PrivilegedLaunching {
     func isActive() -> Bool { active }
     func startedConfigs() -> [Data] { configs }
     func attemptedConfigs() -> [Data] { configs }
+    func recoveryCount() -> Int { recoverCallCount }
+}
+
+private actor FakeProcessExitMonitor: ProcessExitMonitoring {
+    private var monitoredPID: Int32?
+    private var handler: (@Sendable (Int32) -> Void)?
+    private(set) var cancellationCount = 0
+
+    func monitor(
+        pid: Int32,
+        handler: @escaping @Sendable (Int32) -> Void
+    ) throws {
+        monitoredPID = pid
+        self.handler = handler
+    }
+
+    func cancel() {
+        monitoredPID = nil
+        handler = nil
+        cancellationCount += 1
+    }
+
+    func fireCurrent() {
+        guard let monitoredPID, let handler else { return }
+        handler(monitoredPID)
+    }
 }
 
 private enum ModeTestError: Error {
