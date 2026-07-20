@@ -169,3 +169,13 @@
 - 风险/注意事项：不使用已移除的旧 geosite/geoip 数据库字段；完整 route 变更用快速重启，不假设不存在的热重载 API。
 - 下一步：使用 executing-plans + TDD 执行 M2 Task 1 routing 值类型。
 - 下一位 Agent 如何接手：从 M2 计划第一个未勾选步骤开始，每个 Task 代码、测试和记录同提交。
+
+## 2026-07-20 — M2 Task 1 分流数据模型与校验
+
+- 已完成：先写默认 bypass、五种规则类型、三种动作、Codable 往返和非法输入测试并观察缺少类型的预期失败；实现 Sendable/Hashable 值类型、CIDR 校验与中文错误。
+- 修改文件：`Sources/KongshanCore/RoutingModels.swift`、`Tests/KongshanCoreTests/RoutingModelsTests.swift`、M2 计划与记录。
+- 测试结果：RED 因 `RoutingSettings`/`CustomRouteRule` 不存在而失败；GREEN 为定向 5/5、全量 39/39 通过，无编译警告。
+- 当前状态：Task 1 完成；规则可持久化排序/启停、匹配五类值并路由到直连/代理/拒绝。
+- 风险/注意事项：当前仅完成数据边界，ConfigGenerator 尚未注入 route；单 IP 需以 `/32` 或 `/128` 表示。
+- 下一步：Task 2 实现六级 route、本地 rule-set 定义和绕过域名归一化。
+- 下一位 Agent 如何接手：从 M2 计划 Task 2 Step 1 写纯 JSON 结构失败测试。
