@@ -1,21 +1,46 @@
 import Foundation
 
+public struct PreparedRuleSets: Equatable, Sendable {
+    public let geositeCN: URL
+    public let geoipCN: URL
+    public let ads: URL?
+
+    public init(geositeCN: URL, geoipCN: URL, ads: URL?) {
+        self.geositeCN = geositeCN
+        self.geoipCN = geoipCN
+        self.ads = ads
+    }
+}
+
+public struct RoutingConfiguration: Equatable, Sendable {
+    public let settings: RoutingSettings
+    public let ruleSets: PreparedRuleSets
+
+    public init(settings: RoutingSettings, ruleSets: PreparedRuleSets) {
+        self.settings = settings
+        self.ruleSets = ruleSets
+    }
+}
+
 public struct ConfigInput: Sendable {
     public let nodes: [ProxyNode]
     public let selectedNodeID: UUID?
     public let runtime: RuntimeParameters
     public let testURL: String
+    public let routing: RoutingConfiguration?
 
     public init(
         nodes: [ProxyNode],
         selectedNodeID: UUID?,
         runtime: RuntimeParameters,
-        testURL: String = "http://www.gstatic.com/generate_204"
+        testURL: String = "http://www.gstatic.com/generate_204",
+        routing: RoutingConfiguration? = nil
     ) {
         self.nodes = nodes
         self.selectedNodeID = selectedNodeID
         self.runtime = runtime
         self.testURL = testURL
+        self.routing = routing
     }
 }
 
@@ -23,6 +48,7 @@ public enum ConfigGenerationError: Error, Equatable, LocalizedError {
     case noNodes
     case selectedNodeMissing
     case missingField(node: String, field: String)
+    case missingRuleSet(String)
     case invalidJSON
 
     public var errorDescription: String? {
@@ -30,6 +56,7 @@ public enum ConfigGenerationError: Error, Equatable, LocalizedError {
         case .noNodes: "至少需要一个代理节点"
         case .selectedNodeMissing: "当前选中的节点已不存在"
         case let .missingField(node, field): "节点 \(node) 缺少 \(field)"
+        case let .missingRuleSet(tag): "缺少规则集：\(tag)"
         case .invalidJSON: "生成的 sing-box 配置不是有效 JSON"
         }
     }
@@ -81,6 +108,8 @@ public enum ConfigGenerator {
         outbounds.append(["type": "direct", "tag": "direct"])
         outbounds.append(["type": "block", "tag": "reject"])
 
+        let route = try route(for: input.routing)
+
         let root: [String: Any] = [
             "log": ["level": "info", "timestamp": true],
             "inbounds": [[
@@ -90,7 +119,7 @@ public enum ConfigGenerator {
                 "listen_port": Int(input.runtime.mixedPort)
             ]],
             "outbounds": outbounds,
-            "route": ["rules": [], "final": "自动选择"],
+            "route": route,
             "experimental": [
                 "clash_api": [
                     "external_controller": "127.0.0.1:\(input.runtime.clashPort)",
@@ -99,6 +128,97 @@ public enum ConfigGenerator {
             ]
         ]
         return try encode(root)
+    }
+
+    private static func route(for routing: RoutingConfiguration?) throws -> [String: Any] {
+        guard let routing else {
+            return ["rules": [], "final": "自动选择"]
+        }
+
+        let settings = try routing.settings.validated()
+        var rules = settings.customRules
+            .filter(\.enabled)
+            .map(customRouteRule)
+
+        if let bypass = bypassRule(for: settings) {
+            rules.append(bypass)
+        }
+        rules.append([
+            "ip_is_private": true,
+            "action": "route",
+            "outbound": "direct"
+        ])
+
+        var ruleSets = [
+            localRuleSet(tag: "geosite-cn", path: routing.ruleSets.geositeCN),
+            localRuleSet(tag: "geoip-cn", path: routing.ruleSets.geoipCN)
+        ]
+        if settings.blockAds {
+            guard let ads = routing.ruleSets.ads else {
+                throw ConfigGenerationError.missingRuleSet("geosite-category-ads-all")
+            }
+            rules.append([
+                "rule_set": "geosite-category-ads-all",
+                "action": "route",
+                "outbound": "reject"
+            ])
+            ruleSets.append(localRuleSet(tag: "geosite-category-ads-all", path: ads))
+        }
+
+        rules.append([
+            "rule_set": ["geosite-cn", "geoip-cn"],
+            "action": "route",
+            "outbound": "direct"
+        ])
+
+        return [
+            "rules": rules,
+            "rule_set": ruleSets,
+            "final": "自动选择"
+        ]
+    }
+
+    private static func customRouteRule(_ rule: CustomRouteRule) -> [String: Any] {
+        let field: String
+        switch rule.type {
+        case .domainSuffix: field = "domain_suffix"
+        case .domainKeyword: field = "domain_keyword"
+        case .domain: field = "domain"
+        case .ipCIDR: field = "ip_cidr"
+        case .processName: field = "process_name"
+        }
+
+        let outbound: String
+        switch rule.action {
+        case .direct: outbound = "direct"
+        case .proxy: outbound = rule.proxyGroup ?? "自动选择"
+        case .reject: outbound = "reject"
+        }
+        return [field: [rule.value], "action": "route", "outbound": outbound]
+    }
+
+    private static func bypassRule(for settings: RoutingSettings) -> [String: Any]? {
+        var exactDomains: [String] = []
+        var domainSuffixes: [String] = []
+        for domain in settings.bypassDomains {
+            if domain.hasPrefix("*.") {
+                domainSuffixes.append(String(domain.dropFirst(2)))
+            } else if domain.hasPrefix(".") {
+                domainSuffixes.append(String(domain.dropFirst()))
+            } else {
+                exactDomains.append(domain)
+            }
+        }
+
+        var rule: [String: Any] = ["action": "route", "outbound": "direct"]
+        if !exactDomains.isEmpty { rule["domain"] = exactDomains }
+        if !domainSuffixes.isEmpty { rule["domain_suffix"] = domainSuffixes }
+        if !settings.bypassCIDRs.isEmpty { rule["ip_cidr"] = settings.bypassCIDRs }
+        return rule.count > 2 ? rule : nil
+    }
+
+    private static func localRuleSet(tag: String, path: URL) -> [String: Any] {
+        ["type": "local", "tag": tag, "format": "binary", "path": path.path]
     }
 
     public static func diagnosticSnapshot(from fullConfig: Data) throws -> Data {

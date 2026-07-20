@@ -179,3 +179,13 @@
 - 风险/注意事项：当前仅完成数据边界，ConfigGenerator 尚未注入 route；单 IP 需以 `/32` 或 `/128` 表示。
 - 下一步：Task 2 实现六级 route、本地 rule-set 定义和绕过域名归一化。
 - 下一位 Agent 如何接手：从 M2 计划 Task 2 Step 1 写纯 JSON 结构失败测试。
+
+## 2026-07-20 — M2 Task 2 六级 route 与本地 rule-set
+
+- 已完成：先写六级顺序、五类字段、bypass 归一化、广告开关与真实内核测试并观察缺少 routing API 的预期失败；扩展纯 ConfigGenerator，保持 M1 调用默认兼容。
+- 修改文件：`Sources/KongshanCore/ConfigGenerator.swift`、`Tests/KongshanCoreTests/RoutingConfigTests.swift`、M2 计划与记录。
+- 测试结果：RED 因 `PreparedRuleSets`/`RoutingConfiguration`/`routing` 不存在而失败；GREEN 为定向 4/4、全量 43/43 通过，临时 binary `.srs` 由官方 CLI 编译且生成配置通过内置 sing-box 1.13.14 `check`。
+- 当前状态：Task 2 完成；route 按自定义、bypass、私网、可选广告、中国规则、final 顺序生成，规则集只接收本地路径。
+- 风险/注意事项：尚未下载或缓存官方 `.srs`；`*.local` 仅在 route 中归一，持久值与系统 bypass 保持原形。
+- 下一步：Task 3 实现官方 rule-set 下载、解析验证、原子替换与最后成功缓存兜底。
+- 下一位 Agent 如何接手：从 M2 计划 Task 3 Step 1 写 loader/validator 注入的失败测试。
