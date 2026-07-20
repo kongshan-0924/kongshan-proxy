@@ -70,12 +70,12 @@ private struct DashboardView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button(state.isOn ? "关闭代理" : "开启代理") {
+                Button(state.activeMode != nil ? "关闭代理" : "开启\(modeTitle(state.preferredMode))") {
                     Task {
-                        if state.isOn {
+                        if state.activeMode != nil {
                             await state.stop()
                         } else {
-                            await state.startSystemProxy()
+                            await state.startPreferredProxy()
                         }
                     }
                 }
@@ -83,13 +83,38 @@ private struct DashboardView: View {
                 .disabled(state.isBusy || !state.isReady)
             }
 
+            GroupBox("代理模式") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Picker("首选接管方式", selection: modeBinding) {
+                        Text("系统代理").tag(ProxyMode.systemProxy)
+                        Text("TUN").tag(ProxyMode.tun)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .disabled(state.isBusy || !state.isReady)
+
+                    Text("TUN 模式的启动和停止需要管理员授权。在线切换会先完整关闭当前模式。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 4)
+            }
+
             GroupBox("运行信息") {
                 Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 10) {
-                    GridRow { Text("接管模式").foregroundStyle(.secondary); Text("系统代理") }
+                    GridRow {
+                        Text("当前接管").foregroundStyle(.secondary)
+                        Text(state.activeMode.map(modeTitle) ?? "未接管（首选\(modeTitle(state.preferredMode))）")
+                    }
                     GridRow { Text("节点数").foregroundStyle(.secondary); Text("\(state.nodes.count)") }
                     GridRow {
                         Text("Mixed 端口").foregroundStyle(.secondary)
-                        Text(state.mixedPort.map(String.init) ?? "未启动")
+                        Text(
+                            state.activeMode == .tun
+                                ? "TUN 模式不使用"
+                                : (state.mixedPort.map(String.init) ?? "未启动")
+                        )
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -118,6 +143,17 @@ private struct DashboardView: View {
         }
         .padding(24)
         .navigationTitle("Dashboard")
+    }
+
+    private var modeBinding: Binding<ProxyMode> {
+        Binding(
+            get: { state.preferredMode },
+            set: { mode in Task { await state.switchMode(to: mode) } }
+        )
+    }
+
+    private func modeTitle(_ mode: ProxyMode) -> String {
+        mode == .tun ? "TUN" : "系统代理"
     }
 }
 
@@ -268,6 +304,25 @@ private struct SettingsView: View {
 
     var body: some View {
         Form {
+            Section("代理模式") {
+                Picker("首选接管方式", selection: modeBinding) {
+                    Text("系统代理").tag(ProxyMode.systemProxy)
+                    Text("TUN").tag(ProxyMode.tun)
+                }
+                .pickerStyle(.segmented)
+                .disabled(state.isBusy || !state.isReady)
+
+                LabeledContent("当前接管", value: state.activeMode.map(modeTitle) ?? "未开启")
+                Text("TUN 模式的启动和停止需要管理员授权。")
+                    .foregroundStyle(.secondary)
+
+                Toggle("严格路由（strict_route）", isOn: strictRouteBinding)
+                    .disabled(state.isBusy || !state.isReady)
+                Text("启用更严格的路由处理，可能影响局域网或虚拟化软件；macOS 上的 DNS 防泄漏仍需 M4 DNS 设置验证")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("测速") {
                 TextField("测试 URL", text: Binding(
                     get: { state.testURLString },
@@ -282,14 +337,36 @@ private struct SettingsView: View {
             }
 
             Section("当前能力") {
-                LabeledContent("代理模式", value: "系统代理")
+                LabeledContent("代理模式", value: "系统代理 + TUN")
                 LabeledContent("分流", value: "自定义规则 + 中国直连")
-                Text("TUN、Dashboard 流量曲线和自动订阅更新将在后续里程碑提供。")
+                Text("Dashboard 流量曲线和自动订阅更新将在 M4 提供。")
                     .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
         .navigationTitle("设置")
+    }
+
+    private var modeBinding: Binding<ProxyMode> {
+        Binding(
+            get: { state.preferredMode },
+            set: { mode in Task { await state.switchMode(to: mode) } }
+        )
+    }
+
+    private var strictRouteBinding: Binding<Bool> {
+        Binding(
+            get: { state.tunSettings.strictRoute },
+            set: { enabled in
+                var settings = state.tunSettings
+                settings.strictRoute = enabled
+                Task { await state.applyTunSettings(settings) }
+            }
+        )
+    }
+
+    private func modeTitle(_ mode: ProxyMode) -> String {
+        mode == .tun ? "TUN" : "系统代理"
     }
 }
 

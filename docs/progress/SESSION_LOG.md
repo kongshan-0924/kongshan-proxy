@@ -299,3 +299,13 @@
 - 风险/注意事项：本节不启动真实 TUN；全量回归曾暴露测试 `Process.waitUntilExit` 偶发不返回，已用有界 done marker 修复并确认无遗留测试进程。
 - 下一步：Task 6 实现原生模式与 strict_route UI，运行 debug/release 无授权冒烟。
 - 下一位 Agent 如何接手：从 M3 计划 Task 6 Step 1 开始，文案不得宣称 macOS DNS 必然无泄漏。
+
+## 2026-07-20 — M3 Task 6 原生模式与 strict_route 界面
+
+- 已完成：先为 strict 离线保存、在线特权重启与失败回滚写 RED/GREEN 测试；实现 Dashboard/设置模式选择、strict 开关、准确 DNS 边界文案和菜单栏模式图标。
+- 修改文件：`Sources/kongshan/AppState.swift`、`Sources/kongshan/MainWindowView.swift`、`Sources/kongshan/MenuBarView.swift`、`Tests/KongshanAppTests/AppStateTests.swift`、M3 计划与全部项目记录。
+- 测试结果：RED 因 `applyTunSettings` 缺失失败；GREEN 为 strict 3/3、AppState 18/18、全量 88/88；`swift build`、release App、arm64 与 codesign 通过。
+- 当前状态：Task 6 完成；strict 说明明确“可能影响局域网/虚拟化，macOS DNS 防泄漏待 M4 验证”，没有过度承诺。
+- 风险/注意事项：空节点 App 仅启动 2 秒后退出，未点击 TUN、未出现恢复文件或授权；本机状态栏管理导致自动视觉点击仍不可靠。
+- 下一步：Task 7 实现 M3 一键自动验收、运行并写入 `docs/acceptance/M3.md`。
+- 下一位 Agent 如何接手：从 M3 计划 Task 7 Step 1 先运行缺失脚本得到预期失败，自动化只做纯配置/check/注入测试。

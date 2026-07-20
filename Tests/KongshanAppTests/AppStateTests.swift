@@ -459,6 +459,74 @@ final class AppStateTests: XCTestCase {
         XCTAssertTrue(networkArguments.isEmpty)
     }
 
+    func testOfflineTUNSettingsPersistWithoutStartingTakeover() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        let privileged = FakePrivilegedLauncher(root: root)
+        let state = AppState(
+            storage: storage,
+            systemProxyManager: SystemProxyManager(storage: storage) { _, _ in
+                ProcessResult(exitCode: 0, stdout: "", stderr: "")
+            },
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            privilegedLauncher: privileged,
+            automaticallyInitialize: false
+        )
+        var settings = TunSettings.defaults
+        settings.strictRoute = true
+
+        await state.applyTunSettings(settings)
+
+        XCTAssertEqual(state.tunSettings, settings)
+        XCTAssertEqual(state.status, .off)
+        let attempts = await privileged.attemptedConfigs()
+        XCTAssertTrue(attempts.isEmpty)
+        let persisted = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: root.appending(path: "settings.json")))
+                as? [String: Any]
+        )
+        XCTAssertEqual((persisted["tunSettings"] as? [String: Any])?["strictRoute"] as? Bool, true)
+    }
+
+    func testActiveTUNStrictRouteUpdateUsesPrivilegedTransaction() async throws {
+        let fixture = try await makeModeFixture(initialMode: .tun)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        var settings = fixture.state.tunSettings
+        settings.strictRoute = true
+
+        await fixture.state.applyTunSettings(settings)
+
+        XCTAssertEqual(fixture.state.status, .on)
+        XCTAssertEqual(fixture.state.activeMode, .tun)
+        XCTAssertEqual(fixture.state.tunSettings, settings)
+        let attempts = await fixture.privileged.attemptedConfigs()
+        let networkArguments = await fixture.network.arguments
+        XCTAssertEqual(attempts.count, 2)
+        XCTAssertEqual(try tunStrictRoute(from: try XCTUnwrap(attempts.last)), true)
+        XCTAssertTrue(networkArguments.isEmpty)
+    }
+
+    func testActiveTUNStrictRouteFailureRestoresOldConfiguration() async throws {
+        let fixture = try await makeModeFixture(initialMode: .tun, tunStartFailureCalls: [2])
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let oldSettings = fixture.state.tunSettings
+        var requested = oldSettings
+        requested.strictRoute = true
+
+        await fixture.state.applyTunSettings(requested)
+
+        XCTAssertEqual(fixture.state.status, .on)
+        XCTAssertEqual(fixture.state.activeMode, .tun)
+        XCTAssertEqual(fixture.state.tunSettings, oldSettings)
+        XCTAssertTrue(fixture.state.errorMessage?.contains("已恢复旧 TUN 配置") == true)
+        let attempts = await fixture.privileged.attemptedConfigs()
+        XCTAssertEqual(attempts.count, 3)
+        guard attempts.count == 3 else { return }
+        XCTAssertEqual(attempts[0], attempts[2])
+        XCTAssertEqual(try tunStrictRoute(from: attempts[1]), true)
+    }
+
     private func makeRunningFixture(
         failOnceFor: [String]? = nil,
         healthFailures: Set<Int> = []
@@ -618,6 +686,13 @@ final class AppStateTests: XCTestCase {
         let inbound = try XCTUnwrap((root["inbounds"] as? [[String: Any]])?.first)
         XCTAssertEqual(inbound["type"] as? String, "tun")
         return try XCTUnwrap(inbound["route_exclude_address"] as? [String])
+    }
+
+    private func tunStrictRoute(from config: Data) throws -> Bool {
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: config) as? [String: Any])
+        let inbound = try XCTUnwrap((root["inbounds"] as? [[String: Any]])?.first)
+        XCTAssertEqual(inbound["type"] as? String, "tun")
+        return try XCTUnwrap(inbound["strict_route"] as? Bool)
     }
 
     private func compiledRuleSet(in directory: URL) async throws -> Data {

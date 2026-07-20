@@ -86,21 +86,26 @@ final class AppState {
     }
 
     var menuBarSymbol: String {
-        switch status {
+        if let activeMode {
+            return activeMode == .tun ? "network" : "shield.fill"
+        }
+        return switch status {
         case .off, .failed:
             "shield.slash"
-        case .starting, .stopping:
+        case .starting:
+            preferredMode == .tun ? "network" : "shield.lefthalf.filled"
+        case .stopping:
             "shield.lefthalf.filled"
         case .on:
-            "shield.fill"
+            "shield.slash"
         }
     }
 
     var statusText: String {
         switch status {
         case .off: "已关闭"
-        case .starting: "正在启动系统代理…"
-        case .on: "系统代理已开启"
+        case .starting: preferredMode == .tun ? "正在启动 TUN…" : "正在启动系统代理…"
+        case .on: activeMode == .tun ? "TUN 已开启" : "系统代理已开启"
         case .stopping: "正在关闭…"
         case let .failed(message): "失败：\(message)"
         }
@@ -469,11 +474,12 @@ final class AppState {
                     return
                 }
             case .tun:
-                guard await reloadTUNRouting(
+                guard await reloadTUNConfiguration(
                     newConfig: newConfig,
                     oldConfig: oldConfig,
                     oldSettings: oldSettings,
-                    client: client
+                    client: client,
+                    operation: "分流规则"
                 ) else {
                     return
                 }
@@ -489,6 +495,64 @@ final class AppState {
             errorMessage = nil
         } catch {
             errorMessage = "应用分流规则失败：\(error.localizedDescription)"
+        }
+    }
+
+    func applyTunSettings(_ requestedSettings: TunSettings) async {
+        guard !isBusy else { return }
+        isApplyingRouting = true
+        defer { isApplyingRouting = false }
+
+        let oldTunSettings = tunSettings
+        do {
+            guard status == .on, activeMode == .tun else {
+                tunSettings = requestedSettings
+                try await persistSettings()
+                errorMessage = nil
+                return
+            }
+            guard let runtime, let oldConfig = currentConfig, let client = clashAPIClient else {
+                throw AppStateError.missingRuntimeState
+            }
+
+            let prepared = try await ruleSetService.prepare(includeAds: routingSettings.blockAds)
+            warnings.append(contentsOf: prepared.warnings)
+            let newConfig = try ConfigGenerator.generate(ConfigInput(
+                nodes: nodes,
+                selectedNodeID: selectedNodeID,
+                runtime: runtime,
+                testURL: testURLString,
+                routing: RoutingConfiguration(settings: routingSettings, ruleSets: prepared.ruleSets),
+                proxyMode: .tun,
+                tunSettings: requestedSettings
+            ))
+            let check = try await singBoxProcess.check(config: newConfig)
+            guard check.exitCode == 0 else {
+                throw AppStateError.coreCheckFailed(check.stderr)
+            }
+
+            guard await reloadTUNConfiguration(
+                newConfig: newConfig,
+                oldConfig: oldConfig,
+                oldSettings: routingSettings,
+                client: client,
+                operation: "TUN 设置"
+            ) else {
+                tunSettings = oldTunSettings
+                return
+            }
+
+            tunSettings = requestedSettings
+            currentConfig = newConfig
+            try await persistSettings()
+            try await storage.writeAtomically(
+                ConfigGenerator.diagnosticSnapshot(from: newConfig),
+                to: storage.rootDirectory.appending(path: "config.json")
+            )
+            errorMessage = nil
+        } catch {
+            tunSettings = oldTunSettings
+            errorMessage = "应用 TUN 设置失败：\(error.localizedDescription)"
         }
     }
 
@@ -596,18 +660,19 @@ final class AppState {
         }
     }
 
-    private func reloadTUNRouting(
+    private func reloadTUNConfiguration(
         newConfig: Data,
         oldConfig: Data,
         oldSettings: RoutingSettings,
-        client: ClashAPIClient
+        client: ClashAPIClient,
+        operation: String
     ) async -> Bool {
         do {
             try await privilegedLauncher.stop()
             activeMode = nil
         } catch {
             status = .on
-            errorMessage = "应用分流规则失败，旧 TUN 配置仍在运行：\(error.localizedDescription)"
+            errorMessage = "应用\(operation)失败，旧 TUN 配置仍在运行：\(error.localizedDescription)"
             return false
         }
 
@@ -643,7 +708,7 @@ final class AppState {
                 currentConfig = oldConfig
                 routingSettings = oldSettings
                 status = .on
-                errorMessage = "应用分流规则失败，已恢复旧 TUN 配置：\(updateError.localizedDescription)"
+                errorMessage = "应用\(operation)失败，已恢复旧 TUN 配置：\(updateError.localizedDescription)"
                 return false
             } catch let rollbackError {
                 if oldConfigurationStarted {
@@ -654,7 +719,7 @@ final class AppState {
                 }
                 clearRuntimeState()
                 setFailure(
-                    "TUN 分流更新失败且旧配置无法恢复：\(updateError.localizedDescription)；\(rollbackError.localizedDescription)"
+                    "\(operation)更新失败且旧 TUN 配置无法恢复：\(updateError.localizedDescription)；\(rollbackError.localizedDescription)"
                 )
                 return false
             }

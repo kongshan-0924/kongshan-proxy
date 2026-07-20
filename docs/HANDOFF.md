@@ -1,9 +1,9 @@
 # 项目交接
 
-- 已完成：M3 Task 5 TUN 在线分流事务；复用原 runtime，用特权 launcher 停/启新配置，失败时回启旧 root 配置，双重失败则关闭。
-- 修改文件：`Sources/kongshan/AppState.swift`、`Tests/KongshanAppTests/AppStateTests.swift`、`Tests/KongshanCoreTests/PrivilegedLauncherTests.swift` 与 M3 计划/记录。
-- 测试结果：TUN routing 定向 3/3、AppState 15/15、全量 `swift test` 85/85 通过；FIFO 读取夹具的偶发 waitUntilExit 阻塞已改为有界完成标记。
-- 当前状态：M3 Task 5 已完成；TUN 规则更新不会调用 networksetup，新旧 config 的 Clash controller/secret 保持一致。
-- 风险/注意事项：AppState RED 测试使用只消费 stdin 的安全假内核，避免错误实现尝试真实 TUN；未执行管理员授权。
-- 下一步：实现原生 system/TUN segmented picker、strict_route 开关、精确说明与菜单栏模式状态。
-- 接手方式：先读本文件、M3 计划与最新 SESSION_LOG，从 Task 6 Step 1 开始；编译/冒烟不得点击 TUN 或触发授权。
+- 已完成：M3 Task 6 原生模式 UI；Dashboard/设置提供 segmented picker，strict_route 可离线保存或在线事务更新，菜单栏区分关闭/system/TUN。
+- 修改文件：`Sources/kongshan/AppState.swift`、`Sources/kongshan/MainWindowView.swift`、`Sources/kongshan/MenuBarView.swift`、`Tests/KongshanAppTests/AppStateTests.swift` 与 M3 计划/记录。
+- 测试结果：strict 定向 3/3、AppState 18/18、全量 88/88；debug/release 编译、arm64、ad-hoc codesign 严格验证通过。
+- 当前状态：M3 Task 6 已完成，`dist/kongshan.app` 已更新；空节点无授权冒烟进程正常，无 proxy/TUN recovery 文件。
+- 风险/注意事项：冒烟 2 秒采样为 RSS 75968 KB、CPU 0.7%（启动期，非稳态性能结论）；本机状态栏管理环境仍无法稳定执行自动视觉点击。
+- 下一步：实现 `verify_m3.sh`，执行完整自动验收并固化 M3 人工边界。
+- 接手方式：先读本文件、M3 计划与最新 SESSION_LOG，从 Task 7 Step 1 开始；验证脚本严禁运行提权 osascript 或启动 TUN。
