@@ -279,3 +279,13 @@
 - 风险/注意事项：自动测试全部注入 fake authorizer，仅对 osascript 参数/结果做纯映射，未触发系统授权。
 - 下一步：Task 4 实现 AppState 模式持久化、互斥启停、切换与初始/退出恢复。
 - 下一位 Agent 如何接手：从 M3 计划 Task 4 Step 1 先写旧 settings 兼容与 system↔TUN 序列测试，fake launcher 必须能证明互斥不变量。
+
+## 2026-07-20 — M3 Task 4 AppState 模式持久化与互斥切换
+
+- 已完成：先写旧 settings 解码、离线首选、system↔TUN 序列、新模式失败、初始恢复与退出失败测试并观察 API 缺失；实现可注入 PrivilegedLaunching 与互斥状态机。
+- 修改文件：`Sources/KongshanCore/PrivilegedLauncher.swift`、`Sources/kongshan/AppState.swift`、`Tests/KongshanAppTests/AppStateTests.swift`、M3 计划与全部项目记录。
+- 测试结果：RED 因 PrivilegedLaunching/preferredMode/activeMode/switchMode 缺失失败；GREEN 为 AppState 12/12、全量 82/82，`git diff --check` 通过。
+- 当前状态：Task 4 完成；TUN 不调用 networksetup，两种模式切换均先完整停止旧模式，新模式失败不自动回启旧模式。
+- 风险/注意事项：TUN 健康失败后若特权停止也失败，activeMode 保留 `.tun` 以如实反映可能仍在接管；Task 5 尚需处理 TUN 在线规则更新。
+- 下一步：Task 5 实现 TUN 相同 runtime 更新、旧 root 配置回滚与双重失败关闭。
+- 下一位 Agent 如何接手：从 M3 计划 Task 5 Step 1 扩展 mode fixture，断言 config runtime 值复用、CIDR 更新且 networksetup 调用数不变。

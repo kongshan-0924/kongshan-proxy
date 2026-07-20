@@ -27,6 +27,9 @@ final class AppState {
     var warnings: [String] = []
     var isReady = false
     var routingSettings = RoutingSettings.defaults
+    var preferredMode: ProxyMode = .systemProxy
+    private(set) var activeMode: ProxyMode?
+    var tunSettings: TunSettings = .defaults
     private(set) var isApplyingRouting = false
 
     @ObservationIgnored private let storage: Storage
@@ -34,6 +37,7 @@ final class AppState {
     @ObservationIgnored private let ruleSetService: RuleSetService
     @ObservationIgnored private let systemProxyManager: SystemProxyManager
     @ObservationIgnored private let singBoxProcess: SingBoxProcess
+    @ObservationIgnored private let privilegedLauncher: any PrivilegedLaunching
     @ObservationIgnored private let runtimeFactory: RuntimeFactory
     @ObservationIgnored private let healthVerifier: HealthVerifier
     @ObservationIgnored private var clashAPIClient: ClashAPIClient?
@@ -46,6 +50,7 @@ final class AppState {
         ruleSetService: RuleSetService? = nil,
         systemProxyManager: SystemProxyManager? = nil,
         singBoxProcess: SingBoxProcess? = nil,
+        privilegedLauncher: (any PrivilegedLaunching)? = nil,
         runtimeFactory: RuntimeFactory? = nil,
         healthVerifier: HealthVerifier? = nil,
         automaticallyInitialize: Bool = true
@@ -56,6 +61,10 @@ final class AppState {
         self.ruleSetService = ruleSetService ?? RuleSetService(storage: storage, binaryURL: binaryURL)
         self.systemProxyManager = systemProxyManager ?? SystemProxyManager(storage: storage)
         self.singBoxProcess = singBoxProcess ?? SingBoxProcess(binaryURL: binaryURL)
+        self.privilegedLauncher = privilegedLauncher ?? PrivilegedLauncher(
+            storage: storage,
+            binaryURL: binaryURL
+        )
         self.runtimeFactory = runtimeFactory ?? Self.makeRuntimeParameters
         self.healthVerifier = healthVerifier ?? Self.waitUntilHealthy
 
@@ -100,6 +109,7 @@ final class AppState {
     func initialize() async {
         guard !isReady else { return }
         do {
+            try await privilegedLauncher.recoverIfNeeded()
             try await systemProxyManager.recoverIfNeeded()
             try await storage.prepare()
             try await loadPersistedState()
@@ -110,7 +120,11 @@ final class AppState {
     }
 
     func startSystemProxy() async {
-        guard !isBusy, status != .on else { return }
+        await startPreferredProxy()
+    }
+
+    func startPreferredProxy() async {
+        guard !isBusy, status != .on, activeMode == nil else { return }
         guard !nodes.isEmpty else {
             setFailure("至少需要一个代理节点")
             return
@@ -118,6 +132,8 @@ final class AppState {
 
         status = .starting
         errorMessage = nil
+        let requestedMode = preferredMode
+        var tunStarted = false
         do {
             let prepared = try await ruleSetService.prepare(includeAds: routingSettings.blockAds)
             warnings.append(contentsOf: prepared.warnings)
@@ -127,7 +143,9 @@ final class AppState {
                 selectedNodeID: selectedNodeID,
                 runtime: runtime,
                 testURL: testURLString,
-                routing: RoutingConfiguration(settings: routingSettings, ruleSets: prepared.ruleSets)
+                routing: RoutingConfiguration(settings: routingSettings, ruleSets: prepared.ruleSets),
+                proxyMode: requestedMode,
+                tunSettings: tunSettings
             ))
             let diagnostic = try ConfigGenerator.diagnosticSnapshot(from: config)
             try await storage.writeAtomically(
@@ -139,60 +157,127 @@ final class AppState {
             guard check.exitCode == 0 else {
                 throw AppStateError.coreCheckFailed(check.stderr)
             }
-            try await singBoxProcess.start(config: config)
-
             let client = ClashAPIClient(
                 controller: URL(string: "http://127.0.0.1:\(runtime.clashPort)")!,
                 secret: runtime.secret
             )
-            try await healthVerifier(client)
-            try await systemProxyManager.enable(
-                port: Int(runtime.mixedPort),
-                bypassDomains: routingSettings.systemProxyBypassEntries
-            )
+            switch requestedMode {
+            case .systemProxy:
+                try await singBoxProcess.start(config: config)
+                try await healthVerifier(client)
+                try await systemProxyManager.enable(
+                    port: Int(runtime.mixedPort),
+                    bypassDomains: routingSettings.systemProxyBypassEntries
+                )
+            case .tun:
+                _ = try await privilegedLauncher.start(config: config)
+                tunStarted = true
+                try await healthVerifier(client)
+            }
 
             self.runtime = runtime
             clashAPIClient = client
             currentConfig = config
-            mixedPort = runtime.mixedPort
+            mixedPort = requestedMode == .systemProxy ? runtime.mixedPort : nil
+            activeMode = requestedMode
             status = .on
         } catch {
-            try? await systemProxyManager.restore()
-            await singBoxProcess.stop()
-            runtime = nil
-            clashAPIClient = nil
-            currentConfig = nil
-            mixedPort = nil
+            switch requestedMode {
+            case .systemProxy:
+                try? await systemProxyManager.restore()
+                await singBoxProcess.stop()
+            case .tun:
+                if tunStarted {
+                    do {
+                        try await privilegedLauncher.stop()
+                    } catch let stopError {
+                        activeMode = .tun
+                        currentConfig = nil
+                        mixedPort = nil
+                        setFailure(
+                            "TUN 启动失败且无法停止：\(error.localizedDescription)；\(stopError.localizedDescription)"
+                        )
+                        return
+                    }
+                }
+            }
+            clearRuntimeState()
             setFailure(error.localizedDescription)
         }
     }
 
     func stop() async {
         guard !isBusy, status != .off else { return }
-        status = .stopping
-        errorMessage = nil
-        do {
-            try await systemProxyManager.restore()
-        } catch {
-            setFailure("恢复系统代理失败：\(error.localizedDescription)")
+        guard let activeMode else {
+            clearRuntimeState()
+            status = .off
             return
         }
-
-        await singBoxProcess.stop()
-        runtime = nil
-        clashAPIClient = nil
-        currentConfig = nil
-        mixedPort = nil
+        status = .stopping
+        errorMessage = nil
+        switch activeMode {
+        case .systemProxy:
+            do {
+                try await systemProxyManager.restore()
+            } catch {
+                setFailure("恢复系统代理失败：\(error.localizedDescription)")
+                return
+            }
+            await singBoxProcess.stop()
+        case .tun:
+            do {
+                try await privilegedLauncher.stop()
+            } catch {
+                setFailure("停止 TUN 失败：\(error.localizedDescription)")
+                return
+            }
+        }
+        clearRuntimeState()
         status = .off
     }
 
+    func switchMode(to mode: ProxyMode) async {
+        guard !isBusy else { return }
+        if activeMode == mode, status == .on {
+            preferredMode = mode
+            do {
+                try await persistSettings()
+                errorMessage = nil
+            } catch {
+                errorMessage = "保存代理模式失败：\(error.localizedDescription)"
+            }
+            return
+        }
+
+        let shouldRestart = status == .on && activeMode != nil
+        if activeMode != nil {
+            await stop()
+            guard status == .off, activeMode == nil else { return }
+        }
+
+        preferredMode = mode
+        do {
+            try await persistSettings()
+            errorMessage = nil
+        } catch {
+            setFailure("保存代理模式失败：\(error.localizedDescription)")
+            return
+        }
+        if shouldRestart {
+            await startPreferredProxy()
+        }
+    }
+
     func prepareForTermination() async -> Bool {
-        if status != .off {
+        if activeMode != nil {
             await stop()
             return status == .off
         } else {
             do {
+                try await privilegedLauncher.recoverIfNeeded()
                 try await systemProxyManager.recoverIfNeeded()
+                clearRuntimeState()
+                status = .off
                 return true
             } catch {
                 setFailure("退出前恢复系统代理失败：\(error.localizedDescription)")
@@ -392,7 +477,7 @@ final class AppState {
 
     func dismissError() {
         errorMessage = nil
-        if case .failed = status { status = .off }
+        if case .failed = status, activeMode == nil { status = .off }
     }
 
     func nodes(for source: SubscriptionSource) -> [ProxyNode] {
@@ -423,6 +508,8 @@ final class AppState {
             let settings = try JSONDecoder().decode(PersistedSettings.self, from: data)
             selectedNodeID = settings.selectedNodeID
             testURLString = settings.testURL
+            preferredMode = settings.preferredMode ?? .systemProxy
+            tunSettings = settings.tunSettings ?? .defaults
         }
         if let data = try await storage.readIfPresent(from: rulesURL) {
             routingSettings = try JSONDecoder().decode(RoutingSettings.self, from: data).validated()
@@ -448,7 +535,9 @@ final class AppState {
         try await storage.writeAtomically(
             try JSONEncoder.sorted.encode(PersistedSettings(
                 selectedNodeID: selectedNodeID,
-                testURL: testURLString
+                testURL: testURLString,
+                preferredMode: preferredMode,
+                tunSettings: tunSettings
             )),
             to: settingsURL
         )
@@ -483,10 +572,7 @@ final class AppState {
             } catch let proxyError {
                 restoreMessage = "系统代理恢复失败：\(proxyError.localizedDescription)"
             }
-            runtime = nil
-            clashAPIClient = nil
-            currentConfig = nil
-            mixedPort = nil
+            clearRuntimeState()
             setFailure(
                 "分流更新失败且旧配置无法恢复：\(updateError.localizedDescription)；\(error.localizedDescription)；\(restoreMessage)"
             )
@@ -536,6 +622,14 @@ final class AppState {
         errorMessage = message
     }
 
+    private func clearRuntimeState() {
+        runtime = nil
+        clashAPIClient = nil
+        currentConfig = nil
+        mixedPort = nil
+        activeMode = nil
+    }
+
     private var subscriptionsURL: URL {
         storage.rootDirectory.appending(path: "subscriptions.json")
     }
@@ -564,6 +658,8 @@ final class AppState {
 private struct PersistedSettings: Codable {
     let selectedNodeID: UUID?
     let testURL: String
+    let preferredMode: ProxyMode?
+    let tunSettings: TunSettings?
 }
 
 private enum AppStateError: Error, LocalizedError {

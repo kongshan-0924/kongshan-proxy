@@ -251,7 +251,13 @@ enum POSIXConfigPipe {
 
 /// MVP 只通过固定 AppleScript 获取单次管理员授权。不在此暴露任意 root shell API；
 /// 后续若需降低授权频率，应迁移到经签名校验的 SMAppService helper 或 Network Extension。
-public actor PrivilegedLauncher {
+public protocol PrivilegedLaunching: Sendable {
+    func start(config: Data) async throws -> PrivilegedProcessRecord
+    func stop() async throws
+    func recoverIfNeeded() async throws
+}
+
+public actor PrivilegedLauncher: PrivilegedLaunching {
     public nonisolated let recoveryURL: URL
 
     private let storage: Storage

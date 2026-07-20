@@ -218,6 +218,170 @@ final class AppStateTests: XCTestCase {
         XCTAssertFalse(isRunning)
     }
 
+    func testOldSettingsDefaultToSystemModeAndNewModePersists() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        try await storage.prepare()
+        try await storage.writeAtomically(
+            Data(#"{"selectedNodeID":null,"testURL":"http://example.com/generate_204"}"#.utf8),
+            to: root.appending(path: "settings.json")
+        )
+        let privileged = FakePrivilegedLauncher(root: root)
+        let state = AppState(
+            storage: storage,
+            systemProxyManager: SystemProxyManager(storage: storage) { _, _ in
+                ProcessResult(exitCode: 0, stdout: "", stderr: "")
+            },
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            privilegedLauncher: privileged,
+            automaticallyInitialize: false
+        )
+
+        await state.initialize()
+
+        XCTAssertEqual(state.preferredMode, .systemProxy)
+        XCTAssertNil(state.activeMode)
+        XCTAssertEqual(state.tunSettings, .defaults)
+        await state.switchMode(to: .tun)
+        XCTAssertEqual(state.preferredMode, .tun)
+        XCTAssertEqual(state.status, .off)
+
+        let persisted = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: root.appending(path: "settings.json")))
+                as? [String: Any]
+        )
+        XCTAssertEqual(persisted["preferredMode"] as? String, "tun")
+        XCTAssertEqual((persisted["tunSettings"] as? [String: Any])?["strictRoute"] as? Bool, false)
+
+        let reloaded = AppState(
+            storage: storage,
+            systemProxyManager: SystemProxyManager(storage: storage) { _, _ in
+                ProcessResult(exitCode: 0, stdout: "", stderr: "")
+            },
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            privilegedLauncher: privileged,
+            automaticallyInitialize: false
+        )
+        await reloaded.initialize()
+        XCTAssertEqual(reloaded.preferredMode, .tun)
+        XCTAssertEqual(reloaded.tunSettings, .defaults)
+    }
+
+    func testSwitchSystemProxyToTUNFullyStopsOldTakeoverFirst() async throws {
+        let fixture = try await makeModeFixture(initialMode: .systemProxy)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        XCTAssertEqual(fixture.state.activeMode, .systemProxy)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.proxyRecoveryURL.path))
+
+        await fixture.state.switchMode(to: .tun)
+
+        XCTAssertEqual(fixture.state.status, .on)
+        XCTAssertEqual(fixture.state.preferredMode, .tun)
+        XCTAssertEqual(fixture.state.activeMode, .tun)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.proxyRecoveryURL.path))
+        let tunIsActive = await fixture.privileged.isActive()
+        let userCoreIsRunning = await fixture.core.isRunning
+        XCTAssertTrue(tunIsActive)
+        XCTAssertFalse(userCoreIsRunning)
+        let configs = await fixture.privileged.startedConfigs()
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(configs.last)) as? [String: Any])
+        let inbound = try XCTUnwrap((root["inbounds"] as? [[String: Any]])?.first)
+        XCTAssertEqual(inbound["type"] as? String, "tun")
+        let events = await fixture.events.values()
+        let violations = await fixture.events.invariantViolations()
+        XCTAssertEqual(events, [.systemEnable, .systemRestore, .tunStart])
+        XCTAssertTrue(violations.isEmpty)
+    }
+
+    func testSwitchTUNToSystemProxyStopsRootBeforeNetworkSetup() async throws {
+        let fixture = try await makeModeFixture(initialMode: .tun)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        XCTAssertEqual(fixture.state.activeMode, .tun)
+        let initiallyActive = await fixture.privileged.isActive()
+        XCTAssertTrue(initiallyActive)
+
+        await fixture.state.switchMode(to: .systemProxy)
+
+        XCTAssertEqual(fixture.state.status, .on)
+        XCTAssertEqual(fixture.state.preferredMode, .systemProxy)
+        XCTAssertEqual(fixture.state.activeMode, .systemProxy)
+        let tunIsActive = await fixture.privileged.isActive()
+        let userCoreIsRunning = await fixture.core.isRunning
+        XCTAssertFalse(tunIsActive)
+        XCTAssertTrue(userCoreIsRunning)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.proxyRecoveryURL.path))
+        let events = await fixture.events.values()
+        let violations = await fixture.events.invariantViolations()
+        XCTAssertEqual(events, [.tunStart, .tunStop, .systemEnable])
+        XCTAssertTrue(violations.isEmpty)
+        await fixture.state.stop()
+    }
+
+    func testNewModeFailureLeavesBothTakeoversOff() async throws {
+        let fixture = try await makeModeFixture(
+            initialMode: .systemProxy,
+            tunStartError: ModeTestError.startFailed
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        await fixture.state.switchMode(to: .tun)
+
+        if case .failed = fixture.state.status {
+            // Expected terminal state.
+        } else {
+            XCTFail("Expected failed state, got \(fixture.state.status)")
+        }
+        XCTAssertEqual(fixture.state.preferredMode, .tun)
+        XCTAssertNil(fixture.state.activeMode)
+        let tunIsActive = await fixture.privileged.isActive()
+        let userCoreIsRunning = await fixture.core.isRunning
+        XCTAssertFalse(tunIsActive)
+        XCTAssertFalse(userCoreIsRunning)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.proxyRecoveryURL.path))
+        let events = await fixture.events.values()
+        XCTAssertEqual(events, [.systemEnable, .systemRestore, .tunStart])
+    }
+
+    func testInitializeAndTerminationSurfaceTUNRecoveryFailures() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        let recoveryFailure = FakePrivilegedLauncher(
+            root: root,
+            recoverError: ModeTestError.recoveryFailed
+        )
+        let failedInitialization = AppState(
+            storage: storage,
+            systemProxyManager: SystemProxyManager(storage: storage) { _, _ in
+                ProcessResult(exitCode: 0, stdout: "", stderr: "")
+            },
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            privilegedLauncher: recoveryFailure,
+            automaticallyInitialize: false
+        )
+
+        await failedInitialization.initialize()
+
+        XCTAssertFalse(failedInitialization.isReady)
+        if case .failed = failedInitialization.status {
+            // Expected recovery failure.
+        } else {
+            XCTFail("Expected failed initialization")
+        }
+
+        let fixture = try await makeModeFixture(
+            initialMode: .tun,
+            tunStopError: ModeTestError.stopFailed
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let canTerminate = await fixture.state.prepareForTermination()
+        XCTAssertFalse(canTerminate)
+        XCTAssertEqual(fixture.state.activeMode, .tun)
+        let tunIsActive = await fixture.privileged.isActive()
+        XCTAssertTrue(tunIsActive)
+    }
+
     private func makeRunningFixture(
         failOnceFor: [String]? = nil,
         healthFailures: Set<Int> = []
@@ -269,6 +433,74 @@ final class AppStateTests: XCTestCase {
         )
     }
 
+    private func makeModeFixture(
+        initialMode: ProxyMode,
+        tunStartError: Error? = nil,
+        tunStopError: Error? = nil
+    ) async throws -> ModeFixture {
+        let root = temporaryDirectory()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let storage = Storage(rootDirectory: root)
+        let ruleSetData = try await compiledRuleSet(in: root)
+        let events = TakeoverEvents()
+        let markerURL = root.appending(path: "fake-tun-active")
+        let proxyRecoveryURL = root.appending(path: "proxy-recovery.json")
+        let network = AppNetworkSetupRecorder(
+            recoveryURL: proxyRecoveryURL,
+            tunMarkerURL: markerURL,
+            takeoverEvents: events
+        )
+        let runtime = try runtimeParameters()
+        let core = SingBoxProcess(binaryURL: singBoxURL)
+        let privileged = FakePrivilegedLauncher(
+            root: root,
+            markerURL: markerURL,
+            proxyRecoveryURL: proxyRecoveryURL,
+            events: events,
+            startError: tunStartError,
+            stopError: tunStopError
+        )
+        let state = AppState(
+            storage: storage,
+            subscriptionService: SubscriptionService(storage: storage) { _ in
+                HTTPDownload(data: Data(), statusCode: 500)
+            },
+            ruleSetService: RuleSetService(
+                storage: storage,
+                binaryURL: singBoxURL,
+                loader: { _ in HTTPDownload(data: ruleSetData, statusCode: 200) }
+            ),
+            systemProxyManager: SystemProxyManager(storage: storage, runner: network.run(arguments:timeout:)),
+            singBoxProcess: core,
+            privilegedLauncher: privileged,
+            runtimeFactory: { runtime },
+            healthVerifier: { _ in },
+            automaticallyInitialize: false
+        )
+        state.nodes = [ProxyNode(
+            name: "mode-test",
+            protocolType: .shadowsocks,
+            server: "127.0.0.1",
+            port: 9,
+            password: "secret",
+            method: "aes-128-gcm"
+        )]
+        state.selectedNodeID = state.nodes[0].id
+        if initialMode != .systemProxy {
+            await state.switchMode(to: initialMode)
+        }
+        await state.startSystemProxy()
+        XCTAssertEqual(state.status, .on)
+        return ModeFixture(
+            root: root,
+            state: state,
+            core: core,
+            privileged: privileged,
+            events: events,
+            proxyRecoveryURL: proxyRecoveryURL
+        )
+    }
+
     private func compiledRuleSet(in directory: URL) async throws -> Data {
         let source = directory.appending(path: "source.json")
         let output = directory.appending(path: "compiled.srs")
@@ -316,6 +548,16 @@ private struct RunningFixture {
     let runtime: RuntimeParameters
 }
 
+@MainActor
+private struct ModeFixture {
+    let root: URL
+    let state: AppState
+    let core: SingBoxProcess
+    let privileged: FakePrivilegedLauncher
+    let events: TakeoverEvents
+    let proxyRecoveryURL: URL
+}
+
 private actor CommandCalls {
     private var arguments: [[String]] = []
 
@@ -330,16 +572,38 @@ private actor CommandCalls {
 
 private actor AppNetworkSetupRecorder {
     private let recoveryURL: URL
+    private let tunMarkerURL: URL?
+    private let takeoverEvents: TakeoverEvents?
     private var failOnceFor: [String]?
+    private var recordedEnable = false
+    private var recordedRestore = false
     private(set) var arguments: [[String]] = []
 
-    init(recoveryURL: URL, failOnceFor: [String]? = nil) {
+    init(
+        recoveryURL: URL,
+        failOnceFor: [String]? = nil,
+        tunMarkerURL: URL? = nil,
+        takeoverEvents: TakeoverEvents? = nil
+    ) {
         self.recoveryURL = recoveryURL
         self.failOnceFor = failOnceFor
+        self.tunMarkerURL = tunMarkerURL
+        self.takeoverEvents = takeoverEvents
     }
 
     func run(arguments: [String], timeout: TimeInterval) async -> ProcessResult {
         self.arguments.append(arguments)
+        if arguments.first == "-setwebproxy", !recordedEnable {
+            recordedEnable = true
+            if let tunMarkerURL, FileManager.default.fileExists(atPath: tunMarkerURL.path) {
+                await takeoverEvents?.recordViolation("system proxy enabled while TUN marker exists")
+            }
+            await takeoverEvents?.append(.systemEnable)
+        }
+        if arguments.starts(with: ["-setwebproxystate", "Wi-Fi", "off"]), !recordedRestore {
+            recordedRestore = true
+            await takeoverEvents?.append(.systemRestore)
+        }
         if failOnceFor == arguments {
             failOnceFor = nil
             return ProcessResult(exitCode: 7, stdout: "", stderr: "simulated")
@@ -359,6 +623,89 @@ private actor AppNetworkSetupRecorder {
             ""
         }
     }
+}
+
+private enum TakeoverEvent: Equatable, Sendable {
+    case systemEnable
+    case systemRestore
+    case tunStart
+    case tunStop
+}
+
+private actor TakeoverEvents {
+    private var events: [TakeoverEvent] = []
+    private var violations: [String] = []
+
+    func append(_ event: TakeoverEvent) { events.append(event) }
+    func recordViolation(_ message: String) { violations.append(message) }
+    func values() -> [TakeoverEvent] { events }
+    func invariantViolations() -> [String] { violations }
+}
+
+private actor FakePrivilegedLauncher: PrivilegedLaunching {
+    private let markerURL: URL
+    private let proxyRecoveryURL: URL
+    private let events: TakeoverEvents?
+    private let startError: Error?
+    private let stopError: Error?
+    private let recoverError: Error?
+    private var active = false
+    private var configs: [Data] = []
+
+    init(
+        root: URL,
+        markerURL: URL? = nil,
+        proxyRecoveryURL: URL? = nil,
+        events: TakeoverEvents? = nil,
+        startError: Error? = nil,
+        stopError: Error? = nil,
+        recoverError: Error? = nil
+    ) {
+        self.markerURL = markerURL ?? root.appending(path: "fake-tun-active")
+        self.proxyRecoveryURL = proxyRecoveryURL ?? root.appending(path: "proxy-recovery.json")
+        self.events = events
+        self.startError = startError
+        self.stopError = stopError
+        self.recoverError = recoverError
+    }
+
+    func start(config: Data) async throws -> PrivilegedProcessRecord {
+        await events?.append(.tunStart)
+        if FileManager.default.fileExists(atPath: proxyRecoveryURL.path) {
+            await events?.recordViolation("TUN started while system proxy recovery exists")
+        }
+        if let startError { throw startError }
+        configs.append(config)
+        active = true
+        try Data().write(to: markerURL)
+        return PrivilegedProcessRecord(
+            pid: 4321,
+            binaryPath: "/fake/sing-box",
+            launchedAt: Date(timeIntervalSince1970: 1)
+        )
+    }
+
+    func stop() async throws {
+        await events?.append(.tunStop)
+        if let stopError { throw stopError }
+        active = false
+        try? FileManager.default.removeItem(at: markerURL)
+    }
+
+    func recoverIfNeeded() async throws {
+        if let recoverError { throw recoverError }
+        active = false
+        try? FileManager.default.removeItem(at: markerURL)
+    }
+
+    func isActive() -> Bool { active }
+    func startedConfigs() -> [Data] { configs }
+}
+
+private enum ModeTestError: Error {
+    case startFailed
+    case stopFailed
+    case recoveryFailed
 }
 
 private actor HealthGate {
