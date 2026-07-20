@@ -1,5 +1,5 @@
 # 下一步
 
-1. 执行 M2 Task 5：AppState 规则持久化、相同运行时参数的快速重启和双重回滚。
-2. 按 `docs/superpowers/plans/2026-07-20-kongshan-m2.md` 顺序完成快速重启与原生规则 UI。
+1. 执行 M2 Task 6：主窗口原生规则编辑器、自定义规则排序/启停、两类 bypass 和广告开关。
+2. 完成 M2 Task 7 自动打包验证与人工验收边界记录。
 3. M1 真实网络人工验收仍按 `docs/acceptance/M1.md` 保留。

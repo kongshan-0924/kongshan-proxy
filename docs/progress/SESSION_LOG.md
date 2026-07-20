@@ -209,3 +209,13 @@
 - 风险/注意事项：传入的 `rollbackTo` 必须是 AppState 当前已生效设置；Task 5 负责维护该状态与双重回滚。
 - 下一步：Task 5 串联 rules.json、规则集、配置 check、相同运行时参数快速重启和 bypass 事务。
 - 下一位 Agent 如何接手：从 M2 计划 Task 5 Step 1 开始，测试不可让真实 SystemProxyManager 修改本机网络。
+
+## 2026-07-20 — M2 Task 5 rules.json、快速重启与双重回滚
+
+- 已完成：先为 process restart、rules.json 离线持久化、相同运行时热更新、内核健康失败、bypass 失败和旧核心恢复失败编写测试并观察缺少 API 的预期失败；串联完整启动/更新/回滚事务。
+- 修改文件：`Sources/KongshanCore/SingBoxProcess.swift`、`Sources/kongshan/AppState.swift`、`Tests/KongshanCoreTests/SingBoxProcessTests.swift`、`Tests/KongshanAppTests/AppStateTests.swift`、M2 计划与记录。
+- 测试结果：restart RED 因 API 不存在失败，AppState RED 因 routing/ruleSetService 缺失失败；GREEN 为 AppState 7/7、全量 59/59。真实 sing-box/Clash API 快速重启单次实测 0.270651417 秒，低于 2 秒目标。
+- 当前状态：Task 5 完成；启动顺序为规则集 → generate/check/start/health → system proxy，在线改动复用 runtime 且不先关闭系统代理。
+- 风险/注意事项：失败恢复链已自动覆盖，但 system proxy 在测试中仍是记录器；只有旧内存配置也无法恢复时才恢复系统代理并进入 failed。
+- 下一步：Task 6 实现原生规则编辑器、拖拽排序、两类 bypass 与广告开关。
+- 下一位 Agent 如何接手：从 M2 计划 Task 6 Step 1 开始，View 只编辑副本并调用 `applyRoutingSettings`，不得直接生成配置。

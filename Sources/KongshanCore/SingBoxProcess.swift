@@ -71,6 +71,11 @@ public actor SingBoxProcess {
         try inputPipe.fileHandleForWriting.close()
     }
 
+    public func restart(config: Data) throws {
+        stop()
+        try start(config: config)
+    }
+
     public func stop() {
         guard let process else { return }
         stopping = true

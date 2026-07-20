@@ -25,6 +25,7 @@
 - [x] M2.2 六级 route 与本地 rule-set 配置生成
 - [x] M2.3 官方 rule-set 验证、缓存替换与兜底
 - [x] M2.4 运行中 system bypass 更新与回滚
+- [x] M2.5 rules.json、快速重启与双重回滚
 - [ ] M2 分流
 - [ ] M3 TUN
 - [ ] M4 打磨

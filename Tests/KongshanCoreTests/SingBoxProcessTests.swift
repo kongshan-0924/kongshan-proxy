@@ -64,6 +64,29 @@ final class SingBoxProcessTests: XCTestCase {
         XCTAssertFalse(stopped)
     }
 
+    func testRestartReplacesRunningProcessWithNewConfig() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let log = directory.appending(path: "configs.log")
+        let script = try makeScript("#!/bin/zsh\nvalue=$(cat)\nprint -r -- $value >> '\(log.path)'\nsleep 10\n")
+        defer { try? FileManager.default.removeItem(at: script.deletingLastPathComponent()) }
+        let core = SingBoxProcess(binaryURL: script)
+
+        try await core.start(config: Data("old-config".utf8))
+        try await waitForLineCount(1, at: log)
+        try await core.restart(config: Data("new-config".utf8))
+        try await waitForLineCount(2, at: log)
+
+        let running = await core.isRunning
+        XCTAssertTrue(running)
+        XCTAssertEqual(
+            try String(contentsOf: log, encoding: .utf8).split(separator: "\n").map(String.init),
+            ["old-config", "new-config"]
+        )
+        await core.stop()
+    }
+
     private var packageRoot: URL {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -78,5 +101,14 @@ final class SingBoxProcessTests: XCTestCase {
         try Data(source.utf8).write(to: script)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
         return script
+    }
+
+    private func waitForLineCount(_ count: Int, at url: URL) async throws {
+        for _ in 0..<50 {
+            let lines = (try? String(contentsOf: url, encoding: .utf8))?.split(separator: "\n").count ?? 0
+            if lines >= count { return }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTFail("Timed out waiting for process input")
     }
 }
