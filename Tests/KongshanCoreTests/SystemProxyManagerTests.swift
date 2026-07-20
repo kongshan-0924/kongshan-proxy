@@ -161,6 +161,101 @@ final class SystemProxyManagerTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: recoveryURL.path))
     }
 
+    func testUpdateBypassUsesOnlySnapshotServicesAndDoesNotRewriteRecoveryFile() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        try await storage.prepare()
+        let recoveryURL = root.appending(path: "proxy-recovery.json")
+        let recoveryData = try JSONEncoder().encode(activeSnapshot)
+        try await storage.writeAtomically(recoveryData, to: recoveryURL)
+        let runner = NetworkSetupRecorder(recoveryURL: recoveryURL)
+        let manager = SystemProxyManager(storage: storage, runner: runner.run(arguments:timeout:))
+
+        try await manager.updateBypassDomains(
+            to: ["localhost", "*.local", "10.0.0.0/8"],
+            rollbackTo: ["localhost"]
+        )
+
+        let arguments = await runner.arguments
+        XCTAssertEqual(arguments, [
+            ["-setproxybypassdomains", "Wi-Fi", "localhost", "*.local", "10.0.0.0/8"],
+            ["-setproxybypassdomains", "Thunderbolt Bridge", "localhost", "*.local", "10.0.0.0/8"]
+        ])
+        XCTAssertEqual(try Data(contentsOf: recoveryURL), recoveryData)
+        XCTAssertFalse(arguments.joined().contains { argument in
+            ["-setwebproxy", "-setsecurewebproxy", "-setsocksfirewallproxy"].contains(argument)
+        })
+    }
+
+    func testUpdateBypassFailureRollsEverySnapshotServiceBack() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        try await storage.prepare()
+        let recoveryURL = root.appending(path: "proxy-recovery.json")
+        try await storage.writeAtomically(try JSONEncoder().encode(activeSnapshot), to: recoveryURL)
+        let runner = NetworkSetupRecorder(
+            recoveryURL: recoveryURL,
+            failOnceFor: ["-setproxybypassdomains", "Thunderbolt Bridge", "new.local"]
+        )
+        let manager = SystemProxyManager(storage: storage, runner: runner.run(arguments:timeout:))
+
+        do {
+            try await manager.updateBypassDomains(to: ["new.local"], rollbackTo: ["old.local"])
+            XCTFail("Expected bypass update failure")
+        } catch {
+            XCTAssertEqual(error as? SystemProxyError, .commandFailed(exitCode: 7, message: "simulated"))
+        }
+
+        let arguments = await runner.arguments
+        XCTAssertEqual(arguments, [
+            ["-setproxybypassdomains", "Wi-Fi", "new.local"],
+            ["-setproxybypassdomains", "Thunderbolt Bridge", "new.local"],
+            ["-setproxybypassdomains", "Wi-Fi", "old.local"],
+            ["-setproxybypassdomains", "Thunderbolt Bridge", "old.local"]
+        ])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: recoveryURL.path))
+    }
+
+    func testUpdateBypassRequiresActiveRecoverySnapshot() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runner = NetworkSetupRecorder(recoveryURL: root.appending(path: "proxy-recovery.json"))
+        let manager = SystemProxyManager(
+            storage: Storage(rootDirectory: root),
+            runner: runner.run(arguments:timeout:)
+        )
+
+        do {
+            try await manager.updateBypassDomains(to: [], rollbackTo: [])
+            XCTFail("Expected inactive proxy error")
+        } catch {
+            XCTAssertEqual(error as? SystemProxyError, .noActiveProxySession)
+        }
+        let arguments = await runner.arguments
+        XCTAssertTrue(arguments.isEmpty)
+    }
+
+    private var activeSnapshot: ProxyRecoverySnapshot {
+        ProxyRecoverySnapshot(services: [
+            NetworkServiceProxySnapshot(
+                name: "Wi-Fi",
+                http: .init(enabled: false, server: "", port: 0),
+                https: .init(enabled: false, server: "", port: 0),
+                socks: .init(enabled: false, server: "", port: 0),
+                bypassDomains: ["before-wifi.local"]
+            ),
+            NetworkServiceProxySnapshot(
+                name: "Thunderbolt Bridge",
+                http: .init(enabled: false, server: "", port: 0),
+                https: .init(enabled: false, server: "", port: 0),
+                socks: .init(enabled: false, server: "", port: 0),
+                bypassDomains: ["before-bridge.local"]
+            )
+        ])
+    }
+
     private func temporaryDirectory() -> URL {
         FileManager.default.temporaryDirectory
             .appending(path: "kongshan-system-proxy-tests-\(UUID().uuidString)", directoryHint: .isDirectory)

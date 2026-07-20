@@ -59,6 +59,7 @@ public enum SystemProxyError: Error, Equatable, LocalizedError {
     case noEnabledServices
     case invalidProxyState(String)
     case recoveryPending
+    case noActiveProxySession
     case transactionInProgress
     case unsupportedSnapshotVersion(Int)
     case commandFailed(exitCode: Int32, message: String)
@@ -74,6 +75,8 @@ public enum SystemProxyError: Error, Equatable, LocalizedError {
             "无法读取系统代理状态：\(message)"
         case .recoveryPending:
             "检测到尚未恢复的系统代理快照"
+        case .noActiveProxySession:
+            "系统代理尚未启用，无法更新绕过列表"
         case .transactionInProgress:
             "另一项系统代理操作仍在执行"
         case let .unsupportedSnapshotVersion(version):
@@ -178,6 +181,13 @@ public enum SystemProxyCommands {
                 stateSetter: "-setsocksfirewallproxystate"
             ) + [bypassCommand(service: service.name, domains: service.bypassDomains)]
         }
+    }
+
+    public static func updateBypass(
+        services: [String],
+        domains: [String]
+    ) -> [NetworkSetupCommand] {
+        services.map { bypassCommand(service: $0, domains: domains) }
     }
 
     private static func restoreEndpoint(
@@ -296,6 +306,38 @@ public actor SystemProxyManager {
         try beginTransaction()
         defer { transactionInProgress = false }
         try await restoreFromDisk()
+    }
+
+    public func updateBypassDomains(to domains: [String], rollbackTo oldDomains: [String]) async throws {
+        try beginTransaction()
+        defer { transactionInProgress = false }
+
+        guard let data = try await storage.readIfPresent(from: recoveryURL) else {
+            throw SystemProxyError.noActiveProxySession
+        }
+        let snapshot = try JSONDecoder().decode(ProxyRecoverySnapshot.self, from: data)
+        guard snapshot.version == 1 else {
+            throw SystemProxyError.unsupportedSnapshotVersion(snapshot.version)
+        }
+        let services = snapshot.services.map(\.name)
+
+        do {
+            for command in SystemProxyCommands.updateBypass(services: services, domains: domains) {
+                _ = try await execute(command.arguments)
+            }
+        } catch {
+            do {
+                for command in SystemProxyCommands.updateBypass(services: services, domains: oldDomains) {
+                    _ = try await execute(command.arguments)
+                }
+            } catch let restoreError {
+                throw SystemProxyError.rollbackFailed(
+                    enableError: error.localizedDescription,
+                    restoreError: restoreError.localizedDescription
+                )
+            }
+            throw error
+        }
     }
 
     private func beginTransaction() throws {

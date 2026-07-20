@@ -199,3 +199,13 @@
 - 风险/注意事项：尚未接入 AppState；官方资源可随上游更新，程序每次使用前会以固定内核解析验证。临时真实冒烟目录留给系统临时目录自动清理。
 - 下一步：Task 4 实现运行中 system bypass 事务与失败回滚。
 - 下一位 Agent 如何接手：从 M2 计划 Task 4 Step 1 扩展命令记录器测试，严禁测试调用真实 networksetup。
+
+## 2026-07-20 — M2 Task 4 运行中 system bypass 更新与回滚
+
+- 已完成：先写仅使用恢复快照服务、恢复文件不变、无 endpoint 命令、失败全服务回滚和未启用错误测试并观察 API 缺失；实现带现有事务锁的 bypass 更新入口。
+- 修改文件：`Sources/KongshanCore/SystemProxyManager.swift`、`Tests/KongshanCoreTests/SystemProxyManagerTests.swift`、M2 计划与记录。
+- 测试结果：RED 因 `updateBypassDomains`/`noActiveProxySession` 不存在而失败；GREEN 为定向 8/8、全量 53/53 通过，所有测试均使用命令记录器且未调用真实 networksetup。
+- 当前状态：Task 4 完成；更新不重写 `proxy-recovery.json`，任一服务失败会向快照内全部服务写回旧 bypass。
+- 风险/注意事项：传入的 `rollbackTo` 必须是 AppState 当前已生效设置；Task 5 负责维护该状态与双重回滚。
+- 下一步：Task 5 串联 rules.json、规则集、配置 check、相同运行时参数快速重启和 bypass 事务。
+- 下一位 Agent 如何接手：从 M2 计划 Task 5 Step 1 开始，测试不可让真实 SystemProxyManager 修改本机网络。
