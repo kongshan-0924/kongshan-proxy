@@ -728,6 +728,114 @@ final class AppStateTests: XCTestCase {
         try await waitUntil { streams.terminationCount == 2 }
     }
 
+    func testLogMonitoringKeepsTwoThousandEntriesAndIsIdempotent() async throws {
+        let streams = LogStreamFixture(sampleCount: 2_005)
+        let fixture = try await makeModeFixture(
+            initialMode: .systemProxy,
+            clashClientFactory: { controller, secret in
+                ClashAPIClient(
+                    controller: controller,
+                    secret: secret,
+                    streamFactory: streams.stream(for:)
+                )
+            }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        fixture.state.startLogMonitoring()
+        fixture.state.startLogMonitoring()
+        try await waitUntil { fixture.state.liveLogs.count == 2_000 }
+
+        XCTAssertEqual(fixture.state.liveLogs.first?.entry.message, "message-5")
+        XCTAssertEqual(fixture.state.liveLogs.last?.entry.message, "message-2004")
+        XCTAssertEqual(streams.requestCount(level: "info"), 1)
+
+        fixture.state.clearLiveLogs()
+        XCTAssertTrue(fixture.state.liveLogs.isEmpty)
+        fixture.state.stopLogMonitoring()
+        try await waitUntil { streams.terminationCount == 1 }
+        await fixture.state.stop()
+    }
+
+    func testChangingLogLevelCancelsOldStreamBeforeStartingNewOne() async throws {
+        let streams = LogStreamFixture(sampleCount: 0)
+        let fixture = try await makeModeFixture(
+            initialMode: .systemProxy,
+            clashClientFactory: { controller, secret in
+                ClashAPIClient(
+                    controller: controller,
+                    secret: secret,
+                    streamFactory: streams.stream(for:)
+                )
+            }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        fixture.state.startLogMonitoring()
+        try await waitUntil { streams.requestCount(level: "info") == 1 }
+
+        fixture.state.setLogLevel(.warning)
+        try await waitUntil {
+            streams.terminationCount == 1 && streams.requestCount(level: "warn") == 1
+        }
+
+        XCTAssertEqual(fixture.state.logLevel, .warning)
+        fixture.state.stopLogMonitoring()
+        try await waitUntil { streams.terminationCount == 2 }
+        await fixture.state.stop()
+    }
+
+    func testLogMonitoringDoesNothingWhileProxyIsOff() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let streams = LogStreamFixture(sampleCount: 1)
+        let storage = Storage(rootDirectory: root)
+        let state = AppState(
+            storage: storage,
+            systemProxyManager: SystemProxyManager(storage: storage) { _, _ in
+                ProcessResult(exitCode: 0, stdout: "", stderr: "")
+            },
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            clashClientFactory: { controller, secret in
+                ClashAPIClient(
+                    controller: controller,
+                    secret: secret,
+                    streamFactory: streams.stream(for:)
+                )
+            },
+            automaticallyInitialize: false
+        )
+
+        state.startLogMonitoring()
+        try await Task.sleep(for: .milliseconds(30))
+
+        XCTAssertTrue(streams.requests.isEmpty)
+        XCTAssertTrue(state.liveLogs.isEmpty)
+    }
+
+    func testLogStreamFailureWarnsWithoutStoppingProxy() async throws {
+        let streams = LogStreamFixture(sampleCount: 0, fails: true)
+        let fixture = try await makeModeFixture(
+            initialMode: .systemProxy,
+            clashClientFactory: { controller, secret in
+                ClashAPIClient(
+                    controller: controller,
+                    secret: secret,
+                    streamFactory: streams.stream(for:)
+                )
+            }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        fixture.state.startLogMonitoring()
+        try await waitUntil {
+            fixture.state.warnings.contains { $0.contains("内核日志推送已断开") }
+        }
+
+        XCTAssertEqual(fixture.state.status, .on)
+        await fixture.state.stop()
+    }
+
     private func makeRunningFixture(
         failOnceFor: [String]? = nil,
         healthFailures: Set<Int> = []
@@ -1198,6 +1306,61 @@ private final class DashboardStreamFixture: @unchecked Sendable {
                 ))
             default:
                 continuation.finish(throwing: DashboardStreamError.disconnected)
+            }
+        }
+    }
+}
+
+private final class LogStreamFixture: @unchecked Sendable {
+    private let lock = NSLock()
+    private let sampleCount: Int
+    private let fails: Bool
+    private var storedRequests: [URLRequest] = []
+    private var storedTerminationCount = 0
+
+    init(sampleCount: Int, fails: Bool = false) {
+        self.sampleCount = sampleCount
+        self.fails = fails
+    }
+
+    var requests: [URLRequest] {
+        lock.withLock { storedRequests }
+    }
+
+    var terminationCount: Int {
+        lock.withLock { storedTerminationCount }
+    }
+
+    func requestCount(level: String) -> Int {
+        requests.filter { request in
+            guard let url = request.url,
+                  url.path == "/logs",
+                  let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+                return false
+            }
+            return components.queryItems?.contains(URLQueryItem(name: "level", value: level)) == true
+        }.count
+    }
+
+    func stream(for request: URLRequest) -> AsyncThrowingStream<Data, Error> {
+        lock.withLock { storedRequests.append(request) }
+        return AsyncThrowingStream { continuation in
+            continuation.onTermination = { [weak self] _ in
+                guard let self else { return }
+                lock.withLock { storedTerminationCount += 1 }
+            }
+            guard request.url?.path == "/logs" else {
+                continuation.finish(throwing: DashboardStreamError.disconnected)
+                return
+            }
+            if fails {
+                continuation.finish(throwing: DashboardStreamError.disconnected)
+                return
+            }
+            for index in 0..<sampleCount {
+                continuation.yield(Data(
+                    "{\"type\":\"info\",\"payload\":\"message-\(index)\"}".utf8
+                ))
             }
         }
     }

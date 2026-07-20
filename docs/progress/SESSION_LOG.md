@@ -369,3 +369,13 @@
 - 风险/注意事项：无节点 release App 启动后进程稳定且 CPU 0.0%，未生成运行文件或启动内核；菜单栏 UIElement 仍无法由当前桌面可访问性工具附着，因此本节无自动视觉截图。
 - 下一步：Task 5 实现有界内核日志存储、实时日志页、等级切换与安全导出。
 - 下一位 Agent 如何接手：从 M4 计划 Task 5 Step 1 写 KernelLogStore RED；内存上限 2000 行，导出不得包含 config、secret 或订阅 URL。
+
+## 2026-07-20 — M4 Task 5 有界内核日志、实时页与导出
+
+- 已完成：先写 2000 行缓冲、5 MiB 轮转、超大写入、已知文件导出、普通内核 stdout/stderr、流生命周期与断线测试；实现日志 actor、事件驱动 TUN 轮转和原生日志页/导出。
+- 修改文件：新增 `Sources/KongshanCore/KernelLogStore.swift`、`Sources/kongshan/LogsView.swift`、`Tests/KongshanCoreTests/KernelLogStoreTests.swift`；修改 SingBoxProcess、PrivilegedLauncher、AppState、MainWindowView 及相关测试/记录。
+- 测试结果：RED 分别为 `KernelLogStore`、`logStore` 接口和 AppState 日志 API 缺失；GREEN 为日志定向 12/12、全量 119/119，debug/release、arm64、codesign strict 与 diff check 通过。
+- 当前状态：日志页只在可见+代理开启时订阅；info/warning/error 切换先取消旧流，可暂停自动滚动/清空/导出；普通与 TUN 日志均保留当前+1 份轮转。
+- 风险/注意事项：自动测试未启动真实 TUN 或真实节点 `/logs`；TUN 轮转使用 DispatchSource 写事件而非轮询，日志写错误只记 warning 不中断代理。Swift 6.3 方法引用 IRGen 崩溃已用显式闭包稳定规避。
+- 下一步：Task 6 实现无轮询订阅定时更新、缓存保留告警和可注入本地通知。
+- 下一位 Agent 如何接手：从 M4 计划 Task 6 Step 1 开始；自动测试只用 fake sleeper/notification，不得请求真实通知权限。

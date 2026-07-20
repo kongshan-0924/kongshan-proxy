@@ -249,11 +249,14 @@ final class PrivilegedLauncherTests: XCTestCase {
         let files = (enumerator?.allObjects as? [URL] ?? []).filter {
             (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
         }
-        XCTAssertEqual(files.count, 1)
         XCTAssertEqual(
-            files.first?.resolvingSymlinksInPath(),
-            launcher.recoveryURL.resolvingSymlinksInPath()
+            Set(files.map(\.lastPathComponent)),
+            Set(["tun-recovery.json", "sing-box-tun.log"])
         )
+        let tunLog = root.appending(path: "logs/sing-box-tun.log")
+        XCTAssertEqual(try Data(contentsOf: tunLog), Data())
+        let permissions = try FileManager.default.attributesOfItem(atPath: tunLog.path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(permissions?.intValue, 0o600)
         for file in files {
             let contents = String(decoding: try Data(contentsOf: file), as: UTF8.self)
             for value in sensitiveValues {

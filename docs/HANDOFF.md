@@ -1,9 +1,9 @@
 # 项目交接
 
-- 已完成：M4 Task 4；实现 Dashboard 可见会话、实时上下行/连接/内存/版本/运行时长以及 Swift Charts 60 秒曲线。
-- 修改文件：`Sources/kongshan/AppState.swift`、`Sources/kongshan/DashboardView.swift`、`Sources/kongshan/MainWindowView.swift`、`Tests/KongshanAppTests/AppStateTests.swift`、M4 计划及全部记录。
-- 测试结果：RED 为 Dashboard 状态/API 缺失；GREEN 为 Dashboard 3/3、全量 107/107，debug/release 构建、arm64 与 codesign strict 通过。
-- 当前状态：仅当页面可见且代理开启时消费两条 WebSocket；重复 appear 幂等，disappear、stop 和 config reload 会取消，断流只记 warning 不擅自关代理。
-- 风险/注意事项：未用真实节点验证指标推送；无节点 release 启动稳定且无内核/接管，当前工具无法附着菜单栏 UIElement 生成视觉截图。
-- 下一步：M4 Task 5 实现日志有界存储、实时页、等级切换和安全导出。
-- 接手方式：从 M4 计划 Task 5 Step 1 开始；先写 KernelLogStore 测试，确保内存 2000 行、磁盘有限转、导出不含敏感运行值。
+- 已完成：M4 Task 5；实现普通/TUN 有界磁盘日志、2000 行实时缓冲、日志页、等级切换与已知文件安全导出。
+- 修改文件：新增 `KernelLogStore.swift`、`LogsView.swift`、`KernelLogStoreTests.swift`；修改 SingBoxProcess、PrivilegedLauncher、AppState、MainWindowView 与相关测试/记录。
+- 测试结果：多轮 RED 证明 store/process/AppState API 缺失；GREEN 为全量 119/119，debug/release、arm64、codesign strict、diff check 与无节点启动通过。
+- 当前状态：实时 `/logs` 仅页面可见+代理开启时存在；普通日志 actor 串行写，TUN 日志授权前以 0600 预创建并用写事件触发轮转，不使用 Timer/轮询。
+- 风险/注意事项：未用真实节点或真实 root TUN 验证日志页/导出；自动测试全部使用 fake 边界，没有请求管理员权限。
+- 下一步：M4 Task 6 实现订阅定时更新与非阻塞本地通知。
+- 接手方式：从 M4 计划 Task 6 Step 1 开始；用可注入 clock/sleeper 证明只安排一次 sleep，通知只用 fake sender。

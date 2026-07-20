@@ -264,6 +264,8 @@ public actor PrivilegedLauncher: PrivilegedLaunching {
     private let binaryURL: URL
     private let runtimeDirectory: URL
     private let logURL: URL
+    private let logStore: KernelLogStore
+    private let logErrorHandler: @Sendable (String) -> Void
     private let authorizationTimeout: TimeInterval
     private let now: @Sendable () -> Date
     private let authorizer: PrivilegedAuthorizer
@@ -274,6 +276,8 @@ public actor PrivilegedLauncher: PrivilegedLaunching {
     public init(
         storage: Storage = Storage(),
         binaryURL: URL,
+        logStore: KernelLogStore? = nil,
+        logErrorHandler: @escaping @Sendable (String) -> Void = { _ in },
         authorizationTimeout: TimeInterval = 60,
         now: @escaping @Sendable () -> Date = Date.init,
         authorizer: PrivilegedAuthorizer? = nil,
@@ -282,6 +286,10 @@ public actor PrivilegedLauncher: PrivilegedLaunching {
     ) {
         self.storage = storage
         self.binaryURL = binaryURL.standardizedFileURL.resolvingSymlinksInPath()
+        self.logStore = logStore ?? KernelLogStore(
+            directory: storage.rootDirectory.appending(path: "logs", directoryHint: .isDirectory)
+        )
+        self.logErrorHandler = logErrorHandler
         self.authorizationTimeout = authorizationTimeout
         self.now = now
         self.authorizer = authorizer ?? { script, timeout in
@@ -310,6 +318,13 @@ public actor PrivilegedLauncher: PrivilegedLaunching {
 
         try await storage.prepare()
         try await reconcileRecoveryBeforeStart()
+        var monitorsExternalLog = false
+        do {
+            try await logStore.startExternalRotationMonitoring(source: .tun)
+            monitorsExternalLog = true
+        } catch {
+            logErrorHandler(error.localizedDescription)
+        }
 
         let binaryURL = self.binaryURL
         let authorizer = self.authorizer
@@ -326,11 +341,17 @@ public actor PrivilegedLauncher: PrivilegedLaunching {
                 return try PrivilegedCommandBuilder.parsePID(output)
             }
         } catch {
+            if monitorsExternalLog {
+                await logStore.stopExternalRotationMonitoring(source: .tun)
+            }
             try? removeRecoveryRecord()
             throw error
         }
 
         guard try await processMatches(pid: pid, expectedPath: binaryURL.path) else {
+            if monitorsExternalLog {
+                await logStore.stopExternalRotationMonitoring(source: .tun)
+            }
             try? removeRecoveryRecord()
             throw PrivilegedLauncherError.processMismatch(pid)
         }
@@ -346,6 +367,9 @@ public actor PrivilegedLauncher: PrivilegedLaunching {
             try await storage.writeAtomically(try encoder.encode(record), to: recoveryURL)
         } catch {
             try? await stopVerifiedProcess(record)
+            if monitorsExternalLog {
+                await logStore.stopExternalRotationMonitoring(source: .tun)
+            }
             try? removeRecoveryRecord()
             throw PrivilegedLauncherError.persistenceFailed(error.localizedDescription)
         }
@@ -356,12 +380,14 @@ public actor PrivilegedLauncher: PrivilegedLaunching {
         try beginOperation()
         defer { operationInProgress = false }
         try await stopFromRecoveryRecord()
+        await logStore.stopExternalRotationMonitoring(source: .tun)
     }
 
     public func recoverIfNeeded() async throws {
         try beginOperation()
         defer { operationInProgress = false }
         try await stopFromRecoveryRecord()
+        await logStore.stopExternalRotationMonitoring(source: .tun)
     }
 
     private func reconcileRecoveryBeforeStart() async throws {

@@ -87,6 +87,49 @@ final class SingBoxProcessTests: XCTestCase {
         await core.stop()
     }
 
+    func testSingBoxProcessPersistsBothStandardStreams() async throws {
+        let script = try makeScript(
+            "#!/bin/zsh\ncat >/dev/null\nprint -r -- stdout-line\nprint -r -u2 -- stderr-line\nsleep 10\n"
+        )
+        let root = script.deletingLastPathComponent()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let logDirectory = root.appending(path: "logs", directoryHint: .isDirectory)
+        let store = KernelLogStore(directory: logDirectory)
+        let core = SingBoxProcess(binaryURL: script, logStore: store)
+
+        try await core.start(config: Data("{}".utf8))
+        try await waitForText(["stdout-line", "stderr-line"], at: logDirectory.appending(path: "sing-box.log"))
+
+        let log = try String(
+            contentsOf: logDirectory.appending(path: "sing-box.log"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(log.contains("stdout-line"))
+        XCTAssertTrue(log.contains("stderr-line"))
+        await core.stop()
+    }
+
+    func testLogWriteFailureIsReportedWithoutStoppingCore() async throws {
+        let script = try makeScript("#!/bin/zsh\ncat >/dev/null\nprint -r -- output\nsleep 10\n")
+        let root = script.deletingLastPathComponent()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let invalidDirectory = root.appending(path: "not-a-directory")
+        try Data("file".utf8).write(to: invalidDirectory)
+        let errors = ProcessLogErrorRecorder()
+        let core = SingBoxProcess(
+            binaryURL: script,
+            logStore: KernelLogStore(directory: invalidDirectory),
+            logErrorHandler: errors.append
+        )
+
+        try await core.start(config: Data("{}".utf8))
+        try await waitUntil { !errors.values.isEmpty }
+
+        let isRunning = await core.isRunning
+        XCTAssertTrue(isRunning)
+        await core.stop()
+    }
+
     private var packageRoot: URL {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -110,5 +153,33 @@ final class SingBoxProcessTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(20))
         }
         XCTFail("Timed out waiting for process input")
+    }
+
+    private func waitForText(_ values: [String], at url: URL) async throws {
+        for _ in 0..<100 {
+            let text = try? String(contentsOf: url, encoding: .utf8)
+            if let text, values.allSatisfy(text.contains) { return }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTFail("Timed out waiting for process logs")
+    }
+
+    private func waitUntil(_ condition: @escaping @Sendable () -> Bool) async throws {
+        for _ in 0..<100 {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTFail("Timed out waiting for condition")
+    }
+}
+
+private final class ProcessLogErrorRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValues: [String] = []
+
+    var values: [String] { lock.withLock { storedValues } }
+
+    func append(_ value: String) {
+        lock.withLock { storedValues.append(value) }
     }
 }

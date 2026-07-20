@@ -20,6 +20,8 @@ struct MainWindowView: View {
                 NodesView()
             case .rules:
                 RoutingView()
+            case .logs:
+                LogsView()
             case .settings:
                 SettingsView()
             }
@@ -31,6 +33,7 @@ private enum SidebarPage: String, CaseIterable, Identifiable {
     case dashboard
     case nodes
     case rules
+    case logs
     case settings
 
     var id: Self { self }
@@ -40,6 +43,7 @@ private enum SidebarPage: String, CaseIterable, Identifiable {
         case .dashboard: "Dashboard"
         case .nodes: "节点"
         case .rules: "规则"
+        case .logs: "日志"
         case .settings: "设置"
         }
     }
@@ -49,6 +53,7 @@ private enum SidebarPage: String, CaseIterable, Identifiable {
         case .dashboard: "gauge.with.dots.needle.67percent"
         case .nodes: "point.3.connected.trianglepath.dotted"
         case .rules: "list.bullet.rectangle.portrait"
+        case .logs: "doc.text.magnifyingglass"
         case .settings: "gearshape"
         }
     }

@@ -1,6 +1,6 @@
 # 下一步
 
-1. 执行 M4 Task 5：先写 `KernelLogStore` 有界内存、日志轮转、导出合并与敏感值隔离测试。
-2. 普通 sing-box stdout/stderr 仅追加到既定日志文件，转写失败只记 warning，不影响代理生命周期。
-3. 新增实时日志页：可见时订阅 `/logs`，等级切换取消旧流，离开页面立即断开，内存最多 2000 行。
-4. 真实节点 Dashboard、管理员授权/TUN 与 DNS 泄漏验收继续按 acceptance 人工边界保留。
+1. 执行 M4 Task 6：先写默认 24h、旧设置兼容、过期立即刷新、取消/重排和 fake 通知测试。
+2. scheduler 根据最早到期订阅只安排一次 sleep，唤醒刷新后重新计算，禁止固定间隔轮询。
+3. 失败或使用旧缓存时保留现有节点，记 warning 并通过可注入 sender 发送本地通知；拒绝通知不影响主功能。
+4. 真实节点 Dashboard/日志、管理员授权/TUN 与 DNS 泄漏验收继续按 acceptance 人工边界保留。

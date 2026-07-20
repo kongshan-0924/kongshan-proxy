@@ -16,6 +16,30 @@ struct TrafficPoint: Identifiable, Equatable, Sendable {
     }
 }
 
+struct LiveLogEntry: Identifiable, Equatable, Sendable {
+    let id: UUID
+    let entry: CoreLogEntry
+
+    init(id: UUID = UUID(), entry: CoreLogEntry) {
+        self.id = id
+        self.entry = entry
+    }
+}
+
+private final class AppWarningRelay: @unchecked Sendable {
+    private let lock = NSLock()
+    private var handler: (@Sendable (String) -> Void)?
+
+    func install(_ handler: @escaping @Sendable (String) -> Void) {
+        lock.withLock { self.handler = handler }
+    }
+
+    func send(_ message: String) {
+        let handler = lock.withLock { self.handler }
+        handler?(message)
+    }
+}
+
 @MainActor
 @Observable
 final class AppState {
@@ -54,6 +78,8 @@ final class AppState {
     private(set) var coreVersion = "—"
     private(set) var runtimeStartedAt: Date?
     private(set) var trafficHistory: [TrafficPoint] = []
+    private(set) var liveLogs: [LiveLogEntry] = []
+    private(set) var logLevel: CoreLogLevel = .info
     private(set) var isApplyingRouting = false
 
     @ObservationIgnored private let storage: Storage
@@ -66,11 +92,14 @@ final class AppState {
     @ObservationIgnored private let healthVerifier: HealthVerifier
     @ObservationIgnored private let clashClientFactory: ClashClientFactory
     @ObservationIgnored private let now: NowProvider
+    @ObservationIgnored private let kernelLogStore: KernelLogStore
     @ObservationIgnored private var clashAPIClient: ClashAPIClient?
     @ObservationIgnored private var runtime: RuntimeParameters?
     @ObservationIgnored private var currentConfig: Data?
     @ObservationIgnored private var dashboardTasks: [Task<Void, Never>] = []
     @ObservationIgnored private var isDashboardVisible = false
+    @ObservationIgnored private var logTask: Task<Void, Never>?
+    @ObservationIgnored private var isLogsVisible = false
 
     init(
         storage: Storage = Storage(),
@@ -78,6 +107,7 @@ final class AppState {
         ruleSetService: RuleSetService? = nil,
         systemProxyManager: SystemProxyManager? = nil,
         singBoxProcess: SingBoxProcess? = nil,
+        kernelLogStore: KernelLogStore? = nil,
         privilegedLauncher: (any PrivilegedLaunching)? = nil,
         runtimeFactory: RuntimeFactory? = nil,
         healthVerifier: HealthVerifier? = nil,
@@ -86,14 +116,25 @@ final class AppState {
         automaticallyInitialize: Bool = true
     ) {
         let binaryURL = Self.singBoxBinaryURL()
+        let logWarningRelay = AppWarningRelay()
+        let resolvedLogStore = kernelLogStore ?? KernelLogStore(
+            directory: storage.rootDirectory.appending(path: "logs", directoryHint: .isDirectory),
+            errorHandler: logWarningRelay.send
+        )
         self.storage = storage
         self.subscriptionService = subscriptionService ?? SubscriptionService(storage: storage)
         self.ruleSetService = ruleSetService ?? RuleSetService(storage: storage, binaryURL: binaryURL)
         self.systemProxyManager = systemProxyManager ?? SystemProxyManager(storage: storage)
-        self.singBoxProcess = singBoxProcess ?? SingBoxProcess(binaryURL: binaryURL)
+        self.singBoxProcess = singBoxProcess ?? SingBoxProcess(
+            binaryURL: binaryURL,
+            logStore: resolvedLogStore,
+            logErrorHandler: logWarningRelay.send
+        )
         self.privilegedLauncher = privilegedLauncher ?? PrivilegedLauncher(
             storage: storage,
-            binaryURL: binaryURL
+            binaryURL: binaryURL,
+            logStore: resolvedLogStore,
+            logErrorHandler: logWarningRelay.send
         )
         self.runtimeFactory = runtimeFactory ?? Self.makeRuntimeParameters
         self.healthVerifier = healthVerifier ?? Self.waitUntilHealthy
@@ -101,6 +142,12 @@ final class AppState {
             ClashAPIClient(controller: controller, secret: secret)
         }
         self.now = now
+        self.kernelLogStore = resolvedLogStore
+        logWarningRelay.install { [weak self] message in
+            Task { @MainActor [weak self] in
+                self?.warnings.append("内核日志写入失败：\(message)")
+            }
+        }
 
         if automaticallyInitialize {
             Task { await initialize() }
@@ -221,6 +268,7 @@ final class AppState {
             status = .on
             markRuntimeStarted()
             resumeDashboardMonitoringIfNeeded()
+            resumeLogMonitoringIfNeeded()
         } catch {
             switch requestedMode {
             case .systemProxy:
@@ -254,6 +302,7 @@ final class AppState {
             return
         }
         suspendDashboardMonitoring()
+        suspendLogMonitoring()
         status = .stopping
         errorMessage = nil
         switch activeMode {
@@ -263,6 +312,7 @@ final class AppState {
             } catch {
                 setFailure("恢复系统代理失败：\(error.localizedDescription)")
                 resumeDashboardMonitoringIfNeeded()
+                resumeLogMonitoringIfNeeded()
                 return
             }
             await singBoxProcess.stop()
@@ -272,6 +322,7 @@ final class AppState {
             } catch {
                 setFailure("停止 TUN 失败：\(error.localizedDescription)")
                 resumeDashboardMonitoringIfNeeded()
+                resumeLogMonitoringIfNeeded()
                 return
             }
         }
@@ -484,6 +535,7 @@ final class AppState {
             switch activeMode {
             case .systemProxy:
                 suspendDashboardMonitoring()
+                suspendLogMonitoring()
                 do {
                     try await singBoxProcess.restart(config: newConfig)
                     try await healthVerifier(client)
@@ -532,6 +584,7 @@ final class AppState {
             errorMessage = nil
             markRuntimeStarted()
             resumeDashboardMonitoringIfNeeded()
+            resumeLogMonitoringIfNeeded()
         } catch {
             errorMessage = "应用分流规则失败：\(error.localizedDescription)"
         }
@@ -589,6 +642,7 @@ final class AppState {
             errorMessage = nil
             markRuntimeStarted()
             resumeDashboardMonitoringIfNeeded()
+            resumeLogMonitoringIfNeeded()
         } catch {
             tunSettings = oldTunSettings
             errorMessage = "应用 TUN 设置失败：\(error.localizedDescription)"
@@ -634,6 +688,7 @@ final class AppState {
             switch activeMode {
             case .systemProxy:
                 suspendDashboardMonitoring()
+                suspendLogMonitoring()
                 do {
                     try await singBoxProcess.restart(config: newConfig)
                     try await healthVerifier(client)
@@ -667,6 +722,7 @@ final class AppState {
             errorMessage = nil
             markRuntimeStarted()
             resumeDashboardMonitoringIfNeeded()
+            resumeLogMonitoringIfNeeded()
         } catch {
             dnsSettings = oldDNSSettings
             errorMessage = "应用 DNS 设置失败：\(error.localizedDescription)"
@@ -681,6 +737,31 @@ final class AppState {
     func stopDashboardMonitoring() {
         isDashboardVisible = false
         suspendDashboardMonitoring()
+    }
+
+    func startLogMonitoring() {
+        isLogsVisible = true
+        resumeLogMonitoringIfNeeded()
+    }
+
+    func stopLogMonitoring() {
+        isLogsVisible = false
+        suspendLogMonitoring()
+    }
+
+    func setLogLevel(_ level: CoreLogLevel) {
+        guard [.info, .warning, .error].contains(level), level != logLevel else { return }
+        logLevel = level
+        suspendLogMonitoring()
+        resumeLogMonitoringIfNeeded()
+    }
+
+    func clearLiveLogs() {
+        liveLogs.removeAll(keepingCapacity: false)
+    }
+
+    func exportLogs() async throws -> String {
+        try await kernelLogStore.exportText()
     }
 
     func dismissError() {
@@ -774,6 +855,7 @@ final class AppState {
             errorMessage = "应用\(operation)失败，已恢复旧配置：\(updateError.localizedDescription)"
             markRuntimeStarted()
             resumeDashboardMonitoringIfNeeded()
+            resumeLogMonitoringIfNeeded()
         } catch {
             await singBoxProcess.stop()
             let restoreMessage: String
@@ -797,6 +879,7 @@ final class AppState {
         operation: String
     ) async -> Bool {
         suspendDashboardMonitoring()
+        suspendLogMonitoring()
         do {
             try await privilegedLauncher.stop()
             activeMode = nil
@@ -804,6 +887,7 @@ final class AppState {
             status = .on
             errorMessage = "应用\(operation)失败，旧 TUN 配置仍在运行：\(error.localizedDescription)"
             resumeDashboardMonitoringIfNeeded()
+            resumeLogMonitoringIfNeeded()
             return false
         }
 
@@ -841,6 +925,7 @@ final class AppState {
                 errorMessage = "应用\(operation)失败，已恢复旧 TUN 配置：\(updateError.localizedDescription)"
                 markRuntimeStarted()
                 resumeDashboardMonitoringIfNeeded()
+                resumeLogMonitoringIfNeeded()
                 return false
             } catch let rollbackError {
                 if oldConfigurationStarted {
@@ -914,6 +999,50 @@ final class AppState {
     private func suspendDashboardMonitoring() {
         dashboardTasks.forEach { $0.cancel() }
         dashboardTasks.removeAll()
+    }
+
+    private func resumeLogMonitoringIfNeeded() {
+        guard isLogsVisible,
+              status == .on,
+              let client = clashAPIClient,
+              logTask == nil else {
+            return
+        }
+
+        let level = logLevel
+        logTask = Task { [weak self] in
+            do {
+                let stream = await client.logStream(level: level)
+                for try await entry in stream {
+                    guard !Task.isCancelled else { return }
+                    self?.receiveLog(entry)
+                }
+                if !Task.isCancelled {
+                    self?.logStreamEnded("内核日志推送已断开")
+                }
+            } catch {
+                if !Task.isCancelled {
+                    self?.logStreamEnded("内核日志推送已断开：\(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    private func suspendLogMonitoring() {
+        logTask?.cancel()
+        logTask = nil
+    }
+
+    private func receiveLog(_ entry: CoreLogEntry) {
+        liveLogs.append(LiveLogEntry(entry: entry))
+        if liveLogs.count > KernelLogStore.defaultBufferedLineLimit {
+            liveLogs.removeFirst(liveLogs.count - KernelLogStore.defaultBufferedLineLimit)
+        }
+    }
+
+    private func logStreamEnded(_ message: String) {
+        guard isLogsVisible, status == .on else { return }
+        if warnings.last != message { warnings.append(message) }
     }
 
     private func receiveTraffic(_ sample: TrafficSample) {
@@ -1015,6 +1144,7 @@ final class AppState {
 
     private func clearRuntimeState() {
         clearDashboardRuntime()
+        suspendLogMonitoring()
         runtime = nil
         clashAPIClient = nil
         currentConfig = nil

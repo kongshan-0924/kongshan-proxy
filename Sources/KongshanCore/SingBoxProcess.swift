@@ -9,10 +9,13 @@ public struct SingBoxLogLine: Sendable {
 
 public actor SingBoxProcess {
     public typealias LogHandler = @Sendable (SingBoxLogLine) -> Void
+    public typealias LogErrorHandler = @Sendable (String) -> Void
     public typealias UnexpectedExitHandler = @Sendable (Int32) -> Void
 
     private let binaryURL: URL
+    private let logStore: KernelLogStore?
     private let logHandler: LogHandler
+    private let logErrorHandler: LogErrorHandler
     private let unexpectedExitHandler: UnexpectedExitHandler
     private var process: Process?
     private var outputPipe: Pipe?
@@ -21,11 +24,15 @@ public actor SingBoxProcess {
 
     public init(
         binaryURL: URL,
+        logStore: KernelLogStore? = nil,
         logHandler: @escaping LogHandler = { _ in },
+        logErrorHandler: @escaping LogErrorHandler = { _ in },
         unexpectedExitHandler: @escaping UnexpectedExitHandler = { _ in }
     ) {
         self.binaryURL = binaryURL
+        self.logStore = logStore
         self.logHandler = logHandler
+        self.logErrorHandler = logErrorHandler
         self.unexpectedExitHandler = unexpectedExitHandler
     }
 
@@ -95,10 +102,22 @@ public actor SingBoxProcess {
 
     private func stream(_ pipe: Pipe, as stream: SingBoxLogLine.Stream) {
         let handler = logHandler
+        let store = logStore
+        let errorHandler = logErrorHandler
         pipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
-            handler(SingBoxLogLine(stream: stream, text: String(decoding: data, as: UTF8.self)))
+            let line = SingBoxLogLine(stream: stream, text: String(decoding: data, as: UTF8.self))
+            handler(line)
+            if let store {
+                Task {
+                    do {
+                        try await store.append(line)
+                    } catch {
+                        errorHandler(error.localizedDescription)
+                    }
+                }
+            }
         }
     }
 
