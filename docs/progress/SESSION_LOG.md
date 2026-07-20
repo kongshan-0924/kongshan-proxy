@@ -109,3 +109,13 @@
 - 风险/注意事项：失败通知由 Task 9 AppState/UI 消费 warning 后展示；当前服务层不直接依赖通知框架。
 - 下一步：Task 7 实现 Clash API 节点选择、单测延迟与 ≤8 并发批量测速。
 - 下一位 Agent 如何接手：从 M1 计划 Task 7 Step 1 写 URLProtocol 与并发计数失败测试。
+
+## 2026-07-20 — M1 Task 7 Clash API 节点选择与限流测速
+
+- 已完成：先写 Bearer 鉴权、中文路径编码、健康检查、HTTP 错误和并发上限测试并观察缺少客户端的预期失败；实现 Clash API 节点选择、延迟测试与最多 8 并发批处理。
+- 修改文件：`Sources/KongshanCore/ClashAPIClient.swift`、`Tests/KongshanCoreTests/ClashAPIClientTests.swift`、M1 计划与记录。
+- 测试结果：RED 因 `ClashAPIClient` 不存在而失败；GREEN 为定向 5/5、全量 27/27 通过，无编译警告。
+- 当前状态：Task 7 完成，客户端可在内存 secret 保护下选择节点、查健康和批量测速。
+- 风险/注意事项：单测使用 URLProtocol 仿真 Clash API；真实内核联调留到 AppState/UI 集成阶段。
+- 下一步：Task 8 实现系统代理快照、失败回滚和启动自愈恢复。
+- 下一位 Agent 如何接手：从 M1 计划 Task 8 Step 1 写纯解析/命令生成测试，自动测试不得修改本机代理。
