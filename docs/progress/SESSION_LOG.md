@@ -69,3 +69,13 @@
 - 风险/注意事项：尚未生成 sing-box outbound；字段映射在 Task 3/4 完成。
 - 下一步：Task 3 实现 Clash YAML 五类协议转换与不支持类型跳过。
 - 下一位 Agent 如何接手：从 M1 计划 Task 3 Step 1 写 YAML fixture 失败测试。
+
+## 2026-07-20 — M1 Task 3 Clash YAML 五协议转换
+
+- 已完成：先写五协议、SS2022、WebSocket 字段、未知类型和坏节点容错测试并观察缺少转换器的预期失败；实现纯 Clash YAML 转换器。
+- 修改文件：`Sources/KongshanCore/ClashSubscriptionConverter.swift`、`Tests/KongshanCoreTests/ClashSubscriptionConverterTests.swift`、M1 计划与记录。
+- 测试结果：RED 因 `ClashSubscriptionConverter` 不存在而失败；GREEN 为定向 3/3、全量 8/8 通过，无编译警告。
+- 当前状态：Task 3 完成，SS/SS2022、Trojan、VMess、Hysteria2、AnyTLS 可转为统一模型；坏节点只记录 warning。
+- 风险/注意事项：具体 sing-box outbound 结构仍需 Task 4 生成并由官方内核 check 验证。
+- 下一步：Task 4 实现纯配置生成器、随机高位端口和内存 secret。
+- 下一位 Agent 如何接手：从 M1 计划 Task 4 Step 1 写配置 JSON 失败测试。
