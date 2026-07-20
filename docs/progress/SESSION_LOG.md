@@ -259,3 +259,13 @@
 - 风险/注意事项：仅完成配置生成与静态检查，没有 root/TUN 网络副作用；域名无法作为静态系统路由排除。
 - 下一步：Task 2 实现安全提权命令白名单和 0600 FIFO transport。
 - 下一位 Agent 如何接手：先写单引号路径、坏 PID、大于 pipe buffer 数据与清理失败测试，不运行真实 osascript 授权。
+
+## 2026-07-20 — M3 Task 2 安全提权命令与内存 FIFO
+
+- 已完成：先写含单引号路径、坏 PID、AppleScript 编译、大数据传输和失败清理测试并观察 API 缺失；实现固定 start/stop 命令与 POSIX FIFO transport。
+- 修改文件：`Sources/KongshanCore/PrivilegedLauncher.swift`、`Tests/KongshanCoreTests/PrivilegedLauncherTests.swift`、M3 计划与全部项目记录。
+- 测试结果：RED 因 PrivilegedCommandBuilder/PrivilegedLauncherError/POSIXConfigPipe 缺失而编译失败；GREEN 为定向 6/6、全量 70/70，262144 字节通过真实 FIFO + `/bin/cat` 完整传输。
+- 当前状态：Task 2 完成；runtime 目录强制 0700、FIFO 为 0600，成功/失败后均 unlink，阻塞写入不占用 Swift 协作执行器。
+- 风险/注意事项：测试只调用 `osacompile`，没有执行提权脚本或真实 TUN；授权返回后的 PID 身份与恢复文件由 Task 3 实现。
+- 下一步：Task 3 实现特权 TUN 生命周期、进程身份复核和崩溃恢复记录。
+- 下一位 Agent 如何接手：从 M3 计划 Task 3 Step 1 写注入 fake authorizer/inspector 的失败测试，所有自动测试严禁真实授权。

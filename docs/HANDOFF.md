@@ -1,9 +1,9 @@
 # 项目交接
 
-- 已完成：需求已固化，应用身份确定为 `kongshan / com.kaysen.kongshan`，设计稿已获确认；实时核验 sing-box stable 为 1.13.14。
-- 修改文件：新增 `ProxyMode.swift`、`TunConfigTests.swift` 并扩展 `ConfigGenerator`，支持 mixed/tun 互斥 inbound、strict_route、CIDR 排除和回环保护。
-- 测试结果：TunConfig 定向 5/5、全量 `swift test` 64/64 通过；strict 关/开两份含本地 `.srs` 的 TUN 配置均通过内置 sing-box 1.13.14 `check`。
-- 当前状态：M3 Task 1 已完成，准备执行 Task 2 安全提权命令与内存 FIFO。
-- 风险/注意事项：域名无法写入 IP route exclude，仍由 route direct 保证；真实 TUN 未启动，自动测试禁止授权。
-- 下一步：按 TDD 实现只允许固定 start/stop 的 AppleScript 构造器和 POSIX FIFO transport。
-- 接手方式：先读本文件、设计稿、M1 计划与会话日志，再从首个未勾选步骤继续。
+- 已完成：M3 Task 2 安全提权传输；只暴露固定的 TUN 启动/停止 AppleScript，校验 PID，通过 0600 FIFO 向特权进程传送内存配置。
+- 修改文件：新增 `Sources/KongshanCore/PrivilegedLauncher.swift`、`Tests/KongshanCoreTests/PrivilegedLauncherTests.swift`，并更新 M3 计划与记录。
+- 测试结果：PrivilegedLauncher 定向 6/6、全量 `swift test` 70/70 通过；AppleScript 仅编译验证，262144 字节 FIFO 完整一致并清理。
+- 当前状态：M3 Task 2 已完成，准备执行 Task 3 特权 TUN 生命周期与崩溃恢复。
+- 风险/注意事项：自动测试没有运行 `osascript` 授权或创建真实 TUN；当前仅是安全构造和 transport，还未持久化恢复记录。
+- 下一步：按 TDD 注入 Authorizer/ProcessInspector，实现 PID 命令身份复核、原子恢复记录和安全停止。
+- 接手方式：先读本文件、M3 计划与最新 SESSION_LOG，从 Task 3 Step 1 开始；不得在自动测试中触发管理员授权。
