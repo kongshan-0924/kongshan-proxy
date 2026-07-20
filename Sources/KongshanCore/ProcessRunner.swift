@@ -100,13 +100,18 @@ private final class ProcessExecution: @unchecked Sendable {
 
     private func timeOut() {
         lock.lock()
-        let shouldTerminate = !completed
+        guard !completed else {
+            lock.unlock()
+            return
+        }
+        completed = true
+        let continuation = continuation
+        self.continuation = nil
         lock.unlock()
-        guard shouldTerminate else { return }
 
         let processID = process.processIdentifier
+        continuation?.resume(throwing: ProcessRunnerError.timedOut)
         process.terminate()
-        complete(.failure(ProcessRunnerError.timedOut))
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.2) {
             if kill(processID, 0) == 0 { kill(processID, SIGKILL) }
         }

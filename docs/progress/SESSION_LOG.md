@@ -189,3 +189,13 @@
 - 风险/注意事项：尚未下载或缓存官方 `.srs`；`*.local` 仅在 route 中归一，持久值与系统 bypass 保持原形。
 - 下一步：Task 3 实现官方 rule-set 下载、解析验证、原子替换与最后成功缓存兜底。
 - 下一位 Agent 如何接手：从 M2 计划 Task 3 Step 1 写 loader/validator 注入的失败测试。
+
+## 2026-07-20 — M2 Task 3 官方 rule-set 验证与缓存兜底
+
+- 已完成：先写成功替换、HTTP/空内容/解析失败、坏缓存和无缓存测试并观察缺少服务的预期失败；实现固定官方 URL、下载临时文件解析、成功后原子替换及旧缓存再验证。全量回归同时捕获并修复 ProcessRunner timeout 完成顺序竞态。
+- 修改文件：`Sources/KongshanCore/RuleSetService.swift`、`Sources/KongshanCore/ProcessRunner.swift`、`Tests/KongshanCoreTests/RuleSetServiceTests.swift`、M2 计划与记录。
+- 测试结果：RED 因 `RuleSetService` 不存在而失败；GREEN 为定向 7/7、timeout 连续 10/10、全量 50/50 通过。实时下载的 `geosite-cn` 53669 B、`geoip-cn` 33920 B、ads 8176 B 均通过内置 sing-box 1.13.14 反编译。
+- 当前状态：Task 3 完成；坏下载绝不覆盖正式缓存，坏旧缓存绝不作为兜底，广告关闭时不下载 ads。
+- 风险/注意事项：尚未接入 AppState；官方资源可随上游更新，程序每次使用前会以固定内核解析验证。临时真实冒烟目录留给系统临时目录自动清理。
+- 下一步：Task 4 实现运行中 system bypass 事务与失败回滚。
+- 下一位 Agent 如何接手：从 M2 计划 Task 4 Step 1 扩展命令记录器测试，严禁测试调用真实 networksetup。
