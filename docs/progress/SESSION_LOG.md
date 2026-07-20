@@ -319,3 +319,13 @@
 - 风险/注意事项：本轮未请求管理员授权或启动真实 TUN；utun、出口 IP、域名/CIDR 真实路径、关闭恢复、strict 兼容性、强杀自愈和 DNS 防泄漏均未冒充自动通过。
 - 下一步：编写并执行 M4 打磨计划；如先人工验收 M3，按 `docs/acceptance/M3.md` 并在可接受网络中断的环境执行。
 - 下一位 Agent 如何接手：先读 HANDOFF、M3 验收、原始需求和 M3 计划；M4 开始前先拆分任务，真实 TUN 操作前先确认恢复路径。
+
+## 2026-07-20 — M4 打磨实施计划
+
+- 已完成：对照原始需求逐项盘点 M4 缺口；核验 sing-box 1.13.14 双 DoH、bootstrap resolver、DNS hijack 与 Clash `/traffic`、`/connections`、`/logs` 实际字段；拆为 9 个 TDD Task。
+- 修改文件：新增 `docs/superpowers/plans/2026-07-20-kongshan-m4.md`，更新 HANDOFF、PROGRESS、NEXT_STEPS 与本日志。
+- 测试结果：打包内核对新格式双 DoH、`route.default_domain_resolver=dns-cn` 和 sniff/hijack fixture 执行 `check`，exit 0；未修改产品代码。
+- 当前状态：M4 计划就绪，首个未完成项为 Task 1 DNS 值类型与纯配置。
+- 风险/注意事项：system 模式不能宣称全局 DNS 接管；remote DoH 经代理时必须用独立 direct DNS bootstrap 代理节点；所有 WebSocket 必须随页面消失取消。
+- 下一步：先写 DNSConfigTests RED，再实现默认/自定义 DNS、TUN hijack 和四份真实配置 check。
+- 下一位 Agent 如何接手：使用 executing-plans + TDD，从 M4 计划 Task 1 Step 1 开始；每个小节继续同步记录并提交。
