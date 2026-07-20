@@ -352,29 +352,48 @@ private actor PipeCapture {
     private var process: Process?
     private var outputHandle: FileHandle?
     private var outputURL: URL?
+    private var completionURL: URL?
 
     func startReading(from url: URL) throws {
         let process = Process()
         let outputURL = FileManager.default.temporaryDirectory
             .appending(path: "kongshan-pipe-capture-\(UUID().uuidString)")
+        let completionURL = outputURL.appendingPathExtension("done")
         FileManager.default.createFile(atPath: outputURL.path, contents: nil)
         let outputHandle = try FileHandle(forWritingTo: outputURL)
-        process.executableURL = URL(fileURLWithPath: "/bin/cat")
-        process.arguments = [url.path]
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = [
+            "-c",
+            "/bin/cat \"$1\"; /usr/bin/touch \"$2\"",
+            "kongshan-pipe-reader",
+            url.path,
+            completionURL.path
+        ]
         process.standardOutput = outputHandle
         process.standardError = FileHandle.nullDevice
         try process.run()
         self.process = process
         self.outputHandle = outputHandle
         self.outputURL = outputURL
+        self.completionURL = completionURL
     }
 
-    func result() throws -> Data {
-        guard let process, let outputHandle, let outputURL else { throw TestError.missingReader }
-        defer { try? FileManager.default.removeItem(at: outputURL) }
-        process.waitUntilExit()
+    func result() async throws -> Data {
+        guard let process, let outputHandle, let outputURL, let completionURL else {
+            throw TestError.missingReader
+        }
+        defer {
+            try? FileManager.default.removeItem(at: outputURL)
+            try? FileManager.default.removeItem(at: completionURL)
+        }
+        for _ in 0..<500 where !FileManager.default.fileExists(atPath: completionURL.path) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard FileManager.default.fileExists(atPath: completionURL.path) else {
+            if process.isRunning { process.terminate() }
+            throw TestError.readerFailed
+        }
         try outputHandle.close()
-        guard process.terminationStatus == 0 else { throw TestError.readerFailed }
         return try Data(contentsOf: outputURL)
     }
 }

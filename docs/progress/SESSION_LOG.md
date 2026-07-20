@@ -289,3 +289,13 @@
 - 风险/注意事项：TUN 健康失败后若特权停止也失败，activeMode 保留 `.tun` 以如实反映可能仍在接管；Task 5 尚需处理 TUN 在线规则更新。
 - 下一步：Task 5 实现 TUN 相同 runtime 更新、旧 root 配置回滚与双重失败关闭。
 - 下一位 Agent 如何接手：从 M3 计划 Task 5 Step 1 扩展 mode fixture，断言 config runtime 值复用、CIDR 更新且 networksetup 调用数不变。
+
+## 2026-07-20 — M3 Task 5 TUN 在线分流更新与回滚
+
+- 已完成：先用安全假内核写 runtime 复用、CIDR 更新、零 networksetup、新配置失败回滚和双重失败测试；观察当前错用普通 SingBoxProcess 的 RED，再按 activeMode 实现 TUN 事务。
+- 修改文件：`Sources/kongshan/AppState.swift`、`Tests/KongshanAppTests/AppStateTests.swift`、`Tests/KongshanCoreTests/PrivilegedLauncherTests.swift`、M3 计划与全部项目记录。
+- 测试结果：RED 显示旧实现仍保持 on/tun 且没有特权重启/回滚；GREEN 为定向 3/3、AppState 15/15、全量 85/85，`git diff --check` 通过。
+- 当前状态：Task 5 完成；新配置成功后才持久化 rules，失败保留旧 settings，新旧都无法启动时 activeMode/runtime 清空。
+- 风险/注意事项：本节不启动真实 TUN；全量回归曾暴露测试 `Process.waitUntilExit` 偶发不返回，已用有界 done marker 修复并确认无遗留测试进程。
+- 下一步：Task 6 实现原生模式与 strict_route UI，运行 debug/release 无授权冒烟。
+- 下一位 Agent 如何接手：从 M3 计划 Task 6 Step 1 开始，文案不得宣称 macOS DNS 必然无泄漏。

@@ -382,6 +382,83 @@ final class AppStateTests: XCTestCase {
         XCTAssertTrue(tunIsActive)
     }
 
+    func testTUNRoutingUpdateReusesRuntimeAndNeverCallsNetworkSetup() async throws {
+        let fixture = try await makeModeFixture(initialMode: .tun)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let initialConfigs = await fixture.privileged.attemptedConfigs()
+        let initialConfig = try XCTUnwrap(initialConfigs.last)
+        let initialRuntime = try clashRuntime(from: initialConfig)
+        let networkCallsBefore = await fixture.network.arguments.count
+        var updated = fixture.state.routingSettings
+        updated.bypassCIDRs = ["10.20.0.0/16", "192.168.50.0/24"]
+
+        await fixture.state.applyRoutingSettings(updated)
+
+        XCTAssertEqual(fixture.state.status, .on)
+        XCTAssertEqual(fixture.state.activeMode, .tun)
+        XCTAssertEqual(fixture.state.routingSettings, updated)
+        let configs = await fixture.privileged.attemptedConfigs()
+        XCTAssertEqual(configs.count, 2)
+        let updatedConfig = try XCTUnwrap(configs.last)
+        XCTAssertEqual(try clashRuntime(from: updatedConfig).controller, initialRuntime.controller)
+        XCTAssertEqual(try clashRuntime(from: updatedConfig).secret, initialRuntime.secret)
+        XCTAssertEqual(
+            try tunRouteExclusions(from: updatedConfig),
+            ["10.20.0.0/16", "192.168.50.0/24"]
+        )
+        let networkCallsAfter = await fixture.network.arguments.count
+        let events = await fixture.events.values()
+        XCTAssertEqual(networkCallsAfter, networkCallsBefore)
+        XCTAssertEqual(events, [.tunStart, .tunStop, .tunStart])
+    }
+
+    func testTUNRoutingStartFailureRestoresOldRootConfiguration() async throws {
+        let fixture = try await makeModeFixture(initialMode: .tun, tunStartFailureCalls: [2])
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let oldSettings = fixture.state.routingSettings
+        var updated = oldSettings
+        updated.bypassCIDRs = ["10.88.0.0/16"]
+
+        await fixture.state.applyRoutingSettings(updated)
+
+        XCTAssertEqual(fixture.state.status, .on)
+        XCTAssertEqual(fixture.state.activeMode, .tun)
+        XCTAssertEqual(fixture.state.routingSettings, oldSettings)
+        XCTAssertTrue(fixture.state.errorMessage?.contains("已恢复旧 TUN 配置") == true)
+        let tunIsActive = await fixture.privileged.isActive()
+        let attempts = await fixture.privileged.attemptedConfigs()
+        let networkArguments = await fixture.network.arguments
+        XCTAssertTrue(tunIsActive)
+        XCTAssertEqual(attempts.count, 3)
+        guard attempts.count == 3 else { return }
+        XCTAssertEqual(attempts[0], attempts[2])
+        XCTAssertNotEqual(attempts[0], attempts[1])
+        XCTAssertTrue(networkArguments.isEmpty)
+    }
+
+    func testTUNRoutingDoubleStartFailureLeavesNoTakeoverOrRuntime() async throws {
+        let fixture = try await makeModeFixture(initialMode: .tun, tunStartFailureCalls: [2, 3])
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        var updated = fixture.state.routingSettings
+        updated.bypassCIDRs = ["10.99.0.0/16"]
+
+        await fixture.state.applyRoutingSettings(updated)
+
+        if case .failed = fixture.state.status {
+            // Expected terminal failure.
+        } else {
+            XCTFail("Expected failed state, got \(fixture.state.status)")
+        }
+        XCTAssertNil(fixture.state.activeMode)
+        XCTAssertNil(fixture.state.mixedPort)
+        let tunIsActive = await fixture.privileged.isActive()
+        let coreIsRunning = await fixture.core.isRunning
+        let networkArguments = await fixture.network.arguments
+        XCTAssertFalse(tunIsActive)
+        XCTAssertFalse(coreIsRunning)
+        XCTAssertTrue(networkArguments.isEmpty)
+    }
+
     private func makeRunningFixture(
         failOnceFor: [String]? = nil,
         healthFailures: Set<Int> = []
@@ -436,7 +513,8 @@ final class AppStateTests: XCTestCase {
     private func makeModeFixture(
         initialMode: ProxyMode,
         tunStartError: Error? = nil,
-        tunStopError: Error? = nil
+        tunStopError: Error? = nil,
+        tunStartFailureCalls: Set<Int> = []
     ) async throws -> ModeFixture {
         let root = temporaryDirectory()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -451,14 +529,15 @@ final class AppStateTests: XCTestCase {
             takeoverEvents: events
         )
         let runtime = try runtimeParameters()
-        let core = SingBoxProcess(binaryURL: singBoxURL)
+        let core = SingBoxProcess(binaryURL: try safeCoreExecutable(in: root))
         let privileged = FakePrivilegedLauncher(
             root: root,
             markerURL: markerURL,
             proxyRecoveryURL: proxyRecoveryURL,
             events: events,
             startError: tunStartError,
-            stopError: tunStopError
+            stopError: tunStopError,
+            startFailureCalls: tunStartFailureCalls
         )
         let state = AppState(
             storage: storage,
@@ -496,9 +575,49 @@ final class AppStateTests: XCTestCase {
             state: state,
             core: core,
             privileged: privileged,
+            network: network,
             events: events,
             proxyRecoveryURL: proxyRecoveryURL
         )
+    }
+
+    private func safeCoreExecutable(in root: URL) throws -> URL {
+        let url = root.appending(path: "safe-test-core")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "check" ]; then
+          /bin/cat >/dev/null
+          exit 0
+        fi
+        if [ "$1" = "run" ]; then
+          /bin/cat >/dev/null
+          exec /usr/bin/tail -f /dev/null
+        fi
+        exit 64
+        """
+        try Data(script.utf8).write(to: url)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: Int16(0o700))],
+            ofItemAtPath: url.path
+        )
+        return url
+    }
+
+    private func clashRuntime(from config: Data) throws -> (controller: String, secret: String) {
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: config) as? [String: Any])
+        let experimental = try XCTUnwrap(root["experimental"] as? [String: Any])
+        let clash = try XCTUnwrap(experimental["clash_api"] as? [String: Any])
+        return (
+            try XCTUnwrap(clash["external_controller"] as? String),
+            try XCTUnwrap(clash["secret"] as? String)
+        )
+    }
+
+    private func tunRouteExclusions(from config: Data) throws -> [String] {
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: config) as? [String: Any])
+        let inbound = try XCTUnwrap((root["inbounds"] as? [[String: Any]])?.first)
+        XCTAssertEqual(inbound["type"] as? String, "tun")
+        return try XCTUnwrap(inbound["route_exclude_address"] as? [String])
     }
 
     private func compiledRuleSet(in directory: URL) async throws -> Data {
@@ -554,6 +673,7 @@ private struct ModeFixture {
     let state: AppState
     let core: SingBoxProcess
     let privileged: FakePrivilegedLauncher
+    let network: AppNetworkSetupRecorder
     let events: TakeoverEvents
     let proxyRecoveryURL: URL
 }
@@ -649,8 +769,10 @@ private actor FakePrivilegedLauncher: PrivilegedLaunching {
     private let startError: Error?
     private let stopError: Error?
     private let recoverError: Error?
+    private let startFailureCalls: Set<Int>
     private var active = false
     private var configs: [Data] = []
+    private var startCallCount = 0
 
     init(
         root: URL,
@@ -659,7 +781,8 @@ private actor FakePrivilegedLauncher: PrivilegedLaunching {
         events: TakeoverEvents? = nil,
         startError: Error? = nil,
         stopError: Error? = nil,
-        recoverError: Error? = nil
+        recoverError: Error? = nil,
+        startFailureCalls: Set<Int> = []
     ) {
         self.markerURL = markerURL ?? root.appending(path: "fake-tun-active")
         self.proxyRecoveryURL = proxyRecoveryURL ?? root.appending(path: "proxy-recovery.json")
@@ -667,15 +790,18 @@ private actor FakePrivilegedLauncher: PrivilegedLaunching {
         self.startError = startError
         self.stopError = stopError
         self.recoverError = recoverError
+        self.startFailureCalls = startFailureCalls
     }
 
     func start(config: Data) async throws -> PrivilegedProcessRecord {
+        startCallCount += 1
         await events?.append(.tunStart)
         if FileManager.default.fileExists(atPath: proxyRecoveryURL.path) {
             await events?.recordViolation("TUN started while system proxy recovery exists")
         }
-        if let startError { throw startError }
         configs.append(config)
+        if let startError { throw startError }
+        if startFailureCalls.contains(startCallCount) { throw ModeTestError.startFailed }
         active = true
         try Data().write(to: markerURL)
         return PrivilegedProcessRecord(
@@ -700,6 +826,7 @@ private actor FakePrivilegedLauncher: PrivilegedLaunching {
 
     func isActive() -> Bool { active }
     func startedConfigs() -> [Data] { configs }
+    func attemptedConfigs() -> [Data] { configs }
 }
 
 private enum ModeTestError: Error {

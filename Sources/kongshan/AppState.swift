@@ -415,7 +415,10 @@ final class AppState {
                 errorMessage = nil
                 return
             }
-            guard let runtime, let oldConfig = currentConfig, let client = clashAPIClient else {
+            guard let runtime,
+                  let oldConfig = currentConfig,
+                  let client = clashAPIClient,
+                  let activeMode else {
                 throw AppStateError.missingRuntimeState
             }
 
@@ -427,39 +430,53 @@ final class AppState {
                 selectedNodeID: selectedNodeID,
                 runtime: runtime,
                 testURL: testURLString,
-                routing: RoutingConfiguration(settings: settings, ruleSets: prepared.ruleSets)
+                routing: RoutingConfiguration(settings: settings, ruleSets: prepared.ruleSets),
+                proxyMode: activeMode,
+                tunSettings: tunSettings
             ))
             let check = try await singBoxProcess.check(config: newConfig)
             guard check.exitCode == 0 else {
                 throw AppStateError.coreCheckFailed(check.stderr)
             }
 
-            do {
-                try await singBoxProcess.restart(config: newConfig)
-                try await healthVerifier(client)
-            } catch {
-                await restoreOldRouting(
-                    config: oldConfig,
-                    settings: oldSettings,
-                    client: client,
-                    updateError: error
-                )
-                return
-            }
+            switch activeMode {
+            case .systemProxy:
+                do {
+                    try await singBoxProcess.restart(config: newConfig)
+                    try await healthVerifier(client)
+                } catch {
+                    await restoreOldRouting(
+                        config: oldConfig,
+                        settings: oldSettings,
+                        client: client,
+                        updateError: error
+                    )
+                    return
+                }
 
-            do {
-                try await systemProxyManager.updateBypassDomains(
-                    to: settings.systemProxyBypassEntries,
-                    rollbackTo: oldSettings.systemProxyBypassEntries
-                )
-            } catch {
-                await restoreOldRouting(
-                    config: oldConfig,
-                    settings: oldSettings,
-                    client: client,
-                    updateError: error
-                )
-                return
+                do {
+                    try await systemProxyManager.updateBypassDomains(
+                        to: settings.systemProxyBypassEntries,
+                        rollbackTo: oldSettings.systemProxyBypassEntries
+                    )
+                } catch {
+                    await restoreOldRouting(
+                        config: oldConfig,
+                        settings: oldSettings,
+                        client: client,
+                        updateError: error
+                    )
+                    return
+                }
+            case .tun:
+                guard await reloadTUNRouting(
+                    newConfig: newConfig,
+                    oldConfig: oldConfig,
+                    oldSettings: oldSettings,
+                    client: client
+                ) else {
+                    return
+                }
             }
 
             routingSettings = settings
@@ -576,6 +593,71 @@ final class AppState {
             setFailure(
                 "分流更新失败且旧配置无法恢复：\(updateError.localizedDescription)；\(error.localizedDescription)；\(restoreMessage)"
             )
+        }
+    }
+
+    private func reloadTUNRouting(
+        newConfig: Data,
+        oldConfig: Data,
+        oldSettings: RoutingSettings,
+        client: ClashAPIClient
+    ) async -> Bool {
+        do {
+            try await privilegedLauncher.stop()
+            activeMode = nil
+        } catch {
+            status = .on
+            errorMessage = "应用分流规则失败，旧 TUN 配置仍在运行：\(error.localizedDescription)"
+            return false
+        }
+
+        var newConfigurationStarted = false
+        do {
+            _ = try await privilegedLauncher.start(config: newConfig)
+            newConfigurationStarted = true
+            activeMode = .tun
+            try await healthVerifier(client)
+            return true
+        } catch {
+            let updateError = error
+            if newConfigurationStarted {
+                do {
+                    try await privilegedLauncher.stop()
+                    activeMode = nil
+                } catch let stopError {
+                    currentConfig = newConfig
+                    activeMode = .tun
+                    setFailure(
+                        "新 TUN 配置健康检查失败且无法停止：\(updateError.localizedDescription)；\(stopError.localizedDescription)"
+                    )
+                    return false
+                }
+            }
+
+            var oldConfigurationStarted = false
+            do {
+                _ = try await privilegedLauncher.start(config: oldConfig)
+                oldConfigurationStarted = true
+                activeMode = .tun
+                try await healthVerifier(client)
+                currentConfig = oldConfig
+                routingSettings = oldSettings
+                status = .on
+                errorMessage = "应用分流规则失败，已恢复旧 TUN 配置：\(updateError.localizedDescription)"
+                return false
+            } catch let rollbackError {
+                if oldConfigurationStarted {
+                    try? await privilegedLauncher.stop()
+                } else {
+                    // start 失败时默认 launcher 也会清理临时记录；再次 stop 是幂等安全网。
+                    try? await privilegedLauncher.stop()
+                }
+                clearRuntimeState()
+                setFailure(
+                    "TUN 分流更新失败且旧配置无法恢复：\(updateError.localizedDescription)；\(rollbackError.localizedDescription)"
+                )
+                return false
+            }
         }
     }
 
