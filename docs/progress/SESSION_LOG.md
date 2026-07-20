@@ -89,3 +89,13 @@
 - 风险/注意事项：尚未用真实 sing-box 1.13.14 执行 `check`；Task 5 必须验证并修正任何版本字段差异。
 - 下一步：Task 5 固定官方内核、实现带超时 ProcessRunner 和 check/start/stop。
 - 下一位 Agent 如何接手：先执行官方内核下载和 SHA 校验，再从 Task 5 进程测试开始。
+
+## 2026-07-20 — M1 Task 5 官方内核与进程生命周期
+
+- 已完成：固定并下载官方 sing-box 1.13.14 darwin-arm64；校验归档 SHA、Mach-O 架构、版本、revision 和 Clash API tag；先写 ProcessRunner/内核测试并观察缺少类型的预期失败；实现 check/start/stop、实时输出和超时终止。
+- 修改文件：`scripts/fetch_sing_box.sh`、`Vendor/sing-box/sing-box`、`Resources/THIRD_PARTY_NOTICES.md`、`Sources/KongshanCore/ProcessRunner.swift`、`Sources/KongshanCore/SingBoxProcess.swift`、`Tests/KongshanCoreTests/SingBoxProcessTests.swift`、M1 计划与记录。
+- 测试结果：官方归档 SHA-256 为 `73e8967b0fc08e17bce4263ca56ebc394822401a16497a1c4e02316c888202ab`；RED 因进程类型不存在而失败；GREEN 为真实生成配置 check 成功、定向 4/4、全量 17/17 通过。
+- 当前状态：Task 5 完成，官方内核可从内存配置校验、启动和停止，短命令具备超时与 stderr 采集。
+- 风险/注意事项：M1 仅检测异常退出并提供回调；10 秒内最多三次自动重启策略按设计留到 M4。
+- 下一步：Task 6 实现 Application Support 原子存储和订阅旧缓存兜底。
+- 下一位 Agent 如何接手：从 M1 计划 Task 6 Step 1 写 Storage/SubscriptionService 失败测试。
