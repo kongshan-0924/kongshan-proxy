@@ -1,6 +1,6 @@
 # 下一步
 
-1. 执行 M4 Task 2：先写旧 settings DNS 兼容、离线保存、system/TUN 在线应用与失败回滚测试。
-2. 将 DNS 参数接入 AppState 全部配置生成路径，避免 start/routing/TUN 更新遗漏或回退默认值。
-3. 增加 DNS 高级设置原生 UI，明确 system 模式不等于全局 DNS 接管且默认不使用 fake-ip。
-4. 真实管理员授权/TUN 与 M1/M2 网络验收继续按三份 acceptance 文档保留。
+1. 执行 M4 Task 3：先为 `/traffic`、`/connections`、`/logs` 的 URL、Bearer、payload、坏消息和取消清理写失败测试。
+2. 实现可注入的 URLSessionWebSocketTask → AsyncThrowingStream 桥接，不做 Timer/REST 轮询或无限自动重连。
+3. Clash REST 增加 version 返回值并保持现有 health/选择/测速 API 兼容。
+4. 真实管理员授权/TUN 与 DNS 泄漏验收继续按 acceptance 人工边界保留。

@@ -527,6 +527,119 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(try tunStrictRoute(from: attempts[1]), true)
     }
 
+    func testOldSettingsDefaultDNSAndOfflineCustomDNSPersists() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        try await storage.prepare()
+        try await storage.writeAtomically(
+            Data(#"{"selectedNodeID":null,"testURL":"http://example.com/generate_204"}"#.utf8),
+            to: root.appending(path: "settings.json")
+        )
+        let state = AppState(
+            storage: storage,
+            systemProxyManager: SystemProxyManager(storage: storage) { _, _ in
+                ProcessResult(exitCode: 0, stdout: "", stderr: "")
+            },
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            privilegedLauncher: FakePrivilegedLauncher(root: root),
+            automaticallyInitialize: false
+        )
+
+        await state.initialize()
+        XCTAssertEqual(state.dnsSettings, .defaults)
+
+        let custom = customDNSSettings
+        await state.applyDNSSettings(custom)
+
+        XCTAssertEqual(state.status, .off)
+        XCTAssertEqual(state.dnsSettings, custom)
+        XCTAssertNil(state.errorMessage)
+        let data = try Data(contentsOf: root.appending(path: "settings.json"))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let persisted = try XCTUnwrap(object["dnsSettings"] as? [String: Any])
+        XCTAssertEqual(persisted["domesticDoH"] as? String, custom.domesticDoH)
+        XCTAssertEqual(persisted["remoteDoH"] as? String, custom.remoteDoH)
+    }
+
+    func testActiveSystemDNSUpdateRestartsCoreWithoutReenablingProxy() async throws {
+        let fixture = try await makeRunningFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let networkCallsBefore = await fixture.network.arguments
+
+        await fixture.state.applyDNSSettings(customDNSSettings)
+
+        XCTAssertEqual(fixture.state.status, .on)
+        XCTAssertEqual(fixture.state.activeMode, .systemProxy)
+        XCTAssertEqual(fixture.state.dnsSettings, customDNSSettings)
+        XCTAssertNil(fixture.state.errorMessage)
+        let config = try Data(contentsOf: fixture.root.appending(path: "config.json"))
+        XCTAssertEqual(try dnsURLs(from: config), customDNSSettings)
+        let networkCallsAfter = await fixture.network.arguments
+        XCTAssertEqual(
+            networkCallsAfter.filter { $0.first == "-setwebproxy" }.count,
+            networkCallsBefore.filter { $0.first == "-setwebproxy" }.count
+        )
+        let healthCalls = await fixture.health.callCount
+        XCTAssertEqual(healthCalls, 2)
+        await fixture.state.stop()
+    }
+
+    func testActiveSystemDNSHealthFailureRestoresOldConfiguration() async throws {
+        let fixture = try await makeRunningFixture(healthFailures: [2])
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let original = fixture.state.dnsSettings
+
+        await fixture.state.applyDNSSettings(customDNSSettings)
+
+        XCTAssertEqual(fixture.state.status, .on)
+        XCTAssertEqual(fixture.state.dnsSettings, original)
+        XCTAssertTrue(fixture.state.errorMessage?.contains("已恢复旧配置") == true)
+        let healthCalls = await fixture.health.callCount
+        XCTAssertEqual(healthCalls, 3)
+        try await ClashAPIClient(
+            controller: URL(string: "http://127.0.0.1:\(fixture.runtime.clashPort)")!,
+            secret: fixture.runtime.secret
+        ).health()
+        await fixture.state.stop()
+    }
+
+    func testActiveTUNDNSUpdateUsesPrivilegedTransaction() async throws {
+        let fixture = try await makeModeFixture(initialMode: .tun)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let networkCallsBefore = await fixture.network.arguments.count
+
+        await fixture.state.applyDNSSettings(customDNSSettings)
+
+        XCTAssertEqual(fixture.state.status, .on)
+        XCTAssertEqual(fixture.state.activeMode, .tun)
+        XCTAssertEqual(fixture.state.dnsSettings, customDNSSettings)
+        XCTAssertNil(fixture.state.errorMessage)
+        let attempts = await fixture.privileged.attemptedConfigs()
+        XCTAssertEqual(attempts.count, 2)
+        XCTAssertEqual(try dnsURLs(from: try XCTUnwrap(attempts.last)), customDNSSettings)
+        let networkCallsAfter = await fixture.network.arguments.count
+        XCTAssertEqual(networkCallsAfter, networkCallsBefore)
+    }
+
+    func testActiveTUNDNSFailureRestoresOldConfiguration() async throws {
+        let fixture = try await makeModeFixture(initialMode: .tun, tunStartFailureCalls: [2])
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let original = fixture.state.dnsSettings
+
+        await fixture.state.applyDNSSettings(customDNSSettings)
+
+        XCTAssertEqual(fixture.state.status, .on)
+        XCTAssertEqual(fixture.state.activeMode, .tun)
+        XCTAssertEqual(fixture.state.dnsSettings, original)
+        XCTAssertTrue(fixture.state.errorMessage?.contains("已恢复旧 TUN 配置") == true)
+        let attempts = await fixture.privileged.attemptedConfigs()
+        XCTAssertEqual(attempts.count, 3)
+        guard attempts.count == 3 else { return }
+        XCTAssertEqual(attempts[0], attempts[2])
+        XCTAssertEqual(try dnsURLs(from: attempts[1]), customDNSSettings)
+    }
+
     private func makeRunningFixture(
         failOnceFor: [String]? = nil,
         healthFailures: Set<Int> = []
@@ -693,6 +806,29 @@ final class AppStateTests: XCTestCase {
         let inbound = try XCTUnwrap((root["inbounds"] as? [[String: Any]])?.first)
         XCTAssertEqual(inbound["type"] as? String, "tun")
         return try XCTUnwrap(inbound["strict_route"] as? Bool)
+    }
+
+    private var customDNSSettings: DNSSettings {
+        DNSSettings(
+            domesticDoH: "https://1.1.1.1/domestic-query",
+            remoteDoH: "https://9.9.9.9/remote-query"
+        )
+    }
+
+    private func dnsURLs(from config: Data) throws -> DNSSettings {
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: config) as? [String: Any])
+        let dns = try XCTUnwrap(root["dns"] as? [String: Any])
+        let servers = try XCTUnwrap(dns["servers"] as? [[String: Any]])
+        let domestic = try XCTUnwrap(servers.first { $0["tag"] as? String == "dns-cn" })
+        let remote = try XCTUnwrap(servers.first { $0["tag"] as? String == "dns-remote" })
+
+        func url(from server: [String: Any]) throws -> String {
+            let host = try XCTUnwrap(server["server"] as? String)
+            let path = try XCTUnwrap(server["path"] as? String)
+            let port = server["server_port"] as? Int
+            return "https://\(host)\(port.map { ":\($0)" } ?? "")\(path)"
+        }
+        return try DNSSettings(domesticDoH: url(from: domestic), remoteDoH: url(from: remote))
     }
 
     private func compiledRuleSet(in directory: URL) async throws -> Data {

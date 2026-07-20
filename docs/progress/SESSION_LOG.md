@@ -339,3 +339,13 @@
 - 风险/注意事项：仅 `sing-box check` 不足以发现所有服务初始化错误，已新增真实启动/Clash health 回归；DNS 泄漏仍需真实网络人工验收。
 - 下一步：Task 2 实现 DNS settings 旧文件兼容、离线/在线事务、失败回滚和 UI。
 - 下一位 Agent 如何接手：从 M4 计划 Task 2 Step 1 开始，扩展 AppState fixture，严禁测试调用真实 networksetup 或 TUN 授权。
+
+## 2026-07-20 — M4 Task 2 DNS 持久化、在线事务与设置 UI
+
+- 已完成：先写旧 settings、离线保存、system/TUN 在线成功及两类回滚测试并观察 API 缺失；实现统一配置构造、DNS 应用事务、诊断快照和草稿式高级设置 UI。
+- 修改文件：`Sources/kongshan/AppState.swift`、`Sources/kongshan/MainWindowView.swift`、`Tests/KongshanAppTests/AppStateTests.swift`、M4 计划与全部项目记录。
+- 测试结果：RED 因 `dnsSettings/applyDNSSettings` 不存在；GREEN 为定向 5/5、全量 99/99，release arm64 App、codesign strict 与 `git diff --check` 通过。
+- 当前状态：DNS 可离线保存，在线 system 快速重启不重复启用 networksetup，TUN 使用特权事务；失败均保留旧 DNS 与旧运行配置。
+- 风险/注意事项：自动测试只用 networksetup 记录器与 fake TUN launcher；没有发起管理员授权或真实 DoH 查询。磁盘完全不可写时的落盘后置失败需最终审视。
+- 下一步：Task 3 实现三类 Clash WebSocket 流与一次 version REST。
+- 下一位 Agent 如何接手：从 M4 计划 Task 3 Step 1 开始，底层流必须可注入、可取消，secret 仅放 Bearer 内存 header。

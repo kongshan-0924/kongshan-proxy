@@ -301,6 +301,7 @@ private struct NodeRow: View {
 
 private struct SettingsView: View {
     @Environment(AppState.self) private var state
+    @State private var dnsDraft = DNSSettings.defaults
 
     var body: some View {
         Form {
@@ -336,6 +337,31 @@ private struct SettingsView: View {
                 Button("保存设置") { Task { await state.saveSettings() } }
             }
 
+            Section("DNS 高级设置") {
+                TextField("国内 DoH", text: $dnsDraft.domesticDoH)
+                TextField("远程 DoH", text: $dnsDraft.remoteDoH)
+                Text("geosite-cn 使用国内 DoH 直连解析，其余域名使用经当前代理的远程 DoH。兼容性优先，默认不启用 fake-ip。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("系统代理模式只管理进入本地 mixed 代理的域名解析，不等同于接管 macOS 全局 DNS。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Button("恢复默认") { dnsDraft = .defaults }
+                    Button("放弃修改") { dnsDraft = state.dnsSettings }
+                        .disabled(dnsDraft == state.dnsSettings)
+                    Spacer()
+                    Button("应用 DNS") {
+                        Task {
+                            await state.applyDNSSettings(dnsDraft)
+                            dnsDraft = state.dnsSettings
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(state.isBusy || !state.isReady || dnsDraft == state.dnsSettings)
+                }
+            }
+
             Section("当前能力") {
                 LabeledContent("代理模式", value: "系统代理 + TUN")
                 LabeledContent("分流", value: "自定义规则 + 中国直连")
@@ -345,6 +371,7 @@ private struct SettingsView: View {
         }
         .formStyle(.grouped)
         .navigationTitle("设置")
+        .onAppear { dnsDraft = state.dnsSettings }
     }
 
     private var modeBinding: Binding<ProxyMode> {

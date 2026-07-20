@@ -30,6 +30,7 @@ final class AppState {
     var preferredMode: ProxyMode = .systemProxy
     private(set) var activeMode: ProxyMode?
     var tunSettings: TunSettings = .defaults
+    var dnsSettings: DNSSettings = .defaults
     private(set) var isApplyingRouting = false
 
     @ObservationIgnored private let storage: Storage
@@ -143,15 +144,14 @@ final class AppState {
             let prepared = try await ruleSetService.prepare(includeAds: routingSettings.blockAds)
             warnings.append(contentsOf: prepared.warnings)
             let runtime = try runtimeFactory()
-            let config = try ConfigGenerator.generate(ConfigInput(
-                nodes: nodes,
-                selectedNodeID: selectedNodeID,
+            let config = try generateConfiguration(
                 runtime: runtime,
-                testURL: testURLString,
-                routing: RoutingConfiguration(settings: routingSettings, ruleSets: prepared.ruleSets),
+                ruleSets: prepared.ruleSets,
+                routingSettings: routingSettings,
                 proxyMode: requestedMode,
-                tunSettings: tunSettings
-            ))
+                tunSettings: tunSettings,
+                dnsSettings: dnsSettings
+            )
             let diagnostic = try ConfigGenerator.diagnosticSnapshot(from: config)
             try await storage.writeAtomically(
                 diagnostic,
@@ -430,15 +430,14 @@ final class AppState {
             let oldSettings = routingSettings
             let prepared = try await ruleSetService.prepare(includeAds: settings.blockAds)
             warnings.append(contentsOf: prepared.warnings)
-            let newConfig = try ConfigGenerator.generate(ConfigInput(
-                nodes: nodes,
-                selectedNodeID: selectedNodeID,
+            let newConfig = try generateConfiguration(
                 runtime: runtime,
-                testURL: testURLString,
-                routing: RoutingConfiguration(settings: settings, ruleSets: prepared.ruleSets),
+                ruleSets: prepared.ruleSets,
+                routingSettings: settings,
                 proxyMode: activeMode,
-                tunSettings: tunSettings
-            ))
+                tunSettings: tunSettings,
+                dnsSettings: dnsSettings
+            )
             let check = try await singBoxProcess.check(config: newConfig)
             guard check.exitCode == 0 else {
                 throw AppStateError.coreCheckFailed(check.stderr)
@@ -450,11 +449,11 @@ final class AppState {
                     try await singBoxProcess.restart(config: newConfig)
                     try await healthVerifier(client)
                 } catch {
-                    await restoreOldRouting(
+                    await restoreOldSystemConfiguration(
                         config: oldConfig,
-                        settings: oldSettings,
                         client: client,
-                        updateError: error
+                        updateError: error,
+                        operation: "分流规则"
                     )
                     return
                 }
@@ -465,11 +464,11 @@ final class AppState {
                         rollbackTo: oldSettings.systemProxyBypassEntries
                     )
                 } catch {
-                    await restoreOldRouting(
+                    await restoreOldSystemConfiguration(
                         config: oldConfig,
-                        settings: oldSettings,
                         client: client,
-                        updateError: error
+                        updateError: error,
+                        operation: "分流规则"
                     )
                     return
                 }
@@ -477,7 +476,6 @@ final class AppState {
                 guard await reloadTUNConfiguration(
                     newConfig: newConfig,
                     oldConfig: oldConfig,
-                    oldSettings: oldSettings,
                     client: client,
                     operation: "分流规则"
                 ) else {
@@ -517,15 +515,14 @@ final class AppState {
 
             let prepared = try await ruleSetService.prepare(includeAds: routingSettings.blockAds)
             warnings.append(contentsOf: prepared.warnings)
-            let newConfig = try ConfigGenerator.generate(ConfigInput(
-                nodes: nodes,
-                selectedNodeID: selectedNodeID,
+            let newConfig = try generateConfiguration(
                 runtime: runtime,
-                testURL: testURLString,
-                routing: RoutingConfiguration(settings: routingSettings, ruleSets: prepared.ruleSets),
+                ruleSets: prepared.ruleSets,
+                routingSettings: routingSettings,
                 proxyMode: .tun,
-                tunSettings: requestedSettings
-            ))
+                tunSettings: requestedSettings,
+                dnsSettings: dnsSettings
+            )
             let check = try await singBoxProcess.check(config: newConfig)
             guard check.exitCode == 0 else {
                 throw AppStateError.coreCheckFailed(check.stderr)
@@ -534,7 +531,6 @@ final class AppState {
             guard await reloadTUNConfiguration(
                 newConfig: newConfig,
                 oldConfig: oldConfig,
-                oldSettings: routingSettings,
                 client: client,
                 operation: "TUN 设置"
             ) else {
@@ -553,6 +549,81 @@ final class AppState {
         } catch {
             tunSettings = oldTunSettings
             errorMessage = "应用 TUN 设置失败：\(error.localizedDescription)"
+        }
+    }
+
+    func applyDNSSettings(_ requestedSettings: DNSSettings) async {
+        guard !isBusy else { return }
+        isApplyingRouting = true
+        defer { isApplyingRouting = false }
+
+        let oldDNSSettings = dnsSettings
+        do {
+            let settings = try requestedSettings.validated()
+            guard status == .on else {
+                dnsSettings = settings
+                try await persistSettings()
+                errorMessage = nil
+                return
+            }
+            guard let runtime,
+                  let oldConfig = currentConfig,
+                  let client = clashAPIClient,
+                  let activeMode else {
+                throw AppStateError.missingRuntimeState
+            }
+
+            let prepared = try await ruleSetService.prepare(includeAds: routingSettings.blockAds)
+            warnings.append(contentsOf: prepared.warnings)
+            let newConfig = try generateConfiguration(
+                runtime: runtime,
+                ruleSets: prepared.ruleSets,
+                routingSettings: routingSettings,
+                proxyMode: activeMode,
+                tunSettings: tunSettings,
+                dnsSettings: settings
+            )
+            let check = try await singBoxProcess.check(config: newConfig)
+            guard check.exitCode == 0 else {
+                throw AppStateError.coreCheckFailed(check.stderr)
+            }
+
+            switch activeMode {
+            case .systemProxy:
+                do {
+                    try await singBoxProcess.restart(config: newConfig)
+                    try await healthVerifier(client)
+                } catch {
+                    await restoreOldSystemConfiguration(
+                        config: oldConfig,
+                        client: client,
+                        updateError: error,
+                        operation: "DNS 设置"
+                    )
+                    return
+                }
+            case .tun:
+                guard await reloadTUNConfiguration(
+                    newConfig: newConfig,
+                    oldConfig: oldConfig,
+                    client: client,
+                    operation: "DNS 设置"
+                ) else {
+                    return
+                }
+            }
+
+            dnsSettings = settings
+            currentConfig = newConfig
+            try await persistSettings()
+            try await storage.writeAtomically(
+                ConfigGenerator.diagnosticSnapshot(from: newConfig),
+                to: storage.rootDirectory.appending(path: "config.json")
+            )
+            errorMessage = nil
+        } catch {
+            dnsSettings = oldDNSSettings
+            errorMessage = "应用 DNS 设置失败：\(error.localizedDescription)"
         }
     }
 
@@ -591,6 +662,7 @@ final class AppState {
             testURLString = settings.testURL
             preferredMode = settings.preferredMode ?? .systemProxy
             tunSettings = settings.tunSettings ?? .defaults
+            dnsSettings = settings.dnsSettings ?? .defaults
         }
         if let data = try await storage.readIfPresent(from: rulesURL) {
             routingSettings = try JSONDecoder().decode(RoutingSettings.self, from: data).validated()
@@ -618,7 +690,8 @@ final class AppState {
                 selectedNodeID: selectedNodeID,
                 testURL: testURLString,
                 preferredMode: preferredMode,
-                tunSettings: tunSettings
+                tunSettings: tunSettings,
+                dnsSettings: dnsSettings
             )),
             to: settingsURL
         )
@@ -631,19 +704,18 @@ final class AppState {
         )
     }
 
-    private func restoreOldRouting(
+    private func restoreOldSystemConfiguration(
         config: Data,
-        settings: RoutingSettings,
         client: ClashAPIClient,
-        updateError: Error
+        updateError: Error,
+        operation: String
     ) async {
         do {
             try await singBoxProcess.restart(config: config)
             try await healthVerifier(client)
             currentConfig = config
-            routingSettings = settings
             status = .on
-            errorMessage = "应用分流规则失败，已恢复旧配置：\(updateError.localizedDescription)"
+            errorMessage = "应用\(operation)失败，已恢复旧配置：\(updateError.localizedDescription)"
         } catch {
             await singBoxProcess.stop()
             let restoreMessage: String
@@ -655,7 +727,7 @@ final class AppState {
             }
             clearRuntimeState()
             setFailure(
-                "分流更新失败且旧配置无法恢复：\(updateError.localizedDescription)；\(error.localizedDescription)；\(restoreMessage)"
+                "\(operation)更新失败且旧配置无法恢复：\(updateError.localizedDescription)；\(error.localizedDescription)；\(restoreMessage)"
             )
         }
     }
@@ -663,7 +735,6 @@ final class AppState {
     private func reloadTUNConfiguration(
         newConfig: Data,
         oldConfig: Data,
-        oldSettings: RoutingSettings,
         client: ClashAPIClient,
         operation: String
     ) async -> Bool {
@@ -706,7 +777,6 @@ final class AppState {
                 activeMode = .tun
                 try await healthVerifier(client)
                 currentConfig = oldConfig
-                routingSettings = oldSettings
                 status = .on
                 errorMessage = "应用\(operation)失败，已恢复旧 TUN 配置：\(updateError.localizedDescription)"
                 return false
@@ -729,6 +799,26 @@ final class AppState {
     private func replaceNodes(_ newNodes: [ProxyNode], for sourceID: UUID) {
         nodes.removeAll { $0.sourceID == sourceID }
         nodes.append(contentsOf: newNodes)
+    }
+
+    private func generateConfiguration(
+        runtime: RuntimeParameters,
+        ruleSets: PreparedRuleSets,
+        routingSettings: RoutingSettings,
+        proxyMode: ProxyMode,
+        tunSettings: TunSettings,
+        dnsSettings: DNSSettings
+    ) throws -> Data {
+        try ConfigGenerator.generate(ConfigInput(
+            nodes: nodes,
+            selectedNodeID: selectedNodeID,
+            runtime: runtime,
+            testURL: testURLString,
+            routing: RoutingConfiguration(settings: routingSettings, ruleSets: ruleSets),
+            proxyMode: proxyMode,
+            tunSettings: tunSettings,
+            dnsSettings: dnsSettings
+        ))
     }
 
     private func selectFirstNodeIfNeeded() {
@@ -807,6 +897,7 @@ private struct PersistedSettings: Codable {
     let testURL: String
     let preferredMode: ProxyMode?
     let tunSettings: TunSettings?
+    let dnsSettings: DNSSettings?
 }
 
 private enum AppStateError: Error, LocalizedError {

@@ -1,9 +1,9 @@
 # 项目交接
 
-- 已完成：M4 Task 1；加入可校验 DNSSettings、默认/自定义双 DoH、CN DNS rule-set、无环 bootstrap、route default resolver，以及仅 TUN 的 sniff/DNS hijack。
-- 修改文件：`Sources/KongshanCore/DNSSettings.swift`、`ConfigGenerator.swift`、`Tests/KongshanCoreTests/DNSConfigTests.swift`、M4 计划及全部记录。
-- 测试结果：首个 RED 为 DNS API 缺失；运行期 RED 捕获显式 direct detour 被 1.13.14 拒绝；修复后 DNS 6/6、全量 94/94、`swift build` 与 `git diff --check` 通过。
-- 当前状态：Task 1 完成；system/TUN、默认/域名自定义 DoH 四份配置 check 通过，另有真实启动并访问 Clash `/version` 的运行期测试。
-- 风险/注意事项：新格式 domestic DoH 省略 detour 才表示直连，不能显式 detour 到空 direct outbound；system 模式仍不代表操作系统全局 DNS 被接管。
-- 下一步：M4 Task 2 持久化 DNS，接入 system/TUN 在线事务与高级设置 UI。
-- 接手方式：从 M4 计划 Task 2 Step 1 写 AppState RED；每条生成路径都必须传当前 `dnsSettings`，失败必须保留旧设置。
+- 已完成：M4 Task 2；DNS 旧设置兼容、离线持久化、system/TUN 在线事务与回滚、诊断配置更新，以及原生 DNS 高级设置界面。
+- 修改文件：`Sources/kongshan/AppState.swift`、`MainWindowView.swift`、`Tests/KongshanAppTests/AppStateTests.swift`、M4 计划与全部记录。
+- 测试结果：RED 因 `dnsSettings/applyDNSSettings` 缺失；GREEN 为 DNS AppState 5/5、全量 99/99；release arm64 组装、严格 codesign 与 diff check 通过。
+- 当前状态：Task 2 完成；统一 config helper 确保启动/分流/TUN/DNS 四条路径都使用当前 DNS，在线失败恢复旧内核配置与旧设置。
+- 风险/注意事项：system 模式 UI 已明确不接管 macOS 全局 DNS；真实 DNS 泄漏和 DoH 连通仍未冒充通过。设置落盘发生磁盘级故障的极端事务需在最终故障注入审视。
+- 下一步：M4 Task 3 实现 Clash API WebSocket 流模型与 version API。
+- 接手方式：从 M4 计划 Task 3 Step 1 写 stream factory fake 测试；必须证明消费取消会关闭底层 WebSocket。
