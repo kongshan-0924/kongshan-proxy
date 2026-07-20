@@ -1,4 +1,5 @@
 import Foundation
+import ServiceManagement
 import XCTest
 @testable import KongshanCore
 @testable import kongshan
@@ -985,6 +986,116 @@ final class AppStateTests: XCTestCase {
         await scheduler.cancel()
     }
 
+    func testLoginItemManagerMapsEverySystemStatus() {
+        XCTAssertEqual(LoginItemManager.map(.notRegistered), .notRegistered)
+        XCTAssertEqual(LoginItemManager.map(.enabled), .enabled)
+        XCTAssertEqual(LoginItemManager.map(.requiresApproval), .requiresApproval)
+        XCTAssertEqual(LoginItemManager.map(.notFound), .notFound)
+    }
+
+    func testInitializeOnlyReadsLoginItemStatusWithoutRegistering() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        let loginItems = FakeLoginItemManager(status: .enabled)
+        let state = AppState(
+            storage: storage,
+            systemProxyManager: SystemProxyManager(storage: storage) { _, _ in
+                ProcessResult(exitCode: 0, stdout: "", stderr: "")
+            },
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            loginItemManager: loginItems,
+            automaticallyInitialize: false
+        )
+
+        await state.initialize()
+
+        XCTAssertEqual(state.loginItemStatus, .enabled)
+        let reads = await loginItems.statusReadCount
+        let requests = await loginItems.setRequests
+        XCTAssertEqual(reads, 1)
+        XCTAssertTrue(requests.isEmpty)
+    }
+
+    func testUserCanEnableAndDisableLoginItem() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        let loginItems = FakeLoginItemManager(status: .notRegistered)
+        let state = AppState(
+            storage: storage,
+            systemProxyManager: SystemProxyManager(storage: storage) { _, _ in
+                ProcessResult(exitCode: 0, stdout: "", stderr: "")
+            },
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            loginItemManager: loginItems,
+            automaticallyInitialize: false
+        )
+
+        await state.setLaunchAtLoginEnabled(true)
+        XCTAssertEqual(state.loginItemStatus, .enabled)
+        await state.setLaunchAtLoginEnabled(false)
+        XCTAssertEqual(state.loginItemStatus, .notRegistered)
+        let requests = await loginItems.setRequests
+        XCTAssertEqual(requests, [true, false])
+        XCTAssertNil(state.errorMessage)
+    }
+
+    func testRequiresApprovalOnlyOpensSettingsAndNeverRetriesRegistration() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        let loginItems = FakeLoginItemManager(
+            status: .notRegistered,
+            enableResult: .requiresApproval
+        )
+        let state = AppState(
+            storage: storage,
+            systemProxyManager: SystemProxyManager(storage: storage) { _, _ in
+                ProcessResult(exitCode: 0, stdout: "", stderr: "")
+            },
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            loginItemManager: loginItems,
+            automaticallyInitialize: false
+        )
+
+        await state.setLaunchAtLoginEnabled(true)
+        await state.refreshLoginItemStatus()
+        await state.openLoginItemSystemSettings()
+
+        XCTAssertEqual(state.loginItemStatus, .requiresApproval)
+        let requests = await loginItems.setRequests
+        let opens = await loginItems.openSettingsCount
+        XCTAssertEqual(requests, [true])
+        XCTAssertEqual(opens, 1)
+    }
+
+    func testLoginItemRegistrationFailureKeepsActualStatusAndShowsReadableError() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        let loginItems = FakeLoginItemManager(
+            status: .notRegistered,
+            setError: FakeLoginItemError.denied
+        )
+        let state = AppState(
+            storage: storage,
+            systemProxyManager: SystemProxyManager(storage: storage) { _, _ in
+                ProcessResult(exitCode: 0, stdout: "", stderr: "")
+            },
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            loginItemManager: loginItems,
+            automaticallyInitialize: false
+        )
+
+        await state.setLaunchAtLoginEnabled(true)
+
+        XCTAssertEqual(state.loginItemStatus, .notRegistered)
+        XCTAssertTrue(state.errorMessage?.contains("开机自启") == true)
+        let requests = await loginItems.setRequests
+        XCTAssertEqual(requests, [true])
+    }
+
     private static let updatedSubscriptionYAML = """
     proxies:
       - {name: updated, type: ss, server: 2.2.2.2, port: 443, cipher: aes-128-gcm, password: updated}
@@ -1569,5 +1680,44 @@ private actor FakeNotificationSender: NotificationSending {
     func send(title: String, body: String) async throws {
         count += 1
         if let error { throw error }
+    }
+}
+
+private enum FakeLoginItemError: Error {
+    case denied
+}
+
+private actor FakeLoginItemManager: LoginItemManaging {
+    private var storedStatus: LoginItemStatus
+    private let enableResult: LoginItemStatus?
+    private let setError: Error?
+    private(set) var statusReadCount = 0
+    private(set) var setRequests: [Bool] = []
+    private(set) var openSettingsCount = 0
+
+    init(
+        status: LoginItemStatus,
+        enableResult: LoginItemStatus? = nil,
+        setError: Error? = nil
+    ) {
+        storedStatus = status
+        self.enableResult = enableResult
+        self.setError = setError
+    }
+
+    func currentStatus() -> LoginItemStatus {
+        statusReadCount += 1
+        return storedStatus
+    }
+
+    func setEnabled(_ enabled: Bool) throws -> LoginItemStatus {
+        setRequests.append(enabled)
+        if let setError { throw setError }
+        storedStatus = enabled ? (enableResult ?? .enabled) : .notRegistered
+        return storedStatus
+    }
+
+    func openSystemSettings() {
+        openSettingsCount += 1
     }
 }

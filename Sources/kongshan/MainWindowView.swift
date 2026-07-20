@@ -304,6 +304,35 @@ private struct SettingsView: View {
                 }
             }
 
+            Section("开机自启") {
+                Toggle("登录时启动 kongshan", isOn: launchAtLoginBinding)
+                    .disabled(
+                        !state.isReady
+                            || state.loginItemStatus == .requiresApproval
+                            || state.loginItemStatus == .notFound
+                    )
+                LabeledContent("系统状态", value: loginItemStatusTitle)
+                if state.loginItemStatus == .requiresApproval {
+                    Text("登录项已登记，但需要你在系统设置中批准。应用不会重复发起注册。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("打开系统登录项设置") {
+                        Task { await state.openLoginItemSystemSettings() }
+                    }
+                } else if state.loginItemStatus == .notFound {
+                    Text("当前运行环境不是可注册的应用包；请从打包后的 kongshan.app 使用此功能。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                HStack {
+                    Spacer()
+                    Button("刷新状态") {
+                        Task { await state.refreshLoginItemStatus() }
+                    }
+                    .disabled(!state.isReady)
+                }
+            }
+
             Section("当前能力") {
                 LabeledContent("代理模式", value: "系统代理 + TUN")
                 LabeledContent("分流", value: "自定义规则 + 中国直连")
@@ -335,6 +364,24 @@ private struct SettingsView: View {
                 Task { await state.applyTunSettings(settings) }
             }
         )
+    }
+
+    private var launchAtLoginBinding: Binding<Bool> {
+        Binding(
+            get: { state.loginItemStatus == .enabled },
+            set: { enabled in
+                Task { await state.setLaunchAtLoginEnabled(enabled) }
+            }
+        )
+    }
+
+    private var loginItemStatusTitle: String {
+        switch state.loginItemStatus {
+        case .notRegistered: "未启用"
+        case .enabled: "已启用"
+        case .requiresApproval: "等待系统批准"
+        case .notFound: "应用包不可用"
+        }
     }
 
     private func modeTitle(_ mode: ProxyMode) -> String {

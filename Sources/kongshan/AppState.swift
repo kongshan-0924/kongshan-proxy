@@ -73,6 +73,7 @@ final class AppState {
     var dnsSettings: DNSSettings = .defaults
     private(set) var subscriptionUpdateSettings = SubscriptionUpdateSettings.defaults
     private(set) var nextSubscriptionUpdateAt: Date?
+    private(set) var loginItemStatus: LoginItemStatus = .notRegistered
     private(set) var uploadRate: Int64 = 0
     private(set) var downloadRate: Int64 = 0
     private(set) var activeConnectionCount = 0
@@ -97,6 +98,7 @@ final class AppState {
     @ObservationIgnored private let kernelLogStore: KernelLogStore
     @ObservationIgnored private let subscriptionUpdateScheduler: SubscriptionUpdateScheduler
     @ObservationIgnored private let notificationSender: any NotificationSending
+    @ObservationIgnored private let loginItemManager: any LoginItemManaging
     @ObservationIgnored private var clashAPIClient: ClashAPIClient?
     @ObservationIgnored private var runtime: RuntimeParameters?
     @ObservationIgnored private var currentConfig: Data?
@@ -114,6 +116,7 @@ final class AppState {
         kernelLogStore: KernelLogStore? = nil,
         subscriptionUpdateScheduler: SubscriptionUpdateScheduler? = nil,
         notificationSender: (any NotificationSending)? = nil,
+        loginItemManager: (any LoginItemManaging)? = nil,
         privilegedLauncher: (any PrivilegedLaunching)? = nil,
         runtimeFactory: RuntimeFactory? = nil,
         healthVerifier: HealthVerifier? = nil,
@@ -151,6 +154,7 @@ final class AppState {
         self.kernelLogStore = resolvedLogStore
         self.subscriptionUpdateScheduler = subscriptionUpdateScheduler ?? SubscriptionUpdateScheduler(now: now)
         self.notificationSender = notificationSender ?? NotificationService()
+        self.loginItemManager = loginItemManager ?? LoginItemManager()
         logWarningRelay.install { [weak self] message in
             Task { @MainActor [weak self] in
                 self?.warnings.append("内核日志写入失败：\(message)")
@@ -208,6 +212,7 @@ final class AppState {
             try await storage.prepare()
             try await loadPersistedState()
             isReady = true
+            loginItemStatus = await loginItemManager.currentStatus()
             await rescheduleSubscriptionUpdates()
         } catch {
             setFailure("启动恢复失败：\(error.localizedDescription)")
@@ -468,6 +473,24 @@ final class AppState {
             subscriptionUpdateSettings = oldSettings
             errorMessage = "保存订阅更新设置失败：\(error.localizedDescription)"
         }
+    }
+
+    func setLaunchAtLoginEnabled(_ enabled: Bool) async {
+        do {
+            loginItemStatus = try await loginItemManager.setEnabled(enabled)
+            errorMessage = nil
+        } catch {
+            loginItemStatus = await loginItemManager.currentStatus()
+            errorMessage = "设置开机自启失败：\(error.localizedDescription)"
+        }
+    }
+
+    func refreshLoginItemStatus() async {
+        loginItemStatus = await loginItemManager.currentStatus()
+    }
+
+    func openLoginItemSystemSettings() async {
+        await loginItemManager.openSystemSettings()
     }
 
     func addManual(_ form: ManualHysteria2) async {

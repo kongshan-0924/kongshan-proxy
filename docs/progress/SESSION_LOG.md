@@ -389,3 +389,13 @@
 - 风险/注意事项：自动测试没有发送真实通知或使用真实订阅；通知权限只在首次实际失败需要通知时按需请求。无节点冒烟约 70 MB、0% CPU，未启动内核或生成接管恢复文件。
 - 下一步：Task 7 实现 `SMAppService.mainApp` 开机自启状态映射、用户开关和系统设置入口。
 - 下一位 Agent 如何接手：从 M4 计划 Task 7 Step 1 开始；测试只用 fake manager，初始化只能读状态，禁止静默注册登录项。
+
+## 2026-07-20 — M4 Task 7 SMAppService 开机自启
+
+- 已完成：先写四状态映射、初始化只读、用户启停、拒绝、待系统批准和设置跳转测试；实现 `SMAppService.mainApp` 适配及原生设置区。
+- 修改文件：新增 `Sources/kongshan/LoginItemManager.swift`；修改 `Sources/kongshan/AppState.swift`、`Sources/kongshan/MainWindowView.swift`、`Tests/KongshanAppTests/AppStateTests.swift`、M4 计划与全部项目记录。
+- 测试结果：RED 因 LoginItem manager/status/AppState API 缺失；GREEN 为 AppState 38/38、全量 131/131，release arm64、codesign strict、diff check 与空节点 `.app` 冷启动通过。
+- 当前状态：初始化只读取系统实际状态，只有用户开关会 register/unregister；requiresApproval 不重复注册，仅提供打开系统登录项设置与刷新状态。
+- 风险/注意事项：自动测试全部用 actor fake；未真实注册或注销本机登录项。非 `.app` 测试宿主返回 notFound，避免 XCTest 接触系统服务。
+- 下一步：Task 8 实现普通/TUN 内核事件驱动退出监控与 10 秒最多 3 次崩溃自愈。
+- 下一位 Agent 如何接手：从 M4 计划 Task 8 Step 1 开始；普通模式可用普通用户假内核退出测试，TUN 只能 fake，主动 stop/reload 必须先取消 monitor。
