@@ -239,3 +239,13 @@
 - 风险/注意事项：真实中国直连、广告拒绝、进程规则、route/system bypass 双处命中和真实浏览流量中断仍待人工；TUN 第三处 bypass 属于 M3。
 - 下一步：为 M3 TUN 编写可执行计划，重点先解决提权与恢复边界。
 - 下一位 Agent 如何接手：先读 `docs/acceptance/M2.md` 与 M2 计划，再从 M3 计划/设计门禁开始；不得直接猜测 macOS TUN 权限实现。
+
+## 2026-07-20 — M3 TUN 实施计划
+
+- 已完成：使用官方 sing-box 1.13 TUN/route 文档与 Apple 权限文档核验字段、回环保护、提权和 shell 安全边界；将 M3 拆为 7 个 TDD Task，并明确 DNS 留在 M4。
+- 修改文件：`docs/superpowers/plans/2026-07-20-kongshan-m3.md` 与全部项目记录。
+- 测试结果：strict=false、双栈地址、auto_route、route_exclude_address、system stack 和 auto_detect_interface 的本地 fixture 通过内置 sing-box 1.13.14 `check`；计划尚未修改产品代码。
+- 当前状态：M3 实施计划就绪，Task 1 未开始。
+- 风险/注意事项：每次真实 TUN 启停可能触发系统管理员授权；自动测试不得触发。strict_route 的 macOS DNS语义不得夸大。
+- 下一步：M3 Task 1 实现模式模型和纯 TUN 配置。
+- 下一位 Agent 如何接手：使用 executing-plans + TDD，从 M3 计划首个未勾选步骤开始。
