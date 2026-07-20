@@ -269,3 +269,13 @@
 - 风险/注意事项：测试只调用 `osacompile`，没有执行提权脚本或真实 TUN；授权返回后的 PID 身份与恢复文件由 Task 3 实现。
 - 下一步：Task 3 实现特权 TUN 生命周期、进程身份复核和崩溃恢复记录。
 - 下一位 Agent 如何接手：从 M3 计划 Task 3 Step 1 写注入 fake authorizer/inspector 的失败测试，所有自动测试严禁真实授权。
+
+## 2026-07-20 — M3 Task 3 特权 TUN 生命周期与崩溃恢复
+
+- 已完成：先写启动记录、授权异常、PID 身份、停止保留、陈旧记录、重启恢复与敏感值检查并观察生命周期 API 缺失；实现可注入 actor 与默认 osascript/ps 边界。
+- 修改文件：`Sources/KongshanCore/PrivilegedLauncher.swift`、`Tests/KongshanCoreTests/PrivilegedLauncherTests.swift`、M3 计划与全部项目记录。
+- 测试结果：RED 因 PrivilegedLauncher/PrivilegedProcessRecord/authorization 错误类型缺失而失败；GREEN 为定向 13/13、全量 77/77，`git diff --check` 通过。
+- 当前状态：Task 3 完成；`tun-recovery.json` 仅保存 PID、规范内核路径和时间，启/停均验证进程身份，授权失败保留恢复能力。
+- 风险/注意事项：自动测试全部注入 fake authorizer，仅对 osascript 参数/结果做纯映射，未触发系统授权。
+- 下一步：Task 4 实现 AppState 模式持久化、互斥启停、切换与初始/退出恢复。
+- 下一位 Agent 如何接手：从 M3 计划 Task 4 Step 1 先写旧 settings 兼容与 system↔TUN 序列测试，fake launcher 必须能证明互斥不变量。

@@ -113,6 +113,235 @@ final class PrivilegedLauncherTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), [])
     }
 
+    func testLifecycleStartVerifiesPIDAndWritesMinimalRecoveryRecord() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let harness = PrivilegedHarness(
+            authorizationResponses: [.output(" 4321\n")],
+            commands: [4321: "/Applications/Kong's App/sing-box run -c /dev/stdin"]
+        )
+        let launchedAt = Date(timeIntervalSince1970: 1_721_430_000)
+        let launcher = makeLifecycleLauncher(root: root, harness: harness, now: { launchedAt })
+
+        let record = try await launcher.start(config: Data("runtime-secret".utf8))
+
+        XCTAssertEqual(record, PrivilegedProcessRecord(
+            pid: 4321,
+            binaryPath: "/Applications/Kong's App/sing-box",
+            launchedAt: launchedAt
+        ))
+        let persisted = try JSONDecoder().decode(
+            PrivilegedProcessRecord.self,
+            from: Data(contentsOf: launcher.recoveryURL)
+        )
+        XCTAssertEqual(persisted, record)
+        let sentConfigs = await harness.sentConfigs()
+        let authorizationCount = await harness.authorizationCount()
+        XCTAssertEqual(sentConfigs, [Data("runtime-secret".utf8)])
+        XCTAssertEqual(authorizationCount, 1)
+    }
+
+    func testLifecycleStartFailuresNeverLeaveRecoveryRecord() async throws {
+        let scenarios: [(AuthorizationResponse, String?, PrivilegedLauncherError)] = [
+            (.failure(.authorizationCancelled), nil, .authorizationCancelled),
+            (.output("not-a-pid"), nil, .invalidPID("not-a-pid")),
+            (.output("4321"), "/usr/bin/other-process", .processMismatch(4321))
+        ]
+
+        for (response, command, expectedError) in scenarios {
+            let root = temporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let harness = PrivilegedHarness(
+                authorizationResponses: [response],
+                commands: command.map { [4321: $0] } ?? [:]
+            )
+            let launcher = makeLifecycleLauncher(root: root, harness: harness)
+
+            do {
+                _ = try await launcher.start(config: Data("secret".utf8))
+                XCTFail("Expected lifecycle start to fail")
+            } catch {
+                XCTAssertEqual(error as? PrivilegedLauncherError, expectedError)
+            }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: launcher.recoveryURL.path))
+        }
+    }
+
+    func testLifecycleStopRechecksIdentityAndKeepsRecordWhenAuthorizationFails() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let harness = PrivilegedHarness(
+            authorizationResponses: [.output("4321"), .failure(.authorizationCancelled)],
+            commands: [4321: "/Applications/Kong's App/sing-box run -c /dev/stdin"]
+        )
+        let launcher = makeLifecycleLauncher(root: root, harness: harness)
+        _ = try await launcher.start(config: Data("secret".utf8))
+
+        do {
+            try await launcher.stop()
+            XCTFail("Expected stop authorization to fail")
+        } catch {
+            XCTAssertEqual(error as? PrivilegedLauncherError, .authorizationCancelled)
+        }
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: launcher.recoveryURL.path))
+        let authorizationCount = await harness.authorizationCount()
+        XCTAssertEqual(authorizationCount, 2)
+    }
+
+    func testLifecycleRecoveryStopsExpectedProcessAndDeletesRecord() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let harness = PrivilegedHarness(
+            authorizationResponses: [.output("4321"), .output("")],
+            commands: [4321: "/Applications/Kong's App/sing-box run -c /dev/stdin"]
+        )
+        let firstLauncher = makeLifecycleLauncher(root: root, harness: harness)
+        _ = try await firstLauncher.start(config: Data("secret".utf8))
+
+        let restartedLauncher = makeLifecycleLauncher(root: root, harness: harness)
+        try await restartedLauncher.recoverIfNeeded()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: restartedLauncher.recoveryURL.path))
+        let scripts = await harness.authorizationScripts()
+        XCTAssertEqual(scripts.count, 2)
+        XCTAssertTrue(scripts[1].contains("/bin/kill -INT 4321"))
+    }
+
+    func testLifecycleRecoveryDeletesStaleRecordWithoutAuthorizing() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let harness = PrivilegedHarness(
+            authorizationResponses: [],
+            commands: [4321: "/usr/bin/unrelated"]
+        )
+        let launcher = makeLifecycleLauncher(root: root, harness: harness)
+        try await Storage(rootDirectory: root).writeAtomically(
+            try JSONEncoder().encode(PrivilegedProcessRecord(
+                pid: 4321,
+                binaryPath: "/Applications/Kong's App/sing-box",
+                launchedAt: Date(timeIntervalSince1970: 1)
+            )),
+            to: launcher.recoveryURL
+        )
+
+        try await launcher.recoverIfNeeded()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: launcher.recoveryURL.path))
+        let authorizationCount = await harness.authorizationCount()
+        XCTAssertEqual(authorizationCount, 0)
+    }
+
+    func testLifecyclePersistsNoRuntimeConfigOrCredentials() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let harness = PrivilegedHarness(
+            authorizationResponses: [.output("4321")],
+            commands: [4321: "/Applications/Kong's App/sing-box run -c /dev/stdin"]
+        )
+        let launcher = makeLifecycleLauncher(root: root, harness: harness)
+        let sensitiveValues = ["unique-clash-secret", "unique-node-password", "54321"]
+        let config = Data(sensitiveValues.joined(separator: "|").utf8)
+
+        _ = try await launcher.start(config: config)
+
+        let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey])
+        let files = (enumerator?.allObjects as? [URL] ?? []).filter {
+            (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+        }
+        XCTAssertEqual(files.count, 1)
+        XCTAssertEqual(
+            files.first?.resolvingSymlinksInPath(),
+            launcher.recoveryURL.resolvingSymlinksInPath()
+        )
+        for file in files {
+            let contents = String(decoding: try Data(contentsOf: file), as: UTF8.self)
+            for value in sensitiveValues {
+                XCTAssertFalse(contents.contains(value), "Persisted sensitive value in \(file.path)")
+            }
+        }
+    }
+
+    func testOSAScriptAuthorizerUsesFixedExecutableAndMapsFailures() async throws {
+        let recorder = ProcessInvocationRecorder()
+        let success = try await OSAScriptAuthorizer.run(
+            script: "return 4321",
+            timeout: 7,
+            runner: { executable, arguments, timeout in
+                await recorder.record(executable: executable, arguments: arguments, timeout: timeout)
+                return ProcessResult(exitCode: 0, stdout: "4321\n", stderr: "")
+            }
+        )
+        XCTAssertEqual(success, "4321\n")
+        let recordedInvocation = await recorder.lastInvocation()
+        let invocation = try XCTUnwrap(recordedInvocation)
+        XCTAssertEqual(invocation.executable.path, "/usr/bin/osascript")
+        XCTAssertEqual(invocation.arguments, ["-e", "return 4321"])
+        XCTAssertEqual(invocation.timeout, 7)
+
+        do {
+            _ = try await OSAScriptAuthorizer.run(
+                script: "cancel",
+                timeout: 7,
+                runner: { _, _, _ in
+                    ProcessResult(exitCode: 1, stdout: "", stderr: "execution error: User canceled. (-128)")
+                }
+            )
+            XCTFail("Expected cancellation")
+        } catch {
+            XCTAssertEqual(error as? PrivilegedLauncherError, .authorizationCancelled)
+        }
+
+        do {
+            _ = try await OSAScriptAuthorizer.run(
+                script: "fail",
+                timeout: 7,
+                runner: { _, _, _ in
+                    ProcessResult(exitCode: 2, stdout: "", stderr: "authorization denied")
+                }
+            )
+            XCTFail("Expected authorization failure")
+        } catch {
+            XCTAssertEqual(
+                error as? PrivilegedLauncherError,
+                .authorizationFailed("authorization denied")
+            )
+        }
+
+        do {
+            _ = try await OSAScriptAuthorizer.run(
+                script: "timeout",
+                timeout: 7,
+                runner: { _, _, _ in throw ProcessRunnerError.timedOut }
+            )
+            XCTFail("Expected timeout")
+        } catch {
+            XCTAssertEqual(error as? PrivilegedLauncherError, .authorizationTimedOut)
+        }
+    }
+
+    private func makeLifecycleLauncher(
+        root: URL,
+        harness: PrivilegedHarness,
+        now: @escaping @Sendable () -> Date = Date.init
+    ) -> PrivilegedLauncher {
+        PrivilegedLauncher(
+            storage: Storage(rootDirectory: root),
+            binaryURL: URL(fileURLWithPath: "/Applications/Kong's App/sing-box"),
+            authorizationTimeout: 7,
+            now: now,
+            authorizer: { script, timeout in
+                try await harness.authorize(script: script, timeout: timeout)
+            },
+            configTransport: { data, runtimeDirectory, launch in
+                try await harness.send(data, runtimeDirectory: runtimeDirectory, launch: launch)
+            },
+            processInspector: { pid in
+                await harness.command(for: pid)
+            }
+        )
+    }
+
     private func temporaryDirectory() -> URL {
         FileManager.default.temporaryDirectory
             .appending(path: "kongshan-privileged-launcher-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
@@ -154,4 +383,65 @@ private enum TestError: Error, Equatable {
     case authorizationCancelled
     case missingReader
     case readerFailed
+}
+
+private enum AuthorizationResponse: Sendable {
+    case output(String)
+    case failure(PrivilegedLauncherError)
+}
+
+private actor PrivilegedHarness {
+    private var responses: [AuthorizationResponse]
+    private let commands: [Int32: String]
+    private var scripts: [String] = []
+    private var configs: [Data] = []
+
+    init(authorizationResponses: [AuthorizationResponse], commands: [Int32: String]) {
+        responses = authorizationResponses
+        self.commands = commands
+    }
+
+    func authorize(script: String, timeout: TimeInterval) throws -> String {
+        scripts.append(script)
+        guard !responses.isEmpty else {
+            throw PrivilegedLauncherError.authorizationFailed("missing fake response")
+        }
+        switch responses.removeFirst() {
+        case let .output(output): return output
+        case let .failure(error): throw error
+        }
+    }
+
+    func send(
+        _ data: Data,
+        runtimeDirectory: URL,
+        launch: @Sendable (URL) async throws -> Int32
+    ) async throws -> Int32 {
+        configs.append(data)
+        return try await launch(runtimeDirectory.appending(path: "fake-config.fifo"))
+    }
+
+    func command(for pid: Int32) -> String? {
+        commands[pid]
+    }
+
+    func sentConfigs() -> [Data] { configs }
+    func authorizationCount() -> Int { scripts.count }
+    func authorizationScripts() -> [String] { scripts }
+}
+
+private actor ProcessInvocationRecorder {
+    struct Invocation: Sendable {
+        let executable: URL
+        let arguments: [String]
+        let timeout: TimeInterval
+    }
+
+    private var invocation: Invocation?
+
+    func record(executable: URL, arguments: [String], timeout: TimeInterval) {
+        invocation = Invocation(executable: executable, arguments: arguments, timeout: timeout)
+    }
+
+    func lastInvocation() -> Invocation? { invocation }
 }
