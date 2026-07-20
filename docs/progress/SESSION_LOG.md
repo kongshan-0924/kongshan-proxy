@@ -99,3 +99,13 @@
 - 风险/注意事项：M1 仅检测异常退出并提供回调；10 秒内最多三次自动重启策略按设计留到 M4。
 - 下一步：Task 6 实现 Application Support 原子存储和订阅旧缓存兜底。
 - 下一位 Agent 如何接手：从 M1 计划 Task 6 Step 1 写 Storage/SubscriptionService 失败测试。
+
+## 2026-07-20 — M1 Task 6 原子存储与订阅缓存兜底
+
+- 已完成：先写临时目录原子替换、成功刷新、下载失败、坏 YAML 和无缓存测试并观察缺少类型的预期失败；实现 Application Support 目录、Foundation 原子写入和订阅刷新事务。
+- 修改文件：`Sources/KongshanCore/Models.swift`、`Sources/KongshanCore/Storage.swift`、`Sources/KongshanCore/SubscriptionService.swift`、`Tests/KongshanCoreTests/StorageTests.swift`、`Tests/KongshanCoreTests/SubscriptionServiceTests.swift`、M1 计划与记录。
+- 测试结果：RED 因 Storage/SubscriptionService 不存在而失败；GREEN 为定向 5/5、全量 22/22 通过，无编译警告。
+- 当前状态：Task 6 完成；新订阅仅在转换成功后覆盖缓存，任何失败都保留并使用最后成功节点。
+- 风险/注意事项：失败通知由 Task 9 AppState/UI 消费 warning 后展示；当前服务层不直接依赖通知框架。
+- 下一步：Task 7 实现 Clash API 节点选择、单测延迟与 ≤8 并发批量测速。
+- 下一位 Agent 如何接手：从 M1 计划 Task 7 Step 1 写 URLProtocol 与并发计数失败测试。
