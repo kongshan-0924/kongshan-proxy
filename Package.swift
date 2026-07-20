@@ -17,6 +17,7 @@ let package = Package(
             dependencies: [.product(name: "Yams", package: "Yams")]
         ),
         .executableTarget(name: "kongshan", dependencies: ["KongshanCore"]),
-        .testTarget(name: "KongshanCoreTests", dependencies: ["KongshanCore"])
+        .testTarget(name: "KongshanCoreTests", dependencies: ["KongshanCore"]),
+        .testTarget(name: "KongshanAppTests", dependencies: ["kongshan", "KongshanCore"])
     ]
 )

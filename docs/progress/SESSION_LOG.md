@@ -129,3 +129,13 @@
 - 风险/注意事项：自动测试使用命令记录器，未修改本机代理；真实网络服务验收留到 M1 人工步骤。
 - 下一步：Task 9 串联 AppState、内核健康检查、系统代理和菜单栏/主窗口。
 - 下一位 Agent 如何接手：从 M1 计划 Task 9 Step 1 开始，启动链严格保持 check → start → health → system proxy 顺序。
+
+## 2026-07-20 — M1 Task 9 AppState 与原生界面
+
+- 已完成：先写空节点不可修改系统代理、手动节点持久化测试并观察 `AppState` 缺失的预期失败；完成固定 check → start → health → system proxy 启动事务、反向清理、订阅/手动节点持久化、节点选择/测速、退出恢复与原生菜单栏/主窗口。
+- 修改文件：`Package.swift`、`Sources/kongshan/AppState.swift`、`KongshanApp.swift`、`MenuBarView.swift`、`MainWindowView.swift`、`Tests/KongshanAppTests/AppStateTests.swift`、M1 计划与记录。
+- 测试结果：RED 因 `AppState` 不存在而失败；GREEN 为 AppState 定向 2/2、全量 34/34 通过，`swift build` 成功无警告；debug 进程实际启动并干净退出。
+- 当前状态：Task 9 完成；空节点时开关返回可读错误且不执行系统代理命令。
+- 风险/注意事项：debug 裸可执行文件未注册 LaunchServices bundle，自动可访问性工具无法按 bundle ID 读取窗口；Task 10 将对组装后 `.app` 做实际界面冒烟。
+- 下一步：Task 10 完成 Info.plist、打包脚本、ad-hoc 签名与 M1 自动验证脚本。
+- 下一位 Agent 如何接手：从 M1 计划 Task 10 Step 1 开始，打包后先以空节点做不改网络的界面冒烟。
