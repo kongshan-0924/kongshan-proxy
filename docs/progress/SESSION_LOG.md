@@ -79,3 +79,13 @@
 - 风险/注意事项：具体 sing-box outbound 结构仍需 Task 4 生成并由官方内核 check 验证。
 - 下一步：Task 4 实现纯配置生成器、随机高位端口和内存 secret。
 - 下一位 Agent 如何接手：从 M1 计划 Task 4 Step 1 写配置 JSON 失败测试。
+
+## 2026-07-20 — M1 Task 4 纯配置生成器与运行时参数
+
+- 已完成：对照官方 1.13 文档确认 outbound/inbound/selector/urltest/route 字段；先写配置结构、五协议、自建组、脱敏快照和随机源测试并观察预期失败；实现纯 JSON 生成器。
+- 修改文件：`Sources/KongshanCore/ConfigGenerator.swift`、`Sources/KongshanCore/RuntimeSecrets.swift`、`Tests/KongshanCoreTests/ConfigGeneratorTests.swift`、M1 计划与记录。
+- 测试结果：RED 因生成器/运行时类型不存在而失败；GREEN 为定向 5/5、全量 13/13 通过，无编译警告。
+- 当前状态：Task 4 完成，可生成 mixed inbound、五协议 outbound、三个策略组、Clash API 和 final route；诊断快照不含 Clash port/secret。
+- 风险/注意事项：尚未用真实 sing-box 1.13.14 执行 `check`；Task 5 必须验证并修正任何版本字段差异。
+- 下一步：Task 5 固定官方内核、实现带超时 ProcessRunner 和 check/start/stop。
+- 下一位 Agent 如何接手：先执行官方内核下载和 SHA 校验，再从 Task 5 进程测试开始。
