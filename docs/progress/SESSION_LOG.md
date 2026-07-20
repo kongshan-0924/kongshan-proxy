@@ -249,3 +249,13 @@
 - 风险/注意事项：每次真实 TUN 启停可能触发系统管理员授权；自动测试不得触发。strict_route 的 macOS DNS语义不得夸大。
 - 下一步：M3 Task 1 实现模式模型和纯 TUN 配置。
 - 下一位 Agent 如何接手：使用 executing-plans + TDD，从 M3 计划首个未勾选步骤开始。
+
+## 2026-07-20 — M3 Task 1 模式模型与纯 TUN 配置
+
+- 已完成：先写模式 Codable、TUN 默认值、CIDR 第三处注入、回环保护、M1 兼容和 strict 双态测试并观察类型缺失；实现纯 mixed/tun inbound 分支。补充测试发现并修复 route exclude 未使用 trim 后 CIDR。
+- 修改文件：`Sources/KongshanCore/ProxyMode.swift`、`Sources/KongshanCore/ConfigGenerator.swift`、`Tests/KongshanCoreTests/TunConfigTests.swift`、M3 计划与记录。
+- 测试结果：首个 RED 因 ProxyMode/TunSettings/参数不存在；第二个 RED 捕获未 trim CIDR；GREEN 为定向 5/5、全量 64/64，strict false/true 均通过真实 1.13.14 check。
+- 当前状态：Task 1 完成；TUN 使用双栈地址、auto_route、system stack、strict 开关、CIDR route_exclude 和 auto_detect_interface。
+- 风险/注意事项：仅完成配置生成与静态检查，没有 root/TUN 网络副作用；域名无法作为静态系统路由排除。
+- 下一步：Task 2 实现安全提权命令白名单和 0600 FIFO transport。
+- 下一位 Agent 如何接手：先写单引号路径、坏 PID、大于 pipe buffer 数据与清理失败测试，不运行真实 osascript 授权。

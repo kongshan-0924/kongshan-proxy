@@ -28,19 +28,25 @@ public struct ConfigInput: Sendable {
     public let runtime: RuntimeParameters
     public let testURL: String
     public let routing: RoutingConfiguration?
+    public let proxyMode: ProxyMode
+    public let tunSettings: TunSettings
 
     public init(
         nodes: [ProxyNode],
         selectedNodeID: UUID?,
         runtime: RuntimeParameters,
         testURL: String = "http://www.gstatic.com/generate_204",
-        routing: RoutingConfiguration? = nil
+        routing: RoutingConfiguration? = nil,
+        proxyMode: ProxyMode = .systemProxy,
+        tunSettings: TunSettings = .defaults
     ) {
         self.nodes = nodes
         self.selectedNodeID = selectedNodeID
         self.runtime = runtime
         self.testURL = testURL
         self.routing = routing
+        self.proxyMode = proxyMode
+        self.tunSettings = tunSettings
     }
 }
 
@@ -108,16 +114,14 @@ public enum ConfigGenerator {
         outbounds.append(["type": "direct", "tag": "direct"])
         outbounds.append(["type": "block", "tag": "reject"])
 
-        let route = try route(for: input.routing)
+        var route = try route(for: input.routing)
+        if input.proxyMode == .tun {
+            route["auto_detect_interface"] = true
+        }
 
         let root: [String: Any] = [
             "log": ["level": "info", "timestamp": true],
-            "inbounds": [[
-                "type": "mixed",
-                "tag": "mixed-in",
-                "listen": "127.0.0.1",
-                "listen_port": Int(input.runtime.mixedPort)
-            ]],
+            "inbounds": try inbounds(for: input),
             "outbounds": outbounds,
             "route": route,
             "experimental": [
@@ -128,6 +132,33 @@ public enum ConfigGenerator {
             ]
         ]
         return try encode(root)
+    }
+
+    private static func inbounds(for input: ConfigInput) throws -> [[String: Any]] {
+        switch input.proxyMode {
+        case .systemProxy:
+            return [[
+                "type": "mixed",
+                "tag": "mixed-in",
+                "listen": "127.0.0.1",
+                "listen_port": Int(input.runtime.mixedPort)
+            ]]
+        case .tun:
+            var inbound: [String: Any] = [
+                "type": "tun",
+                "tag": "tun-in",
+                "interface_name": input.tunSettings.interfaceName,
+                "address": input.tunSettings.addresses,
+                "mtu": input.tunSettings.mtu,
+                "auto_route": true,
+                "strict_route": input.tunSettings.strictRoute,
+                "stack": "system"
+            ]
+            if let routing = input.routing {
+                inbound["route_exclude_address"] = try routing.settings.validated().bypassCIDRs
+            }
+            return [inbound]
+        }
     }
 
     private static func route(for routing: RoutingConfiguration?) throws -> [String: Any] {
