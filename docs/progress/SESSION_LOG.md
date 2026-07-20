@@ -119,3 +119,13 @@
 - 风险/注意事项：单测使用 URLProtocol 仿真 Clash API；真实内核联调留到 AppState/UI 集成阶段。
 - 下一步：Task 8 实现系统代理快照、失败回滚和启动自愈恢复。
 - 下一位 Agent 如何接手：从 M1 计划 Task 8 Step 1 写纯解析/命令生成测试，自动测试不得修改本机代理。
+
+## 2026-07-20 — M1 Task 8 系统代理快照、自愈与恢复
+
+- 已完成：先写启用服务解析、HTTP/HTTPS/SOCKS/bypass 快照、精确恢复、启用失败回滚和启动自愈测试并观察缺少类型的预期失败；实现原子恢复快照与带超时/错误的 `networksetup` 事务。
+- 修改文件：`Sources/KongshanCore/SystemProxyManager.swift`、`Tests/KongshanCoreTests/SystemProxyManagerTests.swift`、M1 计划与记录。
+- 测试结果：RED 因 `SystemProxyCommands`/`SystemProxyManager` 不存在而失败；GREEN 为定向 5/5、全量 32/32 通过，无编译警告。
+- 当前状态：Task 8 完成；启用前快照所有已启用服务，任一设置失败立即回滚，只有全部恢复成功才删除快照。
+- 风险/注意事项：自动测试使用命令记录器，未修改本机代理；真实网络服务验收留到 M1 人工步骤。
+- 下一步：Task 9 串联 AppState、内核健康检查、系统代理和菜单栏/主窗口。
+- 下一位 Agent 如何接手：从 M1 计划 Task 9 Step 1 开始，启动链严格保持 check → start → health → system proxy 顺序。

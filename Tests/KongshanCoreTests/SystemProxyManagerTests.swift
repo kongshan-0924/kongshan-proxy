@@ -1,0 +1,217 @@
+import Foundation
+import XCTest
+@testable import KongshanCore
+
+final class SystemProxyManagerTests: XCTestCase {
+    func testEnabledServicesSkipsHeaderAndDisabledEntries() {
+        let output = """
+        An asterisk (*) denotes that a network service is disabled.
+        Wi-Fi
+        *USB 10/100/1000 LAN
+        Thunderbolt Bridge
+        """
+
+        XCTAssertEqual(
+            SystemProxyCommands.enabledServices(from: output),
+            ["Wi-Fi", "Thunderbolt Bridge"]
+        )
+    }
+
+    func testParsesProxyStateAndBuildsExactRestoreCommands() throws {
+        let http = try SystemProxyCommands.proxyState(from: """
+        Enabled: Yes
+        Server: old-http.local
+        Port: 8080
+        Authenticated Proxy Enabled: 0
+        """)
+        let https = try SystemProxyCommands.proxyState(from: """
+        Enabled: No
+        Server: old-https.local
+        Port: 4443
+        Authenticated Proxy Enabled: 0
+        """)
+        let socks = try SystemProxyCommands.proxyState(from: """
+        Enabled: Yes
+        Server: old-socks.local
+        Port: 1081
+        Authenticated Proxy Enabled: 0
+        """)
+        let snapshot = ProxyRecoverySnapshot(services: [
+            NetworkServiceProxySnapshot(
+                name: "Wi-Fi",
+                http: http,
+                https: https,
+                socks: socks,
+                bypassDomains: ["localhost", "*.local", "10.0.0.0/8"]
+            ),
+            NetworkServiceProxySnapshot(
+                name: "Thunderbolt Bridge",
+                http: .init(enabled: false, server: "", port: 0),
+                https: .init(enabled: false, server: "", port: 0),
+                socks: .init(enabled: false, server: "", port: 0),
+                bypassDomains: []
+            )
+        ])
+
+        XCTAssertEqual(SystemProxyCommands.restore(snapshot: snapshot).map(\.arguments), [
+            ["-setwebproxy", "Wi-Fi", "old-http.local", "8080"],
+            ["-setwebproxystate", "Wi-Fi", "on"],
+            ["-setsecurewebproxy", "Wi-Fi", "old-https.local", "4443"],
+            ["-setsecurewebproxystate", "Wi-Fi", "off"],
+            ["-setsocksfirewallproxy", "Wi-Fi", "old-socks.local", "1081"],
+            ["-setsocksfirewallproxystate", "Wi-Fi", "on"],
+            ["-setproxybypassdomains", "Wi-Fi", "localhost", "*.local", "10.0.0.0/8"],
+            ["-setwebproxystate", "Thunderbolt Bridge", "off"],
+            ["-setsecurewebproxystate", "Thunderbolt Bridge", "off"],
+            ["-setsocksfirewallproxystate", "Thunderbolt Bridge", "off"],
+            ["-setproxybypassdomains", "Thunderbolt Bridge", "Empty"]
+        ])
+    }
+
+    func testEnableWritesRecoverySnapshotBeforeMutatingAndRestoreDeletesIt() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recoveryURL = root.appending(path: "proxy-recovery.json")
+        let runner = NetworkSetupRecorder(recoveryURL: recoveryURL)
+        let manager = SystemProxyManager(
+            storage: Storage(rootDirectory: root),
+            runner: runner.run(arguments:timeout:)
+        )
+
+        try await manager.enable(port: 32_123)
+
+        let snapshotExistedBeforeFirstMutation = await runner.snapshotExistedBeforeFirstMutation
+        let mutationArguments = await runner.mutationArguments
+        XCTAssertTrue(snapshotExistedBeforeFirstMutation)
+        XCTAssertEqual(mutationArguments.prefix(6), [
+            ["-setwebproxy", "Wi-Fi", "127.0.0.1", "32123"],
+            ["-setwebproxystate", "Wi-Fi", "on"],
+            ["-setsecurewebproxy", "Wi-Fi", "127.0.0.1", "32123"],
+            ["-setsecurewebproxystate", "Wi-Fi", "on"],
+            ["-setsocksfirewallproxy", "Wi-Fi", "127.0.0.1", "32123"],
+            ["-setsocksfirewallproxystate", "Wi-Fi", "on"]
+        ])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: recoveryURL.path))
+
+        try await manager.restore()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: recoveryURL.path))
+        let restoredArguments = await runner.arguments
+        XCTAssertTrue(restoredArguments.contains(["-setwebproxy", "Wi-Fi", "old.local", "8080"]))
+        XCTAssertTrue(restoredArguments.contains(["-setwebproxystate", "Wi-Fi", "off"]))
+        XCTAssertTrue(restoredArguments.contains(["-setproxybypassdomains", "Wi-Fi", "localhost", "*.local"]))
+    }
+
+    func testEnableFailureRollsBackImmediately() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recoveryURL = root.appending(path: "proxy-recovery.json")
+        let runner = NetworkSetupRecorder(
+            recoveryURL: recoveryURL,
+            failOnceFor: ["-setsecurewebproxystate", "Wi-Fi", "on"]
+        )
+        let manager = SystemProxyManager(
+            storage: Storage(rootDirectory: root),
+            runner: runner.run(arguments:timeout:)
+        )
+
+        do {
+            try await manager.enable(port: 32_123)
+            XCTFail("Expected enable failure")
+        } catch {
+            XCTAssertEqual(error as? SystemProxyError, .commandFailed(exitCode: 7, message: "simulated"))
+        }
+
+        let arguments = await runner.arguments
+        XCTAssertTrue(arguments.contains(["-setwebproxystate", "Wi-Fi", "off"]))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: recoveryURL.path))
+    }
+
+    func testRecoverKeepsSnapshotUntilEveryRestoreCommandSucceeds() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        try await storage.prepare()
+        let snapshot = ProxyRecoverySnapshot(services: [
+            NetworkServiceProxySnapshot(
+                name: "Wi-Fi",
+                http: .init(enabled: false, server: "old.local", port: 8080),
+                https: .init(enabled: false, server: "", port: 0),
+                socks: .init(enabled: false, server: "", port: 0),
+                bypassDomains: []
+            )
+        ])
+        let recoveryURL = root.appending(path: "proxy-recovery.json")
+        try await storage.writeAtomically(JSONEncoder().encode(snapshot), to: recoveryURL)
+        let runner = NetworkSetupRecorder(
+            recoveryURL: recoveryURL,
+            failOnceFor: ["-setwebproxystate", "Wi-Fi", "off"]
+        )
+        let manager = SystemProxyManager(storage: storage, runner: runner.run(arguments:timeout:))
+
+        do {
+            try await manager.recoverIfNeeded()
+            XCTFail("Expected restore failure")
+        } catch {
+            XCTAssertEqual(error as? SystemProxyError, .commandFailed(exitCode: 7, message: "simulated"))
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: recoveryURL.path))
+
+        try await manager.recoverIfNeeded()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: recoveryURL.path))
+    }
+
+    private func temporaryDirectory() -> URL {
+        FileManager.default.temporaryDirectory
+            .appending(path: "kongshan-system-proxy-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+    }
+}
+
+private actor NetworkSetupRecorder {
+    private let recoveryURL: URL
+    private var failOnceFor: [String]?
+    private(set) var arguments: [[String]] = []
+    private(set) var mutationArguments: [[String]] = []
+    private(set) var snapshotExistedBeforeFirstMutation = false
+
+    init(recoveryURL: URL, failOnceFor: [String]? = nil) {
+        self.recoveryURL = recoveryURL
+        self.failOnceFor = failOnceFor
+    }
+
+    func run(arguments: [String], timeout: TimeInterval) async throws -> ProcessResult {
+        self.arguments.append(arguments)
+        if arguments.first?.hasPrefix("-set") == true {
+            if mutationArguments.isEmpty {
+                snapshotExistedBeforeFirstMutation = FileManager.default.fileExists(atPath: recoveryURL.path)
+            }
+            mutationArguments.append(arguments)
+        }
+        if failOnceFor == arguments {
+            failOnceFor = nil
+            return ProcessResult(exitCode: 7, stdout: "", stderr: "simulated")
+        }
+        return ProcessResult(exitCode: 0, stdout: output(for: arguments), stderr: "")
+    }
+
+    private func output(for arguments: [String]) -> String {
+        switch arguments.first {
+        case "-listallnetworkservices":
+            """
+            An asterisk (*) denotes that a network service is disabled.
+            Wi-Fi
+            *Disabled LAN
+            """
+        case "-getwebproxy":
+            "Enabled: No\nServer: old.local\nPort: 8080\nAuthenticated Proxy Enabled: 0\n"
+        case "-getsecurewebproxy":
+            "Enabled: No\nServer: \nPort: 0\nAuthenticated Proxy Enabled: 0\n"
+        case "-getsocksfirewallproxy":
+            "Enabled: No\nServer: \nPort: 0\nAuthenticated Proxy Enabled: 0\n"
+        case "-getproxybypassdomains":
+            "localhost\n*.local\n"
+        default:
+            ""
+        }
+    }
+}
