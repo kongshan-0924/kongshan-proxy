@@ -1,5 +1,5 @@
 # 下一步
 
-1. 执行 M2 Task 7：新增 `verify_m2.sh`，完成全量测试、release App、官方规则集和六级 route 自动验收。
-2. 固化 `docs/acceptance/M2.md`，明确真实网络、进程命中、双处 bypass 与热重启人工项。
-3. M1 真实网络人工验收仍按 `docs/acceptance/M1.md` 保留。
+1. 为 M3 TUN 编写权限边界、DNS、路由排除与无管理员权限回退的分步实施计划。
+2. 按原始需求实现 TUN 启停、第三处 bypass 注入、DNS 防泄漏与自动验收。
+3. M1/M2 真实网络人工验收分别按 `docs/acceptance/M1.md`、`docs/acceptance/M2.md` 保留。

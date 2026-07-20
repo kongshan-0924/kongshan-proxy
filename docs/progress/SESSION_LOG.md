@@ -229,3 +229,13 @@
 - 风险/注意事项：本机状态栏管理器使 Computer Use 获取主窗口超时，未完成自动视觉点击；该限制与 M1 相同，需在人工验收中点击“打开 kongshan”核对布局。
 - 下一步：Task 7 编写 M2 自动验证脚本、完整运行并记录产物与人工边界。
 - 下一位 Agent 如何接手：从 M2 计划 Task 7 Step 1 开始，先让缺失脚本测试失败，再实现 fixture 与官方 `.srs` 冒烟。
+
+## 2026-07-20 — M2 Task 7 自动验收与人工边界
+
+- 已完成：先运行缺失 `verify_m2.sh` 并观察预期失败；实现全量测试、release 打包、签名、三个官方 `.srs` 解析和六级 route fixture 的一键验收，并固化 M2 验收记录。
+- 修改文件：`scripts/verify_m2.sh`、`docs/acceptance/M2.md`、M2 计划与全部项目记录。
+- 测试结果：`M2 automated verification passed`；59/59 测试、arm64、codesign、plist、sing-box 1.13.14、三个实时官方规则集和完整 route `check` 全部通过；热重启本轮 0.216799667 秒。
+- 当前状态：M2 自动交付完成，产物为 `dist/kongshan.app`（约 50 MB）。
+- 风险/注意事项：真实中国直连、广告拒绝、进程规则、route/system bypass 双处命中和真实浏览流量中断仍待人工；TUN 第三处 bypass 属于 M3。
+- 下一步：为 M3 TUN 编写可执行计划，重点先解决提权与恢复边界。
+- 下一位 Agent 如何接手：先读 `docs/acceptance/M2.md` 与 M2 计划，再从 M3 计划/设计门禁开始；不得直接猜测 macOS TUN 权限实现。
