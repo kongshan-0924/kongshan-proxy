@@ -12,7 +12,7 @@ Bundle Identifier：`com.kaysen.kongshan`
 
 本设计严格以 [`docs/requirements/original-prompt.md`](../../requirements/original-prompt.md) 为功能和验收权威，不删减 M1 至 M4 的明确需求。应用是 sing-box 的原生 SwiftUI GUI 外壳，不实现代理协议、加密算法或网络内核。
 
-截至 2026-07-20，sing-box 官方最新 1.13 stable 为 `1.13.12`，M1 固定并校验官方 `darwin-arm64` 产物；不使用 1.14 alpha。版本依据：[官方 Releases](https://github.com/SagerNet/sing-box/releases/tag/v1.13.12)。
+截至 2026-07-20，sing-box 官方最新 1.13 stable 为 `1.13.14`，M1 固定并校验官方 `darwin-arm64` 产物；不使用 1.14 alpha。版本依据：[官方 Releases](https://github.com/SagerNet/sing-box/releases/tag/v1.13.14)，下载包 SHA-256 为 `73e8967b0fc08e17bce4263ca56ebc394822401a16497a1c4e02316c888202ab`。
 
 ## 2. 工程路径比较与结论
 
