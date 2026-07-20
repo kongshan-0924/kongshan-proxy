@@ -27,6 +27,7 @@ final class AppState {
     var warnings: [String] = []
     var isReady = false
     var routingSettings = RoutingSettings.defaults
+    private(set) var isApplyingRouting = false
 
     @ObservationIgnored private let storage: Storage
     @ObservationIgnored private let subscriptionService: SubscriptionService
@@ -38,7 +39,6 @@ final class AppState {
     @ObservationIgnored private var clashAPIClient: ClashAPIClient?
     @ObservationIgnored private var runtime: RuntimeParameters?
     @ObservationIgnored private var currentConfig: Data?
-    @ObservationIgnored private var routingUpdateInProgress = false
 
     init(
         storage: Storage = Storage(),
@@ -65,7 +65,7 @@ final class AppState {
     }
 
     var isBusy: Bool {
-        status == .starting || status == .stopping || routingUpdateInProgress
+        status == .starting || status == .stopping || isApplyingRouting
     }
 
     var isOn: Bool {
@@ -319,8 +319,8 @@ final class AppState {
 
     func applyRoutingSettings(_ requestedSettings: RoutingSettings) async {
         guard !isBusy else { return }
-        routingUpdateInProgress = true
-        defer { routingUpdateInProgress = false }
+        isApplyingRouting = true
+        defer { isApplyingRouting = false }
 
         do {
             let settings = try requestedSettings.validated()

@@ -18,6 +18,8 @@ struct MainWindowView: View {
                 DashboardView()
             case .nodes:
                 NodesView()
+            case .rules:
+                RoutingView()
             case .settings:
                 SettingsView()
             }
@@ -28,6 +30,7 @@ struct MainWindowView: View {
 private enum SidebarPage: String, CaseIterable, Identifiable {
     case dashboard
     case nodes
+    case rules
     case settings
 
     var id: Self { self }
@@ -36,6 +39,7 @@ private enum SidebarPage: String, CaseIterable, Identifiable {
         switch self {
         case .dashboard: "Dashboard"
         case .nodes: "节点"
+        case .rules: "规则"
         case .settings: "设置"
         }
     }
@@ -44,6 +48,7 @@ private enum SidebarPage: String, CaseIterable, Identifiable {
         switch self {
         case .dashboard: "gauge.with.dots.needle.67percent"
         case .nodes: "point.3.connected.trianglepath.dotted"
+        case .rules: "list.bullet.rectangle.portrait"
         case .settings: "gearshape"
         }
     }
@@ -276,9 +281,10 @@ private struct SettingsView: View {
                 Button("保存设置") { Task { await state.saveSettings() } }
             }
 
-            Section("M1 说明") {
+            Section("当前能力") {
                 LabeledContent("代理模式", value: "系统代理")
-                Text("TUN、分流规则、Dashboard 流量曲线和自动订阅更新将在后续里程碑提供。")
+                LabeledContent("分流", value: "自定义规则 + 中国直连")
+                Text("TUN、Dashboard 流量曲线和自动订阅更新将在后续里程碑提供。")
                     .foregroundStyle(.secondary)
             }
         }

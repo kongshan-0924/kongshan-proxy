@@ -37,6 +37,7 @@ struct MenuBarView: View {
         }
 
         Text("模式：系统代理")
+        Text("分流：\(state.routingSettings.customRules.filter(\.enabled).count) 条自定义规则 · 广告拦截\(state.routingSettings.blockAds ? "开" : "关")")
 
         Button("打开 kongshan") {
             openWindow(id: "main")

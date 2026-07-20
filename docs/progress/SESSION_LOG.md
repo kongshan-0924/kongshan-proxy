@@ -219,3 +219,13 @@
 - 风险/注意事项：失败恢复链已自动覆盖，但 system proxy 在测试中仍是记录器；只有旧内存配置也无法恢复时才恢复系统代理并进入 failed。
 - 下一步：Task 6 实现原生规则编辑器、拖拽排序、两类 bypass 与广告开关。
 - 下一位 Agent 如何接手：从 M2 计划 Task 6 Step 1 开始，View 只编辑副本并调用 `applyRoutingSettings`，不得直接生成配置。
+
+## 2026-07-20 — M2 Task 6 原生规则编辑器与 bypass 界面
+
+- 已完成：新增“规则”侧栏和原生编辑页，支持五类匹配、三种动作、策略组、启停/删除/拖拽排序、域名与 CIDR bypass、广告开关、恢复默认、放弃与统一应用；菜单栏展示分流摘要。
+- 修改文件：`Sources/kongshan/RoutingView.swift`、`Sources/kongshan/MainWindowView.swift`、`Sources/kongshan/MenuBarView.swift`、`Sources/kongshan/AppState.swift`、M2 计划与记录。
+- 测试结果：`swift build`、release App 组装、codesign 严格校验和全量 59/59 测试通过；空节点进程约 15.5 MB、主线程正常空闲，无代理恢复快照。
+- 当前状态：Task 6 完成；View 仅维护编辑副本并调用 AppState 事务，不直接生成配置或操作网络。
+- 风险/注意事项：本机状态栏管理器使 Computer Use 获取主窗口超时，未完成自动视觉点击；该限制与 M1 相同，需在人工验收中点击“打开 kongshan”核对布局。
+- 下一步：Task 7 编写 M2 自动验证脚本、完整运行并记录产物与人工边界。
+- 下一位 Agent 如何接手：从 M2 计划 Task 7 Step 1 开始，先让缺失脚本测试失败，再实现 fixture 与官方 `.srs` 冒烟。
