@@ -30,6 +30,7 @@ public struct ConfigInput: Sendable {
     public let routing: RoutingConfiguration?
     public let proxyMode: ProxyMode
     public let tunSettings: TunSettings
+    public let dnsSettings: DNSSettings
 
     public init(
         nodes: [ProxyNode],
@@ -38,7 +39,8 @@ public struct ConfigInput: Sendable {
         testURL: String = "http://www.gstatic.com/generate_204",
         routing: RoutingConfiguration? = nil,
         proxyMode: ProxyMode = .systemProxy,
-        tunSettings: TunSettings = .defaults
+        tunSettings: TunSettings = .defaults,
+        dnsSettings: DNSSettings = .defaults
     ) {
         self.nodes = nodes
         self.selectedNodeID = selectedNodeID
@@ -47,6 +49,7 @@ public struct ConfigInput: Sendable {
         self.routing = routing
         self.proxyMode = proxyMode
         self.tunSettings = tunSettings
+        self.dnsSettings = dnsSettings
     }
 }
 
@@ -115,12 +118,20 @@ public enum ConfigGenerator {
         outbounds.append(["type": "block", "tag": "reject"])
 
         var route = try route(for: input.routing)
+        route["default_domain_resolver"] = "dns-cn"
         if input.proxyMode == .tun {
             route["auto_detect_interface"] = true
+            var rules = route["rules"] as? [[String: Any]] ?? []
+            rules.insert(contentsOf: [
+                ["action": "sniff"],
+                ["protocol": "dns", "action": "hijack-dns"]
+            ], at: 0)
+            route["rules"] = rules
         }
 
         let root: [String: Any] = [
             "log": ["level": "info", "timestamp": true],
+            "dns": try dns(for: input),
             "inbounds": try inbounds(for: input),
             "outbounds": outbounds,
             "route": route,
@@ -132,6 +143,76 @@ public enum ConfigGenerator {
             ]
         ]
         return try encode(root)
+    }
+
+    private static func dns(for input: ConfigInput) throws -> [String: Any] {
+        let endpoints = try input.dnsSettings.endpoints()
+        var servers: [[String: Any]] = []
+
+        if !endpoints.domestic.hostIsIPAddress {
+            servers.append([
+                "type": "udp",
+                "tag": "dns-bootstrap",
+                "server": "223.5.5.5",
+                "server_port": 53
+            ])
+        }
+
+        var domestic = dohServer(
+            endpoint: endpoints.domestic,
+            tag: "dns-cn",
+            detour: nil
+        )
+        if !endpoints.domestic.hostIsIPAddress {
+            domestic["domain_resolver"] = "dns-bootstrap"
+        }
+        servers.append(domestic)
+
+        var remote = dohServer(
+            endpoint: endpoints.remote,
+            tag: "dns-remote",
+            detour: "自动选择"
+        )
+        if !endpoints.remote.hostIsIPAddress {
+            remote["domain_resolver"] = "dns-cn"
+        }
+        servers.append(remote)
+
+        var rules: [[String: Any]] = []
+        if input.routing != nil {
+            rules.append([
+                "rule_set": "geosite-cn",
+                "action": "route",
+                "server": "dns-cn"
+            ])
+        }
+        return [
+            "servers": servers,
+            "rules": rules,
+            "final": "dns-remote"
+        ]
+    }
+
+    private static func dohServer(
+        endpoint: DoHEndpoint,
+        tag: String,
+        detour: String?
+    ) -> [String: Any] {
+        var server: [String: Any] = [
+            "type": "https",
+            "tag": tag,
+            "server": endpoint.host,
+            "path": endpoint.path,
+            "tls": [
+                "enabled": true,
+                "server_name": endpoint.host
+            ]
+        ]
+        if let detour { server["detour"] = detour }
+        if let port = endpoint.port, port != 443 {
+            server["server_port"] = port
+        }
+        return server
     }
 
     private static func inbounds(for input: ConfigInput) throws -> [[String: Any]] {

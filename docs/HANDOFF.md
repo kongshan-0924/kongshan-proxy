@@ -1,9 +1,9 @@
 # 项目交接
 
-- 已完成：M3 自动验收与提交；对照原始需求和官方 sing-box/Apple 接口完成 M4 的 9-Task 可执行计划，核验 DNS 无环 bootstrap、Clash 推送字段、事件式崩溃监控及系统服务边界。
-- 修改文件：新增 `docs/superpowers/plans/2026-07-20-kongshan-m4.md`，更新全部项目记录；M3 验收提交为 `d0049b3`。
-- 测试结果：M3 `verify_m3.sh` 为 88/88；规划阶段另用打包 sing-box 1.13.14 实测新格式双 DoH + `default_domain_resolver` + DNS hijack fixture，exit 0。
-- 当前状态：M3 自动交付完成，M4 计划就绪，产品代码尚未进入 M4 修改；工作区应以本次计划提交为干净基线。
-- 风险/注意事项：远程 DoH 不可兼作代理节点 bootstrap，否则可能形成解析环；system 模式不等于操作系统全局 DNS 接管。登录项批准、通知权限和 root TUN 进程事件仍需保留人工边界。
-- 下一步：使用 executing-plans + TDD 从 M4 Task 1 开始实现 DNS 值类型与纯配置生成。
-- 接手方式：先读本文件、M4 计划与最新 SESSION_LOG；首个 RED 应为 `DNSSettings`/ConfigInput DNS 参数缺失，自动测试不得改系统网络。
+- 已完成：M4 Task 1；加入可校验 DNSSettings、默认/自定义双 DoH、CN DNS rule-set、无环 bootstrap、route default resolver，以及仅 TUN 的 sniff/DNS hijack。
+- 修改文件：`Sources/KongshanCore/DNSSettings.swift`、`ConfigGenerator.swift`、`Tests/KongshanCoreTests/DNSConfigTests.swift`、M4 计划及全部记录。
+- 测试结果：首个 RED 为 DNS API 缺失；运行期 RED 捕获显式 direct detour 被 1.13.14 拒绝；修复后 DNS 6/6、全量 94/94、`swift build` 与 `git diff --check` 通过。
+- 当前状态：Task 1 完成；system/TUN、默认/域名自定义 DoH 四份配置 check 通过，另有真实启动并访问 Clash `/version` 的运行期测试。
+- 风险/注意事项：新格式 domestic DoH 省略 detour 才表示直连，不能显式 detour 到空 direct outbound；system 模式仍不代表操作系统全局 DNS 被接管。
+- 下一步：M4 Task 2 持久化 DNS，接入 system/TUN 在线事务与高级设置 UI。
+- 接手方式：从 M4 计划 Task 2 Step 1 写 AppState RED；每条生成路径都必须传当前 `dnsSettings`，失败必须保留旧设置。

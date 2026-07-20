@@ -329,3 +329,13 @@
 - 风险/注意事项：system 模式不能宣称全局 DNS 接管；remote DoH 经代理时必须用独立 direct DNS bootstrap 代理节点；所有 WebSocket 必须随页面消失取消。
 - 下一步：先写 DNSConfigTests RED，再实现默认/自定义 DNS、TUN hijack 和四份真实配置 check。
 - 下一位 Agent 如何接手：使用 executing-plans + TDD，从 M4 计划 Task 1 Step 1 开始；每个小节继续同步记录并提交。
+
+## 2026-07-20 — M4 Task 1 DNS 值类型与纯配置
+
+- 已完成：先写默认/非法 DoH、CN DNS、custom domain bootstrap、TUN hijack 与真实内核测试并观察 API 缺失；实现双 DoH 纯配置。全量回归进一步发现并修复 `check` 不报告、运行期才拒绝的显式 direct detour。
+- 修改文件：`Sources/KongshanCore/DNSSettings.swift`、`Sources/KongshanCore/ConfigGenerator.swift`、`Tests/KongshanCoreTests/DNSConfigTests.swift`、M4 计划与全部项目记录。
+- 测试结果：首个 RED 因 `DNSSettings`/参数缺失；运行期 RED 日志为 `detour to an empty direct outbound makes no sense`；GREEN 为 DNS 6/6、全量 94/94，debug build 与 diff check 通过。
+- 当前状态：默认 CN DoH 直连、remote DoH 经自动选择，代理节点用 CN DoH bootstrap；自定义域名 DoH 有有限直连 bootstrap；TUN 捕获 DNS，system 不伪称全局捕获。
+- 风险/注意事项：仅 `sing-box check` 不足以发现所有服务初始化错误，已新增真实启动/Clash health 回归；DNS 泄漏仍需真实网络人工验收。
+- 下一步：Task 2 实现 DNS settings 旧文件兼容、离线/在线事务、失败回滚和 UI。
+- 下一位 Agent 如何接手：从 M4 计划 Task 2 Step 1 开始，扩展 AppState fixture，严禁测试调用真实 networksetup 或 TUN 授权。
