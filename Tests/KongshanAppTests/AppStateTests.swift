@@ -243,6 +243,7 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(state.preferredMode, .systemProxy)
         XCTAssertNil(state.activeMode)
         XCTAssertEqual(state.tunSettings, .defaults)
+        XCTAssertEqual(state.subscriptionUpdateSettings, .defaults)
         await state.switchMode(to: .tun)
         XCTAssertEqual(state.preferredMode, .tun)
         XCTAssertEqual(state.status, .off)
@@ -253,6 +254,10 @@ final class AppStateTests: XCTestCase {
         )
         XCTAssertEqual(persisted["preferredMode"] as? String, "tun")
         XCTAssertEqual((persisted["tunSettings"] as? [String: Any])?["strictRoute"] as? Bool, false)
+        XCTAssertEqual(
+            (persisted["subscriptionUpdateSettings"] as? [String: Any])?["intervalHours"] as? Int,
+            24
+        )
 
         let reloaded = AppState(
             storage: storage,
@@ -266,6 +271,7 @@ final class AppStateTests: XCTestCase {
         await reloaded.initialize()
         XCTAssertEqual(reloaded.preferredMode, .tun)
         XCTAssertEqual(reloaded.tunSettings, .defaults)
+        XCTAssertEqual(reloaded.subscriptionUpdateSettings, .defaults)
     }
 
     func testSwitchSystemProxyToTUNFullyStopsOldTakeoverFirst() async throws {
@@ -836,6 +842,159 @@ final class AppStateTests: XCTestCase {
         await fixture.state.stop()
     }
 
+    func testSubscriptionUpdateSettingsPersistWhileOffline() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        let state = AppState(
+            storage: storage,
+            systemProxyManager: SystemProxyManager(storage: storage) { _, _ in
+                ProcessResult(exitCode: 0, stdout: "", stderr: "")
+            },
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            automaticallyInitialize: false
+        )
+        let settings = SubscriptionUpdateSettings(enabled: false, intervalHours: 12)
+
+        await state.setSubscriptionUpdateSettings(settings)
+
+        XCTAssertEqual(state.subscriptionUpdateSettings, settings)
+        XCTAssertNil(state.nextSubscriptionUpdateAt)
+        let persisted = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: root.appending(path: "settings.json")))
+                as? [String: Any]
+        )
+        XCTAssertEqual(
+            (persisted["subscriptionUpdateSettings"] as? [String: Any])?["enabled"] as? Bool,
+            false
+        )
+        XCTAssertEqual(
+            (persisted["subscriptionUpdateSettings"] as? [String: Any])?["intervalHours"] as? Int,
+            12
+        )
+    }
+
+    func testOverdueSubscriptionRefreshUpdatesNodesAndReschedulesOneShot() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        let now = Date(timeIntervalSince1970: 20_000)
+        let scheduler = SubscriptionUpdateScheduler(
+            now: { now },
+            sleeper: { _ in try await Task.sleep(for: .seconds(60)) }
+        )
+        let notifications = FakeNotificationSender()
+        let updatedYAML = Self.updatedSubscriptionYAML
+        let source = SubscriptionSource(
+            name: "airport",
+            url: URL(string: "https://example.com/sub.yaml")!,
+            lastUpdatedAt: now.addingTimeInterval(-7_200)
+        )
+        let state = AppState(
+            storage: storage,
+            subscriptionService: SubscriptionService(storage: storage) { _ in
+                HTTPDownload(data: Data(updatedYAML.utf8), statusCode: 200)
+            },
+            systemProxyManager: SystemProxyManager(storage: storage) { _, _ in
+                ProcessResult(exitCode: 0, stdout: "", stderr: "")
+            },
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            subscriptionUpdateScheduler: scheduler,
+            notificationSender: notifications,
+            now: { now },
+            automaticallyInitialize: false
+        )
+        state.subscriptions = [source]
+        state.nodes = [ProxyNode(
+            sourceID: source.id,
+            name: "old",
+            protocolType: .shadowsocks,
+            server: "1.1.1.1",
+            port: 443,
+            password: "old",
+            method: "aes-128-gcm"
+        )]
+
+        await state.setSubscriptionUpdateSettings(
+            SubscriptionUpdateSettings(enabled: true, intervalHours: 1)
+        )
+        try await waitUntil {
+            state.nodes.map(\.name) == ["updated"]
+                && state.subscriptions.first?.lastUpdatedAt == now
+                && state.nextSubscriptionUpdateAt == now.addingTimeInterval(3_600)
+        }
+
+        let notificationCount = await notifications.count
+        XCTAssertEqual(notificationCount, 0)
+        await scheduler.cancel()
+    }
+
+    func testScheduledCacheFallbackKeepsNodesAndNotificationDenialOnlyWarns() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        try await storage.prepare()
+        let now = Date(timeIntervalSince1970: 20_000)
+        let lastSuccess = now.addingTimeInterval(-7_200)
+        let scheduler = SubscriptionUpdateScheduler(now: { now })
+        let notifications = FakeNotificationSender(error: FakeNotificationError.denied)
+        let source = SubscriptionSource(
+            name: "airport",
+            url: URL(string: "https://example.com/sub.yaml")!,
+            lastUpdatedAt: lastSuccess
+        )
+        try Data(Self.cachedSubscriptionYAML.utf8).write(to: storage.cacheURL(for: source))
+        let oldNode = ProxyNode(
+            sourceID: source.id,
+            name: "cached",
+            protocolType: .shadowsocks,
+            server: "1.1.1.1",
+            port: 443,
+            password: "cached",
+            method: "aes-128-gcm"
+        )
+        let state = AppState(
+            storage: storage,
+            subscriptionService: SubscriptionService(storage: storage) { _ in
+                HTTPDownload(data: Data(), statusCode: 503)
+            },
+            systemProxyManager: SystemProxyManager(storage: storage) { _, _ in
+                ProcessResult(exitCode: 0, stdout: "", stderr: "")
+            },
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            subscriptionUpdateScheduler: scheduler,
+            notificationSender: notifications,
+            now: { now },
+            automaticallyInitialize: false
+        )
+        state.subscriptions = [source]
+        state.nodes = [oldNode]
+
+        await state.setSubscriptionUpdateSettings(
+            SubscriptionUpdateSettings(enabled: true, intervalHours: 1)
+        )
+        try await waitUntil {
+            state.warnings.contains { $0.contains("通知未发送") }
+        }
+
+        XCTAssertEqual(state.nodes, [oldNode])
+        XCTAssertEqual(state.subscriptions.first?.lastUpdatedAt, lastSuccess)
+        XCTAssertTrue(state.warnings.contains { $0.contains("继续使用缓存") })
+        let notificationCount = await notifications.count
+        XCTAssertEqual(notificationCount, 1)
+        await scheduler.cancel()
+    }
+
+    private static let updatedSubscriptionYAML = """
+    proxies:
+      - {name: updated, type: ss, server: 2.2.2.2, port: 443, cipher: aes-128-gcm, password: updated}
+    """
+
+    private static let cachedSubscriptionYAML = """
+    proxies:
+      - {name: cached, type: ss, server: 1.1.1.1, port: 443, cipher: aes-128-gcm, password: cached}
+    """
+
     private func makeRunningFixture(
         failOnceFor: [String]? = nil,
         healthFailures: Set<Int> = []
@@ -1392,5 +1551,23 @@ private actor HealthGate {
 
     private enum HealthError: Error {
         case simulated
+    }
+}
+
+private enum FakeNotificationError: Error {
+    case denied
+}
+
+private actor FakeNotificationSender: NotificationSending {
+    private let error: Error?
+    private(set) var count = 0
+
+    init(error: Error? = nil) {
+        self.error = error
+    }
+
+    func send(title: String, body: String) async throws {
+        count += 1
+        if let error { throw error }
     }
 }

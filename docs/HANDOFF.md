@@ -1,9 +1,9 @@
 # 项目交接
 
-- 已完成：M4 Task 5；实现普通/TUN 有界磁盘日志、2000 行实时缓冲、日志页、等级切换与已知文件安全导出。
-- 修改文件：新增 `KernelLogStore.swift`、`LogsView.swift`、`KernelLogStoreTests.swift`；修改 SingBoxProcess、PrivilegedLauncher、AppState、MainWindowView 与相关测试/记录。
-- 测试结果：多轮 RED 证明 store/process/AppState API 缺失；GREEN 为全量 119/119，debug/release、arm64、codesign strict、diff check 与无节点启动通过。
-- 当前状态：实时 `/logs` 仅页面可见+代理开启时存在；普通日志 actor 串行写，TUN 日志授权前以 0600 预创建并用写事件触发轮转，不使用 Timer/轮询。
-- 风险/注意事项：未用真实节点或真实 root TUN 验证日志页/导出；自动测试全部使用 fake 边界，没有请求管理员权限。
-- 下一步：M4 Task 6 实现订阅定时更新与非阻塞本地通知。
-- 接手方式：从 M4 计划 Task 6 Step 1 开始；用可注入 clock/sleeper 证明只安排一次 sleep，通知只用 fake sender。
+- 已完成：M4 Task 6；实现默认 24h、可设置 1–168 小时的订阅自动更新、一次性调度、缓存保留告警、本地通知和设置 UI。
+- 修改文件：新增 `SubscriptionUpdateScheduler.swift`、`NotificationService.swift`、`SubscriptionUpdateSchedulerTests.swift`；修改 AppState、MainWindowView、AppStateTests 与相关计划/记录。
+- 测试结果：RED 证明 scheduler/settings/notification API 缺失；GREEN 为全量 126/126，release arm64、codesign strict、diff check 与无节点冷启动通过。
+- 当前状态：自动更新按最早到期订阅安排单个可取消 sleep，完成后重排；失败保持旧节点/缓存，通知权限拒绝不影响代理。
+- 风险/注意事项：未请求真实通知权限或刷新真实订阅；自动测试只用 fake sleeper/sender。无节点启动没有内核、系统代理/TUN 恢复文件。
+- 下一步：M4 Task 7 实现 `SMAppService.mainApp` 开机自启。
+- 接手方式：从 M4 计划 Task 7 Step 1 开始；初始化只读取登录项状态，只有用户主动开关才能 register/unregister，测试必须使用 fake manager。

@@ -1,6 +1,6 @@
 # 下一步
 
-1. 执行 M4 Task 6：先写默认 24h、旧设置兼容、过期立即刷新、取消/重排和 fake 通知测试。
-2. scheduler 根据最早到期订阅只安排一次 sleep，唤醒刷新后重新计算，禁止固定间隔轮询。
-3. 失败或使用旧缓存时保留现有节点，记 warning 并通过可注入 sender 发送本地通知；拒绝通知不影响主功能。
+1. 执行 M4 Task 7：先写 `SMAppService.mainApp` 状态映射、用户开关、拒绝/待批准和初始化不自动注册测试。
+2. `AppState.initialize()` 只读取实际登录项状态；仅设置页用户主动操作才能调用 register/unregister。
+3. `requiresApproval` 显示可读状态并提供打开系统“登录项”设置入口，不重复尝试注册。
 4. 真实节点 Dashboard/日志、管理员授权/TUN 与 DNS 泄漏验收继续按 acceptance 人工边界保留。

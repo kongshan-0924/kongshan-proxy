@@ -71,6 +71,8 @@ final class AppState {
     private(set) var activeMode: ProxyMode?
     var tunSettings: TunSettings = .defaults
     var dnsSettings: DNSSettings = .defaults
+    private(set) var subscriptionUpdateSettings = SubscriptionUpdateSettings.defaults
+    private(set) var nextSubscriptionUpdateAt: Date?
     private(set) var uploadRate: Int64 = 0
     private(set) var downloadRate: Int64 = 0
     private(set) var activeConnectionCount = 0
@@ -93,6 +95,8 @@ final class AppState {
     @ObservationIgnored private let clashClientFactory: ClashClientFactory
     @ObservationIgnored private let now: NowProvider
     @ObservationIgnored private let kernelLogStore: KernelLogStore
+    @ObservationIgnored private let subscriptionUpdateScheduler: SubscriptionUpdateScheduler
+    @ObservationIgnored private let notificationSender: any NotificationSending
     @ObservationIgnored private var clashAPIClient: ClashAPIClient?
     @ObservationIgnored private var runtime: RuntimeParameters?
     @ObservationIgnored private var currentConfig: Data?
@@ -108,6 +112,8 @@ final class AppState {
         systemProxyManager: SystemProxyManager? = nil,
         singBoxProcess: SingBoxProcess? = nil,
         kernelLogStore: KernelLogStore? = nil,
+        subscriptionUpdateScheduler: SubscriptionUpdateScheduler? = nil,
+        notificationSender: (any NotificationSending)? = nil,
         privilegedLauncher: (any PrivilegedLaunching)? = nil,
         runtimeFactory: RuntimeFactory? = nil,
         healthVerifier: HealthVerifier? = nil,
@@ -143,6 +149,8 @@ final class AppState {
         }
         self.now = now
         self.kernelLogStore = resolvedLogStore
+        self.subscriptionUpdateScheduler = subscriptionUpdateScheduler ?? SubscriptionUpdateScheduler(now: now)
+        self.notificationSender = notificationSender ?? NotificationService()
         logWarningRelay.install { [weak self] message in
             Task { @MainActor [weak self] in
                 self?.warnings.append("内核日志写入失败：\(message)")
@@ -200,6 +208,7 @@ final class AppState {
             try await storage.prepare()
             try await loadPersistedState()
             isReady = true
+            await rescheduleSubscriptionUpdates()
         } catch {
             setFailure("启动恢复失败：\(error.localizedDescription)")
         }
@@ -389,7 +398,7 @@ final class AppState {
         do {
             let result = try await subscriptionService.refresh(source)
             var savedSource = source
-            savedSource.lastUpdatedAt = Date()
+            savedSource.lastUpdatedAt = now()
             subscriptions.append(savedSource)
             replaceNodes(result.nodes, for: source.id)
             warnings = result.warnings
@@ -397,29 +406,68 @@ final class AppState {
             try await persistSubscriptions()
             try await persistSettings()
             errorMessage = nil
+            await rescheduleSubscriptionUpdates()
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
     func refreshSubscriptions() async {
-        guard !isBusy else { return }
+        let hadFailures = await performSubscriptionRefresh(notifyOnFailure: false)
+        await rescheduleSubscriptionUpdates(
+            notBefore: hadFailures ? now().addingTimeInterval(15 * 60) : nil
+        )
+    }
+
+    private func performSubscriptionRefresh(notifyOnFailure: Bool) async -> Bool {
+        guard !isBusy else { return true }
         var collectedWarnings: [String] = []
+        var failedSubscriptions: [String] = []
         for index in subscriptions.indices {
             let source = subscriptions[index]
             do {
                 let result = try await subscriptionService.refresh(source)
-                subscriptions[index].lastUpdatedAt = Date()
-                replaceNodes(result.nodes, for: source.id)
                 collectedWarnings.append(contentsOf: result.warnings)
+                if result.usedCache {
+                    failedSubscriptions.append(source.name)
+                } else {
+                    subscriptions[index].lastUpdatedAt = now()
+                    replaceNodes(result.nodes, for: source.id)
+                }
             } catch {
                 collectedWarnings.append("订阅 \(source.name) 更新失败：\(error.localizedDescription)")
+                failedSubscriptions.append(source.name)
             }
         }
         warnings = collectedWarnings
         selectFirstNodeIfNeeded()
         try? await persistSubscriptions()
         try? await persistSettings()
+        if notifyOnFailure, !failedSubscriptions.isEmpty {
+            do {
+                try await notificationSender.send(
+                    title: "kongshan 订阅更新失败",
+                    body: failedSubscriptions.joined(separator: "、")
+                )
+            } catch {
+                warnings.append("通知未发送：\(error.localizedDescription)")
+            }
+        }
+        return !failedSubscriptions.isEmpty
+    }
+
+    func setSubscriptionUpdateSettings(_ requestedSettings: SubscriptionUpdateSettings) async {
+        let oldSettings = subscriptionUpdateSettings
+        do {
+            let settings = try requestedSettings.validated()
+            subscriptionUpdateSettings = settings
+            try await persistSettings()
+            errorMessage = nil
+            await rescheduleSubscriptionUpdates()
+        } catch {
+            subscriptionUpdateSettings = oldSettings
+            errorMessage = "保存订阅更新设置失败：\(error.localizedDescription)"
+        }
     }
 
     func addManual(_ form: ManualHysteria2) async {
@@ -777,6 +825,27 @@ final class AppState {
         nodes.filter { $0.sourceID == nil }
     }
 
+    private func rescheduleSubscriptionUpdates(notBefore: Date? = nil) async {
+        nextSubscriptionUpdateAt = await subscriptionUpdateScheduler.schedule(
+            sources: subscriptions,
+            settings: subscriptionUpdateSettings,
+            notBefore: notBefore
+        ) { [weak self] in
+            await self?.runScheduledSubscriptionRefresh()
+        }
+    }
+
+    private func runScheduledSubscriptionRefresh() async {
+        if isBusy {
+            await rescheduleSubscriptionUpdates(notBefore: now().addingTimeInterval(15 * 60))
+            return
+        }
+        let hadFailures = await performSubscriptionRefresh(notifyOnFailure: true)
+        await rescheduleSubscriptionUpdates(
+            notBefore: hadFailures ? now().addingTimeInterval(15 * 60) : nil
+        )
+    }
+
     private func loadPersistedState() async throws {
         if let data = try await storage.readIfPresent(from: subscriptionsURL) {
             subscriptions = try JSONDecoder().decode([SubscriptionSource].self, from: data)
@@ -800,6 +869,7 @@ final class AppState {
             preferredMode = settings.preferredMode ?? .systemProxy
             tunSettings = settings.tunSettings ?? .defaults
             dnsSettings = settings.dnsSettings ?? .defaults
+            subscriptionUpdateSettings = settings.subscriptionUpdateSettings ?? .defaults
         }
         if let data = try await storage.readIfPresent(from: rulesURL) {
             routingSettings = try JSONDecoder().decode(RoutingSettings.self, from: data).validated()
@@ -828,7 +898,8 @@ final class AppState {
                 testURL: testURLString,
                 preferredMode: preferredMode,
                 tunSettings: tunSettings,
-                dnsSettings: dnsSettings
+                dnsSettings: dnsSettings,
+                subscriptionUpdateSettings: subscriptionUpdateSettings
             )),
             to: settingsURL
         )
@@ -1183,6 +1254,7 @@ private struct PersistedSettings: Codable {
     let preferredMode: ProxyMode?
     let tunSettings: TunSettings?
     let dnsSettings: DNSSettings?
+    let subscriptionUpdateSettings: SubscriptionUpdateSettings?
 }
 
 private enum AppStateError: Error, LocalizedError {

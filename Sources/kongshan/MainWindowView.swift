@@ -204,6 +204,7 @@ private struct NodeRow: View {
 private struct SettingsView: View {
     @Environment(AppState.self) private var state
     @State private var dnsDraft = DNSSettings.defaults
+    @State private var subscriptionUpdateDraft = SubscriptionUpdateSettings.defaults
 
     var body: some View {
         Form {
@@ -264,16 +265,58 @@ private struct SettingsView: View {
                 }
             }
 
+            Section("订阅自动更新") {
+                Toggle("启用自动更新", isOn: $subscriptionUpdateDraft.enabled)
+                Stepper(
+                    "更新间隔：\(subscriptionUpdateDraft.intervalHours) 小时",
+                    value: $subscriptionUpdateDraft.intervalHours,
+                    in: 1...168
+                )
+                .disabled(!subscriptionUpdateDraft.enabled)
+                LabeledContent(
+                    "下次更新",
+                    value: state.nextSubscriptionUpdateAt?.formatted(
+                        date: .abbreviated,
+                        time: .shortened
+                    ) ?? "未安排"
+                )
+                Text("应用在后台按最近到期的订阅安排一次更新；更新结束后重新计算时间，不会持续轮询。失败时保留原节点和缓存，并尝试发送本地通知。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Button("放弃修改") {
+                        subscriptionUpdateDraft = state.subscriptionUpdateSettings
+                    }
+                    .disabled(subscriptionUpdateDraft == state.subscriptionUpdateSettings)
+                    Spacer()
+                    Button("应用自动更新设置") {
+                        Task {
+                            await state.setSubscriptionUpdateSettings(subscriptionUpdateDraft)
+                            subscriptionUpdateDraft = state.subscriptionUpdateSettings
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(
+                        state.isBusy
+                            || !state.isReady
+                            || subscriptionUpdateDraft == state.subscriptionUpdateSettings
+                    )
+                }
+            }
+
             Section("当前能力") {
                 LabeledContent("代理模式", value: "系统代理 + TUN")
                 LabeledContent("分流", value: "自定义规则 + 中国直连")
-                Text("Dashboard 流量曲线和自动订阅更新将在 M4 提供。")
+                Text("Dashboard 流量曲线、实时日志和订阅自动更新已可用。")
                     .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
         .navigationTitle("设置")
-        .onAppear { dnsDraft = state.dnsSettings }
+        .onAppear {
+            dnsDraft = state.dnsSettings
+            subscriptionUpdateDraft = state.subscriptionUpdateSettings
+        }
     }
 
     private var modeBinding: Binding<ProxyMode> {

@@ -379,3 +379,13 @@
 - 风险/注意事项：自动测试未启动真实 TUN 或真实节点 `/logs`；TUN 轮转使用 DispatchSource 写事件而非轮询，日志写错误只记 warning 不中断代理。Swift 6.3 方法引用 IRGen 崩溃已用显式闭包稳定规避。
 - 下一步：Task 6 实现无轮询订阅定时更新、缓存保留告警和可注入本地通知。
 - 下一位 Agent 如何接手：从 M4 计划 Task 6 Step 1 开始；自动测试只用 fake sleeper/notification，不得请求真实通知权限。
+
+## 2026-07-20 — M4 Task 6 订阅定时更新与非阻塞通知
+
+- 已完成：先写默认 24h、1–168 小时校验、最早到期、过期立即执行、取消/重排、旧设置兼容、缓存回退和 fake 通知测试；实现一次性 sleep 调度、失败保留旧节点、按需本地通知及原生设置入口。
+- 修改文件：新增 `Sources/kongshan/SubscriptionUpdateScheduler.swift`、`Sources/kongshan/NotificationService.swift`、`Tests/KongshanAppTests/SubscriptionUpdateSchedulerTests.swift`；修改 `AppState.swift`、`MainWindowView.swift`、`AppStateTests.swift`、M4 计划与全部项目记录。
+- 测试结果：RED 因 scheduler/settings/notification API 缺失；GREEN 为调度器 4/4、相关 AppState 3/3、全量 126/126，release arm64、codesign strict、diff check 与无节点冷启动通过。
+- 当前状态：每次只安排一个可取消睡眠任务，完成后按订阅时间重排；失败或 `usedCache=true` 不替换旧节点/成功时间，记 warning 并尝试通知；权限拒绝只追加 warning。
+- 风险/注意事项：自动测试没有发送真实通知或使用真实订阅；通知权限只在首次实际失败需要通知时按需请求。无节点冒烟约 70 MB、0% CPU，未启动内核或生成接管恢复文件。
+- 下一步：Task 7 实现 `SMAppService.mainApp` 开机自启状态映射、用户开关和系统设置入口。
+- 下一位 Agent 如何接手：从 M4 计划 Task 7 Step 1 开始；测试只用 fake manager，初始化只能读状态，禁止静默注册登录项。
