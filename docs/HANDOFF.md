@@ -1,9 +1,9 @@
 # 项目交接
 
-- 已完成：M4 Task 8；实现普通/TUN 精确 PID 退出监控、10 秒最多 3 次自动重启、超限/失败清理和通知。
-- 修改文件：新增 `CrashRestartLimiter.swift`、`ProcessExitMonitor.swift`、`CrashRestartTests.swift`；修改 SingBoxProcess、AppState、NotificationService 与相关测试/计划/记录。
-- 测试结果：RED 证明 limiter/monitor/currentPID/AppState API 缺失；竞态回归修复后全量 137/137，release arm64、codesign strict、diff check 与无节点冒烟通过。
-- 当前状态：真实普通用户 sing-box SIGKILL 可新 PID 恢复且不重复 networksetup；主动 stop/DNS/分流/TUN 重载不会计入崩溃，TUN fake 第 4 次会清理并通知。
-- 风险/注意事项：未真实启动 root TUN 或触发管理员授权/通知；真实 TUN 崩溃重启与 root PID 监听仍属人工验收。
-- 下一步：M4 Task 9 完成性能和一键自动验收、README、M4 验收记录。
-- 接手方式：从 M4 计划 Task 9 Step 1 开始；先让缺失 `verify_m4.sh` 失败，再实现无节点 CPU/RSS/残留检查，保持真实网络项为人工边界。
+- 已完成：M1–M4 代码与自动交付；M4 包含 Dashboard、日志、双 DoH、订阅自动更新、SMAppService、崩溃自愈和一键性能/残留验收。
+- 修改文件：最终新增 `verify_m4.sh`、README、M4 acceptance，并更新第三方声明、计划和全部接力记录；功能代码基线为 `46fe328`。
+- 测试结果：`zsh scripts/verify_m4.sh` 覆盖 137/137、release arm64、ad-hoc strict 签名、官方规则集和 M4 门禁；5 次 CPU 0.0%、平均 0.000%、最大 RSS 73,984 KB，最终标记通过。
+- 当前状态：可双击产物为 `dist/kongshan.app`（约 51 MB）；主程序 SHA-256 `92bb53aa…a723`，内核 SHA-256 `813d8eff…84d`。自动验收后无进程、socket、recovery、FIFO 或临时目录残留。
+- 风险/注意事项：真实订阅/节点、浏览/出口、root TUN、DNS leak、登录项批准、通知 UI、强杀 App 和 24h Instruments/Energy Impact 均待人工，不得称为原始清单全部通过。
+- 下一步：按 `docs/acceptance/M4.md` 完成人工验收并追加证据。
+- 接手方式：先读 `README.md` 和四份 acceptance；任何真实系统代理/TUN 操作前确认恢复路径，遇到 recovery 文件先核对进程身份，不盲删/盲杀。

@@ -1,6 +1,6 @@
 # 下一步
 
-1. 执行 M4 Task 9：先运行缺失的 `scripts/verify_m4.sh`，记录预期失败，再实现一键完整自动验收。
-2. 无节点 Release App 启动稳定后多次采样 CPU/RSS，验证 RSS <150 MB、无持续 CPU 活跃、无 WebSocket/内核/recovery/FIFO 残留，并确保脚本主动终止 App。
-3. 完成 README、`docs/acceptance/M4.md` 与第三方声明，写清构建、权限、数据目录、恢复方法和限制。
-4. 真实订阅/节点、系统代理、TUN、DNS leak、登录项批准、崩溃通知、24h Instruments 与 Energy Impact 必须继续标为人工验收。
+1. 准备真实奶昔/Nexitally 订阅和自建 Hysteria2，在可接受短时网络中断的环境按 `docs/acceptance/M4.md` 第 1–7 项验证系统代理/TUN/分流/DNS/恢复。
+2. 将 `dist/kongshan.app` 移至 `/Applications`，人工验证登录项批准、下次登录启动、本地通知允许/拒绝和崩溃通知。
+3. 使用真实节点核对 Dashboard/日志，并在关闭页面/窗口后用系统工具确认没有 Clash WebSocket。
+4. 最后执行 24h Instruments Leaks/Allocations 与 Activity Monitor Energy Impact 观察；逐项把时间、环境、命令和结果追加到 M4 acceptance 与 SESSION_LOG。

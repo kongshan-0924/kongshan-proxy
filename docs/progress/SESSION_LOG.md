@@ -409,3 +409,13 @@
 - 风险/注意事项：真实普通用户 sing-box SIGKILL 路径已验证且未重复写 networksetup；TUN 仍只用 fake launcher/monitor，真实 root PID 监听、授权重启和通知需人工。非 `.app` 测试宿主已硬禁止真实通知中心。
 - 下一步：Task 9 编写 `verify_m4.sh`、性能采样、README/M4 验收记录，并区分自动与真实人工边界。
 - 下一位 Agent 如何接手：从 M4 计划 Task 9 Step 1 开始；脚本只能无节点启动，不得注册登录项、改 networksetup、请求 TUN 或通知权限，最终行必须为 `M4 automated verification passed`。
+
+## 2026-07-20 — M4 Task 9 性能、完整自动验收与人工边界
+
+- 已完成：先运行缺失 `verify_m4.sh` 获得预期 RED；实现复用 M3 回归、M4 定向门禁、隔离无节点启动、5 次 CPU/RSS、socket/子进程/recovery/FIFO 与精确 TERM 的一键验收；完成 README、M4 验收和依赖声明。
+- 修改文件：新增 `scripts/verify_m4.sh`、`README.md`、`docs/acceptance/M4.md`；修改 `Resources/THIRD_PARTY_NOTICES.md`、M4 计划与全部项目记录。
+- 测试结果：完整脚本执行 137/137 测试并覆盖官方规则集/release/签名/M4 定向项；稳态 5 次 CPU 0.0%、平均 0.000%、最大 RSS 73,984 KB，最终输出 `M4 automated verification passed`。缺产物、1 KB RSS、注入 recovery 三个负向场景均失败。
+- 当前状态：M1–M4 自动交付完成，arm64 ad-hoc 产物为 `dist/kongshan.app`（约 51 MB）；脚本结束无 App/内核/临时目录或恢复残留。
+- 风险/注意事项：真实订阅/节点、系统代理浏览、root TUN、三处绕过、DNS leak、登录项批准、通知 UI、强杀 App 和 24h Instruments/Energy Impact 未冒充自动通过。
+- 下一步：按 `docs/acceptance/M4.md` 在可接受网络中断和管理员授权的环境逐项完成人工验收；完成前原始“全部通过”清单保持未最终勾选。
+- 下一位 Agent 如何接手：先读 README 与 M1–M4 acceptance；人工操作前确认真实订阅、网络恢复路径和授权窗口，每完成一项把证据追加到 M4 验收及 SESSION_LOG。
