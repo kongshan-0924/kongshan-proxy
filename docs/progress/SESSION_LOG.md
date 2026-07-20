@@ -309,3 +309,13 @@
 - 风险/注意事项：空节点 App 仅启动 2 秒后退出，未点击 TUN、未出现恢复文件或授权；本机状态栏管理导致自动视觉点击仍不可靠。
 - 下一步：Task 7 实现 M3 一键自动验收、运行并写入 `docs/acceptance/M3.md`。
 - 下一位 Agent 如何接手：从 M3 计划 Task 7 Step 1 先运行缺失脚本得到预期失败，自动化只做纯配置/check/注入测试。
+
+## 2026-07-20 — M3 Task 7 自动验收与人工边界
+
+- 已完成：先运行缺失 `verify_m3.sh` 并观察预期失败；实现全量测试、release 打包签名、三个官方规则集与 strict 关/开 TUN fixture 的一键自动验收，并固化人工授权边界。
+- 修改文件：`scripts/verify_m3.sh`、`docs/acceptance/M3.md`、M3 计划与全部项目记录。
+- 测试结果：`M3 automated verification passed`；88/88 测试、arm64、codesign、plist、sing-box 1.13.14、三个官方规则集以及两份 TUN 配置 `check` 全部通过。
+- 当前状态：M3 自动交付完成，产物为 `dist/kongshan.app`（约 51 MB）；验收后无 kongshan/sing-box 测试进程和 TUN recovery/FIFO 残留。
+- 风险/注意事项：本轮未请求管理员授权或启动真实 TUN；utun、出口 IP、域名/CIDR 真实路径、关闭恢复、strict 兼容性、强杀自愈和 DNS 防泄漏均未冒充自动通过。
+- 下一步：编写并执行 M4 打磨计划；如先人工验收 M3，按 `docs/acceptance/M3.md` 并在可接受网络中断的环境执行。
+- 下一位 Agent 如何接手：先读 HANDOFF、M3 验收、原始需求和 M3 计划；M4 开始前先拆分任务，真实 TUN 操作前先确认恢复路径。

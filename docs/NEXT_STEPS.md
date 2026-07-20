@@ -1,5 +1,6 @@
 # 下一步
 
-1. 执行 M3 Task 7：先观察缺失 `verify_m3.sh` 失败，再实现不请求授权的完整自动验收。
-2. 生成 `docs/acceptance/M3.md`，明确区分自动通过项与必须人工授权/真实 TUN 验证项。
-3. M1/M2 真实网络人工验收分别按 `docs/acceptance/M1.md`、`docs/acceptance/M2.md` 保留。
+1. 进入 M4 打磨：先对照原始需求拆分 DNS、订阅管理、导入导出、日志诊断、更新与交付 Task，并形成可执行计划。
+2. 如先做 M3 人工验收，严格按 `docs/acceptance/M3.md` 执行；首次管理员授权前确认当前网络、管理员凭据可用和关闭恢复步骤。
+3. M1/M2 真实节点、系统代理与分流人工验收继续分别按 `docs/acceptance/M1.md`、`docs/acceptance/M2.md` 保留，不与自动结果混淆。
+4. M4 DNS 完成前不得宣称 macOS TUN 已通过 DNS 防泄漏验收。
