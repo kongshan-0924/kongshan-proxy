@@ -139,3 +139,13 @@
 - 风险/注意事项：debug 裸可执行文件未注册 LaunchServices bundle，自动可访问性工具无法按 bundle ID 读取窗口；Task 10 将对组装后 `.app` 做实际界面冒烟。
 - 下一步：Task 10 完成 Info.plist、打包脚本、ad-hoc 签名与 M1 自动验证脚本。
 - 下一位 Agent 如何接手：从 M1 计划 Task 10 Step 1 开始，打包后先以空节点做不改网络的界面冒烟。
+
+## 2026-07-20 — M1 Task 10 组装、签名与验证 kongshan.app
+
+- 已完成：先写 M1 验证脚本并观察缺少 `build_app.sh` 的预期失败；实现固定内核下载、release arm64 构建、分阶段 App 组装、ad-hoc 签名和端到端验证。
+- 修改文件：`scripts/build_app.sh`、`scripts/verify_m1.sh`、M1 计划与记录；`Resources/Info.plist` 与 `.gitignore` 的计划字段/忽略项已在先前小节满足，无需重复修改。
+- 测试结果：RED 为 34/34 测试通过后因 `scripts/build_app.sh` 不存在退出 127；GREEN 为 `M1 automated verification passed`，覆盖 release 构建、arm64、签名、plist、sing-box 1.13.14 和内置配置 check。
+- 当前状态：Task 10 完成；可双击产物为 `dist/kongshan.app`，空节点冒烟期间进程、LaunchServices bundle 与系统状态项注册正常，无 `proxy-recovery.json`。
+- 风险/注意事项：本机菜单栏管理环境将新状态项放在不可见坐标，自动界面工具无法点击“打开 kongshan”；已通过主线程采样确认 App 正常空闲（约 15 MB、0% CPU），真实菜单展开仍列入人工验收。
+- 下一步：Task 11 记录产物、commit、自动验证摘要与所有未执行的真实网络验收。
+- 下一位 Agent 如何接手：从 M1 计划 Task 11 Step 1 开始，不得将自动测试写成真实订阅/系统代理已验收。

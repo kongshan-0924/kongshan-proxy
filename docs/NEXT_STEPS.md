@@ -1,5 +1,5 @@
 # 下一步
 
-1. 执行 M1 Task 10：组装、签名并验证 `kongshan.app`。
+1. 执行 M1 Task 11：固化 M1 自动验收、产物和待人工验收项。
 2. 按 `docs/superpowers/plans/2026-07-20-kongshan-m1.md` 顺序执行后续 Task。
 3. 每完成一个 Task 立即追加 `docs/progress/SESSION_LOG.md` 并提交。
