@@ -51,6 +51,10 @@ public struct ProxyNode: Identifiable, Codable, Hashable, Sendable {
     public var uploadMbps: Int?
     public var downloadMbps: Int?
     public var transport: TransportOptions?
+    /// SS 的 SIP003 插件（如 Clash 的 `plugin: obfs`）。直接存 sing-box 用的值：
+    /// pluginName="obfs-local"、pluginOptions="obfs=http;obfs-host=…"。缺省＝无插件。
+    public var pluginName: String?
+    public var pluginOptions: String?
 
     public init(
         id: UUID = UUID(),
@@ -70,7 +74,9 @@ public struct ProxyNode: Identifiable, Codable, Hashable, Sendable {
         obfsPassword: String? = nil,
         uploadMbps: Int? = nil,
         downloadMbps: Int? = nil,
-        transport: TransportOptions? = nil
+        transport: TransportOptions? = nil,
+        pluginName: String? = nil,
+        pluginOptions: String? = nil
     ) {
         self.id = id
         self.sourceID = sourceID
@@ -90,6 +96,8 @@ public struct ProxyNode: Identifiable, Codable, Hashable, Sendable {
         self.uploadMbps = uploadMbps
         self.downloadMbps = downloadMbps
         self.transport = transport
+        self.pluginName = pluginName
+        self.pluginOptions = pluginOptions
     }
 }
 

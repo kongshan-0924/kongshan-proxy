@@ -130,6 +130,7 @@ public enum ClashSubscriptionConverter {
 
         switch type {
         case "ss", "shadowsocks":
+            let plugin = try shadowsocksPlugin(raw)
             return ProxyNode(
                 sourceID: sourceID,
                 name: name,
@@ -138,7 +139,9 @@ public enum ClashSubscriptionConverter {
                 port: port,
                 password: try requiredString(raw, "password"),
                 method: try requiredString(raw, "cipher"),
-                transport: transport
+                transport: transport,
+                pluginName: plugin?.name,
+                pluginOptions: plugin?.options
             )
 
         case "trojan":
@@ -234,6 +237,24 @@ public enum ClashSubscriptionConverter {
         }
     }
 
+    /// Clash SS 的 SIP003 插件 → sing-box。目前只支持 simple-obfs（`plugin: obfs`，
+    /// 机场最常用），转成 sing-box 的 `obfs-local` + `obfs=<mode>;obfs-host=<host>`。
+    /// 其它插件(v2ray-plugin/shadow-tls…)暂不支持，抛错让该节点被跳过并计入 warnings，
+    /// 而不是静默生成一个"能握手却传不了数据"的坏节点。
+    private static func shadowsocksPlugin(_ raw: [String: Any]) throws -> (name: String, options: String)? {
+        guard let plugin = optionalString(raw, "plugin")?.lowercased() else { return nil }
+        let opts = raw["plugin-opts"] as? [String: Any] ?? [:]
+        switch plugin {
+        case "obfs", "obfs-local", "simple-obfs":
+            let mode = optionalString(opts, "mode") ?? "http"
+            var options = "obfs=\(mode)"
+            if let host = optionalString(opts, "host") { options += ";obfs-host=\(host)" }
+            return ("obfs-local", options)
+        default:
+            throw NodeMappingError.unsupportedPlugin(plugin)
+        }
+    }
+
     private static func requiredPort(_ raw: [String: Any]) throws -> Int {
         guard let port = int(raw, "port"), (1...65_535).contains(port) else {
             throw NodeMappingError.invalidPort
@@ -279,6 +300,7 @@ private enum NodeMappingError: Error, LocalizedError {
     case unsupportedProtocol(String)
     case unsupportedTransport(String)
     case unsupportedObfs(String)
+    case unsupportedPlugin(String)
 
     var errorDescription: String? {
         switch self {
@@ -287,6 +309,7 @@ private enum NodeMappingError: Error, LocalizedError {
         case let .unsupportedProtocol(value): "不支持的协议 \(value)"
         case let .unsupportedTransport(value): "不支持的传输方式 \(value)"
         case let .unsupportedObfs(value): "不支持的 Hysteria2 obfs \(value)"
+        case let .unsupportedPlugin(value): "不支持的 SS 插件 \(value)"
         }
     }
 }

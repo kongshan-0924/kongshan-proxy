@@ -37,6 +37,43 @@ final class ClashSubscriptionConverterTests: XCTestCase {
         XCTAssertEqual(anyTLS.sni, "any.example.com")
     }
 
+    /// 机场绝大多数 SS 节点带 `plugin: obfs`（simple-obfs）。必须解析并在生成时输出
+    /// sing-box 的 obfs-local + plugin_opts，否则节点能握手/测速却传不了数据（打不开网站）。
+    func testShadowsocksObfsPluginParsedAndEmitted() throws {
+        let yaml = """
+        proxies:
+          - { name: 'HK obfs', type: ss, server: a.example.com, port: 12022, cipher: aes-128-gcm, password: pw, plugin: obfs, plugin-opts: { mode: http, host: mask.microsoft.com }, udp: true }
+        """
+        let result = try ClashSubscriptionConverter.convert(yaml: yaml, sourceID: sourceID)
+        let node = try XCTUnwrap(result.nodes.first)
+        XCTAssertEqual(node.pluginName, "obfs-local")
+        XCTAssertEqual(node.pluginOptions, "obfs=http;obfs-host=mask.microsoft.com")
+
+        let config = try ConfigGenerator.generate(ConfigInput(
+            nodes: result.nodes,
+            selectedNodeID: node.id,
+            runtime: RuntimeParameters(mixedPort: 19_100, clashPort: 19_101, secret: "s"),
+            outboundMode: .global
+        ))
+        let root = try XCTUnwrap(try JSONSerialization.jsonObject(with: config) as? [String: Any])
+        let outbounds = try XCTUnwrap(root["outbounds"] as? [[String: Any]])
+        let ss = try XCTUnwrap(outbounds.first { $0["type"] as? String == "shadowsocks" })
+        XCTAssertEqual(ss["plugin"] as? String, "obfs-local")
+        XCTAssertEqual(ss["plugin_opts"] as? String, "obfs=http;obfs-host=mask.microsoft.com")
+    }
+
+    /// 不认识的 SS 插件应跳过该节点并计入 warnings，而不是生成一个连得上却传不了数据的坏节点。
+    func testUnsupportedShadowsocksPluginIsSkipped() throws {
+        let yaml = """
+        proxies:
+          - { name: bad, type: ss, server: b.example.com, port: 443, cipher: aes-128-gcm, password: pw, plugin: v2ray-plugin }
+          - { name: good, type: ss, server: c.example.com, port: 443, cipher: aes-128-gcm, password: pw }
+        """
+        let result = try ClashSubscriptionConverter.convert(yaml: yaml, sourceID: sourceID)
+        XCTAssertEqual(result.nodes.map(\.name), ["good"])
+        XCTAssertTrue(result.warnings.contains { $0.contains("bad") })
+    }
+
     func testSkipsUnsupportedAndMalformedNodes() throws {
         let yaml = Self.allProtocolsYAML + """
 

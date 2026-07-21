@@ -563,6 +563,12 @@ public enum ConfigGenerator {
         case .shadowsocks:
             value["method"] = try required(node.method, node: node, field: "method")
             value["password"] = try required(node.password, node: node, field: "password")
+            // SIP003 插件（simple-obfs 等）。机场绝大多数 SS 节点靠它混淆，
+            // 不带的话能握手却传不了数据 → 表现为"节点能测速但打不开网站"。
+            if let pluginName = node.pluginName {
+                value["plugin"] = pluginName
+                if let options = node.pluginOptions { value["plugin_opts"] = options }
+            }
         case .trojan:
             value["password"] = try required(node.password, node: node, field: "password")
             value["tls"] = tls(for: node)
