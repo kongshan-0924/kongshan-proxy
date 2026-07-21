@@ -138,13 +138,24 @@ struct BypassListSection: View {
 
     var body: some View {
         Section(title) {
+            if values.isEmpty {
+                Text("暂无，点下方添加")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
             ForEach(values.indices, id: \.self) { index in
-                HStack {
-                    TextField(placeholder, text: $values[index])
+                HStack(spacing: 8) {
+                    // 用 prompt 而非 label 作占位：只在空行显示提示，填了值就正常左对齐，
+                    // 不再有「例如…」那一列常驻标签。
+                    TextField(placeholder, text: $values[index], prompt: Text(placeholder))
+                        .labelsHidden()
+                        .textFieldStyle(.plain)
+                        .font(.system(.body, design: .monospaced))
                     Button(role: .destructive) {
                         values.remove(at: index)
                     } label: {
-                        Image(systemName: "minus.circle")
+                        Image(systemName: "minus.circle.fill")
+                            .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.borderless)
                     .help(deleteHelp)

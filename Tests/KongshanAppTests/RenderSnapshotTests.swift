@@ -54,13 +54,11 @@ final class RenderSnapshotTests: XCTestCase {
             size: CGSize(width: 740, height: 640)
         )
 
-        // 探针：域名列表换成可辨识的值，验证 CIDR 列表前几行是否串了域名的内容。
-        let probe = makeState()
-        probe.routingSettings.bypassDomains = ["AAA-域名一", "BBB-域名二"]
+        // 设置→隧道 的绕过列表：核对不再有「例如…」常驻标签列，值一行一行左对齐。
         render(
-            RoutingView().environment(probe),
-            name: "routing-probe",
-            size: CGSize(width: 740, height: 640)
+            BypassListsPreview(),
+            name: "bypass-lists",
+            size: CGSize(width: 520, height: 640)
         )
         render(
             LogsView().environment(state),
@@ -91,6 +89,36 @@ final class RenderSnapshotTests: XCTestCase {
             size: CGSize(width: 1000, height: 680),
             dark: true
         )
+    }
+
+    private struct BypassListsPreview: View {
+        @State private var settings: RoutingSettings = {
+            var s = RoutingSettings.defaults
+            s.bypassDomains = ["localhost", "*.local", "*.cn"]
+            return s
+        }()
+
+        var body: some View {
+            Form {
+                BypassListSection(
+                    title: "绕过域名（直连）",
+                    placeholder: "例如 *.local 或 example.com",
+                    addTitle: "添加域名",
+                    deleteHelp: "删除域名",
+                    identity: "bypass-domain",
+                    values: $settings.bypassDomains
+                )
+                BypassListSection(
+                    title: "绕过 IP / CIDR（直连）",
+                    placeholder: "例如 192.168.0.0/16",
+                    addTitle: "添加 IP / CIDR",
+                    deleteHelp: "删除 CIDR",
+                    identity: "bypass-cidr",
+                    values: $settings.bypassCIDRs
+                )
+            }
+            .formStyle(.grouped)
+        }
     }
 
     private func makeState() -> AppState {
