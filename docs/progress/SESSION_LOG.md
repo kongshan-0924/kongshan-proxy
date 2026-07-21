@@ -1011,3 +1011,9 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 - 另外：给用户讲清 TUN 反复弹密码=osascript 每次提权 root 内核的固有代价；日常建议用系统代理(免密码)，passwordless TUN 需做一次性特权 helper(未做，待用户拍板)。
 - 验证：`swift build` 通过，`swift test` 170 通过。发布 0.1.19 装 /Applications。
 - 待用户真机：切换节点即时生效、连接监控页、各界面改动。TUN 免密码 helper 仍待拍板。
+
+## 2026-07-21 发布 0.1.19（DMG + GitHub Release）
+- **杜绝"第二个程序"**：dist/kongshan.app 被 Spotlight 自动索引、登记进启动服务，冒充第二个程序出现在启动台（用户没点开过）。已注销 + 给 dist 加 `.metadata_never_index`，并写进 build_app.sh（每次构建自动标记不索引 + lsregister -u）。正式副本始终在 /Applications。
+- **DMG 打包**：新增 `scripts/make_dmg.sh`（拖拽安装式：kongshan.app + /Applications 软链，UDZO 压缩）。产出 `dist/kongshan-0.1.19.dmg`（23M，hdiutil verify 通过）。
+- **推送 + 发布**：7 个提交推上 `kongshan-0924/kongshan-proxy`（main 同步）；创建 GitHub Release **v0.1.19**，附 DMG 资产。地址 https://github.com/kongshan-0924/kongshan-proxy/releases/tag/v0.1.19
+- 提醒：ad-hoc 签名，别人首次打开需右键→打开绕 Gatekeeper。
