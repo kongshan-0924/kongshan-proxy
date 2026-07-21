@@ -130,14 +130,15 @@ public enum PrivilegedCommandBuilder {
         // 正在执行本命令的 shell 的命令行里也含内核路径，会把自己（连带后面的启动）一起杀掉，
         // 导致配置写不进 FIFO、内核只读到 EOF（decode config at /dev/stdin: EOF）。
         // 再对每个同名进程核对可执行路径，只杀我们自己的，绝不误伤别的 sing-box。
-        let cleanup = "for p in $(/usr/bin/pgrep -x sing-box 2>/dev/null); do "
+        // 只有真的杀掉了残留内核才 sleep 1 等路由/utun 释放；没有残留（常态）就不白等这 1 秒。
+        let cleanup = "killed=0; for p in $(/usr/bin/pgrep -x sing-box 2>/dev/null); do "
             + "case \"$(/bin/ps -p \"$p\" -o command= 2>/dev/null)\" in "
-            + "*\(binary)*) /bin/kill -INT \"$p\" 2>/dev/null ;; esac; done"
+            + "*\(binary)*) /bin/kill -INT \"$p\" 2>/dev/null; killed=1 ;; esac; done; "
+            + "[ \"$killed\" = 1 ] && /bin/sleep 1 || true"
         let command = [
             "umask 077",
             "export PATH=/usr/bin:/bin:/usr/sbin:/sbin",
             cleanup,
-            "/bin/sleep 1",
             // cat 的 stdin/stderr 必须一并重定向：只要后台管道还持有 osascript 的捕获描述符，
             // `do shell script` 就会一直等下去，launch 永不返回，配置也就写不进 FIFO，
             // 内核最终只会读到 EOF（实测现象：decode config at /dev/stdin: EOF）。

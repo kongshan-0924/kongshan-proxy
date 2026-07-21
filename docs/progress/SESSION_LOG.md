@@ -922,3 +922,10 @@
 - generateConfiguration 改 async，实际生成放 Task.detached 后台线程；diagnosticSnapshot 统一走 writeDiagnosticConfig 也放后台。主线程不再被大配置阻塞。
 另发现：用户同时开着 Stash 的 TUN（日志里满是 Stash 进程），两个 TUN 抢默认路由会互相干扰——需只留一个。
 测试 167 通过；0.1.9 已装 /Applications。
+
+## 2026-07-21 TUN 启动路径继续加固（0.1.10）
+
+- 预清理只有真杀掉残留内核才 sleep 1（等路由/utun 释放）；常态无残留不再白等 1 秒。
+- 健康检查上限 30→60 次（~3s→~6s），成功即返回不加时；容忍首次建 TUN、大量出站时内核稍慢就绪，避免误判失败回滚。
+- 复核 DNS 段结构正常（dns-cn 直连 DoH、dns-remote 经 自动选择、geosite-cn→dns-cn、final dns-remote）；之前 EOF 是打到机场伪域名 + Stash 抢路由，非配置问题。
+测试 167 通过；0.1.10 已装 /Applications。等用户关掉 Stash 后实测 TUN。

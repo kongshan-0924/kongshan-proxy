@@ -2026,14 +2026,16 @@ final class AppState {
     }
 
     nonisolated private static func waitUntilHealthy(_ client: ClashAPIClient) async throws {
+        // 健康即返回，成功时几乎不耗时；上限给足，容忍首次建 TUN、大量出站时内核稍慢就绪，
+        // 免得误判失败又回滚。最多 ~6 秒。
         var lastError: Error?
-        for attempt in 0..<30 {
+        for attempt in 0..<60 {
             do {
                 try await client.health()
                 return
             } catch {
                 lastError = error
-                if attempt < 29 { try await Task.sleep(for: .milliseconds(100)) }
+                if attempt < 59 { try await Task.sleep(for: .milliseconds(100)) }
             }
         }
         throw AppStateError.coreHealthFailed(lastError?.localizedDescription ?? "未知错误")
