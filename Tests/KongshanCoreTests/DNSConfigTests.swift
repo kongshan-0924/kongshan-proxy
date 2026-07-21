@@ -80,7 +80,9 @@ final class DNSConfigTests: XCTestCase {
         let systemRoot = try json(try ConfigGenerator.generate(input(proxyMode: .systemProxy)))
         let systemRoute = try XCTUnwrap(systemRoot["route"] as? [String: Any])
         let systemRules = try XCTUnwrap(systemRoute["rules"] as? [[String: Any]])
-        XCTAssertEqual(systemRules[0]["domain_suffix"] as? [String], ["custom.example"])
+        // 规则模式统一前置 sniff（含 mixed），hijack-dns 仍然只属于 TUN。
+        XCTAssertEqual(systemRules[0]["action"] as? String, "sniff")
+        XCTAssertEqual(systemRules[1]["domain_suffix"] as? [String], ["custom.example"])
         XCTAssertFalse(systemRules.contains { $0["action"] as? String == "hijack-dns" })
 
         let tunRoot = try json(try ConfigGenerator.generate(input(proxyMode: .tun)))

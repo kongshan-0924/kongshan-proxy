@@ -27,7 +27,7 @@ final class AppStateTests: XCTestCase {
 
         await state.startSystemProxy()
 
-        XCTAssertEqual(state.status, .failed("至少需要一个代理节点"))
+        XCTAssertEqual(state.status, .failed("当前配置没有可用节点"))
         let commandCalls = await calls.values()
         XCTAssertTrue(commandCalls.isEmpty)
     }
@@ -398,7 +398,9 @@ final class AppStateTests: XCTestCase {
         let initialRuntime = try clashRuntime(from: initialConfig)
         let networkCallsBefore = await fixture.network.arguments.count
         var updated = fixture.state.routingSettings
-        updated.bypassCIDRs = ["10.20.0.0/16", "192.168.50.0/24"]
+        // 跳过 TUN 是独立列表，route_exclude_address 只跟它走
+        updated.bypassCIDRs = ["172.31.0.0/16"]
+        updated.tunExcludeCIDRs = ["10.20.0.0/16", "192.168.50.0/24"]
 
         await fixture.state.applyRoutingSettings(updated)
 
@@ -441,7 +443,8 @@ final class AppStateTests: XCTestCase {
         guard attempts.count == 3 else { return }
         XCTAssertEqual(attempts[0], attempts[2])
         XCTAssertNotEqual(attempts[0], attempts[1])
-        XCTAssertTrue(networkArguments.isEmpty)
+        // TUN 流程只允许出现 DNS 接管相关命令，绝不允许改系统代理。
+        XCTAssertTrue(networkArguments.allSatisfy(Self.isDNSTakeoverCommand))
     }
 
     func testTUNRoutingDoubleStartFailureLeavesNoTakeoverOrRuntime() async throws {
@@ -464,7 +467,8 @@ final class AppStateTests: XCTestCase {
         let networkArguments = await fixture.network.arguments
         XCTAssertFalse(tunIsActive)
         XCTAssertFalse(coreIsRunning)
-        XCTAssertTrue(networkArguments.isEmpty)
+        // TUN 流程只允许出现 DNS 接管相关命令，绝不允许改系统代理。
+        XCTAssertTrue(networkArguments.allSatisfy(Self.isDNSTakeoverCommand))
     }
 
     func testOfflineTUNSettingsPersistWithoutStartingTakeover() async throws {
@@ -512,7 +516,8 @@ final class AppStateTests: XCTestCase {
         let networkArguments = await fixture.network.arguments
         XCTAssertEqual(attempts.count, 2)
         XCTAssertEqual(try tunStrictRoute(from: try XCTUnwrap(attempts.last)), true)
-        XCTAssertTrue(networkArguments.isEmpty)
+        // TUN 流程只允许出现 DNS 接管相关命令，绝不允许改系统代理。
+        XCTAssertTrue(networkArguments.allSatisfy(Self.isDNSTakeoverCommand))
     }
 
     func testActiveTUNStrictRouteFailureRestoresOldConfiguration() async throws {
@@ -916,6 +921,7 @@ final class AppStateTests: XCTestCase {
             password: "old",
             method: "aes-128-gcm"
         )]
+        state.activeConfigID = source.id
 
         await state.setSubscriptionUpdateSettings(
             SubscriptionUpdateSettings(enabled: true, intervalHours: 1)
@@ -971,6 +977,7 @@ final class AppStateTests: XCTestCase {
         )
         state.subscriptions = [source]
         state.nodes = [oldNode]
+        state.activeConfigID = source.id
 
         await state.setSubscriptionUpdateSettings(
             SubscriptionUpdateSettings(enabled: true, intervalHours: 1)
@@ -1206,6 +1213,12 @@ final class AppStateTests: XCTestCase {
       - {name: cached, type: ss, server: 1.1.1.1, port: 443, cipher: aes-128-gcm, password: cached}
     """
 
+    /// TUN 生命周期允许出现的 networksetup 命令：系统 DNS 接管三件套。
+    /// 任何系统代理命令（-setwebproxy 等）出现在纯 TUN 流程里都是违规。
+    private static func isDNSTakeoverCommand(_ arguments: [String]) -> Bool {
+        ["-listallnetworkservices", "-getdnsservers", "-setdnsservers"].contains(arguments.first)
+    }
+
     private func makeRunningFixture(
         failOnceFor: [String]? = nil,
         healthFailures: Set<Int> = [],
@@ -1234,6 +1247,7 @@ final class AppStateTests: XCTestCase {
                 loader: { _ in HTTPDownload(data: ruleSetData, statusCode: 200) }
             ),
             systemProxyManager: SystemProxyManager(storage: storage, runner: network.run(arguments:timeout:)),
+            systemDNSManager: SystemDNSManager(storage: storage, runner: network.run(arguments:timeout:)),
             singBoxProcess: core,
             processExitMonitor: processExitMonitor,
             notificationSender: notificationSender,
@@ -1250,6 +1264,7 @@ final class AppStateTests: XCTestCase {
             method: "aes-128-gcm"
         )]
         state.selectedNodeID = state.nodes[0].id
+        state.activeConfigID = AppState.localConfigID
         await state.startSystemProxy()
         return RunningFixture(
             root: root,
@@ -1304,6 +1319,7 @@ final class AppStateTests: XCTestCase {
                 loader: { _ in HTTPDownload(data: ruleSetData, statusCode: 200) }
             ),
             systemProxyManager: SystemProxyManager(storage: storage, runner: network.run(arguments:timeout:)),
+            systemDNSManager: SystemDNSManager(storage: storage, runner: network.run(arguments:timeout:)),
             singBoxProcess: core,
             processExitMonitor: processExitMonitor,
             notificationSender: notificationSender,
@@ -1322,6 +1338,7 @@ final class AppStateTests: XCTestCase {
             method: "aes-128-gcm"
         )]
         state.selectedNodeID = state.nodes[0].id
+        state.activeConfigID = AppState.localConfigID
         if initialMode != .systemProxy {
             await state.switchMode(to: initialMode)
         }

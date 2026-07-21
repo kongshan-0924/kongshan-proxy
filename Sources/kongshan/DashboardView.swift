@@ -6,254 +6,396 @@ struct DashboardView: View {
     @Environment(AppState.self) private var state
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                proxyHeader
-                proxyModeControl
-                metrics
-                trafficChart
-                errorBanner
+        VStack(spacing: 0) {
+            PageHeader(title: "仪表盘", subtitle: nil) {
+                HStack(spacing: 8) {
+                    Picker("出站模式", selection: outboundModeBinding) {
+                        ForEach(OutboundMode.allCases, id: \.self) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .controlSize(.small)
+                    .frame(width: 180)
+                    .help(state.outboundMode.detail)
+                    .disabled(state.isBusy || !state.isReady)
 
-                if state.nodes.isEmpty {
-                    ContentUnavailableView(
-                        "还没有节点",
-                        systemImage: "point.3.connected.trianglepath.dotted",
-                        description: Text("请在“节点”页导入 Clash 订阅或添加手动 Hysteria2。")
-                    )
-                    .frame(maxWidth: .infinity, minHeight: 180)
+                    ModePill(
+                        title: ProxyMode.systemProxy.displayName,
+                        isActive: state.activeModes.contains(.systemProxy),
+                        isBusy: state.isBusy || !state.isReady
+                    ) {
+                        toggle(.systemProxy)
+                    }
+                    ModePill(
+                        title: ProxyMode.tun.displayName,
+                        isActive: state.activeModes.contains(.tun),
+                        isBusy: state.isBusy || !state.isReady
+                    ) {
+                        toggle(.tun)
+                    }
                 }
             }
-            .padding(24)
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    coreOnlyBanner
+                    metrics
+                    trafficChart
+
+                    if state.nodes.isEmpty {
+                        ContentUnavailableView(
+                            "还没有节点",
+                            systemImage: "point.3.connected.trianglepath.dotted",
+                            description: Text("请在“节点”页导入 Clash 订阅或添加手动 Hysteria2。")
+                        )
+                        .frame(maxWidth: .infinity, minHeight: 150)
+                    }
+                }
+                .padding(.horizontal, 22)
+                .padding(.bottom, 22)
+            }
         }
-        .navigationTitle("Dashboard")
+        .pageBackground()
+        .navigationTitle("仪表盘")
         .onAppear { state.startDashboardMonitoring() }
         .onDisappear { state.stopDashboardMonitoring() }
     }
 
-    private var proxyHeader: some View {
-        HStack(spacing: 16) {
-            Image(systemName: state.menuBarSymbol)
-                .font(.system(size: 42))
-                .foregroundStyle(state.isOn ? .green : .secondary)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(state.statusText)
-                    .font(.title2.weight(.semibold))
-                Text(state.selectedNode.map { "当前节点：\($0.name)" } ?? "尚未选择节点")
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            Button(state.activeMode != nil ? "关闭代理" : "开启\(modeTitle(state.preferredMode))") {
-                Task {
-                    if state.activeMode != nil {
-                        await state.stop()
-                    } else {
-                        await state.startPreferredProxy()
-                    }
-                }
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(state.isBusy || !state.isReady)
-        }
-    }
-
-    private var proxyModeControl: some View {
-        GroupBox("代理模式") {
-            VStack(alignment: .leading, spacing: 10) {
-                Picker("首选接管方式", selection: modeBinding) {
-                    Text("系统代理").tag(ProxyMode.systemProxy)
-                    Text("TUN").tag(ProxyMode.tun)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .disabled(state.isBusy || !state.isReady)
-
-                Text("TUN 模式的启动和停止需要管理员授权。在线切换会先完整关闭当前模式。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 4)
-        }
-    }
+    // MARK: - 指标卡
 
     private var metrics: some View {
         LazyVGrid(
-            columns: [GridItem(.adaptive(minimum: 150), spacing: 12)],
-            spacing: 12
+            columns: Array(repeating: GridItem(.flexible(), spacing: 14), count: 3),
+            spacing: 14
         ) {
-            DashboardMetricCard(
-                title: "上传速率",
-                value: rateText(state.uploadRate),
-                symbol: "arrow.up",
-                tint: .blue
-            )
-            DashboardMetricCard(
-                title: "下载速率",
-                value: rateText(state.downloadRate),
-                symbol: "arrow.down",
-                tint: .green
-            )
-            DashboardMetricCard(
-                title: "活动连接",
-                value: "\(state.activeConnectionCount)",
-                symbol: "point.3.connected.trianglepath.dotted",
-                tint: .orange
-            )
-            DashboardMetricCard(
-                title: "内核内存",
-                value: byteText(Int64(clamping: state.coreMemory)),
-                symbol: "memorychip",
-                tint: .purple
-            )
-            DashboardMetricCard(
-                title: "内核版本",
-                value: state.coreVersion,
-                symbol: "shippingbox",
-                tint: .indigo
-            )
-            DashboardMetricCard(
-                title: "运行时长",
-                value: uptimeText,
-                symbol: "clock",
-                tint: .teal
-            )
+            MetricCard(symbol: "shield.lefthalf.filled", tint: .blue, caption: "接管方式") {
+                Text(activeModesText)
+            } corner: {
+                StatusBadge(text: "出站 · \(state.outboundMode.displayName)", tint: state.statusTint)
+            }
+
+            MetricCard(symbol: "point.3.connected.trianglepath.dotted", tint: .green, caption: "当前节点") {
+                Text(state.selectedNode?.name ?? "未选择")
+            } corner: {
+                if let node = state.selectedNode {
+                    ProtocolTag(value: node.protocolType)
+                }
+            }
+
+            MetricCard(symbol: "bolt.horizontal", tint: .orange, caption: "出口连通性") {
+                connectivityValue
+            } corner: {
+                if state.isProbingConnectivity {
+                    ProgressView().controlSize(.small)
+                } else if state.isOn {
+                    Button {
+                        Task { await state.probeConnectivity() }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .help("重新测试")
+                }
+            }
+
+            MetricCard(symbol: "link", tint: .purple, caption: "活跃连接") {
+                Text("\(state.activeConnectionCount)")
+            }
+
+            MetricCard(symbol: "memorychip", tint: .pink, caption: "内核内存") {
+                Text(Theme.bytes(Int64(clamping: state.coreMemory)))
+            } corner: {
+                if state.coreVersion != "—" {
+                    Text(state.coreVersion)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+
+            MetricCard(symbol: "clock", tint: .teal, caption: "运行时长") {
+                if state.isOn, let startedAt = state.runtimeStartedAt {
+                    Text(startedAt, style: .timer)
+                } else {
+                    Text("—")
+                }
+            }
         }
     }
 
-    private var trafficChart: some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("实时速率")
-                        .font(.headline)
-                    Spacer()
-                    Text("最近 60 秒")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+    private var outboundModeBinding: Binding<OutboundMode> {
+        Binding(
+            get: { state.outboundMode },
+            set: { mode in Task { await state.setOutboundMode(mode) } }
+        )
+    }
 
-                Chart {
-                    ForEach(state.trafficHistory) { point in
-                        LineMark(
-                            x: .value("时间", point.timestamp),
-                            y: .value("速率", point.upload),
-                            series: .value("方向", "上传")
-                        )
-                        .foregroundStyle(by: .value("方向", "上传"))
-                        .interpolationMethod(.linear)
+    private var activeModesText: String {
+        let ordered: [ProxyMode] = [.systemProxy, .tun]
+        let names = ordered.filter(state.activeModes.contains).map(\.displayName)
+        return names.isEmpty ? "未开启" : names.joined(separator: " + ")
+    }
 
-                        LineMark(
-                            x: .value("时间", point.timestamp),
-                            y: .value("速率", point.download),
-                            series: .value("方向", "下载")
-                        )
-                        .foregroundStyle(by: .value("方向", "下载"))
-                        .interpolationMethod(.linear)
-                    }
-                }
-                .chartForegroundStyleScale([
-                    "上传": Color.blue,
-                    "下载": Color.green
-                ])
-                .chartYAxis {
-                    AxisMarks(position: .leading) { value in
-                        AxisGridLine()
-                        AxisValueLabel {
-                            if let bytes = value.as(Int64.self) {
-                                Text(rateText(bytes))
-                            }
-                        }
-                    }
-                }
-                .chartXAxis {
-                    AxisMarks(values: .automatic(desiredCount: 4)) {
-                        AxisGridLine()
-                        AxisValueLabel(format: .dateTime.second())
-                    }
-                }
-                .frame(minHeight: 210)
-                .transaction { transaction in
-                    transaction.animation = nil
-                }
-                .overlay {
-                    if state.trafficHistory.isEmpty {
-                        ContentUnavailableView(
-                            state.isOn ? "等待流量数据" : "代理未启动",
-                            systemImage: "chart.xyaxis.line",
-                            description: Text(state.isOn ? "内核正在建立推送。" : "开启代理后显示实时速率。")
-                        )
+    /// 开启接管后经当前节点实测到 Google / GitHub 的往返延迟。
+    @ViewBuilder
+    private var connectivityValue: some View {
+        if !state.isOn {
+            Text("—")
+        } else if state.connectivity.isEmpty {
+            Text(state.isProbingConnectivity ? "测试中…" : "待测试")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.secondary)
+        } else {
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(AppState.connectivityTargets, id: \.name) { target in
+                    HStack(spacing: 6) {
+                        Text(target.name)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 46, alignment: .leading)
+                        connectivityReading(state.connectivity[target.name])
                     }
                 }
             }
-            .padding(.vertical, 4)
         }
     }
 
     @ViewBuilder
-    private var errorBanner: some View {
-        if let error = state.errorMessage {
-            HStack(alignment: .top) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-                Text(error).textSelection(.enabled)
-                Spacer()
-                Button("忽略") { state.dismissError() }
-            }
-            .padding(12)
-            .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+    private func connectivityReading(_ value: Int??) -> some View {
+        switch value {
+        case let .some(.some(milliseconds)):
+            Text("\(milliseconds) ms")
+                .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                .foregroundStyle(Theme.delayColor(milliseconds))
+        case .some(.none):
+            Text("不可达")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.red)
+        case .none:
+            Text("—")
+                .font(.system(size: 13).monospacedDigit())
+                .foregroundStyle(.tertiary)
         }
     }
 
-    private var modeBinding: Binding<ProxyMode> {
-        Binding(
-            get: { state.preferredMode },
-            set: { mode in Task { await state.switchMode(to: mode) } }
-        )
+    // MARK: - 速率曲线
+
+    private var trafficChart: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("网络流量")
+                        .font(.system(size: 15, weight: .semibold))
+                    HStack(spacing: 12) {
+                        legendDot(color: .blue, title: "上传")
+                        legendDot(color: .green, title: "下载")
+                    }
+                }
+                Spacer()
+                HStack(spacing: 18) {
+                    rateSummary(symbol: "arrow.up", tint: .blue, value: state.uploadRate, title: "上传")
+                    rateSummary(symbol: "arrow.down", tint: .green, value: state.downloadRate, title: "下载")
+                }
+            }
+
+            Chart {
+                ForEach(state.trafficHistory) { point in
+                    AreaMark(
+                        x: .value("时间", point.timestamp),
+                        y: .value("速率", point.download),
+                        series: .value("方向", "下载")
+                    )
+                    .foregroundStyle(
+                        .linearGradient(
+                            colors: [.green.opacity(0.3), .green.opacity(0.03)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .interpolationMethod(.monotone)
+
+                    AreaMark(
+                        x: .value("时间", point.timestamp),
+                        y: .value("速率", point.upload),
+                        series: .value("方向", "上传")
+                    )
+                    .foregroundStyle(
+                        .linearGradient(
+                            colors: [.blue.opacity(0.26), .blue.opacity(0.03)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .interpolationMethod(.monotone)
+
+                    LineMark(
+                        x: .value("时间", point.timestamp),
+                        y: .value("速率", point.download),
+                        series: .value("方向", "下载线")
+                    )
+                    .foregroundStyle(.green)
+                    .lineStyle(StrokeStyle(lineWidth: 1.6))
+                    .interpolationMethod(.monotone)
+
+                    LineMark(
+                        x: .value("时间", point.timestamp),
+                        y: .value("速率", point.upload),
+                        series: .value("方向", "上传线")
+                    )
+                    .foregroundStyle(.blue)
+                    .lineStyle(StrokeStyle(lineWidth: 1.6))
+                    .interpolationMethod(.monotone)
+                }
+            }
+            .chartLegend(.hidden)
+            .chartYAxis {
+                AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { value in
+                    AxisGridLine().foregroundStyle(.quaternary)
+                    AxisValueLabel {
+                        if let bytes = value.as(Int64.self) {
+                            Text(Theme.bytes(bytes))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            .chartXAxis {
+                AxisMarks(values: .automatic(desiredCount: 4)) {
+                    AxisGridLine().foregroundStyle(.quaternary)
+                    AxisValueLabel(format: .dateTime.hour().minute())
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            // 固定高度：占位视图放在 overlay 里，用 minHeight 会被撑到几百点高。
+            .frame(height: 200)
+            // 每秒推送一次，禁用隐式动画避免持续重绘带来的 CPU 占用。
+            .transaction { transaction in
+                transaction.animation = nil
+            }
+            .overlay {
+                if state.trafficHistory.isEmpty {
+                    VStack(spacing: 7) {
+                        Image(systemName: "chart.xyaxis.line")
+                            .font(.title3)
+                            .foregroundStyle(.tertiary)
+                        Text(state.isOn ? "等待内核推送流量数据" : "开启代理后显示实时速率")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+        .card(padding: 18)
     }
 
-    private var uptimeText: String {
-        guard state.isOn, let startedAt = state.runtimeStartedAt else { return "—" }
-        let seconds = max(0, Int(Date().timeIntervalSince(startedAt)))
-        let hours = seconds / 3_600
-        let minutes = (seconds % 3_600) / 60
-        let remainder = seconds % 60
-        if hours > 0 { return String(format: "%d:%02d:%02d", hours, minutes, remainder) }
-        return String(format: "%02d:%02d", minutes, remainder)
+    private func rateSummary(symbol: String, tint: Color, value: Int64, title: String) -> some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(tint)
+                .frame(width: 22, height: 22)
+                .overlay(
+                    Image(systemName: symbol)
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.white)
+                )
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(Theme.rate(value))
+                    .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                Text(title)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 
-    private func modeTitle(_ mode: ProxyMode) -> String {
-        mode == .tun ? "TUN" : "系统代理"
+    private func legendDot(color: Color, title: String) -> some View {
+        HStack(spacing: 5) {
+            Circle().fill(color).frame(width: 7, height: 7)
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 
-    private func rateText(_ bytes: Int64) -> String {
-        "\(byteText(bytes))/s"
+    /// 「只跑内核」是测速拉起的临时状态：两个接管胶囊都是灰的，但内核在计时。
+    /// 不给出口的话，主窗口里没有任何办法停掉它（此前只在托盘有入口）。
+    @ViewBuilder
+    private var coreOnlyBanner: some View {
+        if state.isOn, state.activeModes.isEmpty {
+            HStack(spacing: 9) {
+                Image(systemName: "info.circle.fill")
+                    .foregroundStyle(.blue)
+                Text("内核正在运行但未接管网络（仅用于测速）。")
+                    .font(.callout)
+                Spacer(minLength: 8)
+                Button("停止内核") { Task { await state.stop() } }
+                    .controlSize(.small)
+                    .disabled(state.isBusy)
+            }
+            .padding(12)
+            .background(.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: Theme.cardRadius))
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.cardRadius)
+                    .strokeBorder(.blue.opacity(0.25), lineWidth: 0.5)
+            )
+        }
     }
 
-    private func byteText(_ bytes: Int64) -> String {
-        ByteCountFormatter.string(fromByteCount: max(0, bytes), countStyle: .memory)
+    /// 胶囊点击：独立开关该接管方式，两者可同时生效。
+    private func toggle(_ mode: ProxyMode) {
+        Task { await state.setMode(mode, enabled: !state.activeModes.contains(mode)) }
     }
 }
 
-private struct DashboardMetricCard: View {
-    let title: String
-    let value: String
+/// Stash 风格指标卡：左上角彩色图标块，右上角可选角标，底部说明 + 大号数值。
+private struct MetricCard<Value: View, Corner: View>: View {
     let symbol: String
     let tint: Color
+    let caption: String
+    @ViewBuilder let value: Value
+    @ViewBuilder let corner: Corner
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label(title, systemImage: symbol)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top) {
+                IconBadge(symbol: symbol, tint: tint)
+                Spacer(minLength: 8)
+                corner
+            }
+
+            Spacer(minLength: 14)
+
+            Text(caption)
                 .font(.caption)
-                .foregroundStyle(tint)
-            Text(value)
-                .font(.title3.monospacedDigit().weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.bottom, 3)
+
+            value
+                .font(.system(size: 19, weight: .bold).monospacedDigit())
                 .lineLimit(1)
-                .minimumScaleFactor(0.72)
-                .accessibilityLabel("\(title)\(value)")
+                .minimumScaleFactor(0.6)
+                .truncationMode(.middle)
+                .accessibilityLabel(Text(caption))
         }
-        .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
-        .padding(14)
-        .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
+        .frame(maxWidth: .infinity, minHeight: 104, alignment: .leading)
+        .card(padding: 16)
+    }
+}
+
+extension MetricCard where Corner == EmptyView {
+    init(
+        symbol: String,
+        tint: Color,
+        caption: String,
+        @ViewBuilder value: () -> Value
+    ) {
+        self.init(symbol: symbol, tint: tint, caption: caption, value: value) { EmptyView() }
     }
 }

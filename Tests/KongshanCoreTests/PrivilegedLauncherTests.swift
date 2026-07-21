@@ -15,6 +15,10 @@ final class PrivilegedLauncherTests: XCTestCase {
         XCTAssertTrue(script.hasSuffix("with administrator privileges"))
         XCTAssertTrue(script.contains("/bin/cat"))
         XCTAssertTrue(script.contains("run -c /dev/stdin"))
+        // 回归防护：后台管道必须放开 osascript 的捕获描述符，否则
+        // `do shell script` 永不返回，配置写不进 FIFO，内核只会读到 EOF。
+        XCTAssertTrue(script.contains("</dev/null"))
+        XCTAssertTrue(script.contains("2>/dev/null"))
         XCTAssertTrue(script.contains("/bin/echo $!"))
         XCTAssertTrue(script.contains("Kong'\\\\''s App"))
         XCTAssertTrue(script.contains("kong'\\\\''s log.txt"))

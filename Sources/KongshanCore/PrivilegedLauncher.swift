@@ -124,7 +124,10 @@ public enum PrivilegedCommandBuilder {
         let command = [
             "umask 077",
             "export PATH=/usr/bin:/bin:/usr/sbin:/sbin",
-            "/bin/cat \(shellQuote(fifoURL.path)) | \(shellQuote(binaryURL.path)) run -c /dev/stdin >> \(shellQuote(logURL.path)) 2>&1 & /bin/echo $!"
+            // cat 的 stdin/stderr 必须一并重定向：只要后台管道还持有 osascript 的捕获描述符，
+            // `do shell script` 就会一直等下去，launch 永不返回，配置也就写不进 FIFO，
+            // 内核最终只会读到 EOF（实测现象：decode config at /dev/stdin: EOF）。
+            "/bin/cat \(shellQuote(fifoURL.path)) </dev/null 2>/dev/null | \(shellQuote(binaryURL.path)) run -c /dev/stdin >> \(shellQuote(logURL.path)) 2>&1 & /bin/echo $!"
         ].joined(separator: "; ")
         return appleScript(command: command)
     }

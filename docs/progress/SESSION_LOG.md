@@ -429,3 +429,440 @@
 - 风险/注意事项：修复启动窗口时需保留登录启动的静默常驻体验，避免开机登录时强制弹窗；Bartender 内的显示位置需要由用户在 Bartender 中调整，产品代码只能保证状态项正常注册。
 - 下一步：为“用户双击/重新打开”增加显式主窗口展示与激活，同时让登录项启动保持菜单栏静默；完成后重打包并人工验证双击、关闭窗口后重开、Bartender 可见性三条路径。
 - 下一位 Agent 如何接手：先为启动/重新打开行为补测试或可验证边界，再最小修改 `KongshanApp.swift`/AppDelegate；不要尝试用私有 API 控制状态项坐标。
+
+## 2026-07-20 — 修复双击无窗口并按 Stash 风格重做界面
+
+- 已完成：修复双击不出主窗口；重做菜单栏托盘面板、Dashboard、节点、规则、日志页视觉；新增共享样式层；顺带发现并修复绕过列表串行的真实 bug。
+- 修改文件：新增 `Sources/kongshan/Theme.swift`、`Tests/KongshanAppTests/RenderSnapshotTests.swift`；重写 `KongshanApp.swift`、`MenuBarView.swift`、`DashboardView.swift`、`MainWindowView.swift`；修改 `RoutingView.swift`、`LogsView.swift`、`AppState.swift`（menuBarSymbol）。
+- 测试结果：`swift test` 138 项通过（1 项快照工具按 env 跳过）、0 失败；`zsh scripts/verify_m4.sh` 输出 `M4 automated verification passed`，5 次采样平均 CPU 0.040%、最大 RSS 118,336 KB（低于 150 MB 红线）。
+- 当前状态：`open dist/kongshan.app` 实测 CGWindowList 可见窗口数 1（此前为 0）。托盘改为 `.menuBarExtraStyle(.window)` 自绘面板，不建立任何 WebSocket。
+
+### 窗口修复的关键诊断
+
+- 先按“人工启动会激活应用”实现，实测失败。探针数据：`didFinishLaunching isDefault=true`、`isActive=false`、`ppid=1`、`XPC_SERVICE_NAME=application.com.kaysen.kongshan.*`、`didBecomeActive` 完全不触发。
+- 结论：LSUIElement 应用启动时不会被激活，且环境变量与登录项同形，无法据此区分启动来源。
+- 最终判据：`LoginItemManager().currentStatus() != .enabled` 才在启动时展示主窗口；配合 `applicationShouldHandleReopen` 覆盖“已在运行时再次双击”。
+- 副作用修复：`AppState` 改由 AppDelegate 直接持有。此前靠视图 `onAppear` 注入，用户没打开过菜单时 `applicationShouldTerminate` 会拿到 nil，退出时不还原系统代理。
+- 主窗口改为 AppDelegate 自建 `NSWindow` + `NSHostingView`，去掉 SwiftUI `Window` scene；窗口打开期间切 `.regular`（恢复菜单栏与 ⌘Q/⌘W），`windowWillClose` 切回 `.accessory`。
+
+### 发现并修复的既有 bug
+
+- 规则页两个绕过列表都用 `ForEach(indices, id: \.self)` 且结构相同，SwiftUI 判为同一批视图身份，导致「绕过域名」与「绕过 IP / CIDR」互相显示对方内容。
+- 探针验证：域名设为 `AAA/BBB` 时，域名区显示的是 `127.0.0.0/8`、`10.0.0.0/8`。
+- 修复：抽出 `BypassListSection`，行上加 `.id("\(identity)-\(index)")` 区分两组身份；重新渲染确认两列表各自正确。
+
+### 视觉自查方式
+
+- 本机终端无屏幕录制权限，`screencapture` 只能得到全黑图；`osascript` 无辅助功能权限。
+- 改用 `RenderSnapshotTests`：NSWindow + NSHostingView + `cacheDisplay` 离屏出图，可正确渲染 ScrollView 内容与 AppKit 原生控件（`ImageRenderer` 两者都渲染不出来）。
+- 运行：`KONGSHAN_SNAPSHOT_DIR=/tmp/kongshan-shots swift test --filter RenderSnapshotTests`；不设该环境变量时自动跳过。
+- 据此修掉：协议标签 `SHADOWSOCKS` 撑成两行（改短名）、指标卡 4+2 残行（改固定 3 列）、图表占位把卡片撑高数百点（`minHeight` 改 `frame(height:)`）。
+- 已核对浅色与深色两套外观。
+
+- 风险/注意事项：NavigationSplitView 侧栏在 `cacheDisplay` 下抓不到内容（对照组证明普通 `.sidebar` List 可以），侧栏视觉未经离屏验证，需人工确认。托盘面板刻意不显示实时速率——两个消费者共用 `isDashboardVisible` 布尔量会互相取消订阅，改造会破坏既有幂等测试。窗口首次打开位置由 `window.center()` 决定，多显示器下可能不在主屏，移动后由 `setFrameAutosaveName` 记住。
+- 下一步：人工确认侧栏、托盘面板交互与 Bartender 可见性；随后继续 `docs/acceptance/M4.md` 的真实网络人工验收。
+- 下一位 Agent 如何接手：改界面前先跑 `RenderSnapshotTests` 拿到基线图；不要用 `ImageRenderer`。动窗口逻辑前先读本节的探针结论，别再用激活状态判断启动来源。
+
+## 2026-07-20 — 按 Stash 截图二次调整界面与交互
+
+- 已完成：托盘从自绘面板改回原生菜单并按 Stash 操作逻辑重组；仪表盘改为 Stash 式白卡布局；侧栏加分组；页头加接管方式胶囊开关。
+- 修改文件：`MenuBarView.swift`（整体重写）、`DashboardView.swift`（整体重写）、`Theme.swift`、`MainWindowView.swift`、`KongshanApp.swift`、`RoutingView.swift`、`LogsView.swift`、`RenderSnapshotTests.swift`。
+- 测试结果：`swift build` 无错误无警告；`zsh scripts/verify_m4.sh` 输出 `M4 automated verification passed`。
+- 当前状态：主窗口 1000×680 下六张指标卡两行三列，白卡浮于灰底，深浅色均已离屏核对。
+
+### 托盘按 Stash 重做（关键决定）
+
+- 上一版做成 `.menuBarExtraStyle(.window)` 自绘面板，但用户提供的 Stash 截图显示其托盘是**原生菜单**：快捷键右对齐、子菜单带当前选择、开关是勾选项。
+- 因此去掉 `.menuBarExtraStyle(.window)`，回到原生菜单，结构为：状态文字 / 打开仪表盘 ⌘D / 接管方式子菜单（inline Picker 出勾选）/ 节点子菜单（按订阅分 Section，显示延迟与勾选）/ 开启代理 ⌘S / 登录时启动 / 测速全部 ⌘T / 刷新订阅 ⌘R / 错误提示 / 退出 ⌘Q。
+- 原生菜单同时解决了大量节点时自绘列表要限高滚动的问题。`Theme.PanelRowButton` 与 `panelWidth` 随之删除。
+
+### 视觉层次的关键修正
+
+- 首版卡片用 `.background` / `.background.secondary`，浅色下两者几乎同色，完全分不出层次（离屏截图确认）。
+- 改为 `Theme.cardFill = controlBackgroundColor`（浅色为白）、`Theme.pageFill = windowBackgroundColor`，卡片加 0.07 投影，才得到 Stash 那种白卡浮于灰底的效果。
+- 指标卡改为 Stash 结构：左上彩色圆角图标块 + 右上角标 + 底部说明与大号数值。
+
+### 一次 CPU 尖峰的排查（结论：非本项目代码）
+
+- `verify_m4.sh` 出现平均 CPU 0.780%、单次尖峰 4.3%，高于历史的 0.040%。
+- `sample` 抓栈：4776 个样本中 4719 在 `mach_msg` 空等，实际工作几乎全部集中在
+  `FBSSceneObserver scene:didUpdateSettings:` → `NSStatusItem _updateReplicant:` → `_redrawReplicantSnapshot:`。
+- 「replicant」是第三方菜单栏管理器复制状态项的机制；本机 Bartender 6 与其 XPC 服务在运行，反复触发状态项快照重绘。
+- 系统静置后连续 20 次采样：CPU 全部 0.0%，RSS 89,632 KB。确认是外部环境在我反复启停进程时造成的抖动，不是界面改动引入的回归。
+
+- 风险/注意事项：托盘为原生菜单，无法用 `RenderSnapshotTests` 离屏验证，需人工点开确认子菜单与勾选。侧栏同样抓不到。性能采样应在系统静置时进行，否则 Bartender 会污染读数。
+- 下一步：人工确认托盘菜单与侧栏，然后继续真实网络人工验收。
+- 下一位 Agent 如何接手：卡片配色必须用 `Theme.cardFill`/`Theme.pageFill`，不要退回 `.background` 系列。测性能前先静置，先用 `sample` 确认工作落在哪个栈再下结论。
+
+## 2026-07-20 — 图标、并发接管、跳过 TUN 列表与 GeoIP 数据库设置
+
+- 已完成：修掉速率显示 “Zero KB”；生成并接入应用图标；系统代理与 TUN 改为可同时开启；拆出独立的「跳过 TUN」列表；新增 GeoIP/规则集下载源与更新设置。
+- 修改文件：新增 `Resources/AppIcon.icns`、`scripts/make_app_icon.swift`；修改 `Theme.swift`、`Info.plist`、`build_app.sh`、`RoutingModels.swift`、`ConfigGenerator.swift`、`RuleSetService.swift`、`AppState.swift`、`MenuBarView.swift`、`DashboardView.swift`、`MainWindowView.swift`、`RoutingView.swift`、`TunConfigTests.swift`、`AppStateTests.swift`。
+- 测试结果：`swift test` 140 项通过 0 失败（1 项快照工具按 env 跳过，新增 2 项并发模式测试）；`zsh scripts/verify_m4.sh` 输出 `M4 automated verification passed`，平均 CPU 0.220%、最大 RSS 118,144 KB。
+- 当前状态：`dist/kongshan.app` 已带图标（`CFBundleIconFile=AppIcon`）；两种接管方式可各自独立开关。
+
+### 速率显示 Zero
+
+- `ByteCountFormatter` 的 `.memory` 风格会把 0 本地化成 “Zero KB”。改用 `formatted(.byteCount(style: .memory, spellsOutZero: false))`。
+
+### 应用图标
+
+- 之前没有图标资源，Finder/Dock 显示通用图标。
+- `scripts/make_app_icon.swift` 用 CoreGraphics 画：蓝紫渐变 squircle + 白盾 + 盾内三点分流图形，输出 10 个尺寸的 PNG，`iconutil -c icns` 打包成 `Resources/AppIcon.icns`。
+- `Info.plist` 增加 `CFBundleIconFile`，`build_app.sh` 复制 icns 进 bundle。改图标重跑该脚本即可。
+
+### 系统代理与 TUN 并发（原为互斥）
+
+- `ConfigInput.proxyMode: ProxyMode` → `enabledModes: Set<ProxyMode>`；保留单模式便捷 init，既有调用点与测试不受影响。
+- `inbounds` 由 switch 改为按集合累加，可同时产出 mixed 与 tun；`auto_detect_interface` 与 DNS hijack 只看是否含 TUN。
+- `AppState.activeMode` 由存储属性改为派生（含 TUN 时返回 `.tun`），真值是新的 `activeModes: Set<ProxyMode>`。这样既有断言 `activeMode == .tun` 的测试全部保持有效。
+- 关键判据：**TUN 决定内核是否以 root 运行，系统代理决定是否改 networksetup**。启动、停止、分流重载、DNS 重载、崩溃自愈五条路径全部按这两个正交条件重写，不再 switch 单一模式。
+- 同时开启时只有一个 sing-box 进程（提权），mixed inbound 由该 root 进程提供。
+- 新增 `setMode(_:enabled:)`：变更需重建配置，因此先完整停机再按新集合启动，复用既有 stop/start 的回滚路径。
+- 新增测试：双模式配置产出 mixed+tun 两个 inbound，且打包内核 `check` 通过。
+
+### 跳过 TUN 独立列表
+
+- 原先 tun 的 `route_exclude_address` 直接复用 `bypassCIDRs`，语义混在一起。
+- `RoutingSettings` 新增 `tunExcludeCIDRs`，自定义 `init(from:)` 让旧设置文件解码时回落到默认私有网段，避免升级后排除列表变空。
+- 规则页新增「跳过 TUN」编辑区；两个既有测试改为断言解耦后的语义。
+
+### GeoIP / 规则集数据库
+
+- 澄清来源：本项目用的是 sing-box 官方 `.srs` 规则集，来自开源仓库 SagerNet/sing-geoip 与 sing-geosite（不是 MaxMind mmdb）。
+- 新增 `RuleSetMirror`：GitHub 原始地址 / jsDelivr CDN（Fastly）。默认改为 jsDelivr，国内可达性明显更好。
+- 新增 `RuleSetSettings`（镜像、自动更新、最后更新时间），随 settings.json 持久化。
+- 关闭自动更新时 `prepare` 不发起下载，直接走缓存；「立即更新」强制走网络，成功才写入最后更新时间。
+- 设置页新增区块，展示当前三个下载地址、下载源选择、自动更新开关、最后更新时间与立即更新按钮。
+
+- 风险/注意事项：并发模式下同时开启会请求管理员授权（因为内核转为 root 运行）；从单一系统代理切到「同时开启」会经历一次完整停机再启动。规则集镜像切换与立即更新只刷新缓存，不重启内核，下次启动或应用规则时生效。真实双模式共存、真实 TUN 授权、jsDelivr 可达性均未人工验证。
+- 下一步：人工验证双模式同开的真实行为（授权弹窗、出口 IP、系统代理是否仍生效）、跳过 TUN 列表的实际命中、规则集立即更新。
+- 下一位 Agent 如何接手：改模式相关逻辑时记住两个正交条件（是否含 TUN → 是否提权；是否含系统代理 → 是否动 networksetup），不要退回 switch 单一模式。`activeMode` 是派生只读属性，写入要用 `activeModes`。
+
+## 2026-07-20 — 新会话阅读项目
+
+- 已完成：阅读 README、HANDOFF、PROGRESS、NEXT_STEPS、SESSION_LOG、设计稿与源码/测试/脚本目录结构。
+- 修改文件：无代码变更。
+- 测试结果：未跑测试。
+- 当前状态：已建立项目全貌认知，待命后续任务。
+- 风险/注意事项：真实网络/TUN/登录项等人工验收仍未完成。
+- 下一步：等待用户指令；人工验收项见 docs/NEXT_STEPS.md。
+- 下一位 Agent 如何接手：先读 docs/HANDOFF.md 与 docs/PROGRESS.md。
+
+## 2026-07-20 — 修复真实 TUN 无法启动与测速崩溃
+
+- 已完成：定位并修复 TUN 从未真正可用的根因；修复测速崩溃；仪表盘延迟卡改为出口连通性实测。
+- 修改文件：`PrivilegedLauncher.swift`、`PrivilegedLauncherTests.swift`、`AppState.swift`、`DashboardView.swift`。
+- 测试结果：`swift test` 140 项通过 0 失败。
+- 当前状态：TUN 与测速两个阻塞问题已修，待真机验证。
+
+### TUN 无法启动的根因（重要）
+
+- 现象：`logs/sing-box-tun.log` 只有一行 `FATAL[0057] decode config at /dev/stdin: EOF`，内核空等 57 秒后拿到 EOF。
+- 根因：提权命令为
+  `/bin/cat FIFO | sing-box run -c /dev/stdin >> LOG 2>&1 & /bin/echo $!`
+  后台管道里 `cat` 的 stdin/stderr 仍连着 osascript 的捕获描述符，`do shell script` 因此永不返回。
+  `launch()` 阻塞 → `writeAll` 从未执行 → FIFO 里一个字节都没有 → 内核读到 EOF。
+- 实测验证：原写法 osascript 30 秒未返回；加上 `</dev/null 2>/dev/null` 后 **0.088 秒返回**，并成功把 68,795 字节（141 节点配置）完整送达消费端。
+- 修复：`cat` 增加 `</dev/null 2>/dev/null`；`PrivilegedLauncherTests` 增加断言防回归。
+- 说明：此前 M3 只用 fake launcher 测过，真实 root 路径从未跑通，所以该缺陷一直存在。
+
+### 测速崩溃（EXC_CRASH / __cxa_pure_virtual）
+
+- 崩溃栈：`AppState.testAllDelays` → `delays.modify` → `ObservationRegistrar.willSet` → SwiftUI `GraphHost.asyncTransaction`；触发线程在 `swift::AsyncTask::completeFuture`。
+- 处理：141 个节点逐条写 `@Observable` 的 `delays`，每次都触发一次 SwiftUI 事务，在列表可见时形成观察风暴。改为本地聚合后一次性赋值。
+- 同时把 `nodes.map(ConfigGenerator.outboundTag)` 换成显式闭包——本工具链的方法引用有已知 IRGen 问题（M4 Task 5 已踩过一次）。
+- 未在本机复现（无真实订阅与运行中代理），以上是依据崩溃栈的定向修复，需真机确认。
+
+### 仪表盘出口连通性
+
+- 原「延迟」卡展示的是节点握手延迟，改为开启接管后经当前节点实测到 Google 与 GitHub 的往返延迟。
+- 走 Clash API 的 `/proxies/{tag}/delay?url=...`，测的是真实经该节点访问目标。
+- 触发时机：接管启动成功后自动跑一次；切换节点后重跑；卡片右上角可手动重测。停止接管时清空。
+
+- 风险/注意事项：测速崩溃未本地复现，修复基于崩溃栈推断。TUN 修复已用等价命令实测，但真实管理员授权路径仍需人工走一遍。
+- 下一步：节点页改造（导入前可改订阅名、按订阅分组折叠、每组独立自动更新开关）尚未开始。
+- 下一位 Agent 如何接手：改提权命令时务必保证后台进程不持有 osascript 的捕获描述符，否则 `do shell script` 不返回；改动后用本节的 osascript 计时实验复验。
+
+## 2026-07-20 — 节点页改造：订阅分组、导入前改名、按组自动更新
+
+- 已完成：订阅按组折叠展示；导入前可改名并设定是否自动更新；每组独立自动更新开关、重命名、删除；识别机场塞进节点名的套餐信息并聚合到组内说明行。
+- 修改文件：`Models.swift`、`AppState.swift`、`MainWindowView.swift`、`MenuBarView.swift`、`ClashSubscriptionConverterTests.swift`、`RenderSnapshotTests.swift`。
+- 测试结果：`swift test` 141 项通过 0 失败（新增信息条目识别测试）；`zsh scripts/verify_m4.sh` 输出 `M4 automated verification passed`。
+- 当前状态：节点页离屏渲染确认——分组头含折叠箭头、名称、真实节点数、自动更新勾选、⋯ 菜单；套餐信息独占一行不再混入可选节点。
+
+### 订阅分组与自动更新粒度
+
+- `SubscriptionSource` 新增 `autoUpdate`，自定义 `init(from:)` 让旧订阅文件解码时默认开启，行为不变。
+- `performSubscriptionRefresh` 新增 `automaticOnly` 参数：定时更新跳过关掉自动更新的订阅，用户主动「刷新订阅」仍然全量。
+- `rescheduleSubscriptionUpdates` 只把 `autoUpdate == true` 的订阅纳入调度，避免为已关闭的订阅安排唤醒。
+- 新增 `renameSubscription(id:to:)`、`setSubscriptionAutoUpdate(id:enabled:)`、`removeSubscription(id:)`。
+- `importSubscription` 增加 `name` 与 `autoUpdate` 参数；点「导入」先弹确认表单（名称预填 host、可改，附自动更新开关），确认后才真正拉取。
+
+### 机场套餐信息条目
+
+- 机场把「剩余流量 / 重置日 / 到期日 / 官网」当成节点下发，它们是合法 outbound 但没有代理用途。
+- `ProxyNode.isSubscriptionInfo` 按关键词与「491.89 G | 500.00 G」这类用量格式识别，附单元测试（含真实节点名的反例）。
+- 仅影响展示：这些条目仍在 `nodes` 里参与配置生成，不改动代理逻辑；界面上聚合成组内一行说明，菜单栏节点子菜单也过滤掉。
+- `selectFirstNodeIfNeeded` 改为优先选真实节点，避免默认选中信息条目。
+
+- 风险/注意事项：信息条目识别是关键词启发式，可能误判名字里带「流量」「官网」等字样的真实节点；误判只影响展示与默认选中，不影响已生成的配置。`NodesView` 由 private 改为 internal 以便离屏渲染自查。
+- 下一步：本轮四项（TUN、测速崩溃、连通性卡、节点页）需真机验证。
+- 下一位 Agent 如何接手：订阅相关改动记得同时看「手动刷新全量 / 定时更新按开关过滤」这条区分，别把两者合并。
+
+## 2026-07-20 — 出站模式、托盘策略组、日志切换与测速加固
+
+- 已完成：新增直连/全局/规则三种出站模式；托盘按 Stash 重排（测速全部置顶、出站模式子菜单、每个策略组独立选节点并显示延迟）；修复日志等级切换看似无效；测速全部加防重入与结构简化。
+- 修改文件：`ProxyMode.swift`、`ConfigGenerator.swift`、`AppState.swift`、`MenuBarView.swift`（重写）、`DashboardView.swift`、`MainWindowView.swift`、`RoutingConfigTests.swift`。
+- 测试结果：`swift test` 142 项通过 0 失败（新增三种出站模式的内核校验测试）；`zsh scripts/verify_m4.sh` 通过，平均 CPU 0.020%、最大 RSS 118,912 KB。
+
+### 出站模式（直连 / 全局 / 规则）
+
+- 新增 `OutboundMode`，与「接管方式」正交：接管方式决定流量怎么进来，出站模式决定流量怎么出去。
+- `route` 生成按模式分派：`.rule` 保持原有六级优先级；`.global` 清空规则、final 指向「手动选择」；`.direct` 清空规则、final 指向 direct。
+- 连带修正：全局/直连不声明规则集，DNS 里引用 `geosite-cn` 的那条规则必须同步去掉，否则内核校验直接失败。直连模式的 DNS final 也改为国内 DoH，不再绕到代理出口。
+- 新增测试：三种模式生成的配置都用打包内核 `check` 验证通过，并断言各自的 rules/final 形态。
+- 切换时未运行只持久化；运行中复用分流的热重载路径重建配置。
+
+### 托盘按 Stash 重排
+
+- 顺序：状态 / 打开仪表盘 ⌘D / 测速全部 ⌘T（置顶）/ 出站模式子菜单 / 系统代理 ⌘E / TUN ⌘U / 各策略组子菜单 / 登录时启动 / 刷新订阅 ⌘R / 退出 ⌘Q。
+- 策略组：`AppState.policyGroups` 暴露配置里实际生成的 selector 组（手动选择、自建），每组一个子菜单，可单独指定节点，右侧显示上次测速的 ms。
+- 新增 `select(_:in:)`，通过 Clash API 的分组选择接口切换；「手动选择」会同步全局当前节点并重测连通性。
+
+### 日志等级切换看似无效
+
+- `setLogLevel` 只重建了推送流，没有清空已显示的行，旧等级的日志仍留在列表里，看起来像没切换。改为切换时清空显示。
+
+### 测速崩溃的进一步加固（仍未复现）
+
+- 写了针对性复现：141 个节点走真实 actor + TaskGroup 批量测速路径、控制端口无人监听，本地跑 5 轮均未崩溃，说明问题不在并发路径本身。
+- 加固内容：`isTestingAllDelays` 防重入（托盘与节点页都能触发，重复点击会叠加数百个并发请求）；只把 `(id, tag)` 这类 Sendable 数据带过 await，挂起后不再遍历节点数组；两处按钮在进行中禁用。
+- 崩溃栈为 `swift_release` → `destroy for ProxyNode`，属于内存/运行时层面，未能本地复现，以上为定向加固。
+
+### 一次误判的性能回归
+
+- 验收曾报 `CPU sample 6.8% exceeds 5.0%`，连续两次失败。
+- 排查：手动以相同隔离环境（`CFFIXED_USER_HOME`）启动同一产物，`sample` 抓栈显示主线程完全空等；按时间序列采样 `%cpu` 主要为 0.0%，偶发 2.2% 尖峰。
+- 结论：`ps %cpu` 是衰减平均，构建期机器繁忙会把读数抬高。机器静置 30 秒后干净复跑，平均 0.020% 通过。
+- 教训：这类阈值失败先静置复跑并抓栈，不要直接改阈值或回滚代码。
+
+- 风险/注意事项：出站模式切换会重建配置并重启内核（TUN 下会再次请求授权）。策略组子菜单目前只有「手动选择」和「自建」，因为配置只生成这两个 selector；若将来按分流规则生成更多策略组，`policyGroups` 需同步扩展。
+- 下一步：真机验证测速是否仍崩、三种出站模式的实际出口行为、托盘策略组切换。
+- 下一位 Agent 如何接手：改 `route` 生成时记得 DNS 的 `rule_set` 引用必须和 route 里声明的规则集保持一致，否则内核 check 直接失败。
+
+## 2026-07-20 — 内核与接管解耦、自定义策略组、采样窗口修正
+
+- 已完成：测速不再要求先开接管；新增用户自定义策略组（按服务分流，对应 Stash 的 Netflix/YouTube 分组）；修正验收脚本的 CPU 采样窗口。
+- 修改文件：`RoutingModels.swift`、`ConfigGenerator.swift`、`AppState.swift`、`MenuBarView.swift`、`MainWindowView.swift`、`RoutingView.swift`、`RoutingConfigTests.swift`、`scripts/verify_m4.sh`。
+- 测试结果：`swift test` 144 项通过 0 失败（新增策略组生成与命名校验测试）；`zsh scripts/verify_m4.sh` 通过，平均 CPU 0.000%、最大 RSS 114,352 KB。
+
+### 测速按钮为什么是灰的（根因：内核生命周期和接管绑死）
+
+- 测速走 Clash API，而此前内核只在「接管开启」时才启动，于是没开代理就无法测速。这是与 Stash 模型的关键差异：Stash 的内核常驻，接管只是开关。
+- 解耦：`start(modes:)` 允许空集合 = 只跑内核（本地 mixed inbound + Clash API），不改系统代理也不建 TUN。
+- `stop()` 增加 `runtime != nil` 判断，未接管状态下也能真正停进程。
+- 新增 `startCoreForTestingIfNeeded()`：测速时若内核未运行则自动拉起，状态显示为「内核已就绪（未接管）」。
+- 托盘在该状态下显示「停止内核」，避免出现用户无法关闭的隐藏运行态。
+- 两处「测速」「测速全部」按钮不再要求 `isOn`。
+
+### 自定义策略组（按服务分流）
+
+- 新增 `PolicyGroup`（名称 + selector/urltest），随 `RoutingSettings` 持久化，旧文件解码回落空数组。
+- 校验：组名非空、不得占用内置名（手动选择/自动选择/自建/direct/reject）、不得重复。
+- 配置生成为每个组产出对应出站；自定义规则的「策略组」下拉自动包含它们。
+- `AppState.policyGroups` 只暴露 selector 类型供手动指定，urltest 由内核自行选路。
+- 托盘为每个组生成子菜单，可单独指定节点并显示延迟。
+- 新增测试：策略组出站生成、urltest 类型正确、规则指向生效、配置通过打包内核校验；以及保留名/重名被拒。
+
+### 验收脚本采样窗口修正（不是放宽阈值）
+
+- 现象：`verify_m4.sh` 反复报 CPU 超限，但采样 4/5 都是 0.0%，且手动以相同隔离环境启动、`sample` 抓栈显示主线程完全空等。
+- 根因：`ps %cpu` 是衰减平均值；脚本启动后只 `sleep 2` 就采样，把「建主窗口 + 首次渲染仪表盘」的启动开销算了进去。窗口修复前应用启动不开窗，所以这段开销以前不存在。
+- 处理：把静置时间改为 `sleep ${KONGSHAN_VERIFY_SETTLE_SECONDS:-15}`，**阈值一律不动**。红线要求的是空闲稳态，这样测的才是稳态。
+- 修正后 5 次采样全 0.0%。
+
+- 风险/注意事项：「内核已就绪（未接管）」是新增状态，用户若只测速会留下一个运行中的内核，需从托盘「停止内核」或开启接管。策略组名直接用作 sing-box outbound tag，含特殊字符时未做额外转义，仅做了非空/保留名/重名校验。
+- 下一步：真机验证未接管测速、策略组按服务分流的实际命中。
+- 下一位 Agent 如何接手：`ps %cpu` 是衰减平均，性能类失败先静置复跑并 `sample` 抓栈，确认是稳态问题再动代码，永远不要直接调阈值。
+
+## 2026-07-20 — 策略组独立成页、订阅自动发现、规则改名分流
+
+- 已完成：策略组从「规则」页拆出成独立模块；订阅 YAML 的 `proxy-groups` 自动解析并可一键导入；「规则」改名为「分流」；补齐组名字符校验与节点延迟列。
+- 修改文件：新增 `Sources/kongshan/PolicyGroupsView.swift`；修改 `ClashSubscriptionConverter.swift`、`SubscriptionService.swift`、`RoutingModels.swift`、`AppState.swift`、`MainWindowView.swift`、`RoutingView.swift`、`ClashSubscriptionConverterTests.swift`、`RenderSnapshotTests.swift`。
+- 测试结果：`swift test` 145 项通过 0 失败（新增 proxy-groups 解析测试）。
+- 当前状态：侧栏为 仪表盘 / 管理（节点、策略组、分流）/ 其他（日志、设置）。
+
+### 订阅自动发现策略组
+
+- `ClashSubscriptionConverter` 解析 `proxy-groups`：`url-test`/`fallback`/`load-balance` 映射为 urltest，其余为 selector。
+- 逐个跳过非法项而不是整体失败：与内置组重名、含非法字符、组内重复的都直接忽略，不影响其余导入。
+- 结果经 `SubscriptionRefreshResult.policyGroups` 带到 `AppState.discoveredPolicyGroups`，按订阅 ID 存放。
+- 策略组页顶部列出「订阅里发现的策略组」，可单个或全部导入；已导入的不再重复出现。
+
+### 策略组页
+
+- 三个区：订阅发现（可导入）、我的策略组（增删改 + 手动组可直接挑节点并显示延迟）、内置策略组（只读说明）。
+- 「手动指定」组在已生效时可直接在页内切换节点，右侧显示该节点上次测速结果。
+
+### 命名调整
+
+- 侧栏「规则」→「分流」，页头与按钮同步（「应用规则」→「应用分流」）。理由：该页现在包含自定义规则、绕过域名、绕过 CIDR、跳过 TUN 与广告拦截，「分流」比「规则」更准确；「规则」这个词已被策略组页的引用关系占用。
+
+### 其余优化
+
+- 策略组名加字符白名单：组名直接作为 sing-box outbound tag，排除 `"\{}[],:` 与换行制表符，长度上限 40。
+- 节点行延迟改为固定列（宽 64、等宽数字），批量测速后一眼可比；测速按钮仍悬停出现。
+
+- 风险/注意事项：订阅里的策略组只导入「名称 + 类型」，成员节点仍是我们自己的全量节点列表，不还原订阅里 `proxies:` 指定的成员。若机场的分组成员有意义（如只含解锁节点），当前实现不会体现这一点。
+- 下一步：真机验证订阅导入策略组、分流规则指向新组后的实际命中。
+- 下一位 Agent 如何接手：策略组的成员目前固定为全部节点，如要还原订阅分组成员，需要在 `PolicyGroup` 上加成员列表并在配置生成时按名称解析引用（注意订阅里的组可能互相嵌套引用）。
+
+## 2026-07-20 — 按 Stash 重做代理页、设置分区与维护操作
+
+- 已完成：策略组页重做为 Stash 式「代理」页（左策略组 / 右节点卡片 / 顶部出站模式与延迟测试）；设置页按 Stash 拆成 通用/隧道/网络/资源/更多 五个分区；新增数据目录与日志目录的 Finder 入口和缓存清理。
+- 修改文件：`PolicyGroupsView.swift`（重写）、`MainWindowView.swift`、`AppState.swift`、`ProxyMode.swift`。
+- 测试结果：`swift test` 145 项通过 0 失败；`zsh scripts/verify_m4.sh` 通过（退出码 0，平均 CPU 0.000%、最大 RSS 113,296 KB）。
+
+### 代理页（对应 Stash 的「代理」）
+
+- 顶部：出站模式分段控件 + 延迟测试按钮。
+- 左列：策略组列表，每项显示图标、组名与当前选中节点；底部有「管理策略组」入口和「N 个可导入」提示。
+- 右列：该组可选节点的卡片网格，卡片含名称、协议标签、带色点的延迟；选中项高亮描边。
+- 策略组的增删改与订阅导入移到 sheet，主界面只负责选节点。
+
+### 两处按截图修正
+
+- `OutboundMode.allCases` 顺序改为 直连 / 规则 / 全局，与 Stash 一致（枚举顺序即界面顺序，托盘同步生效）。
+- 左列原本漏掉「自动选择」：`policyGroups` 只返回可手动指定的组。新增 `displayPolicyGroups` 用于展示（含只读的自动选择），选中它时右列禁用点击并给出说明。
+
+### 设置分区与维护操作
+
+- 设置页顶部分段：通用（开机自启、关于）/ 隧道（代理模式、strict_route）/ 网络（测速、DNS）/ 资源（订阅自动更新、GeoIP 规则集）/ 更多（数据与日志、清理）。
+- 「更多」新增：数据目录与日志目录的「在 Finder 中显示」、路径可选中复制。
+- 「清理缓存」删除内核日志与规则集缓存（都能自动重建），设置/订阅缓存/节点不动；内核运行时禁用。
+
+- 风险/注意事项：代理页右列在非 selector 组下仍渲染全部节点卡片但禁用点击，节点极多时这一列会较长。设置分区用 `if tab == …` 包裹 Section，新增 Section 时注意放进正确的分区块。
+- 下一步：Stash 还有若干可借鉴项未做，见 NEXT_STEPS 的可选清单。
+- 下一位 Agent 如何接手：`OutboundMode`/`SidebarPage` 的枚举顺序直接决定界面顺序，调整时先确认托盘与仪表盘两处都跟着变。
+
+## 2026-07-20 — 通读后回答优化建议
+
+- 已完成：通读 original-prompt、设计稿、M1–M4 acceptance、HANDOFF/PROGRESS/NEXT、核心 ConfigGenerator/RoutingModels/AppState/UI/托盘。
+- 修改文件：无代码变更。
+- 测试结果：未跑。
+- 当前状态：可给出有依据的优化优先级，非空想功能清单。
+
+## 2026-07-20 — 订阅自带分流规则接入
+
+- 已完成：解析并应用订阅 YAML 的 `rules:`；分流页新增只读、可搜索的订阅规则区与总开关。
+- 修改文件：`RoutingModels.swift`、`ClashSubscriptionConverter.swift`、`SubscriptionService.swift`、`ConfigGenerator.swift`、`AppState.swift`、`RoutingView.swift`、`RoutingConfigTests.swift`。
+- 测试结果：`swift test` 146 项通过 0 失败；`zsh scripts/verify_m4.sh` 通过（退出码 0，平均 CPU 0.000%、最大 RSS 113,360 KB）。
+
+### 为什么做这个
+
+此前我们完全忽略订阅里的 `rules:`，机场按服务写好的几千条分流全部丢失，用户只能靠内置的 geosite-cn 兜底。这是与 Stash 差距最大的功能缺口。
+
+### 实现
+
+- 新增 `SubscriptionRule`（类型 + 值 + 目标），`parse` 把 Clash 规则行映射到我们支持的五种类型。
+- 不支持的类型（GEOIP、GEOSITE、RULE-SET、MATCH…）与非法值直接跳过，不影响其余规则。MATCH 与 GEOIP 本来就由我们自己的兜底和规则集覆盖。
+- 存放在 `AppState.discoveredRules`（按订阅 ID），拼接时按订阅顺序去重。不写进用户自定义规则列表，避免几千条污染设置文件与编辑器。
+- 配置生成插入位置：**用户自定义规则 → 绕过列表 → 订阅规则 → 私有网段 → 广告 → 中国直连 → 兜底**。
+- **目标必须能解析到已存在的出站**（direct/reject/内置组/已导入的策略组），否则该条直接丢弃——否则 sing-box 校验会因为引用不存在的 outbound 直接失败。测试专门覆盖了这条。
+- `RoutingSettings.useSubscriptionRules` 总开关，默认开启；旧设置文件解码回落为 true。
+
+### 界面
+
+- 分流页新增「订阅自带规则」区：显示总条数、开关、搜索框、类型/值/目标三列（DIRECT 绿、REJECT 红、策略组用强调色）。
+- 只渲染前 200 条并提示匹配总数，避免几千行拖垮列表。
+
+- 风险/注意事项：订阅规则指向的策略组必须先在「代理」页导入，否则整条规则被静默丢弃——用户可能困惑为什么某条规则没生效。目前没有在界面上标出「被丢弃」的规则，值得后续补。
+- 下一步：真机验证订阅规则命中；补「被丢弃规则」的可见提示。
+- 下一位 Agent 如何接手：新增规则来源时注意插入顺序与「目标出站必须存在」这两条，配置校验失败多半是引用了不存在的 outbound。
+
+## 2026-07-21 调研会话（子 Agent：开源客户端经验调研）
+- 已完成：针对 7 个主题（订阅抓取/网络切换/睡眠唤醒/macOS TUN/配置坑/进程生命周期/macOS 专属问题）完成 Web 调研，来源含 sing-box 官方文档与 issues、clash-verge-rev issues/FAQ、mihomo #2624、ClashX helper、Stash Wiki、GUI.for.SingBox 文档等。
+- 修改文件：仅本日志（调研结论以会话消息形式交付主 Agent，未写报告文件）。
+- 当前状态：调研完成，结论已交付；建议主 Agent 将采纳项落入 NEXT_STEPS.md。
+- 下一步：按报告中"具体建议"逐项排入开发计划（优先：代理守卫+网络切换重挂、崩溃后系统代理恢复、TUN 开启时改系统 DNS、订阅 UA/userinfo）。
+
+## 2026-07-21 全面体检：需求对照 + UI 审计 + 开源避坑加固
+
+三路并进：需求矩阵对照、全控件交互审计（子代理）、GitHub 开源 sing-box/Clash 客户端坑位调研（子代理，报告含 40+ 条带出处的结论）。
+
+### 真实世界坑位修复（来自调研）
+- 订阅 UA：默认 URLSession UA 会被机场面板发错格式。现固定 `clash.meta kongshan/1.0`（必含 clash、不含 sing-box），`SubscriptionService.request(for:)` 可测。
+- `subscription-userinfo` 响应头解析为 `SubscriptionUsage`（upload/download/total/expire，字段可缺省/小数），存 `SubscriptionSource.usage`（旧文件兼容），节点页订阅组内显示进度条+到期日；>85% 橙色。
+- `profile-title`（含 base64: 前缀）/`Content-Disposition` 文件名 → 用户未起名时的默认订阅名。
+- **节点 ID 确定性**（重大）：转换器原来每次刷新随机 UUID，导致自动刷新后选中节点重置、延迟清零。现 `stableNodeID(sourceID,name,occurrence)`＝SHA-256 前 16 字节（RFC4122 版本/变体位），同名节点按序号区分。
+- **TUN 下接管系统 DNS**（macOS 最大坑，mihomo#2624）：新增 `SystemDNSManager`（与 SystemProxyManager 同构：快照先落盘→改→失败回滚→崩溃自愈→事务串行），TUN 启动时把所有服务 DNS 指向 `TunSettings.dnsServerAddress`（接口地址+1，如 172.19.0.2，会被 hijack-dns 截获），停止/退出/崩溃全路径还原。dns-recovery.json。
+- **切网补挂**：`SystemProxyManager.reassert(port:bypass:)` / `SystemDNSManager.reassert(server:)` 只处理新出现或漂移的服务，先并入快照再设置；AppState 用 NWPathMonitor（事件驱动非轮询）+2s 防抖触发。
+- **睡眠唤醒**：NSWorkspace.didWake → 3s 后 Clash API health 检查（失败给警告）+ 补挂。测试夹具不受影响（监听闸在 monitorsSystemEvents=automaticallyInitialize）。
+- TUN stack 可配置（mixed/system/gvisor），默认从 system 改为 mixed（sing-box#2500/#3529 system 栈翻车记录）；旧设置文件解码兼容。
+- 规则模式统一前置 sniff（原仅 TUN）：SOCKS 客户端只送 IP 时域名规则不再落空。
+- 主窗口显示时校验 window.screen，为 nil（外接屏拔掉）则重新居中。
+
+### 架构级修复（自查发现）
+- **策略组选择持久化**：groupSelections 原为内存态，重启全部回退。现入 PersistedSettings；ConfigGenerator.ConfigInput 增 groupDefaults，自定义 selector 组/自建组的 default 用记住的节点（不存在则回退全局选中）。
+- **节点变化热重载**：订阅刷新/增删订阅/增删自建原来不重载运行中的内核（新节点用不了、删的还在）。现 `hotReloadAfterNodeChange()` 复用分流热重载（校验→快速重启→回滚）；节点删光或「只跑内核」态直接停。确定性 ID 保证内容没变时不重启。
+- **推流断线自动重连**：traffic/connections/logs WebSocket 断开（睡眠唤醒必现)原来只报警告、页面冻结。现指数退避 2→30s，收到数据复位，仅页面可见+内核在跑时重试；退避不在 suspend 中复位（否则退化 2s 死循环）。
+- 修复 performSubscriptionRefresh 中重复的 discoveredRules 赋值行。
+
+### UI 审计修复（P1 全清）
+- F1 全局错误/警告条：挂在 NavigationSplitView detail 顶部（GlobalNoticeBar），红色错误可忽略、橙色警告可清除（新增 clearWarnings()）；移除仪表盘旧 errorBanner 与节点页内联警告避免重复。
+- F2 删除订阅 confirmationDialog；删除自建节点同样确认。
+- F3 设置页「首选接管方式」单选 Picker（双开时点击会静默丢模式）→ 与仪表盘/托盘一致的两个独立开关 + 当前接管集合展示。
+- F4 「只跑内核（未接管）」在主窗口无法停止 → 仪表盘蓝色横幅 + 停止内核按钮。
+- F5 自建节点删不掉 → AppState.removeManualNode（清组选择、selectFirstNodeIfNeeded、运行中热重载），NodeRow hover 垃圾桶（仅自建组）。
+- F6 导入 sheet 先关后导致失败不可见 → sheet 内进度+错误、成功才关闭。
+- F7 测速 URL 直改内存 → 草稿+未保存徽标+saveTestURL(raw) 校验后才写入。
+- F8 ManualNodeSheet 后端失败显示 state.errorMessage（就地显示后 dismissError 防全局重复）。
+- F12 「延迟测试」→「测速全部」统一文案；F16 删除死代码 SectionCaption。
+
+### 测试与验证
+- 新增 SystemDNSManagerTests（6 项：快照先行/回滚/reassert 增量/无快照零命令）、订阅 UA/userinfo/建议名/旧 JSON 兼容（5 项）、稳定 ID、groupDefaults 回退、TunSettings 旧格式解码。
+- 更新既有断言：sniff 前置（RoutingConfig/DNSConfig）、stack=mixed（TunConfig）、TUN 流程 networksetup 白名单改为「仅 DNS 三命令」（AppStateTests isDNSTakeoverCommand）。
+- `swift test`：160 通过 0 失败（原 146）。`verify_m4.sh` 通过：平均 CPU 0.000%，最大 RSS 115,264 KB。离屏快照重渲染确认节点页配额行、仪表盘正常。app 已重打包并运行。
+
+### 风险/注意
+- TUN 现在会改系统 DNS（networksetup -setdnsservers），恢复路径与系统代理同构（独立 dns-recovery.json）；真机验证时若 TUN 后无网，先查 `networksetup -getdnsservers Wi-Fi` 是否残留 172.19.0.2，`打开 App 会自愈`。
+- TUN stack 默认从 system 改为 mixed，行为变化需真机回归。
+- 订阅刷新如果节点集合变化，运行中会短暂重启内核（<2s）——定时刷新也如此，属预期。
+- 蔽而未做：面板 UA 自定义字段、HEAD 轻量刷新配额、profile-update-interval 按订阅覆盖、base64/JSON 订阅格式回退、特权 helper 替代 osascript（记入 NEXT_STEPS）。
+
+## 2026-07-21 — 用户查询最新进度
+
+- 已完成：汇总 HANDOFF/PROGRESS/NEXT/SESSION_LOG 当前状态给用户。
+- 修改文件：无。
+
+## 2026-07-21 配置为中心重构 + TUN/测速两个真机 bug
+
+### 真机 bug（读用户实机日志定位）
+- **TUN 起不动（每次弹密码、输对也开不了）**：`sing-box-tun.log` 明确 `FATAL configure tun interface: bad tun name: kongshan-tun`。macOS 的 utun 名必须是 utunN，自定义名被内核拒绝。提权其实成功了，是内核起 TUN 立即 FATAL。修复：ConfigGenerator 不再输出 `interface_name`，交给 sing-box 自动分配 utunN。TunConfigTests 断言 interface_name 为 nil，集成用例过 `sing-box check`。
+- **测速慢且全失败**：原来只有「经代理请求 gstatic」一种（要内核在跑、100+ 节点并发到 gstatic）。新增 `SpeedTestMethod`：`.tcpPing`（默认，Network 框架直连 server:port 握手计时，不需要内核，快而稳）/`.urlTest`（经代理测真实链路）。设置-网络可切；TCP 直连不依赖代理是否可用。测速只针对当前生效配置的可用节点。
+
+### 配置为中心（Stash 心智模型）——不建新数据模型，用 activeConfigID 过滤
+- AppState 加 `activeConfigID`（订阅 ID 或 `localConfigID` 伪配置＝自建节点），持久化；`configItems` 列表；`setActiveConfig`（切换即清组选择/延迟并热重载）；`ensureActiveConfig`（导入/删除/加载后兜底选一个）。
+- 生成配置、节点、策略组、规则全部按 activeConfigNodes/activeConfigPolicyGroups/subscriptionRules（当前配置）过滤；`start`/`testAll`/`hotReload` 的空判断改成 activeConfigNodes。
+- **策略组带真实成员**：PolicyGroup 加 `members`（节点名/子组/DIRECT/REJECT，空＝全部节点，旧数据兼容解码）。converter 保留 proxy-groups 的 proxies 成员。ConfigGenerator 把成员名解析成出站 tag（节点→tag、子组→组名、DIRECT/REJECT→direct/reject），解析不到丢弃、全丢光回退全部节点（绝不产空组）。
+- **选择模型改为按成员名**：groupSelections 由 [组名:UUID] 改成 [组名:成员名]，统一处理节点与子组/DIRECT/REJECT；`GroupOption` 枚举；`select(optionName:in:)` 走 Clash API select（tag 映射）。旧 [String:UUID] 的 JSON 与 [String:String] 同形（UUID 即字符串），加载不崩，失配则回退默认。
+- 加载路径补上从缓存恢复 discoveredPolicyGroups/discoveredRules（否则重启后生效配置的策略/规则为空）。
+
+### 界面重构
+- 侧栏：仪表盘 / **配置** / 代理 / **规则** / 日志 / 设置。
+- **配置页**（原节点页重写）：只列配置（订阅+本地节点），单选生效、导入/更新/重命名/删除、配额进度条，**不显示节点**。
+- **代理页**：左＝当前配置的策略（内置手动/自动+配置自带），右＝所选策略的成员（节点显示协议+延迟可测速，子组显示为「策略引用」），逐策略选成员；删掉了旧的「管理/导入策略组」编辑器（配置自带，无需手动导入）。
+- **规则页**（原分流页重写）：只读展示当前配置带出的规则（类型/值/目标，颜色区分），搜索、前 200 条；顶部「应用订阅规则/拦截广告」开关即时应用。手动绕过域名/IP/跳过TUN 三个列表**移到 设置→隧道**，可滚动逐条增删+应用。
+- 托盘：各 selector 策略子菜单，成员（节点/子组）逐个可选，节点带延迟。
+- 删除死代码：importablePolicyGroups/setPolicyGroups/NodeRow/PolicyGroupEditorSheet/SectionCaption。
+
+### 测试与验证
+- 新增：配置策略组成员解析+过 `sing-box check`、空成员回退全部节点、TCP ping 失败路径、SpeedTestMethod 编解码。改既有断言：TUN 无 interface_name、start 空节点文案、fixtures 补 activeConfigID。
+- `swift test` 165 通过 0 失败（原 160）。`verify_m4.sh` 通过（平均 CPU 0.020%，最大 RSS 120,256 KB）。离屏渲染确认配置/代理/规则三页符合 Stash 布局。app 已重打包运行。
+
+### 风险/注意
+- 配置层面 TUN 名已修；真机需实测「点 TUN→授权→成功接管」（bad tun name 应消失）。
+- Clash 配置里 GEOSITE/GEOIP/RULE-SET 规则仍不转换（converter 只认 DOMAIN*/IP-CIDR/PROCESS-NAME），靠内置 geosite-cn/geoip-cn/ads/private 兜底；规则页展示的是可解析规则。
+- 子组选择（如主组指向地区组）经 Clash API 生效并持久化为成员名，但生成默认仍取该组首个成员——重启后主组的子组选择由 groupDefaults 的 tag 恢复（子组名即 tag），OK。
+- 升级会一次性重置策略组选择（旧 UUID 值配不上节点名），用户重选即可。

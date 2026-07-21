@@ -1,13 +1,23 @@
+import CryptoKit
 import Foundation
 @preconcurrency import Yams
 
 public struct SubscriptionConversionResult: Sendable {
+    /// 订阅自带的策略组（Clash 的 `proxy-groups`），可直接导入使用。
+    public var policyGroups: [PolicyGroup] = []
+    /// 订阅自带的分流规则，已过滤掉不支持的类型。
+    public var subscriptionRules: [SubscriptionRule] = []
     public let nodes: [ProxyNode]
     public let warnings: [String]
 
-    public init(nodes: [ProxyNode], warnings: [String]) {
+    public init(nodes: [ProxyNode], warnings: [String],
+        policyGroups: [PolicyGroup] = [],
+        subscriptionRules: [SubscriptionRule] = []
+    ) {
         self.nodes = nodes
         self.warnings = warnings
+        self.policyGroups = policyGroups
+        self.subscriptionRules = subscriptionRules
     }
 }
 
@@ -24,6 +34,43 @@ public enum SubscriptionConversionError: Error, Equatable, LocalizedError {
 }
 
 public enum ClashSubscriptionConverter {
+    /// 解析 Clash 的 `proxy-groups`。名称与内置组冲突或非法的直接跳过，
+    /// 不因为订阅里的一个坏分组而影响整体导入。
+    static func policyGroups(from root: [String: Any]) -> [PolicyGroup] {
+        guard let raw = root["proxy-groups"] as? [[String: Any]] else { return [] }
+        var seen = Set<String>()
+        var groups: [PolicyGroup] = []
+        for entry in raw {
+            guard let name = entry["name"] as? String else { continue }
+            let kind: PolicyGroup.Kind = switch (entry["type"] as? String)?.lowercased() {
+            case "url-test", "fallback", "load-balance": .urltest
+            default: .selector
+            }
+            // 保留组的成员（节点名 / 其他组名 / DIRECT / REJECT），供代理页按策略展示、
+            // 生成时解析成对应出站。用 `use:`（proxy-provider）的组没有显式成员，留空＝全部节点。
+            let members = (entry["proxies"] as? [String]) ?? []
+            guard var group = try? PolicyGroup(name: name, kind: kind).validated(),
+                  !seen.contains(group.name) else { continue }
+            group.members = members
+            seen.insert(group.name)
+            groups.append(group)
+        }
+        return groups
+    }
+
+    /// 解析 Clash 的 `rules:`。MATCH / GEOIP / RULE-SET 等交由我们自己的兜底与规则集处理，直接跳过。
+    static func subscriptionRules(from root: [String: Any]) -> [SubscriptionRule] {
+        guard let raw = root["rules"] as? [String] else { return [] }
+        var seen = Set<String>()
+        var rules: [SubscriptionRule] = []
+        for line in raw {
+            guard let rule = SubscriptionRule.parse(line), !seen.contains(rule.id) else { continue }
+            seen.insert(rule.id)
+            rules.append(rule)
+        }
+        return rules
+    }
+
     public static func convert(yaml: String, sourceID: UUID) throws -> SubscriptionConversionResult {
         guard let root = try Yams.load(yaml: yaml) as? [String: Any],
               let proxies = root["proxies"] as? [[String: Any]] else {
@@ -32,9 +79,16 @@ public enum ClashSubscriptionConverter {
 
         var nodes: [ProxyNode] = []
         var warnings: [String] = []
+        // 节点 ID 必须在刷新之间保持稳定：选中节点、各策略组的选择和已测延迟
+        // 都以 ID 为键。随机 UUID 会让每次自动刷新都把这些状态清成初始值。
+        var nameOccurrences: [String: Int] = [:]
         for raw in proxies {
             do {
-                nodes.append(try map(raw, sourceID: sourceID))
+                var node = try map(raw, sourceID: sourceID)
+                let occurrence = nameOccurrences[node.name, default: 0]
+                nameOccurrences[node.name] = occurrence + 1
+                node.id = stableNodeID(sourceID: sourceID, name: node.name, occurrence: occurrence)
+                nodes.append(node)
             } catch {
                 let name = optionalString(raw, "name") ?? "未命名"
                 warnings.append("\(name): \(error.localizedDescription)")
@@ -42,7 +96,27 @@ public enum ClashSubscriptionConverter {
         }
 
         guard !nodes.isEmpty else { throw SubscriptionConversionError.noSupportedNodes }
-        return SubscriptionConversionResult(nodes: nodes, warnings: warnings)
+        return SubscriptionConversionResult(
+            nodes: nodes,
+            warnings: warnings,
+            policyGroups: policyGroups(from: root),
+            subscriptionRules: subscriptionRules(from: root)
+        )
+    }
+
+    /// 由订阅 ID + 节点名（+ 同名序号）推导确定性 UUID（SHA-256 前 16 字节，
+    /// 按 RFC 4122 撥版本/变体位）。同一订阅刷新前后同名节点拿到同一个 ID。
+    static func stableNodeID(sourceID: UUID, name: String, occurrence: Int) -> UUID {
+        let material = "\(sourceID.uuidString)|\(name)|\(occurrence)"
+        var digest = [UInt8](SHA256.hash(data: Data(material.utf8)))
+        digest[6] = (digest[6] & 0x0F) | 0x50   // 版本 5 风格
+        digest[8] = (digest[8] & 0x3F) | 0x80   // RFC 4122 变体
+        return UUID(uuid: (
+            digest[0], digest[1], digest[2], digest[3],
+            digest[4], digest[5], digest[6], digest[7],
+            digest[8], digest[9], digest[10], digest[11],
+            digest[12], digest[13], digest[14], digest[15]
+        ))
     }
 
     private static func map(_ raw: [String: Any], sourceID: UUID) throws -> ProxyNode {

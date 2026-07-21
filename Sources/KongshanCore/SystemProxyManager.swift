@@ -308,6 +308,55 @@ public actor SystemProxyManager {
         try await restoreFromDisk()
     }
 
+    /// 网络服务集合变化后的补挂：macOS 的代理设置按服务存储，新出现的服务
+    /// （新 Wi-Fi、USB 共享、雷雳网桥）不会继承设置，流量会静默直连。
+    /// 只处理「新出现或不再指向我们」的服务，先把它们此刻的状态并入快照，
+    /// 保证之后还原时一并复位。没有活动快照（未接管）时静默返回。
+    public func reassert(port: Int, bypassDomains: [String]? = nil) async throws {
+        guard (1...65_535).contains(port) else { throw SystemProxyError.invalidPort }
+        try beginTransaction()
+        defer { transactionInProgress = false }
+
+        guard let data = try await storage.readIfPresent(from: recoveryURL) else { return }
+        let snapshot = try JSONDecoder().decode(ProxyRecoverySnapshot.self, from: data)
+        guard snapshot.version == 1 else {
+            throw SystemProxyError.unsupportedSnapshotVersion(snapshot.version)
+        }
+
+        let services = SystemProxyCommands.enabledServices(
+            from: try await execute(["-listallnetworkservices"]).stdout
+        )
+        var stale: [String] = []
+        var discovered: [NetworkServiceProxySnapshot] = []
+        for service in services {
+            let current = try await capture(service: service)
+            let pointsToUs = [current.http, current.https, current.socks].allSatisfy {
+                $0.enabled && $0.server == "127.0.0.1" && $0.port == port
+            }
+            guard !pointsToUs else { continue }
+            stale.append(service)
+            if !snapshot.services.contains(where: { $0.name == service }) {
+                discovered.append(current)
+            }
+        }
+        guard !stale.isEmpty else { return }
+
+        let updated = ProxyRecoverySnapshot(
+            capturedAt: snapshot.capturedAt,
+            services: snapshot.services + discovered
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try await storage.writeAtomically(try encoder.encode(updated), to: recoveryURL)
+        for command in SystemProxyCommands.enable(
+            services: stale,
+            port: port,
+            bypassDomains: bypassDomains
+        ) {
+            _ = try await execute(command.arguments)
+        }
+    }
+
     public func updateBypassDomains(to domains: [String], rollbackTo oldDomains: [String]) async throws {
         try beginTransaction()
         defer { transactionInProgress = false }

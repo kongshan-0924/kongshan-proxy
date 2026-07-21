@@ -19,6 +19,7 @@ final class TunConfigTests: XCTestCase {
             customRules: [],
             bypassDomains: ["localhost", "*.local", "*.cn"],
             bypassCIDRs: ["10.0.0.0/8", "192.168.0.0/16", "fc00::/7"],
+            tunExcludeCIDRs: ["172.16.0.0/12", "fe80::/10"],
             blockAds: false
         )
         let root = try json(try ConfigGenerator.generate(input(
@@ -31,13 +32,18 @@ final class TunConfigTests: XCTestCase {
         let tun = inbounds[0]
         XCTAssertEqual(tun["type"] as? String, "tun")
         XCTAssertEqual(tun["tag"] as? String, "tun-in")
-        XCTAssertEqual(tun["interface_name"] as? String, "kongshan-tun")
+        // macOS 下不指定 interface_name，交给 sing-box 自动分配 utunN
+        XCTAssertNil(tun["interface_name"])
         XCTAssertEqual(tun["address"] as? [String], ["172.19.0.1/30", "fdfe:dcba:9876::1/126"])
         XCTAssertEqual(tun["mtu"] as? Int, 9_000)
         XCTAssertEqual(tun["auto_route"] as? Bool, true)
         XCTAssertEqual(tun["strict_route"] as? Bool, true)
-        XCTAssertEqual(tun["stack"] as? String, "system")
-        XCTAssertEqual(tun["route_exclude_address"] as? [String], settings.bypassCIDRs)
+        // 默认 mixed：system 栈在部分 macOS 版本有已知问题（sing-box#2500/#3529）
+        XCTAssertEqual(tun["stack"] as? String, TunSettings.defaults.stack.rawValue)
+        XCTAssertEqual(TunSettings.defaults.stack, .mixed)
+        // 跳过 TUN 与跳过代理是两份独立列表，不得互相串用
+        XCTAssertEqual(tun["route_exclude_address"] as? [String], settings.tunExcludeCIDRs)
+        XCTAssertFalse((tun["route_exclude_address"] as? [String] ?? []).contains("10.0.0.0/8"))
         XCTAssertFalse((tun["route_exclude_address"] as? [String] ?? []).contains("*.local"))
 
         let route = try XCTUnwrap(root["route"] as? [String: Any])
@@ -63,7 +69,8 @@ final class TunConfigTests: XCTestCase {
         let settings = RoutingSettings(
             customRules: [],
             bypassDomains: [],
-            bypassCIDRs: [" 10.0.0.0/8 "],
+            bypassCIDRs: [],
+            tunExcludeCIDRs: [" 10.0.0.0/8 "],
             blockAds: false
         )
 
@@ -74,6 +81,45 @@ final class TunConfigTests: XCTestCase {
         let tun = try XCTUnwrap((root["inbounds"] as? [[String: Any]])?.first)
 
         XCTAssertEqual(tun["route_exclude_address"] as? [String], ["10.0.0.0/8"])
+    }
+
+    func testBothModesEnabledProducesMixedAndTunInbounds() throws {
+        let root = try json(try ConfigGenerator.generate(ConfigInput(
+            nodes: [node],
+            selectedNodeID: node.id,
+            runtime: runtime,
+            routing: nil,
+            enabledModes: [.systemProxy, .tun]
+        )))
+        let inbounds = try XCTUnwrap(root["inbounds"] as? [[String: Any]])
+
+        XCTAssertEqual(inbounds.count, 2)
+        XCTAssertEqual(inbounds.compactMap { $0["type"] as? String }.sorted(), ["mixed", "tun"])
+        let mixed = try XCTUnwrap(inbounds.first { $0["type"] as? String == "mixed" })
+        XCTAssertEqual(mixed["listen_port"] as? Int, Int(runtime.mixedPort))
+        let tun = try XCTUnwrap(inbounds.first { $0["type"] as? String == "tun" })
+        XCTAssertEqual(tun["auto_route"] as? Bool, true)
+
+        // 同时开启时仍需 TUN 的 DNS 劫持与出接口探测
+        let route = try XCTUnwrap(root["route"] as? [String: Any])
+        XCTAssertEqual(route["auto_detect_interface"] as? Bool, true)
+    }
+
+    func testBothModesConfigPassesBundledCoreCheck() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let ruleSets = try await compileRuleSets(in: directory)
+
+        let config = try ConfigGenerator.generate(ConfigInput(
+            nodes: [node],
+            selectedNodeID: node.id,
+            runtime: runtime,
+            routing: RoutingConfiguration(settings: .defaults, ruleSets: ruleSets),
+            enabledModes: [.systemProxy, .tun]
+        ))
+        let result = try await SingBoxProcess(binaryURL: singBoxURL).check(config: config)
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
     }
 
     func testStrictOffAndOnTunConfigsPassBundledCoreCheck() async throws {
@@ -170,5 +216,21 @@ final class TunConfigTests: XCTestCase {
 
     private func json(_ data: Data) throws -> [String: Any] {
         try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+}
+
+extension TunConfigTests {
+    func testLegacyTunSettingsJSONWithoutStackDecodesToMixed() throws {
+        let legacy = """
+        {"strictRoute":true,"interfaceName":"kongshan-tun","addresses":["172.19.0.1/30"],"mtu":9000}
+        """
+        let settings = try JSONDecoder().decode(TunSettings.self, from: Data(legacy.utf8))
+        XCTAssertEqual(settings.stack, .mixed)
+        XCTAssertTrue(settings.strictRoute)
+
+        var custom = TunSettings.defaults
+        custom.stack = .gvisor
+        let decoded = try JSONDecoder().decode(TunSettings.self, from: JSONEncoder().encode(custom))
+        XCTAssertEqual(decoded.stack, .gvisor)
     }
 }

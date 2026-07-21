@@ -84,7 +84,9 @@ for _ in {1..50}; do
     sleep 0.1
 done
 kill -0 "$app_pid" 2>/dev/null || fail "release app exited during launch"
-sleep 2
+# `ps %cpu` 是衰减平均值。应用启动要建主窗口并首次渲染仪表盘，
+# 只等 2 秒会把这段启动开销算进读数。红线针对的是空闲稳态，因此先让它稳定下来。
+sleep ${KONGSHAN_VERIFY_SETTLE_SECONDS:-15}
 
 support_dir="$verification_home/Library/Application Support/kongshan"
 [[ -d "$support_dir" ]] || fail "app did not use the isolated support directory"

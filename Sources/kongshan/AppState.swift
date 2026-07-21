@@ -1,6 +1,28 @@
+import AppKit
 import Foundation
 import KongshanCore
+import Network
 import Observation
+
+/// 策略组里的一个可选成员：节点，或对另一个策略组 / DIRECT / REJECT 的引用。
+enum GroupOption: Identifiable, Sendable {
+    case node(ProxyNode)
+    case reference(String)
+
+    var id: String {
+        switch self {
+        case let .node(node): node.id.uuidString
+        case let .reference(name): "ref:\(name)"
+        }
+    }
+
+    var name: String {
+        switch self {
+        case let .node(node): node.name
+        case let .reference(name): name
+        }
+    }
+}
 
 struct TrafficPoint: Identifiable, Equatable, Sendable {
     let id: UUID
@@ -63,15 +85,26 @@ final class AppState {
     var delays: [UUID: Int?] = [:]
     var mixedPort: UInt16?
     var testURLString = "http://www.gstatic.com/generate_204"
+    var speedTestMethod: SpeedTestMethod = .tcpPing
     var errorMessage: String?
     var warnings: [String] = []
     var isReady = false
     var routingSettings = RoutingSettings.defaults
     var preferredMode: ProxyMode = .systemProxy
-    private(set) var activeMode: ProxyMode?
+    private(set) var outboundMode: OutboundMode = .rule
+    /// 生效中的接管方式，两者可同时存在。
+    private(set) var activeModes: Set<ProxyMode> = []
+
+    /// 兼容旧调用点：同时开启时以 TUN 为主（它决定内核是否以 root 运行）。
+    var activeMode: ProxyMode? {
+        if activeModes.contains(.tun) { return .tun }
+        return activeModes.contains(.systemProxy) ? .systemProxy : nil
+    }
     var tunSettings: TunSettings = .defaults
     var dnsSettings: DNSSettings = .defaults
     private(set) var subscriptionUpdateSettings = SubscriptionUpdateSettings.defaults
+    private(set) var ruleSetSettings = RuleSetSettings.defaults
+    private(set) var isUpdatingRuleSets = false
     private(set) var nextSubscriptionUpdateAt: Date?
     private(set) var loginItemStatus: LoginItemStatus = .notRegistered
     private(set) var uploadRate: Int64 = 0
@@ -84,11 +117,120 @@ final class AppState {
     private(set) var liveLogs: [LiveLogEntry] = []
     private(set) var logLevel: CoreLogLevel = .info
     private(set) var isApplyingRouting = false
+    /// 开启接管后对固定目标的实测延迟：nil 表示失败/超时，缺键表示未测。
+    private(set) var connectivity: [String: Int?] = [:]
+    private(set) var isProbingConnectivity = false
+    private(set) var isTestingAllDelays = false
+    /// 各订阅自带的策略组（来自 Clash 的 proxy-groups），键为订阅 ID。
+    var discoveredPolicyGroups: [UUID: [PolicyGroup]] = [:]
+    /// 各订阅自带的分流规则（Clash 的 rules:），键为订阅 ID。
+    var discoveredRules: [UUID: [SubscriptionRule]] = [:]
+    /// 当前生效的配置（订阅）ID。同一时刻只有一个配置生效——这是 Stash 式的心智模型：
+    /// 一个机场 = 一个配置文件，切换后其节点/策略/规则整套替换。
+    /// `localConfigID` 代表「本地自建节点」这个特殊配置。
+    var activeConfigID: UUID?
+
+    /// 手动自建节点归属的伪配置 ID。
+    static let localConfigID = UUID(uuidString: "10CA110C-0000-0000-0000-000000000001")!
+
+    /// 当前生效配置里的节点。订阅配置→该订阅的节点；本地配置→自建节点。
+    var activeConfigNodes: [ProxyNode] {
+        guard let activeConfigID else { return [] }
+        if activeConfigID == Self.localConfigID { return manualNodes }
+        return nodes.filter { $0.sourceID == activeConfigID }
+    }
+
+    /// 可测速/可选择的节点：当前配置里排除机场塞进来的套餐信息条目。
+    var testableNodes: [ProxyNode] {
+        activeConfigNodes.filter { !$0.isSubscriptionInfo }
+    }
+
+    /// 当前配置自带的策略组（带真实成员）。本地配置没有，返回空。
+    var activeConfigPolicyGroups: [PolicyGroup] {
+        guard let activeConfigID, activeConfigID != Self.localConfigID else { return [] }
+        return discoveredPolicyGroups[activeConfigID] ?? []
+    }
+
+    /// 当前配置自带的分流规则（只读展示 + 写入运行配置）。
+    var subscriptionRules: [SubscriptionRule] {
+        guard let activeConfigID, activeConfigID != Self.localConfigID else { return [] }
+        var seen = Set<String>()
+        return (discoveredRules[activeConfigID] ?? []).filter { seen.insert($0.id).inserted }
+    }
+
+    /// 配置页展示用的一项配置。
+    struct ConfigItem: Identifiable, Sendable {
+        let id: UUID
+        let name: String
+        let nodeCount: Int
+        let isLocal: Bool
+        let usage: SubscriptionUsage?
+        let lastUpdatedAt: Date?
+        let autoUpdate: Bool
+    }
+
+    /// 全部配置：每个订阅一项，另有自建节点时追加「本地节点」。
+    var configItems: [ConfigItem] {
+        var items = subscriptions.map { source in
+            ConfigItem(
+                id: source.id,
+                name: source.name,
+                nodeCount: nodes.filter { $0.sourceID == source.id && !$0.isSubscriptionInfo }.count,
+                isLocal: false,
+                usage: source.usage,
+                lastUpdatedAt: source.lastUpdatedAt,
+                autoUpdate: source.autoUpdate
+            )
+        }
+        if !manualNodes.isEmpty {
+            items.append(ConfigItem(
+                id: Self.localConfigID,
+                name: "本地节点",
+                nodeCount: manualNodes.count,
+                isLocal: true,
+                usage: nil,
+                lastUpdatedAt: nil,
+                autoUpdate: false
+            ))
+        }
+        return items
+    }
+
+    /// 切换生效配置。组选择与延迟按节点归属，换配置即清空；运行中则用新配置热重载。
+    func setActiveConfig(_ id: UUID) async {
+        guard id != activeConfigID, configItems.contains(where: { $0.id == id }) else { return }
+        activeConfigID = id
+        groupSelections = [:]
+        selectedNodeID = nil
+        delays = [:]
+        connectivity = [:]
+        selectFirstNodeIfNeeded()
+        try? await persistSettings()
+        await hotReloadAfterNodeChange()
+    }
+
+    /// 没有生效配置或它已消失时，挑一个可用配置顶上。
+    private func ensureActiveConfig() {
+        if let activeConfigID, configItems.contains(where: { $0.id == activeConfigID }) { return }
+        activeConfigID = configItems.first?.id
+        selectFirstNodeIfNeeded()
+    }
+
+    /// 仅供离屏渲染自查使用。
+    var snapshotSourceID: UUID?
 
     @ObservationIgnored private let storage: Storage
     @ObservationIgnored private let subscriptionService: SubscriptionService
     @ObservationIgnored private let ruleSetService: RuleSetService
     @ObservationIgnored private let systemProxyManager: SystemProxyManager
+    @ObservationIgnored private let systemDNSManager: SystemDNSManager
+    /// 网络路径监听（切 Wi-Fi / 插网线 / 新服务出现时补挂代理与 DNS）。事件驱动，非轮询。
+    @ObservationIgnored private var pathMonitor: NWPathMonitor?
+    @ObservationIgnored private var pathChangeTask: Task<Void, Never>?
+    @ObservationIgnored private var wakeObserver: NSObjectProtocol?
+    /// 是否监听系统事件（网络路径、睡眠唤醒）。测试夹具以 automaticallyInitialize=false
+    /// 构建，不该有后台监听扰动断言的命令序列，因此跟随该标志。
+    @ObservationIgnored private let monitorsSystemEvents: Bool
     @ObservationIgnored private let singBoxProcess: SingBoxProcess
     @ObservationIgnored private let processExitMonitor: any ProcessExitMonitoring
     @ObservationIgnored private let privilegedLauncher: any PrivilegedLaunching
@@ -107,6 +249,11 @@ final class AppState {
     @ObservationIgnored private var isDashboardVisible = false
     @ObservationIgnored private var logTask: Task<Void, Never>?
     @ObservationIgnored private var isLogsVisible = false
+    /// 断流重连（睡眠唤醒后 WebSocket 必断）。指数退避，收到数据即复位。
+    @ObservationIgnored private var dashboardRetryTask: Task<Void, Never>?
+    @ObservationIgnored private var dashboardRetryDelay: Double = 2
+    @ObservationIgnored private var logRetryTask: Task<Void, Never>?
+    @ObservationIgnored private var logRetryDelay: Double = 2
     @ObservationIgnored private var monitoredCorePID: Int32?
     @ObservationIgnored private var crashRestartLimiter = CrashRestartLimiter()
     @ObservationIgnored private var isHandlingCoreCrash = false
@@ -116,6 +263,7 @@ final class AppState {
         subscriptionService: SubscriptionService? = nil,
         ruleSetService: RuleSetService? = nil,
         systemProxyManager: SystemProxyManager? = nil,
+        systemDNSManager: SystemDNSManager? = nil,
         singBoxProcess: SingBoxProcess? = nil,
         processExitMonitor: (any ProcessExitMonitoring)? = nil,
         kernelLogStore: KernelLogStore? = nil,
@@ -139,6 +287,7 @@ final class AppState {
         self.subscriptionService = subscriptionService ?? SubscriptionService(storage: storage)
         self.ruleSetService = ruleSetService ?? RuleSetService(storage: storage, binaryURL: binaryURL)
         self.systemProxyManager = systemProxyManager ?? SystemProxyManager(storage: storage)
+        self.systemDNSManager = systemDNSManager ?? SystemDNSManager(storage: storage)
         self.singBoxProcess = singBoxProcess ?? SingBoxProcess(
             binaryURL: binaryURL,
             logStore: resolvedLogStore,
@@ -161,9 +310,22 @@ final class AppState {
         self.subscriptionUpdateScheduler = subscriptionUpdateScheduler ?? SubscriptionUpdateScheduler(now: now)
         self.notificationSender = notificationSender ?? NotificationService()
         self.loginItemManager = loginItemManager ?? LoginItemManager()
+        monitorsSystemEvents = automaticallyInitialize
         logWarningRelay.install { [weak self] message in
             Task { @MainActor [weak self] in
                 self?.warnings.append("内核日志写入失败：\(message)")
+            }
+        }
+        if monitorsSystemEvents {
+            // 睡眠唤醒后核心可能进入拒绝连接的假死态（sing-box#1709），网络也可能已切换。
+            wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didWakeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.handleDidWake()
+                }
             }
         }
 
@@ -186,27 +348,30 @@ final class AppState {
 
     var menuBarSymbol: String {
         if let activeMode {
-            return activeMode == .tun ? "network" : "shield.fill"
+            return activeMode == .tun ? "network.badge.shield.half.filled" : "shield.fill"
         }
         return switch status {
-        case .off, .failed:
-            "shield.slash"
-        case .starting:
-            preferredMode == .tun ? "network" : "shield.lefthalf.filled"
-        case .stopping:
-            "shield.lefthalf.filled"
-        case .on:
-            "shield.slash"
+        case .starting, .stopping, .on: "shield.lefthalf.filled"
+        case .off, .failed: "shield.slash"
         }
     }
 
     var statusText: String {
         switch status {
-        case .off: "已关闭"
-        case .starting: preferredMode == .tun ? "正在启动 TUN…" : "正在启动系统代理…"
-        case .on: activeMode == .tun ? "TUN 已开启" : "系统代理已开启"
-        case .stopping: "正在关闭…"
-        case let .failed(message): "失败：\(message)"
+        case .off:
+            return "已关闭"
+        case .starting:
+            return preferredMode == .tun ? "正在启动 TUN…" : "正在启动系统代理…"
+        case .on:
+            // 内核可以在不接管任何流量的情况下运行（测速、节点管理只需要这个状态）
+            guard !activeModes.isEmpty else { return "内核已就绪（未接管）" }
+            let ordered: [ProxyMode] = [.systemProxy, .tun]
+            let names = ordered.filter(activeModes.contains).map(\.displayName)
+            return names.joined(separator: " + ") + "已开启"
+        case .stopping:
+            return "正在关闭…"
+        case let .failed(message):
+            return "失败：\(message)"
         }
     }
 
@@ -215,6 +380,7 @@ final class AppState {
         do {
             try await privilegedLauncher.recoverIfNeeded()
             try await systemProxyManager.recoverIfNeeded()
+            try await systemDNSManager.recoverIfNeeded()
             try await storage.prepare()
             try await loadPersistedState()
             isReady = true
@@ -230,9 +396,34 @@ final class AppState {
     }
 
     func startPreferredProxy() async {
-        guard !isBusy, status != .on, activeMode == nil else { return }
-        guard !nodes.isEmpty else {
-            setFailure("至少需要一个代理节点")
+        await start(modes: [preferredMode])
+    }
+
+    /// 开启或关闭单个接管方式；两者互不排斥，可同时生效。
+    /// 变更需要重建内核配置，因此先完整停机再按新集合启动。
+    func setMode(_ mode: ProxyMode, enabled: Bool) async {
+        guard !isBusy, isReady else { return }
+        var target = activeModes
+        if enabled { target.insert(mode) } else { target.remove(mode) }
+        guard target != activeModes else { return }
+
+        if status == .on {
+            await stop()
+            guard status == .off, activeModes.isEmpty else { return }
+        }
+        guard !target.isEmpty else { return }
+
+        preferredMode = target.contains(.tun) ? .tun : .systemProxy
+        try? await persistSettings()
+        await start(modes: target)
+    }
+
+    /// 启动内核。`modes` 为空表示只跑内核（本地 mixed inbound + Clash API），
+    /// 不改系统代理也不建 TUN——测速、节点管理都只需要这个状态。
+    private func start(modes: Set<ProxyMode>) async {
+        guard !isBusy, status != .on, activeModes.isEmpty else { return }
+        guard !activeConfigNodes.isEmpty else {
+            setFailure("当前配置没有可用节点")
             return
         }
 
@@ -240,18 +431,22 @@ final class AppState {
         crashRestartLimiter.reset()
         status = .starting
         errorMessage = nil
-        let requestedMode = preferredMode
+        // TUN 需要 root，因此只要集合里含 TUN，整个内核就走提权启动；
+        // 同时开启时 mixed inbound 也由这个 root 进程提供。
+        let usesTun = modes.contains(.tun)
+        let usesSystemProxy = modes.contains(.systemProxy)
         var tunStarted = false
         var startedPID: Int32?
         do {
-            let prepared = try await ruleSetService.prepare(includeAds: routingSettings.blockAds)
+            let prepared = try await ruleSetService.prepare(includeAds: routingSettings.blockAds, mirror: ruleSetSettings.mirror, allowsNetwork: ruleSetSettings.autoUpdate)
             warnings.append(contentsOf: prepared.warnings)
             let runtime = try runtimeFactory()
             let config = try generateConfiguration(
                 runtime: runtime,
                 ruleSets: prepared.ruleSets,
                 routingSettings: routingSettings,
-                proxyMode: requestedMode,
+                enabledModes: modes,
+                outboundMode: outboundMode,
                 tunSettings: tunSettings,
                 dnsSettings: dnsSettings
             )
@@ -269,29 +464,35 @@ final class AppState {
                 URL(string: "http://127.0.0.1:\(runtime.clashPort)")!,
                 runtime.secret
             )
-            switch requestedMode {
-            case .systemProxy:
+            if usesTun {
+                let record = try await privilegedLauncher.start(config: config)
+                tunStarted = true
+                startedPID = record.pid
+            } else {
                 try await singBoxProcess.start(config: config)
-                try await healthVerifier(client)
+                startedPID = await singBoxProcess.currentPID
+            }
+            try await healthVerifier(client)
+            if usesSystemProxy {
                 try await systemProxyManager.enable(
                     port: Int(runtime.mixedPort),
                     bypassDomains: routingSettings.systemProxyBypassEntries
                 )
-                startedPID = await singBoxProcess.currentPID
-            case .tun:
-                let record = try await privilegedLauncher.start(config: config)
-                tunStarted = true
-                startedPID = record.pid
-                try await healthVerifier(client)
+            }
+            if usesTun {
+                // macOS 的 scoped resolver 会绑定物理网卡发 DNS、绕开 TUN。
+                // 把系统 DNS 指进 TUN 网段（hijack-dns 会截获），关闭时还原。
+                try await systemDNSManager.enable(server: tunSettings.dnsServerAddress)
             }
 
             self.runtime = runtime
             clashAPIClient = client
             currentConfig = config
-            mixedPort = requestedMode == .systemProxy ? runtime.mixedPort : nil
-            activeMode = requestedMode
+            mixedPort = usesSystemProxy ? runtime.mixedPort : nil
+            activeModes = modes
             status = .on
             markRuntimeStarted()
+            startNetworkPathMonitoringIfNeeded()
             if let startedPID {
                 await armCoreExitMonitoring(pid: startedPID)
             } else {
@@ -299,17 +500,17 @@ final class AppState {
             }
             resumeDashboardMonitoringIfNeeded()
             resumeLogMonitoringIfNeeded()
+            Task { await probeConnectivity() }
         } catch {
-            switch requestedMode {
-            case .systemProxy:
-                try? await systemProxyManager.restore()
-                await singBoxProcess.stop()
-            case .tun:
+            // 无论走到哪一步，先无条件尝试还原系统代理与 DNS（无快照时是空操作）。
+            try? await systemProxyManager.restore()
+            try? await systemDNSManager.restore()
+            if usesTun {
                 if tunStarted {
                     do {
                         try await privilegedLauncher.stop()
                     } catch let stopError {
-                        activeMode = .tun
+                        activeModes = modes
                         currentConfig = nil
                         mixedPort = nil
                         if let startedPID { await armCoreExitMonitoring(pid: startedPID) }
@@ -319,6 +520,8 @@ final class AppState {
                         return
                     }
                 }
+            } else {
+                await singBoxProcess.stop()
             }
             clearRuntimeState()
             setFailure(error.localizedDescription)
@@ -327,7 +530,9 @@ final class AppState {
 
     func stop() async {
         guard !isBusy, status != .off else { return }
-        guard let activeMode else {
+        let stoppingModes = activeModes
+        // 内核可能在「未接管」状态下运行（测速用），此时没有模式但仍要停进程。
+        guard !stoppingModes.isEmpty || runtime != nil else {
             await cancelCoreExitMonitoring()
             clearRuntimeState()
             status = .off
@@ -339,8 +544,9 @@ final class AppState {
         suspendLogMonitoring()
         status = .stopping
         errorMessage = nil
-        switch activeMode {
-        case .systemProxy:
+
+        // 先还原系统代理再停内核，避免中间态把流量指向已消失的端口。
+        if stoppingModes.contains(.systemProxy) {
             do {
                 try await systemProxyManager.restore()
             } catch {
@@ -350,8 +556,19 @@ final class AppState {
                 resumeLogMonitoringIfNeeded()
                 return
             }
-            await singBoxProcess.stop()
-        case .tun:
+        }
+
+        if stoppingModes.contains(.tun) {
+            // 先把系统 DNS 还原（此刻 TUN 还在，解析不断档），再停内核。
+            do {
+                try await systemDNSManager.restore()
+            } catch {
+                setFailure("恢复系统 DNS 失败：\(error.localizedDescription)")
+                if let previousPID { await armCoreExitMonitoring(pid: previousPID) }
+                resumeDashboardMonitoringIfNeeded()
+                resumeLogMonitoringIfNeeded()
+                return
+            }
             do {
                 try await privilegedLauncher.stop()
             } catch {
@@ -361,6 +578,8 @@ final class AppState {
                 resumeLogMonitoringIfNeeded()
                 return
             }
+        } else {
+            await singBoxProcess.stop()
         }
         clearRuntimeState()
         status = .off
@@ -379,10 +598,10 @@ final class AppState {
             return
         }
 
-        let shouldRestart = status == .on && activeMode != nil
-        if activeMode != nil {
+        let shouldRestart = status == .on && !activeModes.isEmpty
+        if !activeModes.isEmpty {
             await stop()
-            guard status == .off, activeMode == nil else { return }
+            guard status == .off, activeModes.isEmpty else { return }
         }
 
         preferredMode = mode
@@ -399,7 +618,7 @@ final class AppState {
     }
 
     func prepareForTermination() async -> Bool {
-        if activeMode != nil {
+        if !activeModes.isEmpty {
             await stop()
             return status == .off
         } else {
@@ -407,6 +626,7 @@ final class AppState {
                 await cancelCoreExitMonitoring()
                 try await privilegedLauncher.recoverIfNeeded()
                 try await systemProxyManager.recoverIfNeeded()
+                try await systemDNSManager.recoverIfNeeded()
                 clearRuntimeState()
                 status = .off
                 return true
@@ -417,27 +637,103 @@ final class AppState {
         }
     }
 
-    func importSubscription(url: URL) async {
+    func importSubscription(url: URL, name: String? = nil, autoUpdate: Bool = true) async {
         guard !isBusy else { return }
+        let trimmed = (name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let source = SubscriptionSource(
-            name: url.host ?? "订阅 \(subscriptions.count + 1)",
-            url: url
+            name: trimmed.isEmpty ? (url.host ?? "订阅 \(subscriptions.count + 1)") : trimmed,
+            url: url,
+            autoUpdate: autoUpdate
         )
         do {
             let result = try await subscriptionService.refresh(source)
             var savedSource = source
             savedSource.lastUpdatedAt = now()
+            savedSource.usage = result.usage
+            // 用户没起名时优先用机场自己下发的标题（profile-title / 文件名）。
+            if trimmed.isEmpty, let suggested = result.suggestedName {
+                savedSource.name = suggested
+            }
             subscriptions.append(savedSource)
             replaceNodes(result.nodes, for: source.id)
+            discoveredPolicyGroups[source.id] = result.policyGroups
+            discoveredRules[source.id] = result.subscriptionRules
             warnings = result.warnings
-            selectFirstNodeIfNeeded()
+            // 第一个配置自动生效；已有生效配置则保持不变（不打断用户）。
+            ensureActiveConfig()
+            try await persistSubscriptions()
+            try await persistSettings()
+            errorMessage = nil
+            await rescheduleSubscriptionUpdates()
+            await hotReloadAfterNodeChange()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func renameSubscription(id: UUID, to name: String) async {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let index = subscriptions.firstIndex(where: { $0.id == id }),
+              subscriptions[index].name != trimmed else { return }
+        subscriptions[index].name = trimmed
+        do {
+            try await persistSubscriptions()
+            errorMessage = nil
+        } catch {
+            errorMessage = "保存订阅名称失败：\(error.localizedDescription)"
+        }
+    }
+
+    func setSubscriptionAutoUpdate(id: UUID, enabled: Bool) async {
+        guard let index = subscriptions.firstIndex(where: { $0.id == id }),
+              subscriptions[index].autoUpdate != enabled else { return }
+        subscriptions[index].autoUpdate = enabled
+        do {
+            try await persistSubscriptions()
+            errorMessage = nil
+            await rescheduleSubscriptionUpdates()
+        } catch {
+            errorMessage = "保存订阅更新开关失败：\(error.localizedDescription)"
+        }
+    }
+
+    func removeSubscription(id: UUID) async {
+        guard !isBusy, let index = subscriptions.firstIndex(where: { $0.id == id }) else { return }
+        subscriptions.remove(at: index)
+        nodes.removeAll { $0.sourceID == id }
+        discoveredPolicyGroups[id] = nil
+        discoveredRules[id] = nil
+        // 删掉的正是生效配置时，换一个顶上。
+        if activeConfigID == id { activeConfigID = nil }
+        ensureActiveConfig()
+        do {
             try await persistSubscriptions()
             try await persistSettings()
             errorMessage = nil
             await rescheduleSubscriptionUpdates()
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = "删除订阅失败：\(error.localizedDescription)"
+            return
         }
+        await hotReloadAfterNodeChange()
+    }
+
+    /// 删除本地「自建节点」配置：清空全部手动节点。
+    func removeLocalConfig() async {
+        guard !isBusy, !manualNodes.isEmpty else { return }
+        nodes.removeAll { $0.sourceID == nil }
+        if activeConfigID == Self.localConfigID { activeConfigID = nil }
+        ensureActiveConfig()
+        do {
+            try await persistManualNodes()
+            try await persistSettings()
+            errorMessage = nil
+        } catch {
+            errorMessage = "删除自建节点失败：\(error.localizedDescription)"
+            return
+        }
+        await hotReloadAfterNodeChange()
     }
 
     func refreshSubscriptions() async {
@@ -447,12 +743,44 @@ final class AppState {
         )
     }
 
-    private func performSubscriptionRefresh(notifyOnFailure: Bool) async -> Bool {
+    /// 只刷新单个订阅。
+    func refreshSubscription(id: UUID) async {
+        guard !isBusy, let index = subscriptions.firstIndex(where: { $0.id == id }) else { return }
+        let source = subscriptions[index]
+        let previousNodes = nodes
+        do {
+            let result = try await subscriptionService.refresh(source)
+            if !result.usedCache {
+                subscriptions[index].lastUpdatedAt = now()
+                if let usage = result.usage { subscriptions[index].usage = usage }
+            }
+            replaceNodes(result.nodes, for: id)
+            discoveredPolicyGroups[id] = result.policyGroups
+            discoveredRules[id] = result.subscriptionRules
+            warnings = result.warnings
+            ensureActiveConfig()
+            try await persistSubscriptions()
+            try await persistSettings()
+            errorMessage = nil
+        } catch {
+            errorMessage = "刷新配置失败：\(error.localizedDescription)"
+            return
+        }
+        if nodes != previousNodes { await hotReloadAfterNodeChange() }
+    }
+
+    private func performSubscriptionRefresh(
+        notifyOnFailure: Bool,
+        automaticOnly: Bool = false
+    ) async -> Bool {
         guard !isBusy else { return true }
         var collectedWarnings: [String] = []
         var failedSubscriptions: [String] = []
+        let previousNodes = nodes
         for index in subscriptions.indices {
             let source = subscriptions[index]
+            // 定时更新跳过关掉自动更新的订阅；用户主动刷新不受限制。
+            if automaticOnly, !source.autoUpdate { continue }
             do {
                 let result = try await subscriptionService.refresh(source)
                 collectedWarnings.append(contentsOf: result.warnings)
@@ -460,7 +788,10 @@ final class AppState {
                     failedSubscriptions.append(source.name)
                 } else {
                     subscriptions[index].lastUpdatedAt = now()
+                    if let usage = result.usage { subscriptions[index].usage = usage }
                     replaceNodes(result.nodes, for: source.id)
+                    discoveredPolicyGroups[source.id] = result.policyGroups
+                    discoveredRules[source.id] = result.subscriptionRules
                 }
             } catch {
                 collectedWarnings.append("订阅 \(source.name) 更新失败：\(error.localizedDescription)")
@@ -471,6 +802,10 @@ final class AppState {
         selectFirstNodeIfNeeded()
         try? await persistSubscriptions()
         try? await persistSettings()
+        // 节点 ID 是确定性的：内容没变时集合相等，不会白白重启内核。
+        if nodes != previousNodes {
+            await hotReloadAfterNodeChange()
+        }
         if notifyOnFailure, !failedSubscriptions.isEmpty {
             do {
                 try await notificationSender.send(
@@ -498,6 +833,71 @@ final class AppState {
         }
     }
 
+    /// 数据目录，供「在 Finder 中显示」使用。
+    var supportDirectory: URL { storage.rootDirectory }
+
+    /// 清理可再生的缓存：内核日志与规则集。设置、订阅缓存与节点不动。
+    func clearRegenerableCaches() async {
+        guard status != .on else {
+            errorMessage = "请先停止内核再清理缓存"
+            return
+        }
+        let manager = FileManager.default
+        var removed = 0
+        for directory in ["logs", "rule-sets"] {
+            let url = storage.rootDirectory.appending(path: directory, directoryHint: .isDirectory)
+            guard let entries = try? manager.contentsOfDirectory(at: url, includingPropertiesForKeys: nil) else {
+                continue
+            }
+            for entry in entries where (try? manager.removeItem(at: entry)) != nil {
+                removed += 1
+            }
+        }
+        liveLogs.removeAll(keepingCapacity: false)
+        ruleSetSettings.lastUpdatedAt = nil
+        try? await persistSettings()
+        errorMessage = nil
+        warnings.append("已清理 \(removed) 个缓存文件（日志与规则集），下次启动会重新下载规则集")
+    }
+
+    func setRuleSetSettings(_ settings: RuleSetSettings) async {
+        var updated = settings
+        updated.lastUpdatedAt = ruleSetSettings.lastUpdatedAt
+        guard updated != ruleSetSettings else { return }
+        ruleSetSettings = updated
+        do {
+            try await persistSettings()
+            errorMessage = nil
+        } catch {
+            errorMessage = "保存规则集设置失败：\(error.localizedDescription)"
+        }
+    }
+
+    /// 立即从当前镜像拉取规则集；无论自动更新开关如何都强制走网络。
+    /// 只刷新缓存，不重启内核——下次启动或应用规则时自然生效。
+    func updateRuleSetsNow() async {
+        guard !isUpdatingRuleSets else { return }
+        isUpdatingRuleSets = true
+        defer { isUpdatingRuleSets = false }
+        do {
+            let prepared = try await ruleSetService.prepare(
+                includeAds: routingSettings.blockAds,
+                mirror: ruleSetSettings.mirror,
+                allowsNetwork: true
+            )
+            warnings.append(contentsOf: prepared.warnings)
+            guard prepared.warnings.isEmpty else {
+                errorMessage = "规则集更新未全部成功，已保留可用缓存"
+                return
+            }
+            ruleSetSettings.lastUpdatedAt = now()
+            try await persistSettings()
+            errorMessage = nil
+        } catch {
+            errorMessage = "规则集更新失败：\(error.localizedDescription)"
+        }
+    }
+
     func setLaunchAtLoginEnabled(_ enabled: Bool) async {
         do {
             loginItemStatus = try await loginItemManager.setEnabled(enabled)
@@ -519,32 +919,188 @@ final class AppState {
     func addManual(_ form: ManualHysteria2) async {
         do {
             nodes.append(try form.makeNode())
-            selectFirstNodeIfNeeded()
+            // 没有其他配置时，本地节点配置自动生效。
+            ensureActiveConfig()
             try await persistManualNodes()
             try await persistSettings()
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
+            return
+        }
+        await hotReloadAfterNodeChange()
+    }
+
+    func removeManualNode(id: UUID) async {
+        guard !isBusy,
+              let index = nodes.firstIndex(where: { $0.id == id && $0.sourceID == nil }) else { return }
+        let removedName = nodes[index].name
+        nodes.remove(at: index)
+        for (group, name) in groupSelections where name == removedName {
+            groupSelections[group] = nil
+        }
+        // 自建节点删光后本地配置会消失，若它正生效需另选一个。
+        if manualNodes.isEmpty, activeConfigID == Self.localConfigID { activeConfigID = nil }
+        ensureActiveConfig()
+        do {
+            try await persistManualNodes()
+            try await persistSettings()
+            errorMessage = nil
+        } catch {
+            errorMessage = "删除自建节点失败：\(error.localizedDescription)"
+            return
+        }
+        await hotReloadAfterNodeChange()
+    }
+
+    /// 节点集合变化后（订阅刷新 / 增删自建），运行中的内核不重载就用不上新出站，
+    /// 已删除的节点还会留在旧配置里。复用分流的热重载路径（校验 → 快速重启 → 失败回滚）。
+    private func hotReloadAfterNodeChange() async {
+        guard status == .on else { return }
+        if activeConfigNodes.isEmpty || activeModes.isEmpty {
+            // 节点删光后配置生成必然失败；「只跑内核」的测速态也没有回滚需求。
+            // 两种情况都直接停掉，而不是让热重载报错回滚到含幽灵节点的旧配置。
+            await stop()
+            return
+        }
+        await applyRoutingSettings(routingSettings)
+    }
+
+    /// 代理页/托盘展示的策略：内置「手动选择/自动选择」+ 当前配置自带的策略组。
+    var displayPolicyGroups: [PolicyGroup] {
+        [
+            PolicyGroup(name: "手动选择", kind: .selector),
+            PolicyGroup(name: "自动选择", kind: .urltest)
+        ] + activeConfigPolicyGroups
+    }
+
+    /// 某个策略组里可展示/可选的成员。空成员＝该组含全部节点；
+    /// 有成员时保留原顺序，节点解析成节点、其余（子策略组 / DIRECT / REJECT）保留为引用。
+    func groupOptions(_ group: PolicyGroup) -> [GroupOption] {
+        let pool = testableNodes
+        guard !group.members.isEmpty else { return pool.map(GroupOption.node) }
+        let byName = Dictionary(pool.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
+        return group.members.map { byName[$0].map(GroupOption.node) ?? .reference($0) }
+    }
+
+    /// 每个策略组当前选中的成员名（节点名 / 子组名 / DIRECT / REJECT），键为组名。
+    private(set) var groupSelections: [String: String] = [:]
+
+    /// 某组当前选中的成员名；未记录时回退默认（手动选择用全局节点，其余用首个成员）。
+    func selectedMemberName(in group: String) -> String? {
+        if let name = groupSelections[group] { return name }
+        if group == "手动选择" { return selectedNode?.name ?? testableNodes.first?.name }
+        return displayPolicyGroups.first { $0.name == group }.flatMap { groupOptions($0).first?.name }
+    }
+
+    /// 选中成员是节点时返回它（供托盘/副标题展示）；是子组则返回 nil。
+    func selectedNode(in group: String) -> ProxyNode? {
+        guard let name = selectedMemberName(in: group) else { return nil }
+        return activeConfigNodes.first { $0.name == name }
+    }
+
+    func isSelected(_ option: GroupOption, in group: String) -> Bool {
+        selectedMemberName(in: group) == option.name
+    }
+
+    /// 成员名 → 配置里的出站 tag。节点→节点 tag；DIRECT/REJECT→direct/reject；子组→组名即 tag。
+    private func memberTag(_ name: String) -> String? {
+        switch name.uppercased() {
+        case "DIRECT": return "direct"
+        case "REJECT", "REJECT-DROP": return "reject"
+        default:
+            if let node = activeConfigNodes.first(where: { $0.name == name }) {
+                return ConfigGenerator.outboundTag(for: node)
+            }
+            return displayPolicyGroups.contains { $0.name == name } ? name : nil
         }
     }
 
-    func select(_ node: ProxyNode) async {
-        guard nodes.contains(where: { $0.id == node.id }) else { return }
+    /// 为某策略组切换成员（节点或子组）。「手动选择」选中节点时同步全局当前节点。
+    func select(optionName name: String, in group: String) async {
+        guard let tag = memberTag(name) else { return }
         if let clashAPIClient, status == .on {
             do {
-                try await clashAPIClient.select(node: ConfigGenerator.outboundTag(for: node))
+                try await clashAPIClient.select(node: tag, in: group)
             } catch {
-                errorMessage = "切换节点失败：\(error.localizedDescription)"
+                errorMessage = "切换 \(group) 失败：\(error.localizedDescription)"
                 return
             }
         }
-        selectedNodeID = node.id
+        groupSelections[group] = name
+        if group == "手动选择", let node = activeConfigNodes.first(where: { $0.name == name }) {
+            selectedNodeID = node.id
+        }
+        // 组选择要落盘，否则重启后按策略分流的选择全部回退。
         try? await persistSettings()
+        if group == "手动选择", status == .on {
+            connectivity = [:]
+            Task { await probeConnectivity() }
+        }
+    }
+
+    func select(_ node: ProxyNode, in group: String) async {
+        await select(optionName: node.name, in: group)
+    }
+
+    func select(_ node: ProxyNode) async {
+        await select(optionName: node.name, in: "手动选择")
+    }
+
+    /// 开启接管后实测当前节点到固定目标的延迟。走 Clash API 的 delay 接口，
+    /// 因此测的是「经该节点访问目标」的真实往返，而不是节点本身的握手延迟。
+    static let connectivityTargets: [(name: String, url: String)] = [
+        ("Google", "https://www.google.com/generate_204"),
+        ("GitHub", "https://github.com/")
+    ]
+
+    func probeConnectivity() async {
+        guard !isProbingConnectivity else { return }
+        guard let clashAPIClient, status == .on, let node = selectedNode else {
+            connectivity = [:]
+            return
+        }
+        isProbingConnectivity = true
+        defer { isProbingConnectivity = false }
+
+        let tag = ConfigGenerator.outboundTag(for: node)
+        var results: [String: Int?] = [:]
+        for target in Self.connectivityTargets {
+            guard let url = URL(string: target.url) else { continue }
+            do {
+                results[target.name] = try await clashAPIClient.delay(node: tag, testURL: url)
+            } catch {
+                results.updateValue(nil, forKey: target.name)
+            }
+        }
+        // 一次性赋值，避免逐条写触发多次 SwiftUI 事务。
+        connectivity = results
+    }
+
+    /// 测速依赖 Clash API，内核必须在跑。未运行时自动拉起「只跑内核」状态：
+    /// 只开本地 mixed inbound，不改系统代理也不建 TUN。用户可在托盘停止。
+    @discardableResult
+    func startCoreForTestingIfNeeded() async -> Bool {
+        if status == .on { return true }
+        guard !isBusy else { return false }
+        guard !activeConfigNodes.isEmpty else {
+            errorMessage = "当前配置没有可用节点"
+            return false
+        }
+        await start(modes: [])
+        return status == .on
     }
 
     func testDelay(_ node: ProxyNode) async {
-        guard let clashAPIClient, let testURL = URL(string: testURLString), status == .on else {
-            errorMessage = "请先开启系统代理"
+        // TCP 握手直连节点服务器，不需要内核在跑，快且稳。
+        if speedTestMethod == .tcpPing {
+            let result = await TCPPinger.ping(host: node.server, port: node.port)
+            applyDelay(result, to: node.id)
+            return
+        }
+        guard await startCoreForTestingIfNeeded() else { return }
+        guard let clashAPIClient, let testURL = URL(string: testURLString) else {
+            errorMessage = "内核控制接口不可用"
             return
         }
         do {
@@ -559,35 +1115,110 @@ final class AppState {
         }
     }
 
+    private func applyDelay(_ result: DelayResult, to id: UUID) {
+        switch result {
+        case let .success(value): delays[id] = value
+        case .failure: delays.updateValue(nil, forKey: id)
+        }
+    }
+
     func testAllDelays() async {
-        guard let clashAPIClient, let testURL = URL(string: testURLString), status == .on else {
-            errorMessage = "请先开启系统代理"
+        // 防重入：托盘与节点页都能触发，重复点击会叠加出成百上千个并发请求。
+        guard !isTestingAllDelays else { return }
+        // 测速只针对当前生效配置里的可用节点，避免对上百个节点全量握手。
+        let testable = testableNodes
+        guard !testable.isEmpty else {
+            errorMessage = "当前配置没有可测速的节点"
             return
         }
-        let tags = nodes.map(ConfigGenerator.outboundTag)
-        let results = await clashAPIClient.delays(nodes: tags, testURL: testURL)
-        for node in nodes {
-            switch results[ConfigGenerator.outboundTag(for: node)] {
+        isTestingAllDelays = true
+        defer { isTestingAllDelays = false }
+
+        // TCP 方式：直连握手，不需要内核，一次性并发跑完。
+        if speedTestMethod == .tcpPing {
+            let targets = testable.map { (id: $0.id, host: $0.server, port: $0.port) }
+            let results = await TCPPinger.pingAll(targets: targets)
+            var updated = delays
+            for (id, result) in results {
+                switch result {
+                case let .success(value): updated[id] = value
+                case .failure: updated.updateValue(nil, forKey: id)
+                }
+            }
+            delays = updated
+            return
+        }
+
+        guard await startCoreForTestingIfNeeded() else { return }
+        guard let clashAPIClient, let testURL = URL(string: testURLString) else {
+            errorMessage = "内核控制接口不可用"
+            return
+        }
+
+        // 只把 Sendable 的最小数据带过 await：挂起期间不持有、也不再遍历节点数组。
+        let targets: [(id: UUID, tag: String)] = testable.map {
+            (id: $0.id, tag: ConfigGenerator.outboundTag(for: $0))
+        }
+        let results = await clashAPIClient.delays(nodes: targets.map(\.tag), testURL: testURL)
+
+        // 本地聚合后一次性赋值，避免逐条写 @Observable 属性引发观察风暴。
+        var updated = delays
+        for target in targets {
+            switch results[target.tag] {
             case let .success(value):
-                delays[node.id] = value
+                updated[target.id] = value
             case .failure:
-                delays.updateValue(nil, forKey: node.id)
+                updated.updateValue(nil, forKey: target.id)
             case nil:
                 break
             }
         }
+        delays = updated
     }
 
-    func saveSettings() async {
+    /// 保存测速地址。界面上绑定的是草稿，校验通过才写进运行值，
+    /// 避免输入中途的半截 URL 被测速直接用掉。
+    func saveTestURL(_ raw: String) async {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
-            guard let url = URL(string: testURLString), ["http", "https"].contains(url.scheme) else {
+            guard let url = URL(string: trimmed), ["http", "https"].contains(url.scheme ?? "") else {
                 throw AppStateError.invalidTestURL
             }
+            testURLString = trimmed
             try await persistSettings()
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    func setSpeedTestMethod(_ method: SpeedTestMethod) async {
+        guard method != speedTestMethod else { return }
+        speedTestMethod = method
+        try? await persistSettings()
+    }
+
+    /// 切换出站模式。未运行时只持久化；运行中复用分流的热重载路径重建配置。
+    func setOutboundMode(_ mode: OutboundMode) async {
+        guard !isBusy, mode != outboundMode else { return }
+        let previous = outboundMode
+        outboundMode = mode
+        guard status == .on else {
+            do {
+                try await persistSettings()
+                errorMessage = nil
+            } catch {
+                outboundMode = previous
+                errorMessage = "保存出站模式失败：\(error.localizedDescription)"
+            }
+            return
+        }
+        await applyRoutingSettings(routingSettings)
+        if case .failed = status {
+            outboundMode = previous
+            return
+        }
+        try? await persistSettings()
     }
 
     func applyRoutingSettings(_ requestedSettings: RoutingSettings) async {
@@ -606,18 +1237,19 @@ final class AppState {
             guard let runtime,
                   let oldConfig = currentConfig,
                   let client = clashAPIClient,
-                  let activeMode else {
+                  !activeModes.isEmpty else {
                 throw AppStateError.missingRuntimeState
             }
 
             let oldSettings = routingSettings
-            let prepared = try await ruleSetService.prepare(includeAds: settings.blockAds)
+            let prepared = try await ruleSetService.prepare(includeAds: settings.blockAds, mirror: ruleSetSettings.mirror, allowsNetwork: ruleSetSettings.autoUpdate)
             warnings.append(contentsOf: prepared.warnings)
             let newConfig = try generateConfiguration(
                 runtime: runtime,
                 ruleSets: prepared.ruleSets,
                 routingSettings: settings,
-                proxyMode: activeMode,
+                enabledModes: activeModes,
+                outboundMode: outboundMode,
                 tunSettings: tunSettings,
                 dnsSettings: dnsSettings
             )
@@ -626,8 +1258,17 @@ final class AppState {
                 throw AppStateError.coreCheckFailed(check.stderr)
             }
 
-            switch activeMode {
-            case .systemProxy:
+            // 内核重启方式由是否含 TUN 决定；系统代理是否在集合中决定要不要改 bypass。
+            if activeModes.contains(.tun) {
+                guard await reloadTUNConfiguration(
+                    newConfig: newConfig,
+                    oldConfig: oldConfig,
+                    client: client,
+                    operation: "分流规则"
+                ) else {
+                    return
+                }
+            } else {
                 suspendDashboardMonitoring()
                 suspendLogMonitoring()
                 await cancelCoreExitMonitoring()
@@ -643,7 +1284,9 @@ final class AppState {
                     )
                     return
                 }
+            }
 
+            if activeModes.contains(.systemProxy) {
                 do {
                     try await systemProxyManager.updateBypassDomains(
                         to: settings.systemProxyBypassEntries,
@@ -658,20 +1301,11 @@ final class AppState {
                     )
                     return
                 }
-            case .tun:
-                guard await reloadTUNConfiguration(
-                    newConfig: newConfig,
-                    oldConfig: oldConfig,
-                    client: client,
-                    operation: "分流规则"
-                ) else {
-                    return
-                }
             }
 
             routingSettings = settings
             currentConfig = newConfig
-            if activeMode == .systemProxy {
+            if !activeModes.contains(.tun) {
                 await armRunningSystemCoreIfAvailable()
             }
             try await persistRoutingSettings()
@@ -705,13 +1339,14 @@ final class AppState {
                 throw AppStateError.missingRuntimeState
             }
 
-            let prepared = try await ruleSetService.prepare(includeAds: routingSettings.blockAds)
+            let prepared = try await ruleSetService.prepare(includeAds: routingSettings.blockAds, mirror: ruleSetSettings.mirror, allowsNetwork: ruleSetSettings.autoUpdate)
             warnings.append(contentsOf: prepared.warnings)
             let newConfig = try generateConfiguration(
                 runtime: runtime,
                 ruleSets: prepared.ruleSets,
                 routingSettings: routingSettings,
-                proxyMode: .tun,
+                enabledModes: activeModes,
+                outboundMode: outboundMode,
                 tunSettings: requestedSettings,
                 dnsSettings: dnsSettings
             )
@@ -764,17 +1399,18 @@ final class AppState {
             guard let runtime,
                   let oldConfig = currentConfig,
                   let client = clashAPIClient,
-                  let activeMode else {
+                  !activeModes.isEmpty else {
                 throw AppStateError.missingRuntimeState
             }
 
-            let prepared = try await ruleSetService.prepare(includeAds: routingSettings.blockAds)
+            let prepared = try await ruleSetService.prepare(includeAds: routingSettings.blockAds, mirror: ruleSetSettings.mirror, allowsNetwork: ruleSetSettings.autoUpdate)
             warnings.append(contentsOf: prepared.warnings)
             let newConfig = try generateConfiguration(
                 runtime: runtime,
                 ruleSets: prepared.ruleSets,
                 routingSettings: routingSettings,
-                proxyMode: activeMode,
+                enabledModes: activeModes,
+                outboundMode: outboundMode,
                 tunSettings: tunSettings,
                 dnsSettings: settings
             )
@@ -783,8 +1419,16 @@ final class AppState {
                 throw AppStateError.coreCheckFailed(check.stderr)
             }
 
-            switch activeMode {
-            case .systemProxy:
+            if activeModes.contains(.tun) {
+                guard await reloadTUNConfiguration(
+                    newConfig: newConfig,
+                    oldConfig: oldConfig,
+                    client: client,
+                    operation: "DNS 设置"
+                ) else {
+                    return
+                }
+            } else {
                 suspendDashboardMonitoring()
                 suspendLogMonitoring()
                 await cancelCoreExitMonitoring()
@@ -800,20 +1444,11 @@ final class AppState {
                     )
                     return
                 }
-            case .tun:
-                guard await reloadTUNConfiguration(
-                    newConfig: newConfig,
-                    oldConfig: oldConfig,
-                    client: client,
-                    operation: "DNS 设置"
-                ) else {
-                    return
-                }
             }
 
             dnsSettings = settings
             currentConfig = newConfig
-            if activeMode == .systemProxy {
+            if !activeModes.contains(.tun) {
                 await armRunningSystemCoreIfAvailable()
             }
             try await persistSettings()
@@ -854,6 +1489,8 @@ final class AppState {
     func setLogLevel(_ level: CoreLogLevel) {
         guard [.info, .warning, .error].contains(level), level != logLevel else { return }
         logLevel = level
+        // 不清空的话旧等级的行仍留在列表里，用户会以为切换没生效。
+        liveLogs.removeAll(keepingCapacity: true)
         suspendLogMonitoring()
         resumeLogMonitoringIfNeeded()
     }
@@ -868,7 +1505,11 @@ final class AppState {
 
     func dismissError() {
         errorMessage = nil
-        if case .failed = status, activeMode == nil { status = .off }
+        if case .failed = status, activeModes.isEmpty { status = .off }
+    }
+
+    func clearWarnings() {
+        warnings.removeAll(keepingCapacity: false)
     }
 
     func nodes(for source: SubscriptionSource) -> [ProxyNode] {
@@ -881,7 +1522,7 @@ final class AppState {
 
     private func rescheduleSubscriptionUpdates(notBefore: Date? = nil) async {
         nextSubscriptionUpdateAt = await subscriptionUpdateScheduler.schedule(
-            sources: subscriptions,
+            sources: subscriptions.filter(\.autoUpdate),
             settings: subscriptionUpdateSettings,
             notBefore: notBefore
         ) { [weak self] in
@@ -894,7 +1535,7 @@ final class AppState {
             await rescheduleSubscriptionUpdates(notBefore: now().addingTimeInterval(15 * 60))
             return
         }
-        let hadFailures = await performSubscriptionRefresh(notifyOnFailure: true)
+        let hadFailures = await performSubscriptionRefresh(notifyOnFailure: true, automaticOnly: true)
         await rescheduleSubscriptionUpdates(
             notBefore: hadFailures ? now().addingTimeInterval(15 * 60) : nil
         )
@@ -915,20 +1556,28 @@ final class AppState {
             }
             nodes.append(contentsOf: result.nodes)
             warnings.append(contentsOf: result.warnings)
+            // 重启后配置自带的策略组与规则也要从缓存恢复，否则生效配置的策略/规则会是空的。
+            discoveredPolicyGroups[source.id] = result.policyGroups
+            discoveredRules[source.id] = result.subscriptionRules
         }
         if let data = try await storage.readIfPresent(from: settingsURL) {
             let settings = try JSONDecoder().decode(PersistedSettings.self, from: data)
             selectedNodeID = settings.selectedNodeID
             testURLString = settings.testURL
+            speedTestMethod = settings.speedTestMethod ?? .tcpPing
             preferredMode = settings.preferredMode ?? .systemProxy
             tunSettings = settings.tunSettings ?? .defaults
             dnsSettings = settings.dnsSettings ?? .defaults
             subscriptionUpdateSettings = settings.subscriptionUpdateSettings ?? .defaults
+            ruleSetSettings = settings.ruleSetSettings ?? .defaults
+            outboundMode = settings.outboundMode ?? .rule
+            groupSelections = settings.groupSelections ?? [:]
+            activeConfigID = settings.activeConfigID
         }
         if let data = try await storage.readIfPresent(from: rulesURL) {
             routingSettings = try JSONDecoder().decode(RoutingSettings.self, from: data).validated()
         }
-        selectFirstNodeIfNeeded()
+        ensureActiveConfig()
     }
 
     private func persistSubscriptions() async throws {
@@ -953,7 +1602,12 @@ final class AppState {
                 preferredMode: preferredMode,
                 tunSettings: tunSettings,
                 dnsSettings: dnsSettings,
-                subscriptionUpdateSettings: subscriptionUpdateSettings
+                subscriptionUpdateSettings: subscriptionUpdateSettings,
+                ruleSetSettings: ruleSetSettings,
+                outboundMode: outboundMode,
+                groupSelections: groupSelections,
+                activeConfigID: activeConfigID,
+                speedTestMethod: speedTestMethod
             )),
             to: settingsURL
         )
@@ -991,6 +1645,7 @@ final class AppState {
             } catch let proxyError {
                 restoreMessage = "系统代理恢复失败：\(proxyError.localizedDescription)"
             }
+            try? await systemDNSManager.restore()
             clearRuntimeState()
             setFailure(
                 "\(operation)更新失败且旧配置无法恢复：\(updateError.localizedDescription)；\(error.localizedDescription)；\(restoreMessage)"
@@ -1004,13 +1659,14 @@ final class AppState {
         client: ClashAPIClient,
         operation: String
     ) async -> Bool {
+        let previousModes = activeModes
         let previousPID = monitoredCorePID
         await cancelCoreExitMonitoring()
         suspendDashboardMonitoring()
         suspendLogMonitoring()
         do {
             try await privilegedLauncher.stop()
-            activeMode = nil
+            activeModes = []
         } catch {
             status = .on
             errorMessage = "应用\(operation)失败，旧 TUN 配置仍在运行：\(error.localizedDescription)"
@@ -1024,7 +1680,7 @@ final class AppState {
         do {
             let record = try await privilegedLauncher.start(config: newConfig)
             newConfigurationRecord = record
-            activeMode = .tun
+            activeModes = previousModes
             try await healthVerifier(client)
             currentConfig = newConfig
             await armCoreExitMonitoring(pid: record.pid)
@@ -1034,10 +1690,10 @@ final class AppState {
             if let newConfigurationRecord {
                 do {
                     try await privilegedLauncher.stop()
-                    activeMode = nil
+                    activeModes = []
                 } catch let stopError {
                     currentConfig = newConfig
-                    activeMode = .tun
+                    activeModes = previousModes
                     await armCoreExitMonitoring(pid: newConfigurationRecord.pid)
                     setFailure(
                         "新 TUN 配置健康检查失败且无法停止：\(updateError.localizedDescription)；\(stopError.localizedDescription)"
@@ -1050,7 +1706,7 @@ final class AppState {
             do {
                 let record = try await privilegedLauncher.start(config: oldConfig)
                 oldConfigurationRecord = record
-                activeMode = .tun
+                activeModes = previousModes
                 try await healthVerifier(client)
                 currentConfig = oldConfig
                 status = .on
@@ -1067,6 +1723,8 @@ final class AppState {
                     // start 失败时默认 launcher 也会清理临时记录；再次 stop 是幂等安全网。
                     try? await privilegedLauncher.stop()
                 }
+                // TUN 已经起不来了，接管的系统 DNS 不还原会导致全网解析瘫痪。
+                try? await systemDNSManager.restore()
                 clearRuntimeState()
                 setFailure(
                     "\(operation)更新失败且旧 TUN 配置无法恢复：\(updateError.localizedDescription)；\(rollbackError.localizedDescription)"
@@ -1130,6 +1788,10 @@ final class AppState {
     }
 
     private func suspendDashboardMonitoring() {
+        dashboardRetryTask?.cancel()
+        dashboardRetryTask = nil
+        // 退避间隔不在这里复位：重连路径会经过本方法，复位会退化成 2 秒死循环。
+        // 只有真正收到数据（receiveTraffic）才回到起始间隔。
         dashboardTasks.forEach { $0.cancel() }
         dashboardTasks.removeAll()
     }
@@ -1162,11 +1824,14 @@ final class AppState {
     }
 
     private func suspendLogMonitoring() {
+        logRetryTask?.cancel()
+        logRetryTask = nil
         logTask?.cancel()
         logTask = nil
     }
 
     private func receiveLog(_ entry: CoreLogEntry) {
+        logRetryDelay = 2
         liveLogs.append(LiveLogEntry(entry: entry))
         if liveLogs.count > KernelLogStore.defaultBufferedLineLimit {
             liveLogs.removeFirst(liveLogs.count - KernelLogStore.defaultBufferedLineLimit)
@@ -1176,9 +1841,25 @@ final class AppState {
     private func logStreamEnded(_ message: String) {
         guard isLogsVisible, status == .on else { return }
         if warnings.last != message { warnings.append(message) }
+        scheduleLogReconnect()
+    }
+
+    private func scheduleLogReconnect() {
+        guard logRetryTask == nil else { return }
+        let delay = logRetryDelay
+        logRetryDelay = min(logRetryDelay * 2, 30)
+        logRetryTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard let self, !Task.isCancelled else { return }
+            self.logRetryTask = nil
+            guard self.isLogsVisible, self.status == .on else { return }
+            self.suspendLogMonitoring()
+            self.resumeLogMonitoringIfNeeded()
+        }
     }
 
     private func receiveTraffic(_ sample: TrafficSample) {
+        dashboardRetryDelay = 2
         uploadRate = sample.up
         downloadRate = sample.down
         trafficHistory.append(TrafficPoint(
@@ -1194,6 +1875,22 @@ final class AppState {
     private func dashboardStreamEnded(_ message: String) {
         guard isDashboardVisible, status == .on else { return }
         if warnings.last != message { warnings.append(message) }
+        scheduleDashboardReconnect()
+    }
+
+    /// 不是轮询：仅在推流失败后重试，页面仍可见且内核在跑才继续。
+    private func scheduleDashboardReconnect() {
+        guard dashboardRetryTask == nil else { return }
+        let delay = dashboardRetryDelay
+        dashboardRetryDelay = min(dashboardRetryDelay * 2, 30)
+        dashboardRetryTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard let self, !Task.isCancelled else { return }
+            self.dashboardRetryTask = nil
+            guard self.isDashboardVisible, self.status == .on else { return }
+            self.suspendDashboardMonitoring()
+            self.resumeDashboardMonitoringIfNeeded()
+        }
     }
 
     private func markRuntimeStarted() {
@@ -1221,25 +1918,45 @@ final class AppState {
         runtime: RuntimeParameters,
         ruleSets: PreparedRuleSets,
         routingSettings: RoutingSettings,
-        proxyMode: ProxyMode,
+        enabledModes: Set<ProxyMode>,
+        outboundMode: OutboundMode,
         tunSettings: TunSettings,
         dnsSettings: DNSSettings
     ) throws -> Data {
-        try ConfigGenerator.generate(ConfigInput(
-            nodes: nodes,
+        // 只用当前生效配置里的节点与它自带的策略组来生成配置。
+        var scoped = routingSettings
+        scoped.policyGroups = activeConfigPolicyGroups
+        return try ConfigGenerator.generate(ConfigInput(
+            nodes: activeConfigNodes,
             selectedNodeID: selectedNodeID,
             runtime: runtime,
             testURL: testURLString,
-            routing: RoutingConfiguration(settings: routingSettings, ruleSets: ruleSets),
-            proxyMode: proxyMode,
+            routing: RoutingConfiguration(
+                settings: scoped,
+                ruleSets: ruleSets,
+                subscriptionRules: subscriptionRules
+            ),
+            enabledModes: enabledModes,
+            outboundMode: outboundMode,
             tunSettings: tunSettings,
-            dnsSettings: dnsSettings
+            dnsSettings: dnsSettings,
+            groupDefaults: resolvedGroupDefaults()
         ))
     }
 
+    /// 把持久化的「组名 → 成员名」翻译成配置里的出站 tag；解析不到的丢弃。
+    private func resolvedGroupDefaults() -> [String: String] {
+        var defaults: [String: String] = [:]
+        for (group, name) in groupSelections {
+            if let tag = memberTag(name) { defaults[group] = tag }
+        }
+        return defaults
+    }
+
     private func selectFirstNodeIfNeeded() {
-        if !nodes.contains(where: { $0.id == selectedNodeID }) {
-            selectedNodeID = nodes.first?.id
+        if !activeConfigNodes.contains(where: { $0.id == selectedNodeID }) {
+            // 优先选真实节点，避免选中机场塞进来的套餐信息条目。
+            selectedNodeID = (testableNodes.first ?? activeConfigNodes.first)?.id
         }
     }
 
@@ -1302,7 +2019,7 @@ final class AppState {
         guard monitoredCorePID == pid,
               !isHandlingCoreCrash,
               status == .on,
-              let mode = activeMode,
+              !activeModes.isEmpty,
               let config = currentConfig,
               let client = clashAPIClient else {
             return
@@ -1314,9 +2031,10 @@ final class AppState {
         suspendDashboardMonitoring()
         suspendLogMonitoring()
 
+        let modes = activeModes
         guard crashRestartLimiter.allowsRestart(at: now()) else {
             await finishCoreCrash(
-                mode: mode,
+                modes: modes,
                 message: "内核在 10 秒内连续崩溃，已达到最多 3 次自动重启限制"
             )
             return
@@ -1327,22 +2045,21 @@ final class AppState {
         errorMessage = nil
         do {
             let restartedPID: Int32
-            switch mode {
-            case .systemProxy:
+            if modes.contains(.tun) {
+                try await privilegedLauncher.recoverIfNeeded()
+                let record = try await privilegedLauncher.start(config: config)
+                try await healthVerifier(client)
+                restartedPID = record.pid
+            } else {
                 try await singBoxProcess.start(config: config)
                 try await healthVerifier(client)
                 guard let pid = await singBoxProcess.currentPID else {
                     throw AppStateError.missingRuntimeState
                 }
                 restartedPID = pid
-            case .tun:
-                try await privilegedLauncher.recoverIfNeeded()
-                let record = try await privilegedLauncher.start(config: config)
-                try await healthVerifier(client)
-                restartedPID = record.pid
             }
 
-            activeMode = mode
+            activeModes = modes
             status = .on
             markRuntimeStarted()
             await armCoreExitMonitoring(pid: restartedPID)
@@ -1350,31 +2067,38 @@ final class AppState {
             resumeLogMonitoringIfNeeded()
         } catch {
             await finishCoreCrash(
-                mode: mode,
+                modes: modes,
                 message: "内核崩溃后自动重启失败：\(error.localizedDescription)"
             )
         }
     }
 
-    private func finishCoreCrash(mode: ProxyMode, message: String) async {
-        var cleanupMessage: String?
-        switch mode {
-        case .systemProxy:
-            if await singBoxProcess.currentPID != nil {
-                await singBoxProcess.stop()
-            }
+    private func finishCoreCrash(modes: Set<ProxyMode>, message: String) async {
+        var cleanupMessages: [String] = []
+        if modes.contains(.systemProxy) {
             do {
                 try await systemProxyManager.restore()
             } catch {
-                cleanupMessage = "系统代理恢复失败：\(error.localizedDescription)"
+                cleanupMessages.append("系统代理恢复失败：\(error.localizedDescription)")
             }
-        case .tun:
+        }
+        if modes.contains(.tun) {
             do {
                 try await privilegedLauncher.recoverIfNeeded()
             } catch {
-                cleanupMessage = "TUN 清理失败：\(error.localizedDescription)"
+                cleanupMessages.append("TUN 清理失败：\(error.localizedDescription)")
+            }
+            do {
+                try await systemDNSManager.restore()
+            } catch {
+                cleanupMessages.append("系统 DNS 恢复失败：\(error.localizedDescription)")
+            }
+        } else {
+            if await singBoxProcess.currentPID != nil {
+                await singBoxProcess.stop()
             }
         }
+        let cleanupMessage = cleanupMessages.isEmpty ? nil : cleanupMessages.joined(separator: "；")
 
         clearRuntimeState()
         let failureMessage = [message, cleanupMessage].compactMap { $0 }.joined(separator: "；")
@@ -1389,12 +2113,90 @@ final class AppState {
         }
     }
 
+    // MARK: - 网络变化与睡眠唤醒
+
+    /// macOS 的代理/DNS 设置按网络服务存储；新出现的服务（新 Wi-Fi、USB 共享、
+    /// 雷雳网桥）不会继承设置，流量会静默直连。监听路径变化事件补挂，不轮询。
+    private func startNetworkPathMonitoringIfNeeded() {
+        guard monitorsSystemEvents, pathMonitor == nil, !activeModes.isEmpty else { return }
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.scheduleTakeoverReassert()
+            }
+        }
+        monitor.start(queue: DispatchQueue(label: "kongshan.path-monitor"))
+        pathMonitor = monitor
+    }
+
+    private func stopNetworkPathMonitoring() {
+        pathMonitor?.cancel()
+        pathMonitor = nil
+        pathChangeTask?.cancel()
+        pathChangeTask = nil
+    }
+
+    /// 路径事件在切网时会连发多条，压到一次、等网络稳定 2 秒再补挂。
+    private func scheduleTakeoverReassert() {
+        guard status == .on, !activeModes.isEmpty else { return }
+        pathChangeTask?.cancel()
+        pathChangeTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard let self, !Task.isCancelled else { return }
+            self.pathChangeTask = nil
+            await self.reassertTakeoversAfterNetworkChange()
+        }
+    }
+
+    private func reassertTakeoversAfterNetworkChange() async {
+        guard status == .on, !isBusy else { return }
+        if activeModes.contains(.systemProxy), let runtime {
+            do {
+                try await systemProxyManager.reassert(
+                    port: Int(runtime.mixedPort),
+                    bypassDomains: routingSettings.systemProxyBypassEntries
+                )
+            } catch {
+                warnings.append("网络变化后补挂系统代理失败：\(error.localizedDescription)")
+            }
+        }
+        if activeModes.contains(.tun) {
+            do {
+                try await systemDNSManager.reassert(server: tunSettings.dnsServerAddress)
+            } catch {
+                warnings.append("网络变化后补挂系统 DNS 失败：\(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// 睡眠唤醒后：网络多半已变、核心可能假死（进程还在但拒绝连接）。
+    /// 稳定 3 秒后做一次健康检查并补挂接管；真正的进程退出由退出监控兜底。
+    private func handleDidWake() {
+        guard status == .on else { return }
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            await self?.verifyCoreAfterWake()
+        }
+    }
+
+    private func verifyCoreAfterWake() async {
+        guard status == .on, let clashAPIClient else { return }
+        do {
+            try await clashAPIClient.health()
+        } catch {
+            let message = "睡眠唤醒后内核控制接口无响应：\(error.localizedDescription)。若持续异常，请关闭再开启接管。"
+            if warnings.last != message { warnings.append(message) }
+        }
+        await reassertTakeoversAfterNetworkChange()
+    }
+
     private func setFailure(_ message: String) {
         status = .failed(message)
         errorMessage = message
     }
 
     private func clearRuntimeState() {
+        stopNetworkPathMonitoring()
         monitoredCorePID = nil
         clearDashboardRuntime()
         suspendLogMonitoring()
@@ -1402,7 +2204,8 @@ final class AppState {
         clashAPIClient = nil
         currentConfig = nil
         mixedPort = nil
-        activeMode = nil
+        activeModes = []
+        connectivity = [:]
     }
 
     private var subscriptionsURL: URL {
@@ -1437,6 +2240,13 @@ private struct PersistedSettings: Codable {
     let tunSettings: TunSettings?
     let dnsSettings: DNSSettings?
     let subscriptionUpdateSettings: SubscriptionUpdateSettings?
+    let ruleSetSettings: RuleSetSettings?
+    let outboundMode: OutboundMode?
+    /// 各策略组当前选中的成员（组名 → 成员名），旧版设置文件没有该字段。
+    let groupSelections: [String: String]?
+    /// 当前生效配置 ID 与测速方式，旧版设置文件没有这些字段。
+    var activeConfigID: UUID?
+    var speedTestMethod: SpeedTestMethod?
 }
 
 private enum AppStateError: Error, LocalizedError {

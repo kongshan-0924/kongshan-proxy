@@ -15,10 +15,17 @@ public struct PreparedRuleSets: Equatable, Sendable {
 public struct RoutingConfiguration: Equatable, Sendable {
     public let settings: RoutingSettings
     public let ruleSets: PreparedRuleSets
+    /// 订阅自带的分流规则，按顺序排在用户规则与绕过之后。
+    public let subscriptionRules: [SubscriptionRule]
 
-    public init(settings: RoutingSettings, ruleSets: PreparedRuleSets) {
+    public init(
+        settings: RoutingSettings,
+        ruleSets: PreparedRuleSets,
+        subscriptionRules: [SubscriptionRule] = []
+    ) {
         self.settings = settings
         self.ruleSets = ruleSets
+        self.subscriptionRules = subscriptionRules
     }
 }
 
@@ -28,9 +35,17 @@ public struct ConfigInput: Sendable {
     public let runtime: RuntimeParameters
     public let testURL: String
     public let routing: RoutingConfiguration?
-    public let proxyMode: ProxyMode
+    /// 生效的接管方式，可同时包含系统代理与 TUN。
+    public let enabledModes: Set<ProxyMode>
+    public let outboundMode: OutboundMode
     public let tunSettings: TunSettings
     public let dnsSettings: DNSSettings
+    /// 各策略组重启后要恢复的选中出站（组名 → 出站 tag）。
+    /// 内核不落盘选择状态，不带上它们的话每次重启按服务分组全部回退。
+    public let groupDefaults: [String: String]
+
+    public var usesSystemProxy: Bool { enabledModes.contains(.systemProxy) }
+    public var usesTun: Bool { enabledModes.contains(.tun) }
 
     public init(
         nodes: [ProxyNode],
@@ -38,18 +53,47 @@ public struct ConfigInput: Sendable {
         runtime: RuntimeParameters,
         testURL: String = "http://www.gstatic.com/generate_204",
         routing: RoutingConfiguration? = nil,
-        proxyMode: ProxyMode = .systemProxy,
+        enabledModes: Set<ProxyMode> = [.systemProxy],
+        outboundMode: OutboundMode = .rule,
         tunSettings: TunSettings = .defaults,
-        dnsSettings: DNSSettings = .defaults
+        dnsSettings: DNSSettings = .defaults,
+        groupDefaults: [String: String] = [:]
     ) {
+        self.outboundMode = outboundMode
         self.nodes = nodes
         self.selectedNodeID = selectedNodeID
         self.runtime = runtime
         self.testURL = testURL
         self.routing = routing
-        self.proxyMode = proxyMode
+        self.enabledModes = enabledModes.isEmpty ? [.systemProxy] : enabledModes
         self.tunSettings = tunSettings
         self.dnsSettings = dnsSettings
+        self.groupDefaults = groupDefaults
+    }
+
+    /// 单一模式的便捷入口。
+    public init(
+        nodes: [ProxyNode],
+        selectedNodeID: UUID?,
+        runtime: RuntimeParameters,
+        testURL: String = "http://www.gstatic.com/generate_204",
+        routing: RoutingConfiguration? = nil,
+        proxyMode: ProxyMode,
+        outboundMode: OutboundMode = .rule,
+        tunSettings: TunSettings = .defaults,
+        dnsSettings: DNSSettings = .defaults
+    ) {
+        self.init(
+            nodes: nodes,
+            selectedNodeID: selectedNodeID,
+            runtime: runtime,
+            testURL: testURL,
+            routing: routing,
+            enabledModes: [proxyMode],
+            outboundMode: outboundMode,
+            tunSettings: tunSettings,
+            dnsSettings: dnsSettings
+        )
     }
 }
 
@@ -105,27 +149,77 @@ public enum ConfigGenerator {
             "interval": "5m"
         ])
 
+        // 策略组：配置自带的组（Netflix / 香港 …）或用户自建组。每组一个出站，
+        // 分流规则可指向它，托盘/代理页也能单独为它选节点（对应 Stash 的按策略分流）。
+        let groups = (try? input.routing?.settings.validated().policyGroups) ?? []
+        let nodeNameToTag = Dictionary(
+            input.nodes.map { ($0.name, outboundTag(for: $0)) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let groupNames = Set(groups.map(\.name)).union(["手动选择", "自动选择", "自建"])
+        for group in groups {
+            // 成员名解析成出站 tag；解析不到的丢弃，全丢光则回退到全部节点，
+            // 避免生成空组导致 sing-box 校验失败、内核起不来。
+            var members = group.members.compactMap { member -> String? in
+                switch member.uppercased() {
+                case "DIRECT": return "direct"
+                case "REJECT", "REJECT-DROP": return "reject"
+                default:
+                    if let tag = nodeNameToTag[member] { return tag }
+                    return groupNames.contains(member) ? member : nil
+                }
+            }
+            if members.isEmpty { members = nodeTags }
+            switch group.kind {
+            case .selector:
+                // 优先恢复该组自己记住的节点；不在成员里则回退首个成员。
+                let remembered = input.groupDefaults[group.name].flatMap { members.contains($0) ? $0 : nil }
+                outbounds.append([
+                    "type": "selector",
+                    "tag": group.name,
+                    "outbounds": members,
+                    "default": remembered ?? members[0]
+                ])
+            case .urltest:
+                outbounds.append([
+                    "type": "urltest",
+                    "tag": group.name,
+                    "outbounds": members,
+                    "url": input.testURL,
+                    "interval": "5m"
+                ])
+            }
+        }
+
         let manualTags = input.nodes.filter { $0.sourceID == nil }.map(outboundTag)
         if !manualTags.isEmpty {
+            let remembered = input.groupDefaults["自建"]
+                .flatMap { manualTags.contains($0) ? $0 : nil }
             outbounds.append([
                 "type": "selector",
                 "tag": "自建",
                 "outbounds": manualTags,
-                "default": manualTags[0]
+                "default": remembered ?? manualTags[0]
             ])
         }
         outbounds.append(["type": "direct", "tag": "direct"])
         outbounds.append(["type": "block", "tag": "reject"])
 
-        var route = try route(for: input.routing)
+        var route = try route(for: input.routing, outboundMode: input.outboundMode)
         route["default_domain_resolver"] = "dns-cn"
-        if input.proxyMode == .tun {
+        var prefixRules: [[String: Any]] = []
+        if input.outboundMode == .rule {
+            // SOCKS 客户端可能只送 IP 过来；不嗅探的话域名规则整条落空，
+            // 全靠 geoip 兜底。TUN 之外的 mixed 入站同样受益。
+            prefixRules.append(["action": "sniff"])
+        }
+        if input.usesTun {
             route["auto_detect_interface"] = true
+            prefixRules.append(["protocol": "dns", "action": "hijack-dns"])
+        }
+        if !prefixRules.isEmpty {
             var rules = route["rules"] as? [[String: Any]] ?? []
-            rules.insert(contentsOf: [
-                ["action": "sniff"],
-                ["protocol": "dns", "action": "hijack-dns"]
-            ], at: 0)
+            rules.insert(contentsOf: prefixRules, at: 0)
             route["rules"] = rules
         }
 
@@ -179,7 +273,7 @@ public enum ConfigGenerator {
         servers.append(remote)
 
         var rules: [[String: Any]] = []
-        if input.routing != nil {
+        if input.routing != nil, input.outboundMode == .rule {
             rules.append([
                 "rule_set": "geosite-cn",
                 "action": "route",
@@ -189,7 +283,8 @@ public enum ConfigGenerator {
         return [
             "servers": servers,
             "rules": rules,
-            "final": "dns-remote"
+            // 直连模式不应把解析绕到代理出口
+            "final": input.outboundMode == .direct ? "dns-cn" : "dns-remote"
         ]
     }
 
@@ -215,34 +310,63 @@ public enum ConfigGenerator {
         return server
     }
 
+    /// 两种接管方式可同时开启，此时同一个内核进程同时监听 mixed 与 tun。
     private static func inbounds(for input: ConfigInput) throws -> [[String: Any]] {
-        switch input.proxyMode {
-        case .systemProxy:
-            return [[
+        var result: [[String: Any]] = []
+
+        if input.usesSystemProxy {
+            result.append([
                 "type": "mixed",
                 "tag": "mixed-in",
                 "listen": "127.0.0.1",
                 "listen_port": Int(input.runtime.mixedPort)
-            ]]
-        case .tun:
+            ])
+        }
+
+        if input.usesTun {
+            // macOS 的 utun 名字必须是 utunN，自定义名（如 kongshan-tun）会被内核拒绝
+            // （bad tun name）。不写 interface_name，交给 sing-box 自动分配 utunN。
             var inbound: [String: Any] = [
                 "type": "tun",
                 "tag": "tun-in",
-                "interface_name": input.tunSettings.interfaceName,
                 "address": input.tunSettings.addresses,
                 "mtu": input.tunSettings.mtu,
                 "auto_route": true,
                 "strict_route": input.tunSettings.strictRoute,
-                "stack": "system"
+                "stack": input.tunSettings.stack.rawValue
             ]
             if let routing = input.routing {
-                inbound["route_exclude_address"] = try routing.settings.validated().bypassCIDRs
+                inbound["route_exclude_address"] = try routing.settings.validated().tunExcludeCIDRs
             }
-            return [inbound]
+            result.append(inbound)
+        }
+
+        return result
+    }
+
+    /// Clash 的 DIRECT/REJECT 与策略组名映射到我们生成的出站；无法解析的规则直接丢弃。
+    private static func resolvedOutbound(for target: String, available: Set<String>) -> String? {
+        switch target.uppercased() {
+        case "DIRECT": return "direct"
+        case "REJECT", "REJECT-DROP": return "reject"
+        default: return available.contains(target) ? target : nil
         }
     }
 
-    private static func route(for routing: RoutingConfiguration?) throws -> [String: Any] {
+    private static func route(
+        for routing: RoutingConfiguration?,
+        outboundMode: OutboundMode = .rule
+    ) throws -> [String: Any] {
+        // 全局 / 直连不参与分流：不加载任何规则集，直接给一个兜底出口。
+        switch outboundMode {
+        case .global:
+            return ["rules": [], "final": "手动选择"]
+        case .direct:
+            return ["rules": [], "final": "direct"]
+        case .rule:
+            break
+        }
+
         guard let routing else {
             return ["rules": [], "final": "自动选择"]
         }
@@ -254,6 +378,24 @@ public enum ConfigGenerator {
 
         if let bypass = bypassRule(for: settings) {
             rules.append(bypass)
+        }
+
+        // 订阅自带规则：优先级低于用户规则与绕过，高于内置的私有网段/中国直连。
+        // 目标必须能解析到已存在的出站，否则内核校验会失败，因此逐条过滤。
+        if settings.useSubscriptionRules {
+            let available = Set(
+                ["direct", "reject", "手动选择", "自动选择", "自建"] + settings.policyGroups.map(\.name)
+            )
+            rules.append(contentsOf: routing.subscriptionRules.compactMap { rule in
+                guard let outbound = resolvedOutbound(for: rule.target, available: available) else {
+                    return nil
+                }
+                return [
+                    ruleField(for: rule.type): [rule.value],
+                    "action": "route",
+                    "outbound": outbound
+                ]
+            })
         }
         rules.append([
             "ip_is_private": true,
@@ -290,15 +432,18 @@ public enum ConfigGenerator {
         ]
     }
 
-    private static func customRouteRule(_ rule: CustomRouteRule) -> [String: Any] {
-        let field: String
-        switch rule.type {
-        case .domainSuffix: field = "domain_suffix"
-        case .domainKeyword: field = "domain_keyword"
-        case .domain: field = "domain"
-        case .ipCIDR: field = "ip_cidr"
-        case .processName: field = "process_name"
+    static func ruleField(for type: CustomRuleType) -> String {
+        switch type {
+        case .domainSuffix: "domain_suffix"
+        case .domainKeyword: "domain_keyword"
+        case .domain: "domain"
+        case .ipCIDR: "ip_cidr"
+        case .processName: "process_name"
         }
+    }
+
+    private static func customRouteRule(_ rule: CustomRouteRule) -> [String: Any] {
+        let field = ruleField(for: rule.type)
 
         let outbound: String
         switch rule.action {

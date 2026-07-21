@@ -7,32 +7,135 @@ struct MainWindowView: View {
 
     var body: some View {
         NavigationSplitView {
-            List(SidebarPage.allCases, selection: $selection) { page in
-                Label(page.title, systemImage: page.symbol)
-                    .tag(page)
+            List(selection: $selection) {
+                sidebarRow(.dashboard)
+                Section("管理") {
+                    sidebarRow(.nodes)
+                    sidebarRow(.policyGroups)
+                    sidebarRow(.routing)
+                }
+                Section("其他") {
+                    sidebarRow(.logs)
+                    sidebarRow(.settings)
+                }
             }
-            .navigationTitle("kongshan")
+            .listStyle(.sidebar)
+            .navigationSplitViewColumnWidth(min: 186, ideal: 200, max: 250)
+            .safeAreaInset(edge: .bottom, spacing: 0) { sidebarStatus }
         } detail: {
-            switch selection ?? .dashboard {
-            case .dashboard:
-                DashboardView()
-            case .nodes:
-                NodesView()
-            case .rules:
-                RoutingView()
-            case .logs:
-                LogsView()
-            case .settings:
-                SettingsView()
+            // 错误与警告在所有页面统一呈现；此前只有仪表盘显示，
+            // 其余页面的失败（导入、应用分流、保存设置…）全是静默的。
+            VStack(spacing: 0) {
+                GlobalNoticeBar()
+                Group {
+                    switch selection ?? .dashboard {
+                    case .dashboard:
+                        DashboardView()
+                    case .nodes:
+                        NodesView()
+                    case .policyGroups:
+                        PolicyGroupsView()
+                    case .routing:
+                        RoutingView()
+                    case .logs:
+                        LogsView()
+                    case .settings:
+                        SettingsView()
+                    }
+                }
             }
         }
+        .navigationTitle("kongshan")
+    }
+
+    private func sidebarRow(_ page: SidebarPage) -> some View {
+        Label(page.title, systemImage: page.symbol)
+            .tag(page)
+    }
+
+    /// 侧栏底部常驻状态条，任何页面下都能看到当前接管方式与节点。
+    private var sidebarStatus: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Divider()
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(state.statusTint)
+                    .frame(width: 7, height: 7)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(state.statusText)
+                        .font(.caption.weight(.medium))
+                        .lineLimit(1)
+                    Text(state.selectedNode?.name ?? "未选择节点")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+        }
+    }
+}
+
+/// 全页面统一的错误 / 警告条。错误红色可忽略，警告橙色可清除。
+private struct GlobalNoticeBar: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if let error = state.errorMessage {
+                noticeRow(
+                    text: error,
+                    symbol: "exclamationmark.octagon.fill",
+                    tint: .red,
+                    dismissTitle: "忽略"
+                ) { state.dismissError() }
+            }
+            if let warning = state.warnings.last {
+                noticeRow(
+                    text: state.warnings.count > 1 ? "\(warning)（共 \(state.warnings.count) 条）" : warning,
+                    symbol: "exclamationmark.triangle.fill",
+                    tint: .orange,
+                    dismissTitle: "清除"
+                ) { state.clearWarnings() }
+            }
+        }
+    }
+
+    private func noticeRow(
+        text: String,
+        symbol: String,
+        tint: Color,
+        dismissTitle: String,
+        dismiss: @escaping () -> Void
+    ) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: symbol)
+                .font(.system(size: 11))
+                .foregroundStyle(tint)
+            Text(text)
+                .font(.caption)
+                .lineLimit(2)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+            Spacer(minLength: 8)
+            Button(dismissTitle, action: dismiss)
+                .controlSize(.small)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 7)
+        .background(tint.opacity(0.09))
+        .overlay(alignment: .bottom) { Divider() }
     }
 }
 
 private enum SidebarPage: String, CaseIterable, Identifiable {
     case dashboard
     case nodes
-    case rules
+    case policyGroups
+    case routing
     case logs
     case settings
 
@@ -40,9 +143,10 @@ private enum SidebarPage: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .dashboard: "Dashboard"
-        case .nodes: "节点"
-        case .rules: "规则"
+        case .dashboard: "仪表盘"
+        case .nodes: "配置"
+        case .policyGroups: "代理"
+        case .routing: "规则"
         case .logs: "日志"
         case .settings: "设置"
         }
@@ -51,153 +155,367 @@ private enum SidebarPage: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .dashboard: "gauge.with.dots.needle.67percent"
-        case .nodes: "point.3.connected.trianglepath.dotted"
-        case .rules: "list.bullet.rectangle.portrait"
+        case .nodes: "doc.text"
+        case .policyGroups: "arrow.triangle.swap"
+        case .routing: "arrow.triangle.branch"
         case .logs: "doc.text.magnifyingglass"
         case .settings: "gearshape"
         }
     }
 }
 
-private struct NodesView: View {
+// MARK: - 配置
+
+struct NodesView: View {
     @Environment(AppState.self) private var state
     @State private var subscriptionURL = ""
     @State private var showingManualNode = false
+    @State private var pendingImportURL: URL?
+    @State private var renamingSource: SubscriptionSource?
+    @State private var pendingDelete: AppState.ConfigItem?
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                TextField("Clash 订阅 URL", text: $subscriptionURL)
-                    .textFieldStyle(.roundedBorder)
-                Button("导入") { importSubscription() }
-                    .disabled(subscriptionURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                Button {
-                    Task { await state.refreshSubscriptions() }
-                } label: {
-                    Label("刷新订阅", systemImage: "arrow.clockwise")
-                }
-                .disabled(state.subscriptions.isEmpty || state.isBusy)
-                Button {
-                    showingManualNode = true
-                } label: {
-                    Label("手动 Hysteria2", systemImage: "plus")
-                }
-                Button("测速全部") {
-                    Task { await state.testAllDelays() }
-                }
-                .disabled(!state.isOn || state.nodes.isEmpty)
-            }
-            .padding()
+            PageHeader(title: "配置", subtitle: configSummary) {
+                HStack(spacing: 8) {
+                    Button {
+                        Task { await state.refreshSubscriptions() }
+                    } label: {
+                        Label("刷新全部", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(state.subscriptions.isEmpty || state.isBusy)
 
-            if let warning = state.warnings.last {
-                HStack {
-                    Image(systemName: "exclamationmark.circle").foregroundStyle(.orange)
-                    Text(warning).lineLimit(2)
-                    Spacer()
+                    Button {
+                        showingManualNode = true
+                    } label: {
+                        Label("自建节点", systemImage: "plus")
+                    }
                 }
-                .padding(.horizontal)
-                .padding(.bottom, 10)
             }
+
+            importBar
 
             Divider()
 
             List {
-                ForEach(state.subscriptions) { source in
-                    Section(source.name) {
-                        ForEach(state.nodes(for: source)) { node in
-                            NodeRow(node: node)
-                        }
-                    }
-                }
-                if !state.manualNodes.isEmpty {
-                    Section("手动节点") {
-                        ForEach(state.manualNodes) { node in
-                            NodeRow(node: node)
-                        }
-                    }
+                ForEach(state.configItems) { item in
+                    configRow(item)
                 }
             }
+            .listStyle(.inset)
+            .scrollContentBackground(.hidden)
             .overlay {
-                if state.nodes.isEmpty {
+                if state.configItems.isEmpty {
                     ContentUnavailableView(
-                        "还没有节点",
-                        systemImage: "tray",
-                        description: Text("导入订阅或添加手动节点。")
+                        "还没有配置",
+                        systemImage: "doc.badge.plus",
+                        description: Text("粘贴 Clash 订阅链接导入一个配置，或添加自建 Hysteria2 节点。")
                     )
                 }
             }
         }
-        .navigationTitle("节点")
+        .pageBackground()
+        .navigationTitle("配置")
         .sheet(isPresented: $showingManualNode) {
-            ManualNodeSheet()
-                .environment(state)
+            ManualNodeSheet().environment(state)
+        }
+        .sheet(item: $pendingImportURL) { url in
+            SubscriptionImportSheet(url: url) { subscriptionURL = "" }
+        }
+        .sheet(item: $renamingSource) { source in
+            SubscriptionRenameSheet(source: source) { name in
+                Task { await state.renameSubscription(id: source.id, to: name) }
+            }
+        }
+        .confirmationDialog(
+            "删除配置“\(pendingDelete?.name ?? "")”？",
+            isPresented: Binding(
+                get: { pendingDelete != nil },
+                set: { if !$0 { pendingDelete = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("删除", role: .destructive) {
+                if let item = pendingDelete { delete(item) }
+                pendingDelete = nil
+            }
+            Button("取消", role: .cancel) { pendingDelete = nil }
+        } message: {
+            Text("移除该配置的全部节点、策略与规则；正在运行时会重载配置。")
         }
     }
 
-    private func importSubscription() {
+    // MARK: - 配置行
+
+    @ViewBuilder
+    private func configRow(_ item: AppState.ConfigItem) -> some View {
+        let isActive = state.activeConfigID == item.id
+        Button {
+            Task { await state.setActiveConfig(item.id) }
+        } label: {
+            HStack(spacing: 11) {
+                Image(systemName: isActive ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 15))
+                    .foregroundStyle(isActive ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
+
+                IconBadge(symbol: item.isLocal ? "wrench.and.screwdriver" : "doc.text", tint: item.isLocal ? .orange : .blue, size: 30)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(item.name)
+                            .font(.system(size: 13, weight: .medium))
+                            .lineLimit(1)
+                        if isActive {
+                            Text("生效中")
+                                .font(.caption2)
+                                .foregroundStyle(Color.accentColor)
+                        }
+                    }
+                    Text(rowSubtitle(item))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if let usage = item.usage, let used = usage.usedBytes, let total = usage.totalBytes, total > 0 {
+                        ProgressView(value: min(Double(used) / Double(total), 1))
+                            .frame(maxWidth: 260)
+                            .tint(Double(used) / Double(total) > 0.85 ? .orange : .accentColor)
+                    }
+                }
+                Spacer(minLength: 8)
+                rowMenu(item)
+            }
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(state.isBusy)
+    }
+
+    private func rowSubtitle(_ item: AppState.ConfigItem) -> String {
+        var parts = ["\(item.nodeCount) 个节点"]
+        if let usage = item.usage, let used = usage.usedBytes, let total = usage.totalBytes, total > 0 {
+            parts.append("\(Theme.bytes(used)) / \(Theme.bytes(total))")
+        }
+        if let expires = item.usage?.expiresAt {
+            parts.append("\(expires.formatted(date: .abbreviated, time: .omitted)) 到期")
+        }
+        if let updated = item.lastUpdatedAt {
+            parts.append("更新于 \(updated.formatted(date: .abbreviated, time: .shortened))")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    @ViewBuilder
+    private func rowMenu(_ item: AppState.ConfigItem) -> some View {
+        Menu {
+            if !item.isLocal, let source = state.subscriptions.first(where: { $0.id == item.id }) {
+                Button("重命名…") { renamingSource = source }
+                Button("立即更新") { Task { await state.refreshSubscription(id: source.id) } }
+                Toggle("参与定时更新", isOn: Binding(
+                    get: { source.autoUpdate },
+                    set: { enabled in Task { await state.setSubscriptionAutoUpdate(id: source.id, enabled: enabled) } }
+                ))
+                Divider()
+            }
+            Button("删除", role: .destructive) { pendingDelete = item }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .frame(width: 22)
+        .disabled(state.isBusy)
+    }
+
+    private func delete(_ item: AppState.ConfigItem) {
+        Task {
+            if item.isLocal {
+                await state.removeLocalConfig()
+            } else {
+                await state.removeSubscription(id: item.id)
+            }
+        }
+    }
+
+    // MARK: - 导入
+
+    private var importBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "link")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            TextField("粘贴 Clash YAML 订阅链接", text: $subscriptionURL)
+                .textFieldStyle(.plain)
+                .onSubmit(beginImport)
+            Button("导入") { beginImport() }
+                .controlSize(.small)
+                .disabled(subscriptionURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 8)
+        .background(Theme.cardFill, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary.opacity(0.6), lineWidth: 0.5))
+        .padding(.horizontal, 22)
+        .padding(.bottom, 12)
+    }
+
+    private var configSummary: String {
+        "\(state.configItems.count) 个配置 · 生效：\(state.configItems.first { $0.id == state.activeConfigID }?.name ?? "无")"
+    }
+
+    private func beginImport() {
         let value = subscriptionURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: value) else {
+        guard !value.isEmpty else { return }
+        guard let url = URL(string: value), url.scheme != nil else {
             state.errorMessage = "订阅 URL 无效"
             return
         }
+        pendingImportURL = url
+    }
+}
+
+
+extension URL: @retroactive Identifiable {
+    public var id: String { absoluteString }
+}
+
+/// 导入是异步网络操作：sheet 保持打开显示进度，失败在 sheet 内给出原因，
+/// 成功才关闭。此前是先关 sheet 再后台导入，失败没有任何可见提示。
+private struct SubscriptionImportSheet: View {
+    @Environment(AppState.self) private var state
+    @Environment(\.dismiss) private var dismiss
+    let url: URL
+    let onImported: () -> Void
+
+    @State private var name = ""
+    @State private var autoUpdate = true
+    @State private var isImporting = false
+    @State private var importError: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("导入订阅")
+                .font(.system(size: 13, weight: .semibold))
+                .padding(.horizontal, 20)
+                .padding(.top, 18)
+                .padding(.bottom, 12)
+
+            Form {
+                Section {
+                    TextField("名称", text: $name, prompt: Text(url.host ?? "订阅"))
+                        .disabled(isImporting)
+                    Toggle("参与定时自动更新", isOn: $autoUpdate)
+                        .disabled(isImporting)
+                } footer: {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(url.absoluteString)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                        if let importError {
+                            Label(importError, systemImage: "exclamationmark.octagon.fill")
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+            }
+            .formStyle(.grouped)
+
+            Divider()
+            HStack {
+                if isImporting {
+                    ProgressView().controlSize(.small)
+                    Text("正在下载并解析…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("取消") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("导入") { beginImport() }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isImporting)
+            }
+            .padding(16)
+        }
+        .frame(width: 440, height: 300)
+    }
+
+    private func beginImport() {
+        guard !isImporting else { return }
+        isImporting = true
+        importError = nil
         Task {
-            await state.importSubscription(url: url)
-            if state.errorMessage == nil { subscriptionURL = "" }
+            await state.importSubscription(url: url, name: name, autoUpdate: autoUpdate)
+            isImporting = false
+            if let message = state.errorMessage {
+                importError = message
+                // 错误已经就地显示，不再让全局横幅重复报一次。
+                state.dismissError()
+            } else {
+                onImported()
+                dismiss()
+            }
         }
     }
 }
 
-private struct NodeRow: View {
-    @Environment(AppState.self) private var state
-    let node: ProxyNode
+private struct SubscriptionRenameSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let source: SubscriptionSource
+    let onConfirm: (String) -> Void
+
+    @State private var name = ""
 
     var body: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text(node.name).lineLimit(1)
-                Text(node.protocolType.rawValue.uppercased())
-                    .font(.caption2.weight(.semibold))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(.secondary.opacity(0.12), in: Capsule())
+        VStack(alignment: .leading, spacing: 14) {
+            Text("重命名订阅")
+                .font(.system(size: 13, weight: .semibold))
+            TextField("名称", text: $name)
+                .textFieldStyle(.roundedBorder)
+            HStack {
+                Spacer()
+                Button("取消") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("保存") {
+                    onConfirm(name)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+                .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
-            Spacer()
-            delayLabel
-                .frame(minWidth: 70, alignment: .trailing)
-            Button("测速") { Task { await state.testDelay(node) } }
-                .disabled(!state.isOn)
-            Button {
-                Task { await state.select(node) }
-            } label: {
-                Label(
-                    state.selectedNodeID == node.id ? "已选择" : "选择",
-                    systemImage: state.selectedNodeID == node.id ? "checkmark.circle.fill" : "circle"
-                )
-            }
-            .buttonStyle(.borderless)
-            .disabled(state.isBusy)
         }
-        .padding(.vertical, 4)
+        .padding(20)
+        .frame(width: 380)
+        .onAppear { name = source.name }
     }
+}
 
-    @ViewBuilder
-    private var delayLabel: some View {
-        if let recorded = state.delays[node.id] {
-            if let milliseconds = recorded {
-                Text("\(milliseconds) ms")
-                    .foregroundStyle(delayColor(milliseconds))
-            } else {
-                Text("超时").foregroundStyle(.red)
-            }
-        } else {
-            Text("未测试").foregroundStyle(.secondary)
+// MARK: - 设置
+
+private enum SettingsTab: String, CaseIterable, Identifiable {
+    case general
+    case tunnel
+    case network
+    case resources
+    case more
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .general: "通用"
+        case .tunnel: "隧道"
+        case .network: "网络"
+        case .resources: "资源"
+        case .more: "更多"
         }
-    }
-
-    private func delayColor(_ value: Int) -> Color {
-        if value < 150 { return .green }
-        if value < 350 { return .orange }
-        return .red
     }
 }
 
@@ -205,154 +523,333 @@ private struct SettingsView: View {
     @Environment(AppState.self) private var state
     @State private var dnsDraft = DNSSettings.defaults
     @State private var subscriptionUpdateDraft = SubscriptionUpdateSettings.defaults
+    @State private var testURLDraft = ""
+    @State private var routingDraft = RoutingSettings.defaults
+    @State private var tab: SettingsTab = .general
 
     var body: some View {
-        Form {
-            Section("代理模式") {
-                Picker("首选接管方式", selection: modeBinding) {
-                    Text("系统代理").tag(ProxyMode.systemProxy)
-                    Text("TUN").tag(ProxyMode.tun)
+        VStack(spacing: 0) {
+            PageHeader(title: "设置", subtitle: nil) {
+                Picker("分区", selection: $tab) {
+                    ForEach(SettingsTab.allCases) { Text($0.title).tag($0) }
                 }
                 .pickerStyle(.segmented)
-                .disabled(state.isBusy || !state.isReady)
-
-                LabeledContent("当前接管", value: state.activeMode.map(modeTitle) ?? "未开启")
-                Text("TUN 模式的启动和停止需要管理员授权。")
-                    .foregroundStyle(.secondary)
-
-                Toggle("严格路由（strict_route）", isOn: strictRouteBinding)
-                    .disabled(state.isBusy || !state.isReady)
-                Text("启用更严格的路由处理，可能影响局域网或虚拟化软件；macOS 上的 DNS 防泄漏仍需 M4 DNS 设置验证")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                .labelsHidden()
+                .frame(width: 340)
             }
 
-            Section("测速") {
-                TextField("测试 URL", text: Binding(
-                    get: { state.testURLString },
-                    set: { state.testURLString = $0 }
-                ))
-                HStack {
-                    Text("超时")
-                    Spacer()
-                    Text("5 秒").foregroundStyle(.secondary)
-                }
-                Button("保存设置") { Task { await state.saveSettings() } }
-            }
+            Form {
+                if tab == .tunnel {
+                Section("代理模式") {
+                    // 与仪表盘 / 托盘同一套模型：两种接管可同时开。
+                    // 之前这里是单选 Picker，双开时点一下会静默关掉另一种。
+                    Toggle(ProxyMode.systemProxy.displayName, isOn: modeToggleBinding(.systemProxy))
+                        .disabled(state.isBusy || !state.isReady)
+                    Toggle(ProxyMode.tun.displayName, isOn: modeToggleBinding(.tun))
+                        .disabled(state.isBusy || !state.isReady)
 
-            Section("DNS 高级设置") {
-                TextField("国内 DoH", text: $dnsDraft.domesticDoH)
-                TextField("远程 DoH", text: $dnsDraft.remoteDoH)
-                Text("geosite-cn 使用国内 DoH 直连解析，其余域名使用经当前代理的远程 DoH。兼容性优先，默认不启用 fake-ip。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text("系统代理模式只管理进入本地 mixed 代理的域名解析，不等同于接管 macOS 全局 DNS。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                HStack {
-                    Button("恢复默认") { dnsDraft = .defaults }
-                    Button("放弃修改") { dnsDraft = state.dnsSettings }
-                        .disabled(dnsDraft == state.dnsSettings)
-                    Spacer()
-                    Button("应用 DNS") {
-                        Task {
-                            await state.applyDNSSettings(dnsDraft)
-                            dnsDraft = state.dnsSettings
+                    LabeledContent("当前接管", value: activeModesText)
+
+                    Toggle("严格路由（strict_route）", isOn: strictRouteBinding)
+                        .disabled(state.isBusy || !state.isReady)
+
+                    Picker("TUN 协议栈", selection: tunStackBinding) {
+                        ForEach(TunStack.allCases, id: \.self) { stack in
+                            Text(stack.displayName).tag(stack)
                         }
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(state.isBusy || !state.isReady || dnsDraft == state.dnsSettings)
-                }
-            }
+                    .disabled(state.isBusy || !state.isReady)
 
-            Section("订阅自动更新") {
-                Toggle("启用自动更新", isOn: $subscriptionUpdateDraft.enabled)
-                Stepper(
-                    "更新间隔：\(subscriptionUpdateDraft.intervalHours) 小时",
-                    value: $subscriptionUpdateDraft.intervalHours,
-                    in: 1...168
+                    Text("TUN 的启动与停止需要管理员授权。严格路由更彻底，但可能影响局域网、虚拟机或其他 VPN。system 栈在部分 macOS 版本上有已知问题，异常时可切换协议栈重试。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("TUN 运行期间系统 DNS 会临时指向 \(state.tunSettings.dnsServerAddress) 以防解析绕过 TUN（macOS 特性），关闭或退出时自动还原。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                // 手动绕过列表挪到这里：可上下滚动，逐条增删域名 / IP。
+                BypassListSection(
+                    title: "绕过域名（直连）",
+                    placeholder: "例如 *.local 或 example.com",
+                    addTitle: "添加域名",
+                    deleteHelp: "删除域名",
+                    identity: "bypass-domain",
+                    values: $routingDraft.bypassDomains
                 )
-                .disabled(!subscriptionUpdateDraft.enabled)
-                LabeledContent(
-                    "下次更新",
-                    value: state.nextSubscriptionUpdateAt?.formatted(
-                        date: .abbreviated,
-                        time: .shortened
-                    ) ?? "未安排"
+                BypassListSection(
+                    title: "绕过 IP / CIDR（直连）",
+                    placeholder: "例如 192.168.0.0/16",
+                    addTitle: "添加 IP / CIDR",
+                    deleteHelp: "删除 CIDR",
+                    identity: "bypass-cidr",
+                    values: $routingDraft.bypassCIDRs
                 )
-                Text("应用在后台按最近到期的订阅安排一次更新；更新结束后重新计算时间，不会持续轮询。失败时保留原节点和缓存，并尝试发送本地通知。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                HStack {
-                    Button("放弃修改") {
-                        subscriptionUpdateDraft = state.subscriptionUpdateSettings
+                BypassListSection(
+                    title: "跳过 TUN 的网段",
+                    placeholder: "例如 10.0.0.0/8",
+                    addTitle: "添加网段",
+                    deleteHelp: "删除网段",
+                    identity: "tun-exclude",
+                    values: $routingDraft.tunExcludeCIDRs
+                )
+                Section {
+                    Button("恢复默认绕过列表") {
+                        routingDraft.bypassDomains = RoutingSettings.defaults.bypassDomains
+                        routingDraft.bypassCIDRs = RoutingSettings.defaults.bypassCIDRs
+                        routingDraft.tunExcludeCIDRs = RoutingSettings.defaultTunExcludeCIDRs
                     }
-                    .disabled(subscriptionUpdateDraft == state.subscriptionUpdateSettings)
-                    Spacer()
-                    Button("应用自动更新设置") {
-                        Task {
-                            await state.setSubscriptionUpdateSettings(subscriptionUpdateDraft)
+                    HStack {
+                        if routingDraft != state.routingSettings {
+                            StatusBadge(text: "有未应用的修改", tint: .orange)
+                        }
+                        Spacer()
+                        Button("应用绕过设置") {
+                            Task { await state.applyRoutingSettings(routingDraft) }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(state.isBusy || routingDraft == state.routingSettings)
+                    }
+                } footer: {
+                    Text("绕过域名/IP 会同时生效于分流规则、系统代理 bypass 与 TUN 排除三处。改动统一校验后应用。")
+                }
+
+                }
+                if tab == .network {
+                Section("测速") {
+                    Picker("测速方式", selection: speedTestMethodBinding) {
+                        ForEach(SpeedTestMethod.allCases, id: \.self) { method in
+                            Text(method.displayName).tag(method)
+                        }
+                    }
+                    if state.speedTestMethod == .urlTest {
+                        TextField("测试 URL", text: $testURLDraft)
+                        HStack {
+                            if testURLDraft != state.testURLString {
+                                StatusBadge(text: "未保存", tint: .orange)
+                            }
+                            Spacer()
+                            Button("保存地址") { Task { await state.saveTestURL(testURLDraft) } }
+                                .disabled(testURLDraft == state.testURLString)
+                        }
+                    }
+                    Text("TCP 握手直连节点服务器，快且稳，不需要开启代理；URL 测速经当前代理请求测试地址，测真实链路但更慢。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("DNS 高级设置") {
+                    TextField("国内 DoH", text: $dnsDraft.domesticDoH)
+                    TextField("远程 DoH", text: $dnsDraft.remoteDoH)
+                    Text("geosite-cn 使用国内 DoH 直连解析，其余域名走当前代理的远程 DoH。兼容性优先，默认不启用 fake-ip。系统代理模式只管理进入本地 mixed 代理的解析，不等同于接管 macOS 全局 DNS。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Button("恢复默认") { dnsDraft = .defaults }
+                        Button("放弃修改") { dnsDraft = state.dnsSettings }
+                            .disabled(dnsDraft == state.dnsSettings)
+                        Spacer()
+                        Button("应用 DNS") {
+                            Task {
+                                await state.applyDNSSettings(dnsDraft)
+                                dnsDraft = state.dnsSettings
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(state.isBusy || !state.isReady || dnsDraft == state.dnsSettings)
+                    }
+                }
+
+                }
+                if tab == .resources {
+                Section("订阅自动更新") {
+                    Toggle("启用自动更新", isOn: $subscriptionUpdateDraft.enabled)
+                    Stepper(
+                        "更新间隔：\(subscriptionUpdateDraft.intervalHours) 小时",
+                        value: $subscriptionUpdateDraft.intervalHours,
+                        in: 1...168
+                    )
+                    .disabled(!subscriptionUpdateDraft.enabled)
+                    LabeledContent(
+                        "下次更新",
+                        value: state.nextSubscriptionUpdateAt?.formatted(
+                            date: .abbreviated,
+                            time: .shortened
+                        ) ?? "未安排"
+                    )
+                    Text("按最近到期的订阅安排一次更新，完成后重新计算时间，不会持续轮询。失败时保留原节点和缓存，并尝试发送本地通知。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Button("放弃修改") {
                             subscriptionUpdateDraft = state.subscriptionUpdateSettings
                         }
+                        .disabled(subscriptionUpdateDraft == state.subscriptionUpdateSettings)
+                        Spacer()
+                        Button("应用自动更新设置") {
+                            Task {
+                                await state.setSubscriptionUpdateSettings(subscriptionUpdateDraft)
+                                subscriptionUpdateDraft = state.subscriptionUpdateSettings
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(
+                            state.isBusy
+                                || !state.isReady
+                                || subscriptionUpdateDraft == state.subscriptionUpdateSettings
+                        )
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(
-                        state.isBusy
-                            || !state.isReady
-                            || subscriptionUpdateDraft == state.subscriptionUpdateSettings
-                    )
                 }
-            }
 
-            Section("开机自启") {
-                Toggle("登录时启动 kongshan", isOn: launchAtLoginBinding)
-                    .disabled(
-                        !state.isReady
-                            || state.loginItemStatus == .requiresApproval
-                            || state.loginItemStatus == .notFound
-                    )
-                LabeledContent("系统状态", value: loginItemStatusTitle)
-                if state.loginItemStatus == .requiresApproval {
-                    Text("登录项已登记，但需要你在系统设置中批准。应用不会重复发起注册。")
+                }
+                if tab == .resources {
+                Section("GeoIP / 规则集数据库") {
+                    Picker("下载源", selection: mirrorBinding) {
+                        ForEach(RuleSetMirror.allCases, id: \.self) { mirror in
+                            Text(mirror.displayName).tag(mirror)
+                        }
+                    }
+                    Toggle("自动更新", isOn: ruleSetAutoUpdateBinding)
+                    LabeledContent("最后更新", value: lastRuleSetUpdateText)
+                    HStack {
+                        if state.isUpdatingRuleSets {
+                            ProgressView().controlSize(.small)
+                            Text("正在更新…")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("立即更新") {
+                            Task { await state.updateRuleSetsNow() }
+                        }
+                        .disabled(state.isUpdatingRuleSets)
+                    }
+                    VStack(alignment: .leading, spacing: 3) {
+                        ForEach(
+                            RuleSetService.sourceURLs(
+                                mirror: state.ruleSetSettings.mirror,
+                                includeAds: state.routingSettings.blockAds
+                            ),
+                            id: \.tag
+                        ) { source in
+                            Text(source.url.absoluteString)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .textSelection(.enabled)
+                        }
+                    }
+                    Text("上游是 sing-box 官方开源仓库 SagerNet/sing-geoip 与 sing-geosite，由官方持续维护。下载后用打包内核校验通过才替换缓存；失败或关闭自动更新时沿用最后一次成功的缓存。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Button("打开系统登录项设置") {
-                        Task { await state.openLoginItemSystemSettings() }
+                }
+
+                }
+                if tab == .general {
+                Section("开机自启") {
+                    Toggle("登录时启动 kongshan", isOn: launchAtLoginBinding)
+                        .disabled(
+                            !state.isReady
+                                || state.loginItemStatus == .requiresApproval
+                                || state.loginItemStatus == .notFound
+                        )
+                    LabeledContent("系统状态", value: loginItemStatusTitle)
+                    if state.loginItemStatus == .requiresApproval {
+                        Text("登录项已登记，但需要你在系统设置中批准。应用不会重复发起注册。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Button("打开系统登录项设置") {
+                            Task { await state.openLoginItemSystemSettings() }
+                        }
+                    } else if state.loginItemStatus == .notFound {
+                        Text("当前运行环境不是可注册的应用包；请从打包后的 kongshan.app 使用此功能。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
-                } else if state.loginItemStatus == .notFound {
-                    Text("当前运行环境不是可注册的应用包；请从打包后的 kongshan.app 使用此功能。")
+                    HStack {
+                        Spacer()
+                        Button("刷新状态") {
+                            Task { await state.refreshLoginItemStatus() }
+                        }
+                        .disabled(!state.isReady)
+                    }
+                }
+
+                Section("关于") {
+                    LabeledContent("内核", value: "sing-box \(state.coreVersion)")
+                    LabeledContent("接管能力", value: "系统代理 + TUN（可同时开启）")
+                    LabeledContent("出站模式", value: OutboundMode.allCases.map(\.displayName).joined(separator: " / "))
+                }
+                }
+                if tab == .more {
+                Section("数据与日志") {
+                    LabeledContent("数据目录") {
+                        Button("在 Finder 中显示") {
+                            NSWorkspace.shared.activateFileViewerSelecting([state.supportDirectory])
+                        }
+                    }
+                    LabeledContent("日志目录") {
+                        Button("在 Finder 中显示") {
+                            NSWorkspace.shared.activateFileViewerSelecting([
+                                state.supportDirectory.appending(path: "logs", directoryHint: .isDirectory)
+                            ])
+                        }
+                    }
+                    Text(state.supportDirectory.path)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                Section("清理") {
+                    LabeledContent("清理缓存") {
+                        Button("执行") {
+                            Task { await state.clearRegenerableCaches() }
+                        }
+                        .disabled(state.isOn || state.isBusy)
+                    }
+                    Text("删除内核日志与规则集缓存，两者都会自动重新生成。设置、订阅缓存和节点不受影响。需先停止内核。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                HStack {
-                    Spacer()
-                    Button("刷新状态") {
-                        Task { await state.refreshLoginItemStatus() }
-                    }
-                    .disabled(!state.isReady)
                 }
             }
-
-            Section("当前能力") {
-                LabeledContent("代理模式", value: "系统代理 + TUN")
-                LabeledContent("分流", value: "自定义规则 + 中国直连")
-                Text("Dashboard 流量曲线、实时日志和订阅自动更新已可用。")
-                    .foregroundStyle(.secondary)
-            }
+            .formStyle(.grouped)
+            .scrollContentBackground(.hidden)
         }
-        .formStyle(.grouped)
+        .pageBackground()
         .navigationTitle("设置")
         .onAppear {
             dnsDraft = state.dnsSettings
             subscriptionUpdateDraft = state.subscriptionUpdateSettings
+            testURLDraft = state.testURLString
+            routingDraft = state.routingSettings
         }
+        // 绕过设置在别处应用（如恢复默认）后，草稿同步跟上。
+        .onChange(of: state.routingSettings) { _, new in routingDraft = new }
     }
 
-    private var modeBinding: Binding<ProxyMode> {
+    private var speedTestMethodBinding: Binding<SpeedTestMethod> {
         Binding(
-            get: { state.preferredMode },
-            set: { mode in Task { await state.switchMode(to: mode) } }
+            get: { state.speedTestMethod },
+            set: { method in Task { await state.setSpeedTestMethod(method) } }
         )
+    }
+
+    private func modeToggleBinding(_ mode: ProxyMode) -> Binding<Bool> {
+        Binding(
+            get: { state.activeModes.contains(mode) },
+            set: { enabled in Task { await state.setMode(mode, enabled: enabled) } }
+        )
+    }
+
+    private var activeModesText: String {
+        let ordered: [ProxyMode] = [.systemProxy, .tun]
+        let names = ordered.filter(state.activeModes.contains).map(\.displayName)
+        return names.isEmpty ? "未开启" : names.joined(separator: " + ")
     }
 
     private var strictRouteBinding: Binding<Bool> {
@@ -361,6 +858,17 @@ private struct SettingsView: View {
             set: { enabled in
                 var settings = state.tunSettings
                 settings.strictRoute = enabled
+                Task { await state.applyTunSettings(settings) }
+            }
+        )
+    }
+
+    private var tunStackBinding: Binding<TunStack> {
+        Binding(
+            get: { state.tunSettings.stack },
+            set: { stack in
+                var settings = state.tunSettings
+                settings.stack = stack
                 Task { await state.applyTunSettings(settings) }
             }
         )
@@ -375,6 +883,33 @@ private struct SettingsView: View {
         )
     }
 
+    private var mirrorBinding: Binding<RuleSetMirror> {
+        Binding(
+            get: { state.ruleSetSettings.mirror },
+            set: { mirror in
+                var settings = state.ruleSetSettings
+                settings.mirror = mirror
+                Task { await state.setRuleSetSettings(settings) }
+            }
+        )
+    }
+
+    private var ruleSetAutoUpdateBinding: Binding<Bool> {
+        Binding(
+            get: { state.ruleSetSettings.autoUpdate },
+            set: { enabled in
+                var settings = state.ruleSetSettings
+                settings.autoUpdate = enabled
+                Task { await state.setRuleSetSettings(settings) }
+            }
+        )
+    }
+
+    private var lastRuleSetUpdateText: String {
+        guard let date = state.ruleSetSettings.lastUpdatedAt else { return "从未更新" }
+        return date.formatted(date: .abbreviated, time: .shortened)
+    }
+
     private var loginItemStatusTitle: String {
         switch state.loginItemStatus {
         case .notRegistered: "未启用"
@@ -383,11 +918,9 @@ private struct SettingsView: View {
         case .notFound: "应用包不可用"
         }
     }
-
-    private func modeTitle(_ mode: ProxyMode) -> String {
-        mode == .tun ? "TUN" : "系统代理"
-    }
 }
+
+// MARK: - 手动节点
 
 private struct ManualNodeSheet: View {
     @Environment(\.dismiss) private var dismiss
@@ -405,18 +938,45 @@ private struct ManualNodeSheet: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Image(systemName: "plus.circle.fill")
+                    .font(.system(size: 16))
+                    .foregroundStyle(Theme.protocolTint(.hysteria2))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("添加自建 Hysteria2 节点")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("保存后会生成独立的“自建”策略组")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 18)
+            .padding(.bottom, 12)
+
             Form {
-                TextField("名称", text: $name)
-                TextField("服务器", text: $server)
-                TextField("端口", text: $port)
-                SecureField("密码", text: $password)
-                TextField("SNI（可选）", text: $sni)
-                Toggle("跳过证书验证", isOn: $skipCertificateVerification)
-                TextField("Obfs 密码（可选）", text: $obfsPassword)
-                TextField("上行 Mbps（可选）", text: $uploadMbps)
-                TextField("下行 Mbps（可选）", text: $downloadMbps)
+                Section("基本信息") {
+                    TextField("名称", text: $name)
+                    TextField("服务器", text: $server)
+                    TextField("端口", text: $port)
+                    SecureField("密码", text: $password)
+                }
+                Section("TLS") {
+                    TextField("SNI（可选）", text: $sni)
+                    Toggle("跳过证书验证", isOn: $skipCertificateVerification)
+                }
+                Section("可选参数") {
+                    TextField("Obfs 密码（salamander，可选）", text: $obfsPassword)
+                    TextField("上行 Mbps（可选）", text: $uploadMbps)
+                    TextField("下行 Mbps（可选）", text: $downloadMbps)
+                }
                 if let localError {
-                    Text(localError).foregroundStyle(.red)
+                    Section {
+                        Label(localError, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.red)
+                            .font(.callout)
+                    }
                 }
             }
             .formStyle(.grouped)
@@ -430,9 +990,9 @@ private struct ManualNodeSheet: View {
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent)
             }
-            .padding()
+            .padding(16)
         }
-        .frame(width: 440, height: 510)
+        .frame(width: 460, height: 560)
     }
 
     private func addNode() {
@@ -461,7 +1021,13 @@ private struct ManualNodeSheet: View {
         }
         Task {
             await state.addManual(form)
-            if state.errorMessage == nil { dismiss() }
+            if let message = state.errorMessage {
+                // 失败原因就地显示，不要表现成「点了没反应」。
+                localError = message
+                state.dismissError()
+            } else {
+                dismiss()
+            }
         }
     }
 

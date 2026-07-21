@@ -12,10 +12,23 @@ struct LogsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            PageHeader(title: "日志", subtitle: "仅在本页可见且代理运行时订阅内核推送") {
+                HStack(spacing: 8) {
+                    Button("清空显示") { state.clearLiveLogs() }
+                        .disabled(state.liveLogs.isEmpty)
+                    Button {
+                        prepareExport()
+                    } label: {
+                        Label("导出", systemImage: "square.and.arrow.up")
+                    }
+                    .disabled(isPreparingExport)
+                }
+            }
             toolbar
             Divider()
             logList
         }
+        .pageBackground()
         .navigationTitle("日志")
         .onAppear { state.startLogMonitoring() }
         .onDisappear { state.stopLogMonitoring() }
@@ -40,29 +53,23 @@ struct LogsView: View {
                 Text("错误").tag(CoreLogLevel.error)
             }
             .pickerStyle(.segmented)
-            .frame(width: 240)
+            .labelsHidden()
+            .controlSize(.small)
+            .frame(width: 210)
             .disabled(!state.isOn)
 
             Toggle("暂停自动滚动", isOn: $pausesAutomaticScroll)
                 .toggleStyle(.checkbox)
+                .font(.caption)
 
             Spacer()
 
             Text("\(state.liveLogs.count) / \(KernelLogStore.defaultBufferedLineLimit)")
                 .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-
-            Button("清空显示") { state.clearLiveLogs() }
-                .disabled(state.liveLogs.isEmpty)
-
-            Button {
-                prepareExport()
-            } label: {
-                Label("导出", systemImage: "square.and.arrow.up")
-            }
-            .disabled(isPreparingExport)
+                .foregroundStyle(.tertiary)
         }
-        .padding()
+        .padding(.horizontal, 20)
+        .padding(.bottom, 12)
     }
 
     private var logList: some View {
@@ -72,12 +79,12 @@ struct LogsView: View {
                     ForEach(state.liveLogs) { item in
                         LogEntryRow(item: item)
                             .id(item.id)
-                        Divider()
+                        Divider().opacity(0.4)
                     }
                 }
-                .padding(.horizontal)
+                .padding(.horizontal, 20)
             }
-            .background(Color(nsColor: .textBackgroundColor).opacity(0.35))
+            .background(Color(nsColor: .textBackgroundColor))
             .overlay {
                 if state.liveLogs.isEmpty {
                     ContentUnavailableView(
@@ -125,16 +132,20 @@ private struct LogEntryRow: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Text(item.entry.receivedAt, format: .dateTime.hour().minute().second())
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.tertiary)
             Text(levelTitle)
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
                 .foregroundStyle(levelColor)
-                .frame(width: 42, alignment: .leading)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(levelColor.opacity(0.13), in: RoundedRectangle(cornerRadius: 4))
+                .frame(width: 52, alignment: .leading)
             Text(item.entry.message)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .font(.system(.caption, design: .monospaced))
-        .padding(.vertical, 5)
+        .padding(.vertical, 4)
     }
 
     private var levelTitle: String {

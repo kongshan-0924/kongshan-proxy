@@ -2,65 +2,148 @@ import AppKit
 import KongshanCore
 import SwiftUI
 
+/// 菜单栏菜单。参考 Stash 的操作逻辑：顶部是仪表盘入口与测速全部，
+/// 接管方式与出站模式分开，策略组各自有子菜单可单独指定节点并显示延迟。
+/// 菜单是瞬时的，不建立任何 Clash WebSocket。
 struct MenuBarView: View {
-    @Environment(\.openWindow) private var openWindow
     @Environment(AppState.self) private var state
 
     var body: some View {
-        Button(toggleTitle) {
-            Task {
-                if state.activeMode != nil {
-                    await state.stop()
-                } else {
-                    await state.startPreferredProxy()
+        Text(state.statusText)
+
+        Button("打开仪表盘") { openMainWindow() }
+            .keyboardShortcut("d")
+
+        Button(state.isTestingAllDelays ? "正在测速…" : "测速全部") {
+            Task { await state.testAllDelays() }
+        }
+        .keyboardShortcut("t")
+        .disabled(state.nodes.isEmpty || state.isBusy || state.isTestingAllDelays)
+
+        Divider()
+
+        Menu("出站模式：\(state.outboundMode.displayName)") {
+            Picker("出站模式", selection: outboundModeBinding) {
+                ForEach(OutboundMode.allCases, id: \.self) { mode in
+                    Text(mode.displayName).tag(mode)
                 }
             }
+            .pickerStyle(.inline)
+            .labelsHidden()
         }
         .disabled(state.isBusy || !state.isReady)
 
-        Text(state.statusText)
+        // 两种接管方式互不排斥，各自一个勾选项
+        Toggle(ProxyMode.systemProxy.displayName, isOn: modeBinding(.systemProxy))
+            .keyboardShortcut("e")
+            .disabled(state.isBusy || !state.isReady)
 
-        if !state.nodes.isEmpty {
-            Menu("当前节点：\(state.selectedNode?.name ?? "未选择")") {
-                ForEach(state.nodes) { node in
-                    Button {
-                        Task { await state.select(node) }
-                    } label: {
-                        if state.selectedNodeID == node.id {
-                            Label(node.name, systemImage: "checkmark")
-                        } else {
-                            Text(node.name)
-                        }
-                    }
-                }
-            }
-            .disabled(state.isBusy)
-        }
+        Toggle(ProxyMode.tun.displayName, isOn: modeBinding(.tun))
+            .keyboardShortcut("u")
+            .disabled(state.isBusy || !state.isReady)
 
-        Text(state.activeMode.map { "当前模式：\(modeTitle($0))" } ?? "首选模式：\(modeTitle(state.preferredMode))")
-        Text("分流：\(state.routingSettings.customRules.filter(\.enabled).count) 条自定义规则 · 广告拦截\(state.routingSettings.blockAds ? "开" : "关")")
-
-        Button("打开 kongshan") {
-            openWindow(id: "main")
-            NSApplication.shared.activate(ignoringOtherApps: true)
+        // 内核可能因测速被拉起但没有接管，这里给一个明确的停止入口
+        if state.isOn, state.activeModes.isEmpty {
+            Button("停止内核") { Task { await state.stop() } }
+                .disabled(state.isBusy)
         }
 
         Divider()
 
-        Button("退出") {
+        // 每个可手动指定的策略独立选成员，右侧显示上次测速结果
+        ForEach(state.displayPolicyGroups.filter { $0.kind == .selector }) { group in
+            Menu("\(group.name)：\(state.selectedMemberName(in: group.name) ?? "未选择")") {
+                optionMenuContent(for: group)
+            }
+            .disabled(state.isBusy || state.testableNodes.isEmpty)
+        }
+
+        Divider()
+
+        Toggle("登录时启动", isOn: launchAtLoginBinding)
+            .disabled(
+                !state.isReady
+                    || state.loginItemStatus == .requiresApproval
+                    || state.loginItemStatus == .notFound
+            )
+
+        Button("刷新订阅") {
+            Task { await state.refreshSubscriptions() }
+        }
+        .keyboardShortcut("r")
+        .disabled(state.subscriptions.isEmpty || state.isBusy)
+
+        if let message = state.errorMessage ?? state.warnings.last {
+            Divider()
+            Button(message.count > 48 ? String(message.prefix(48)) + "…" : message) {
+                openMainWindow()
+            }
+        }
+
+        Divider()
+
+        Button("退出 kongshan") {
             NSApplication.shared.terminate(nil)
         }
         .keyboardShortcut("q")
     }
 
-    private var toggleTitle: String {
-        if let activeMode = state.activeMode {
-            return "关闭\(modeTitle(activeMode))"
+    @ViewBuilder
+    private func optionMenuContent(for group: PolicyGroup) -> some View {
+        let options = state.groupOptions(group)
+        if options.isEmpty {
+            Text("当前配置没有节点")
+        } else {
+            ForEach(options) { option in
+                optionButton(option, in: group.name)
+            }
         }
-        return "开启\(modeTitle(state.preferredMode))"
     }
 
-    private func modeTitle(_ mode: ProxyMode) -> String {
-        mode == .tun ? "TUN" : "系统代理"
+    private func optionButton(_ option: GroupOption, in group: String) -> some View {
+        Button {
+            Task { await state.select(optionName: option.name, in: group) }
+        } label: {
+            let suffix: String = {
+                if case let .node(node) = option {
+                    switch state.delays[node.id] {
+                    case let .some(.some(value)): return "   \(value) ms"
+                    case .some(.none): return "   超时"
+                    case .none: return ""
+                    }
+                }
+                return ""
+            }()
+            if state.isSelected(option, in: group) {
+                Label("\(option.name)\(suffix)", systemImage: "checkmark")
+            } else {
+                Text("\(option.name)\(suffix)")
+            }
+        }
+    }
+
+    private func openMainWindow() {
+        (NSApp.delegate as? KongshanAppDelegate)?.showMainWindow()
+    }
+
+    private var outboundModeBinding: Binding<OutboundMode> {
+        Binding(
+            get: { state.outboundMode },
+            set: { mode in Task { await state.setOutboundMode(mode) } }
+        )
+    }
+
+    private func modeBinding(_ mode: ProxyMode) -> Binding<Bool> {
+        Binding(
+            get: { state.activeModes.contains(mode) },
+            set: { enabled in Task { await state.setMode(mode, enabled: enabled) } }
+        )
+    }
+
+    private var launchAtLoginBinding: Binding<Bool> {
+        Binding(
+            get: { state.loginItemStatus == .enabled },
+            set: { enabled in Task { await state.setLaunchAtLoginEnabled(enabled) } }
+        )
     }
 }

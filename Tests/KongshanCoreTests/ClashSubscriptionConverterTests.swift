@@ -79,3 +79,78 @@ final class ClashSubscriptionConverterTests: XCTestCase {
       - {name: any, type: anytls, server: any.example.com, port: 443, password: p, sni: any.example.com}
     """
 }
+
+extension ClashSubscriptionConverterTests {
+    func testSubscriptionInfoNodesAreRecognisedAndRealNodesAreNot() {
+        func node(_ name: String) -> ProxyNode {
+            ProxyNode(name: name, protocolType: .shadowsocks, server: "a.com", port: 443)
+        }
+
+        for name in [
+            "491.89 G | 500.00 G",
+            "Traffic Reset：10 Days Left",
+            "Expire Date：2027/08/07",
+            "剩余流量：120GB",
+            "官网：example.com",
+            "套餐到期：2027-08-07"
+        ] {
+            XCTAssertTrue(node(name).isSubscriptionInfo, name)
+        }
+
+        for name in [
+            "🇭🇰 Hong Kong 01",
+            "日本 IEPL 03",
+            "US-Los Angeles CN2 GIA",
+            "自建 Hysteria2"
+        ] {
+            XCTAssertFalse(node(name).isSubscriptionInfo, name)
+        }
+    }
+}
+
+extension ClashSubscriptionConverterTests {
+    func testProxyGroupsAreImportedAndBadOnesSkipped() throws {
+        let yaml = """
+        proxies:
+          - {name: A, type: ss, server: a.com, port: 443, cipher: aes-128-gcm, password: p}
+        proxy-groups:
+          - {name: Netflix, type: select, proxies: [A]}
+          - {name: AutoFast, type: url-test, proxies: [A]}
+          - {name: 自动选择, type: select, proxies: [A]}
+          - {name: "bad{name}", type: select, proxies: [A]}
+          - {name: Netflix, type: select, proxies: [A]}
+        """
+        let result = try ClashSubscriptionConverter.convert(yaml: yaml, sourceID: UUID())
+
+        XCTAssertEqual(result.policyGroups.map(\.name), ["Netflix", "AutoFast"])
+        XCTAssertEqual(result.policyGroups.first { $0.name == "AutoFast" }?.kind, .urltest)
+        XCTAssertEqual(result.policyGroups.first { $0.name == "Netflix" }?.kind, .selector)
+    }
+}
+
+extension ClashSubscriptionConverterTests {
+    /// 节点 ID 必须跨刷新稳定：选中节点、组选择、延迟表都以它为键。
+    func testNodeIDsAreStableAcrossRefreshesAndDistinctForDuplicateNames() throws {
+        let sourceID = UUID(uuidString: "30000000-0000-0000-0000-000000000001")!
+        let yaml = """
+        proxies:
+          - {name: HK-1, type: ss, server: a.com, port: 443, cipher: aes-128-gcm, password: p}
+          - {name: HK-1, type: ss, server: b.com, port: 443, cipher: aes-128-gcm, password: p}
+          - {name: JP-1, type: ss, server: c.com, port: 443, cipher: aes-128-gcm, password: p}
+        """
+
+        let first = try ClashSubscriptionConverter.convert(yaml: yaml, sourceID: sourceID)
+        let second = try ClashSubscriptionConverter.convert(yaml: yaml, sourceID: sourceID)
+
+        XCTAssertEqual(first.nodes.map(\.id), second.nodes.map(\.id))
+        XCTAssertEqual(Set(first.nodes.map(\.id)).count, 3, "同名节点也要有不同的稳定 ID")
+
+        // 服务器地址变化（机场换 IP）不改变身份；换订阅源则必须不同。
+        let movedYAML = yaml.replacingOccurrences(of: "a.com", with: "a2.com")
+        let moved = try ClashSubscriptionConverter.convert(yaml: movedYAML, sourceID: sourceID)
+        XCTAssertEqual(first.nodes[0].id, moved.nodes[0].id)
+
+        let otherSource = try ClashSubscriptionConverter.convert(yaml: yaml, sourceID: UUID())
+        XCTAssertNotEqual(first.nodes[0].id, otherSource.nodes[0].id)
+    }
+}

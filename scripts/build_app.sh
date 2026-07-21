@@ -23,6 +23,7 @@ install -m 755 .build/arm64-apple-macosx/release/kongshan "$stage_app/Contents/M
 install -m 755 Vendor/sing-box/sing-box "$stage_app/Contents/Resources/sing-box"
 install -m 644 Resources/Info.plist "$stage_app/Contents/Info.plist"
 install -m 644 Resources/THIRD_PARTY_NOTICES.md "$stage_app/Contents/Resources/THIRD_PARTY_NOTICES.md"
+install -m 644 Resources/AppIcon.icns "$stage_app/Contents/Resources/AppIcon.icns"
 codesign --force --deep --sign - --timestamp=none "$stage_app"
 
 if [[ -e "$app_path" ]]; then
