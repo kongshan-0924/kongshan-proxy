@@ -2,22 +2,29 @@
 
 kongshan 是一款面向 Apple Silicon Mac 的原生 sing-box 图形客户端。它使用 SwiftUI/AppKit 构建菜单栏与主窗口，打包官方 sing-box 1.13.14，不自研代理协议或加密实现。
 
-当前实现覆盖系统代理与 TUN 两种互斥模式、Clash YAML 订阅、手动 Hysteria2、节点切换与测速、规则分流、双 DoH、Dashboard、实时日志、订阅定时更新、开机自启和内核崩溃自愈。
+以「配置」为中心：一个订阅即一个配置文件，同一时刻只有一个生效、可随时切换。支持 Shadowsocks（含 `simple-obfs` 混淆插件）、Trojan、VMess、Hysteria2、AnyTLS 五种协议，直接沿用机场自带的策略组做分流——在机场主组里挑一个节点即贯穿所有需代理的流量。系统代理与 TUN 可单独或同时开启，覆盖节点切换/测速、规则分流、连接监控、双 DoH、Dashboard、实时日志、订阅定时更新、开机自启与内核崩溃自愈。
+
+## 安装
+
+从 [Releases](https://github.com/kongshan-0924/kongshan-proxy/releases) 下载最新 `kongshan-<版本>.dmg`，打开后把 `kongshan.app` 拖进 `Applications`。
+
+产物为 **ad-hoc 签名**（无 Developer ID / 公证），首次打开需在 App 上**右键 → 打开**以绕过 Gatekeeper；请从 `/Applications` 启动，不要直接双击 `dist/` 里的构建产物。
 
 ## 系统要求
 
 - Apple Silicon Mac（arm64）
 - macOS 14 或更高版本
-- Xcode Command Line Tools / Swift 6 工具链
-- 构建时可访问 GitHub，用于下载固定版本 sing-box 与当前官方规则集
+- 构建：Xcode Command Line Tools / Swift 6 工具链；构建时可访问 GitHub，用于下载固定版本 sing-box 与当前官方规则集
 
-## 构建与验证
+## 构建与打包
 
 ```bash
 cd /Users/kaysen/workspace/mac/代理软件
-zsh scripts/build_app.sh
-open dist/kongshan.app
+zsh scripts/build_app.sh    # 产出 dist/kongshan.app，自增补丁版本号
+zsh scripts/make_dmg.sh     # 打成拖拽安装式 dist/kongshan-<版本>.dmg
 ```
+
+`build_app.sh` 会把 `dist/` 标记为 Spotlight 不索引（`.metadata_never_index`）并注销该副本的启动服务登记，避免构建产物冒充成第二个程序出现在启动台。正式运行副本应放在 `/Applications`。
 
 完整自动验收：
 
@@ -27,16 +34,17 @@ zsh scripts/verify_m4.sh
 
 成功时最后一行为 `M4 automated verification passed`。脚本运行全量测试、构建并校验 arm64 App/签名/内核/规则集，再在隔离的临时数据目录启动无节点 App，检查 CPU、RSS、TCP socket、子进程和恢复残留。脚本不会设置真实系统代理、注册登录项、请求 TUN 管理员授权或发送真实通知。
 
-产物 `dist/kongshan.app` 使用 ad-hoc 签名，未做 Developer ID 签名、公证或自动更新。建议移动到 `/Applications` 后通过 Finder 首次打开；若 macOS 阻止运行，请在“系统设置 → 隐私与安全性”中按系统提示确认，不要绕过系统安全机制。
+产物 `dist/kongshan.app` 使用 ad-hoc 签名，未做 Developer ID 签名、公证或自动更新（安装方式见上文「安装」）。若 macOS 阻止运行，请在“系统设置 → 隐私与安全性”中按系统提示确认，不要绕过系统安全机制。
 
 ## 使用说明
 
-1. 在“节点”页导入 Clash YAML 订阅，或手动添加 Hysteria2 节点。
-2. 选择节点和代理模式。系统代理模式管理当前活动网络服务的 HTTP/HTTPS/SOCKS 设置；TUN 模式每次启动/停止都可能出现明确的管理员授权弹窗。
-3. 在“规则”页维护自定义规则、绕过域名/CIDR 与广告拦截。
-4. Dashboard 和日志仅在对应页面可见且代理运行时建立 Clash API WebSocket，离开页面会取消连接。
-5. 订阅自动更新默认 24 小时，可设为 1–168 小时。App 未运行期间不会后台唤醒；下次启动时，已到期订阅会立即安排更新。
-6. “登录时启动 kongshan”只在用户主动切换时调用 `SMAppService.mainApp`。若显示“等待系统批准”，请打开系统登录项设置批准后返回刷新状态。
+1. 「配置」页导入 Clash YAML 订阅链接（或手动添加节点），每个订阅下载为一个配置文件；单选其中之一设为生效。
+2. 「代理」页按机场自带的策略分流：在主组里挑一个出站节点（可先「测速全部」），需代理的策略会跟随它；也可为单个策略单独指定节点。切换节点后会自动断开旧连接，出口 IP 立即生效。
+3. 从菜单栏或「代理」页开启接管方式。系统代理管理当前活动网络服务的 HTTP/HTTPS/SOCKS 设置，无需密码；TUN 需 root，每次启动/停止/改配置都会弹管理员授权。两者可单独或同时开启。
+4. 「规则」页只读展示当前配置生效的分流规则；自定义绕过域名/CIDR、跳过 TUN 的网段在「设置 → 隧道」维护。
+5. 「连接」页实时列出活跃连接（主机/进程、规则链路、上下行流量），可单条或一键全部关闭。Dashboard、日志、连接三页仅在可见且代理运行时才建立 Clash API 连接，离开即断开。
+6. 订阅自动更新默认 24 小时，可设为 1–168 小时。App 未运行期间不会后台唤醒；下次启动时，已到期订阅会立即安排更新。
+7. 「登录时启动 kongshan」只在用户主动切换时调用 `SMAppService.mainApp`。若显示“等待系统批准”，请打开系统登录项设置批准后返回刷新状态。
 
 ## 权限与恢复
 
