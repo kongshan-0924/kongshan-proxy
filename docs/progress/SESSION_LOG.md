@@ -929,3 +929,16 @@
 - 健康检查上限 30→60 次（~3s→~6s），成功即返回不加时；容忍首次建 TUN、大量出站时内核稍慢就绪，避免误判失败回滚。
 - 复核 DNS 段结构正常（dns-cn 直连 DoH、dns-remote 经 自动选择、geosite-cn→dns-cn、final dns-remote）；之前 EOF 是打到机场伪域名 + Stash 抢路由，非配置问题。
 测试 167 通过；0.1.10 已装 /Applications。等用户关掉 Stash 后实测 TUN。
+
+## 2026-07-21 系统代理/TUN 开启慢：跳出去实测（0.1.11）
+
+逐项实测把之前的猜测都排除了：
+- networksetup 单次 0.016s，用户仅 4 个网络服务 → 全部调用 <1s，不是瓶颈。
+- 规则集缓存在（geoip-cn/geosite-cn），cache-first 命中，不下载。
+- 合并生效：config.json 1MB→470KB、route.rules 4780→166、outbounds 360（342 SS 节点+15 selector+1 urltest）。
+- 把 config.json 去掉 tun 入站单跑核心：`sing-box started (0.01s)`，Clash API 0.14s 就绪 → 核心启动/健康检查都极快。
+结论：start 各步在隔离测试里都很快，与用户「卡半天」矛盾 → 需要真机逐步计时。
+本版给 start() 加了逐步计时（规则集/生成/落盘/校验/内核/健康/接管），成功后把「启动耗时 → …」写进提示条，直接看清慢在哪一步。
+另：强烈怀疑是同时开着 Stash 的 TUN 在抢路由/劫持流量——用户测系统代理时也应先退 Stash。
+其他小改：pgrep 清理只有真杀到残留才 sleep 1（常态不白等）；健康检查上限 30→60（~6s）容忍首次建 TUN 稍慢。
+测试 167 通过；0.1.11 装 /Applications。

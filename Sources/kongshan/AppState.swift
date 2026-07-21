@@ -440,9 +440,18 @@ final class AppState {
         let usesSystemProxy = modes.contains(.systemProxy)
         var tunStarted = false
         var startedPID: Int32?
+        // 逐步计时，最后汇总成一条提示，直接看清慢在哪一步（不再靠猜）。
+        var lastNanos = DispatchTime.now().uptimeNanoseconds
+        var timings: [String] = []
+        func mark(_ name: String) {
+            let now = DispatchTime.now().uptimeNanoseconds
+            timings.append("\(name) \((now &- lastNanos) / 1_000_000)ms")
+            lastNanos = now
+        }
         do {
             let prepared = try await ruleSetService.prepare(includeAds: routingSettings.blockAds, mirror: ruleSetSettings.mirror, allowsNetwork: ruleSetSettings.autoUpdate)
             warnings.append(contentsOf: prepared.warnings)
+            mark("规则集")
             let runtime = try runtimeFactory()
             let config = try await generateConfiguration(
                 runtime: runtime,
@@ -453,12 +462,15 @@ final class AppState {
                 tunSettings: tunSettings,
                 dnsSettings: dnsSettings
             )
+            mark("生成")
             try await writeDiagnosticConfig(config)
+            mark("落盘")
 
             let check = try await singBoxProcess.check(config: config)
             guard check.exitCode == 0 else {
                 throw AppStateError.coreCheckFailed(check.stderr)
             }
+            mark("校验")
             let client = clashClientFactory(
                 URL(string: "http://127.0.0.1:\(runtime.clashPort)")!,
                 runtime.secret
@@ -471,7 +483,9 @@ final class AppState {
                 try await singBoxProcess.start(config: config)
                 startedPID = await singBoxProcess.currentPID
             }
+            mark("内核")
             try await healthVerifier(client)
+            mark("健康")
             if usesSystemProxy {
                 try await systemProxyManager.enable(
                     port: Int(runtime.mixedPort),
@@ -483,6 +497,7 @@ final class AppState {
                 // 把系统 DNS 指进 TUN 网段（hijack-dns 会截获），关闭时还原。
                 try await systemDNSManager.enable(server: tunSettings.dnsServerAddress)
             }
+            mark("接管")
 
             self.runtime = runtime
             clashAPIClient = client
@@ -491,6 +506,7 @@ final class AppState {
             activeModes = modes
             status = .on
             markRuntimeStarted()
+            warnings.append("启动耗时 → " + timings.joined(separator: " · "))
             startNetworkPathMonitoringIfNeeded()
             if let startedPID {
                 await armCoreExitMonitoring(pid: startedPID)
