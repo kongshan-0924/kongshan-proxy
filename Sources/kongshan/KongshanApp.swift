@@ -59,6 +59,11 @@ final class KongshanAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         // 主窗口打开期间切到 .regular（同时出现 Dock 图标），关闭后切回常驻托盘形态。
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+        // 最小化的窗口用 makeKeyAndOrderFront 是唤不出来的，必须先取消最小化，
+        // 否则从程序坞点图标没反应。
+        if let window = controller.window, window.isMiniaturized {
+            window.deminiaturize(nil)
+        }
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
         // 外接屏拔掉后，自动保存的 frame 可能整个落在已消失的屏幕上，

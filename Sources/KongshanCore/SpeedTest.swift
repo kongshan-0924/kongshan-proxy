@@ -64,33 +64,4 @@ public enum TCPPinger {
             connection.start(queue: queue)
         }
     }
-
-    /// 批量握手，限并发。TCP 握手很轻，并发可比 URL 测速高。
-    public static func pingAll(
-        targets: [(id: UUID, host: String, port: Int)],
-        timeoutMilliseconds: Int = 3_000,
-        concurrency: Int = 16
-    ) async -> [UUID: DelayResult] {
-        let limit = max(1, min(concurrency, 32))
-        var results: [UUID: DelayResult] = [:]
-        var start = 0
-        while start < targets.count {
-            let end = min(start + limit, targets.count)
-            let batch = Array(targets[start..<end])
-            await withTaskGroup(of: (UUID, DelayResult).self) { group in
-                for target in batch {
-                    group.addTask {
-                        (target.id, await ping(
-                            host: target.host,
-                            port: target.port,
-                            timeoutMilliseconds: timeoutMilliseconds
-                        ))
-                    }
-                }
-                for await (id, result) in group { results[id] = result }
-            }
-            start = end
-        }
-        return results
-    }
 }

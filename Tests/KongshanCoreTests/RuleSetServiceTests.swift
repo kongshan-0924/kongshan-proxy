@@ -13,7 +13,7 @@ final class RuleSetServiceTests: XCTestCase {
             validator: { url in try recorder.record(Data(contentsOf: url)) }
         )
 
-        let result = try await service.prepare(includeAds: true)
+        let result = try await service.prepare(includeAds: true, forceRefresh: true)
 
         XCTAssertEqual(result.ruleSets.geositeCN, cacheURL("geosite-cn", in: fixture.root))
         XCTAssertEqual(result.ruleSets.geoipCN, cacheURL("geoip-cn", in: fixture.root))
@@ -23,6 +23,27 @@ final class RuleSetServiceTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: result.ruleSets.geoipCN, encoding: .utf8), "new-geoip-cn.srs")
         XCTAssertEqual(try String(contentsOf: try XCTUnwrap(result.ruleSets.ads), encoding: .utf8), "new-geosite-category-ads-all.srs")
         XCTAssertEqual(recorder.values.count, 3)
+    }
+
+    func testCacheFirstReturnsCacheWithoutDownloadingOrRevalidating() async throws {
+        // 缓存优先：有缓存且非强制刷新时，启动路径不发起下载、也不重复校验（省时间）。
+        let fixture = try makeFixture(old: Data("cached".utf8))
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let recorder = ValidationRecorder()
+        let service = RuleSetService(
+            storage: fixture.storage,
+            loader: { _ in
+                XCTFail("有缓存且非强制刷新时不应发起下载")
+                return HTTPDownload(data: Data(), statusCode: 200)
+            },
+            validator: { url in try recorder.record(Data(contentsOf: url)) }
+        )
+
+        let result = try await service.prepare(includeAds: false)
+
+        XCTAssertEqual(try Data(contentsOf: result.ruleSets.geositeCN), Data("cached".utf8))
+        XCTAssertEqual(recorder.values.count, 0)
+        XCTAssertTrue(result.warnings.isEmpty)
     }
 
     func testHTTPFailureUsesCacheOnlyAfterValidatingItAgain() async throws {
@@ -35,7 +56,7 @@ final class RuleSetServiceTests: XCTestCase {
             validator: { url in try recorder.record(Data(contentsOf: url)) }
         )
 
-        let result = try await service.prepare(includeAds: false)
+        let result = try await service.prepare(includeAds: false, forceRefresh: true)
 
         XCTAssertEqual(result.warnings.count, 2)
         XCTAssertTrue(result.warnings.allSatisfy { $0.contains("缓存") })
@@ -51,7 +72,7 @@ final class RuleSetServiceTests: XCTestCase {
             validator: { _ in }
         )
 
-        let result = try await service.prepare(includeAds: false)
+        let result = try await service.prepare(includeAds: false, forceRefresh: true)
 
         XCTAssertEqual(result.warnings.count, 2)
         XCTAssertEqual(try Data(contentsOf: result.ruleSets.geositeCN), Data("valid-old".utf8))
@@ -68,7 +89,7 @@ final class RuleSetServiceTests: XCTestCase {
             validator: { url in try recorder.record(Data(contentsOf: url)) }
         )
 
-        let result = try await service.prepare(includeAds: false)
+        let result = try await service.prepare(includeAds: false, forceRefresh: true)
 
         XCTAssertEqual(result.warnings.count, 2)
         XCTAssertEqual(try Data(contentsOf: result.ruleSets.geositeCN), Data("valid-old".utf8))
@@ -89,7 +110,7 @@ final class RuleSetServiceTests: XCTestCase {
         )
 
         do {
-            _ = try await service.prepare(includeAds: false)
+            _ = try await service.prepare(includeAds: false, forceRefresh: true)
             XCTFail("Expected unusable cache failure")
         } catch {
             XCTAssertTrue(error.localizedDescription.contains("geosite-cn"))
@@ -108,7 +129,7 @@ final class RuleSetServiceTests: XCTestCase {
         )
 
         do {
-            _ = try await service.prepare(includeAds: false)
+            _ = try await service.prepare(includeAds: false, forceRefresh: true)
             XCTFail("Expected missing cache failure")
         } catch {
             XCTAssertTrue(error.localizedDescription.contains("geosite-cn"))
@@ -126,7 +147,7 @@ final class RuleSetServiceTests: XCTestCase {
             loader: { _ in HTTPDownload(data: binaryData, statusCode: 200) }
         )
 
-        let result = try await service.prepare(includeAds: false)
+        let result = try await service.prepare(includeAds: false, forceRefresh: true)
 
         XCTAssertTrue(result.warnings.isEmpty)
         XCTAssertEqual(try Data(contentsOf: result.ruleSets.geositeCN), binaryData)

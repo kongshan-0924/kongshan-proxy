@@ -880,3 +880,12 @@
 
 测试 165 通过；dist/kongshan.app 0.1.1 运行，空闲 0% CPU。
 注意：CleanMyMac 会把 ~/Library/Application Support/kongshan 当垃圾清掉，导致订阅/设置丢失，需在 CleanMyMac 里排除该目录；本次数据已被清，用户需重新导入订阅。
+
+## 2026-07-21 四项体验修复（0.1.2）
+
+1. 测速全部改后台增量：testAllDelays 从「批量跑完一次性刷新」改为有界并发（TCP 16 / URL 8）TaskGroup，每测完一个立刻 applyDelay 回填，边测边显示、不阻塞前台。删掉不再用的 TCPPinger.pingAll。
+2. 系统代理/TUN 开启慢（根因）：start() 每次都 ruleSetService.prepare(allowsNetwork:true) 同步联网下载 3 个规则集，代理没开时国内直连 jsDelivr/GitHub 卡到 URLSession 默认 60s×3。改为缓存优先（有 .srs 就直接用、不下载不重复校验），下载给 15s 超时；forceRefresh 仅「立即更新」用；启动后按天在后台刷新缓存（非阻塞）。启动从数十秒→秒级。
+3. 最小化后程序坞点击呼不出窗口：showMainWindow 对 isMiniaturized 窗口先 deminiaturize 再 makeKeyAndOrderFront。
+4. 其他提速：规则集缓存优先 + 后台日更；启动路径不再有可预见的网络等待。
+
+测试 166 通过；0.1.2/build 102 发布 dist、运行中。

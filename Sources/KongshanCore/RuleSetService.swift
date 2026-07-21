@@ -104,8 +104,16 @@ public actor RuleSetService {
         validator = Self.coreValidator(binaryURL: binaryURL)
     }
 
-    public init(storage: Storage, binaryURL: URL, session: URLSession = .shared) {
+    public init(storage: Storage, binaryURL: URL, session: URLSession? = nil) {
         self.storage = storage
+        // 规则集下载给合理超时：代理还没开时，国内直连 jsDelivr/GitHub 可能很慢甚至被阻断，
+        // 不能让启动卡在 URLSession 默认的 60 秒上。
+        let session = session ?? {
+            let config = URLSessionConfiguration.default
+            config.timeoutIntervalForRequest = 15
+            config.timeoutIntervalForResource = 20
+            return URLSession(configuration: config)
+        }()
         loader = { url in
             let (data, response) = try await session.data(from: url)
             return HTTPDownload(
@@ -119,15 +127,16 @@ public actor RuleSetService {
     public func prepare(
         includeAds: Bool,
         mirror: RuleSetMirror = .githubRaw,
-        allowsNetwork: Bool = true
+        allowsNetwork: Bool = true,
+        forceRefresh: Bool = false
     ) async throws -> RuleSetPreparationResult {
         try await storage.prepare()
         var warnings: [String] = []
 
-        let geositeCN = try await prepare(Self.geositeCN, mirror: mirror, allowsNetwork: allowsNetwork, warnings: &warnings)
-        let geoipCN = try await prepare(Self.geoipCN, mirror: mirror, allowsNetwork: allowsNetwork, warnings: &warnings)
+        let geositeCN = try await prepare(Self.geositeCN, mirror: mirror, allowsNetwork: allowsNetwork, forceRefresh: forceRefresh, warnings: &warnings)
+        let geoipCN = try await prepare(Self.geoipCN, mirror: mirror, allowsNetwork: allowsNetwork, forceRefresh: forceRefresh, warnings: &warnings)
         let ads = includeAds
-            ? try await prepare(Self.ads, mirror: mirror, allowsNetwork: allowsNetwork, warnings: &warnings)
+            ? try await prepare(Self.ads, mirror: mirror, allowsNetwork: allowsNetwork, forceRefresh: forceRefresh, warnings: &warnings)
             : nil
 
         return RuleSetPreparationResult(
@@ -140,12 +149,18 @@ public actor RuleSetService {
         _ resource: Resource,
         mirror: RuleSetMirror,
         allowsNetwork: Bool,
+        forceRefresh: Bool,
         warnings: inout [String]
     ) async throws -> URL {
         let cacheURL = storage.rootDirectory.appending(path: "rule-sets/\(resource.tag).srs")
+        // 缓存优先：非强制刷新时，只要本地已有该规则集就直接用，绝不在启动路径上等网络。
+        // 缓存是写入时校验过的（且 sing-box check 启动前还会再校验一次整份配置），这里不重复校验以省时间。
+        if !forceRefresh, FileManager.default.fileExists(atPath: cacheURL.path) {
+            return cacheURL
+        }
         do {
             guard allowsNetwork else {
-                throw RuleSetServiceError.unavailable(tag: resource.tag, reason: "自动更新已关闭")
+                throw RuleSetServiceError.unavailable(tag: resource.tag, reason: "无缓存且自动更新已关闭")
             }
             let download = try await loader(resource.remoteURL(mirror: mirror))
             guard (200...299).contains(download.statusCode) else {

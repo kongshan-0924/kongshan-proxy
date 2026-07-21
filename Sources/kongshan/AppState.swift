@@ -504,6 +504,8 @@ final class AppState {
             resumeDashboardMonitoringIfNeeded()
             resumeLogMonitoringIfNeeded()
             Task { await probeConnectivity() }
+            // 规则集用缓存优先保证启动快；开了自动更新就在启动后台悄悄刷新缓存，供下次用，不阻塞。
+            refreshRuleSetCacheInBackgroundIfDue()
         } catch {
             // 无论走到哪一步，先无条件尝试还原系统代理与 DNS（无快照时是空操作）。
             try? await systemProxyManager.restore()
@@ -878,6 +880,27 @@ final class AppState {
 
     /// 立即从当前镜像拉取规则集；无论自动更新开关如何都强制走网络。
     /// 只刷新缓存，不重启内核——下次启动或应用规则时自然生效。
+    /// 启动后台刷新规则集缓存：一天最多一次，失败静默（下次再试），绝不阻塞启动或界面。
+    private func refreshRuleSetCacheInBackgroundIfDue() {
+        guard ruleSetSettings.autoUpdate else { return }
+        if let last = ruleSetSettings.lastUpdatedAt, now().timeIntervalSince(last) < 24 * 3_600 {
+            return
+        }
+        let includeAds = routingSettings.blockAds
+        let mirror = ruleSetSettings.mirror
+        Task { [weak self] in
+            guard let self else { return }
+            guard let prepared = try? await self.ruleSetService.prepare(
+                includeAds: includeAds,
+                mirror: mirror,
+                allowsNetwork: true,
+                forceRefresh: true
+            ), prepared.warnings.isEmpty else { return }
+            self.ruleSetSettings.lastUpdatedAt = self.now()
+            try? await self.persistSettings()
+        }
+    }
+
     func updateRuleSetsNow() async {
         guard !isUpdatingRuleSets else { return }
         isUpdatingRuleSets = true
@@ -886,7 +909,8 @@ final class AppState {
             let prepared = try await ruleSetService.prepare(
                 includeAds: routingSettings.blockAds,
                 mirror: ruleSetSettings.mirror,
-                allowsNetwork: true
+                allowsNetwork: true,
+                forceRefresh: true
             )
             warnings.append(contentsOf: prepared.warnings)
             guard prepared.warnings.isEmpty else {
@@ -1148,46 +1172,56 @@ final class AppState {
         isTestingAllDelays = true
         defer { isTestingAllDelays = false }
 
-        // TCP 方式：直连握手，不需要内核，一次性并发跑完。
+        // TCP 方式：直连握手，不需要内核。有界并发 + 每测完一个立刻回填延迟——
+        // 后台跑、不阻塞前台，测速结果一个个显示出来，而不是全部跑完才一次性刷新。
         if speedTestMethod == .tcpPing {
-            let targets = testable.map { (id: $0.id, host: $0.server, port: $0.port) }
-            let results = await TCPPinger.pingAll(targets: targets)
-            var updated = delays
-            for (id, result) in results {
-                switch result {
-                case let .success(value): updated[id] = value
-                case .failure: updated.updateValue(nil, forKey: id)
+            let nodes = testable
+            await withTaskGroup(of: (UUID, DelayResult).self) { group in
+                var next = 0
+                let seed = min(16, nodes.count)
+                while next < seed {
+                    let node = nodes[next]; next += 1
+                    group.addTask { (node.id, await TCPPinger.ping(host: node.server, port: node.port)) }
+                }
+                while let (id, result) = await group.next() {
+                    applyDelay(result, to: id)
+                    if next < nodes.count {
+                        let node = nodes[next]; next += 1
+                        group.addTask { (node.id, await TCPPinger.ping(host: node.server, port: node.port)) }
+                    }
                 }
             }
-            delays = updated
             return
         }
 
+        // URL 方式：需要内核在跑，之后同样有界并发 + 逐个回填。
         guard await startCoreForTestingIfNeeded() else { return }
-        guard let clashAPIClient, let testURL = URL(string: testURLString) else {
+        guard let client = clashAPIClient, let testURL = URL(string: testURLString) else {
             errorMessage = "内核控制接口不可用"
             return
         }
-
-        // 只把 Sendable 的最小数据带过 await：挂起期间不持有、也不再遍历节点数组。
         let targets: [(id: UUID, tag: String)] = testable.map {
             (id: $0.id, tag: ConfigGenerator.outboundTag(for: $0))
         }
-        let results = await clashAPIClient.delays(nodes: targets.map(\.tag), testURL: testURL)
-
-        // 本地聚合后一次性赋值，避免逐条写 @Observable 属性引发观察风暴。
-        var updated = delays
-        for target in targets {
-            switch results[target.tag] {
-            case let .success(value):
-                updated[target.id] = value
-            case .failure:
-                updated.updateValue(nil, forKey: target.id)
-            case nil:
-                break
+        await withTaskGroup(of: (UUID, DelayResult).self) { group in
+            var next = 0
+            let seed = min(8, targets.count)
+            func delayTask(_ target: (id: UUID, tag: String)) -> @Sendable () async -> (UUID, DelayResult) {
+                { @Sendable in
+                    do { return (target.id, .success(try await client.delay(node: target.tag, testURL: testURL))) }
+                    catch { return (target.id, .failure(error.localizedDescription)) }
+                }
+            }
+            while next < seed {
+                group.addTask(operation: delayTask(targets[next])); next += 1
+            }
+            while let (id, result) = await group.next() {
+                applyDelay(result, to: id)
+                if next < targets.count {
+                    group.addTask(operation: delayTask(targets[next])); next += 1
+                }
             }
         }
-        delays = updated
     }
 
     /// 保存测速地址。界面上绑定的是草稿，校验通过才写进运行值，
