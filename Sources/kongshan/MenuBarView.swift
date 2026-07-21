@@ -14,12 +14,6 @@ struct MenuBarView: View {
         Button("打开仪表盘") { openMainWindow() }
             .keyboardShortcut("d")
 
-        Button(state.isTestingAllDelays ? "正在测速…" : "测速全部") {
-            Task { await state.testAllDelays() }
-        }
-        .keyboardShortcut("t")
-        .disabled(state.testableNodes.isEmpty || state.isTestingAllDelays)
-
         Divider()
 
         Menu("出站模式：\(state.outboundMode.displayName)") {
@@ -99,6 +93,12 @@ struct MenuBarView: View {
         if options.isEmpty {
             Text("当前配置没有节点")
         } else {
+            // 测速入口放在每个策略选节点列表的最上面，挑节点前先测。
+            Button(state.isTestingAllDelays ? "正在测速…" : "测速全部") {
+                Task { await state.testAllDelays() }
+            }
+            .disabled(state.testableNodes.isEmpty || state.isTestingAllDelays)
+            Divider()
             // 选中项每组只算一次。之前每个选项都调 isSelected→selectedMemberName→groupOptions
             // 重建一遍全节点字典，几百节点×几十组就是 O(n²)，把 SwiftUI 菜单渲染顶到单核 100%。
             let selectedName = state.selectedMemberName(in: group.name)

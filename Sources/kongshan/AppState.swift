@@ -112,6 +112,10 @@ final class AppState {
     private(set) var activeConnectionCount = 0
     private(set) var coreMemory: UInt64 = 0
     private(set) var coreVersion = "—"
+    private(set) var isCheckingKernelUpdate = false
+    /// 连接监控页的实时连接列表（仅该页可见时才轮询）。
+    private(set) var connections: [ConnectionDetail] = []
+    @ObservationIgnored private var connectionsTask: Task<Void, Never>?
     private(set) var runtimeStartedAt: Date?
     private(set) var trafficHistory: [TrafficPoint] = []
     private(set) var liveLogs: [LiveLogEntry] = []
@@ -440,14 +444,8 @@ final class AppState {
         let usesSystemProxy = modes.contains(.systemProxy)
         var tunStarted = false
         var startedPID: Int32?
-        // 逐步计时，最后汇总成一条提示，直接看清慢在哪一步（不再靠猜）。
-        var lastNanos = DispatchTime.now().uptimeNanoseconds
-        var timings: [String] = []
-        func mark(_ name: String) {
-            let now = DispatchTime.now().uptimeNanoseconds
-            timings.append("\(name) \((now &- lastNanos) / 1_000_000)ms")
-            lastNanos = now
-        }
+        // 启动耗时提示已移除；保留空桩避免改动各步骤调用点。
+        func mark(_ name: String) {}
         do {
             let prepared = try await ruleSetService.prepare(includeAds: routingSettings.blockAds, mirror: ruleSetSettings.mirror, allowsNetwork: ruleSetSettings.autoUpdate)
             warnings.append(contentsOf: prepared.warnings)
@@ -506,7 +504,6 @@ final class AppState {
             activeModes = modes
             status = .on
             markRuntimeStarted()
-            warnings.append("启动耗时 → " + timings.joined(separator: " · "))
             startNetworkPathMonitoringIfNeeded()
             if let startedPID {
                 await armCoreExitMonitoring(pid: startedPID)
@@ -1095,6 +1092,8 @@ final class AppState {
         if let clashAPIClient, status == .on {
             do {
                 try await clashAPIClient.select(node: tag, in: group)
+                // 切换后关掉旧连接，逼浏览器等复用的 keep-alive 连接重连——否则出口 IP 不变。
+                try? await clashAPIClient.closeAllConnections()
             } catch {
                 errorMessage = "切换 \(group) 失败：\(error.localizedDescription)"
                 return
@@ -1162,6 +1161,84 @@ final class AppState {
         }
         // 一次性赋值，避免逐条写触发多次 SwiftUI 事务。
         connectivity = results
+    }
+
+    /// 启动时读取打包内核版本（运行 `sing-box version`），让"关于"页即使没开代理也显示版本号。
+    func loadBundledCoreVersionIfNeeded() async {
+        guard coreVersion == "—" else { return }
+        let url = Self.singBoxBinaryURL()
+        guard let result = try? await ProcessRunner.run(executable: url, arguments: ["version"], timeout: 5),
+              result.exitCode == 0 else { return }
+        // "sing-box version 1.13.14 (...)" → 取第三段
+        let parts = result.stdout.split(separator: "\n").first?.split(separator: " ") ?? []
+        if parts.count >= 3 { coreVersion = String(parts[2]) }
+    }
+
+    /// 检查 sing-box 最新发布版本。内核内置于 App、随 App 构建更新；有新版就提示并打开发布页。
+    func updateKernel() async {
+        guard !isCheckingKernelUpdate else { return }
+        isCheckingKernelUpdate = true
+        defer { isCheckingKernelUpdate = false }
+        await loadBundledCoreVersionIfNeeded()
+        warnings.removeAll { $0.hasPrefix("内核") }
+        guard let api = URL(string: "https://api.github.com/repos/SagerNet/sing-box/releases/latest") else { return }
+        do {
+            let (data, _) = try await URLSession.shared.data(from: api)
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            let tag = (json?["tag_name"] as? String) ?? ""
+            let latest = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+            if latest.isEmpty {
+                warnings.append("内核更新检查失败：未取到最新版本号")
+            } else if latest == coreVersion {
+                warnings.append("内核已是最新（\(latest)）")
+            } else {
+                warnings.append("内核有新版 \(latest)（当前 \(coreVersion)）；已打开发布页，更新 App 即随附新内核")
+                if let page = URL(string: "https://github.com/SagerNet/sing-box/releases") {
+                    NSWorkspace.shared.open(page)
+                }
+            }
+        } catch {
+            warnings.append("内核更新检查失败：\(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - 连接监控
+
+    /// 连接监控页出现时开始轮询连接详情；离开时停止（省得没人看还在拉）。
+    func startConnectionsMonitoring() {
+        guard connectionsTask == nil else { return }
+        connectionsTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self, let client = self.clashAPIClient, self.status == .on else {
+                    self?.connections = []
+                    try? await Task.sleep(for: .seconds(1.5))
+                    continue
+                }
+                if let snapshot = try? await client.connectionsSnapshot() {
+                    self.connections = snapshot.sorted { ($0.download + $0.upload) > ($1.download + $1.upload) }
+                }
+                try? await Task.sleep(for: .seconds(1.5))
+            }
+        }
+    }
+
+    func stopConnectionsMonitoring() {
+        connectionsTask?.cancel()
+        connectionsTask = nil
+    }
+
+    /// 一键关闭全部连接。
+    func closeAllActiveConnections() async {
+        guard let client = clashAPIClient else { return }
+        try? await client.closeAllConnections()
+        connections = []
+    }
+
+    /// 关闭单条连接。
+    func closeConnection(_ id: String) async {
+        guard let client = clashAPIClient else { return }
+        try? await client.closeConnection(id: id)
+        connections.removeAll { $0.id == id }
     }
 
     /// 测速依赖 Clash API，内核必须在跑。未运行时自动拉起「只跑内核」状态：
@@ -1630,6 +1707,7 @@ final class AppState {
     }
 
     private func loadPersistedState() async throws {
+        Task { await loadBundledCoreVersionIfNeeded() }   // 后台读内核版本，不阻塞加载
         if let data = try await storage.readIfPresent(from: subscriptionsURL) {
             subscriptions = try JSONDecoder().decode([SubscriptionSource].self, from: data)
         }

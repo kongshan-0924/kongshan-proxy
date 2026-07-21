@@ -15,6 +15,7 @@ struct MainWindowView: View {
                     sidebarRow(.routing)
                 }
                 Section("其他") {
+                    sidebarRow(.connections)
                     sidebarRow(.logs)
                     sidebarRow(.settings)
                 }
@@ -37,6 +38,8 @@ struct MainWindowView: View {
                         PolicyGroupsView()
                     case .routing:
                         RoutingView()
+                    case .connections:
+                        ConnectionsView()
                     case .logs:
                         LogsView()
                     case .settings:
@@ -136,6 +139,7 @@ private enum SidebarPage: String, CaseIterable, Identifiable {
     case nodes
     case policyGroups
     case routing
+    case connections
     case logs
     case settings
 
@@ -147,6 +151,7 @@ private enum SidebarPage: String, CaseIterable, Identifiable {
         case .nodes: "配置"
         case .policyGroups: "代理"
         case .routing: "规则"
+        case .connections: "连接"
         case .logs: "日志"
         case .settings: "设置"
         }
@@ -158,6 +163,7 @@ private enum SidebarPage: String, CaseIterable, Identifiable {
         case .nodes: "doc.text"
         case .policyGroups: "arrow.triangle.swap"
         case .routing: "arrow.triangle.branch"
+        case .connections: "point.3.filled.connected.trianglepath.dotted"
         case .logs: "doc.text.magnifyingglass"
         case .settings: "gearshape"
         }
@@ -754,7 +760,7 @@ private struct SettingsView: View {
                                 || state.loginItemStatus == .requiresApproval
                                 || state.loginItemStatus == .notFound
                         )
-                    LabeledContent("系统状态", value: loginItemStatusTitle)
+                    LabeledContent("登录项状态", value: loginItemStatusTitle)
                     if state.loginItemStatus == .requiresApproval {
                         Text("登录项已登记，但需要你在系统设置中批准。应用不会重复发起注册。")
                             .font(.caption)
@@ -778,9 +784,17 @@ private struct SettingsView: View {
 
                 Section("关于") {
                     LabeledContent("应用版本", value: Self.appVersion)
-                    LabeledContent("内核", value: "sing-box \(state.coreVersion)")
-                    LabeledContent("接管能力", value: "系统代理 + TUN（可同时开启）")
-                    LabeledContent("出站模式", value: OutboundMode.allCases.map(\.displayName).joined(separator: " / "))
+                    LabeledContent("内核") {
+                        HStack(spacing: 8) {
+                            Text("sing-box \(state.coreVersion)")
+                                .foregroundStyle(.secondary)
+                            Button(state.isCheckingKernelUpdate ? "检查中…" : "更新内核") {
+                                Task { await state.updateKernel() }
+                            }
+                            .controlSize(.small)
+                            .disabled(state.isCheckingKernelUpdate)
+                        }
+                    }
                 }
                 }
                 if tab == .more {

@@ -70,7 +70,6 @@ struct PolicyGroupsView: View {
 
     private func groupRow(_ group: PolicyGroup) -> some View {
         HStack(spacing: 9) {
-            IconBadge(symbol: groupSymbol(group), tint: groupTint(group), size: 26)
             VStack(alignment: .leading, spacing: 1) {
                 Text(group.name)
                     .font(.system(size: 12, weight: .medium))

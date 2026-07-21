@@ -39,6 +39,38 @@ public struct ConnectionSnapshot: Equatable, Sendable {
     }
 }
 
+/// 一条活跃连接的详情（GET /connections 里的一项），供监控页展示。
+public struct ConnectionDetail: Identifiable, Equatable, Sendable {
+    public let id: String
+    public let host: String          // 目标主机（域名优先，回退 IP:端口）
+    public let process: String?      // 发起进程名（内核 sniff 到才有）
+    public let rule: String          // 命中的规则（含 payload）
+    public let chains: [String]      // 出站链路，从入站到最终节点
+    public let network: String       // tcp / udp
+    public let upload: Int64
+    public let download: Int64
+
+    public init(payload: [String: Any]) {
+        id = payload["id"] as? String ?? UUID().uuidString
+        let meta = payload["metadata"] as? [String: Any] ?? [:]
+        let hostName = (meta["host"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let destIP = meta["destinationIP"] as? String ?? ""
+        let destPort = meta["destinationPort"] as? String ?? (meta["destinationPort"] as? NSNumber).map { "\($0)" } ?? ""
+        host = hostName.map { destPort.isEmpty ? $0 : "\($0):\(destPort)" }
+            ?? (destPort.isEmpty ? destIP : "\(destIP):\(destPort)")
+        let proc = (meta["process"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        process = proc
+        network = (meta["network"] as? String) ?? "tcp"
+        let ruleName = payload["rule"] as? String ?? ""
+        let rulePayload = (payload["rulePayload"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        rule = rulePayload.map { "\(ruleName) : \($0)" } ?? ruleName
+        // chains 内核给的是「最终→入站」倒序，反转成「入站→最终」更符合直觉
+        chains = ((payload["chains"] as? [String]) ?? []).reversed()
+        upload = (payload["upload"] as? NSNumber)?.int64Value ?? 0
+        download = (payload["download"] as? NSNumber)?.int64Value ?? 0
+    }
+}
+
 public enum CoreLogLevel: String, CaseIterable, Sendable {
     case debug
     case info
@@ -118,6 +150,31 @@ public actor ClashAPIClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: ["name": node], options: [.sortedKeys])
         _ = try await perform(request)
+    }
+
+    /// 关闭全部活跃连接（DELETE /connections）。切换节点后调用，逼现有 keep-alive 连接重连，
+    /// 让新节点立刻生效（否则浏览器复用旧连接，出口 IP 不变）。
+    public func closeAllConnections() async throws {
+        var request = request(path: ["connections"])
+        request.httpMethod = "DELETE"
+        _ = try await perform(request)
+    }
+
+    /// 关闭单条连接（DELETE /connections/{id}）。
+    public func closeConnection(id: String) async throws {
+        var request = request(path: ["connections", id])
+        request.httpMethod = "DELETE"
+        _ = try await perform(request)
+    }
+
+    /// 拉一次连接详情快照（GET /connections）。监控页用它列出每条连接。
+    public func connectionsSnapshot() async throws -> [ConnectionDetail] {
+        let (data, _) = try await perform(request(path: ["connections"]))
+        guard let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rawConnections = payload["connections"] as? [[String: Any]] else {
+            return []
+        }
+        return rawConnections.map(ConnectionDetail.init(payload:))
     }
 
     public func delay(

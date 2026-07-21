@@ -997,3 +997,17 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 - 验证：+2 测试(解析+生成+跳过不支持插件)，170 通过。发布 0.1.18 到 dist + 装 /Applications。
 - **待用户真机确认**：重开 0.1.18 → **刷新订阅一次**(重新解析出带 obfs 的节点；loadPersistedState 也会在启动时重解析存的 YAML) → 在 TAGSS 挑节点 → 应能打开国外网站、连通卡可达。这次是隔离测(用户关工作代理只开 kongshan)。
 - TUN password-loop 仍未复现取证（同一批节点坏，之前 TUN"起不来"也可能是这个连不通导致的健康/体验问题，obfs 修好后需重测）。
+
+## 2026-07-21 obfs 修复后用户确认代理通；一批交互/界面改进（0.1.19）
+- 用户确认 0.1.18 obfs 修复后**代理正常生效**。随后提 8 项：
+  1. **切换节点不生效**（切到日本OK，再切斐济等刷新仍是日本 IP）→ 真因：`select()` 只调 Clash API 改选择，没关旧连接，浏览器 keep-alive 连接继续走旧节点。修：切换后 `closeAllConnections()`（DELETE /connections）逼重连。
+  2. **加连接监控页**：新增侧栏「连接」页 `ConnectionsView` + `ClashAPIClient.connectionsSnapshot()`（解析 GET /connections 明细）+ 单条/全部关闭（DELETE /connections[/{id}]）。ConnectionDetail 模型：host/process/rule/chains/network/up/down。只在本页可见时轮询(1.5s)。
+  3. **托盘「测速全部」移到每个策略选节点子菜单最上面**（原在菜单顶部，已移除顶部那个）。
+  4. **代理页策略列表去掉每项前面的图标**（groupRow 去掉 IconBadge）。
+  5. **关于页去掉「接管能力」「出站模式」两行**。
+  6. **关于页内核显示版本号**：启动时跑 `sing-box version` 填 `coreVersion`（原来只在开代理时从 Clash API 取、没开就是「—」）；旁边加「更新内核」按钮 `updateKernel()`（查 GitHub 最新 release，有新版提示并打开发布页；内核内置随 App 构建更新）。
+  7. **「系统状态」改名「登录项状态」**（用户不懂这行干嘛）。
+  8. **去掉「启动耗时→…」提示**（诊断用，移除 append，mark() 留空桩）。
+- 另外：给用户讲清 TUN 反复弹密码=osascript 每次提权 root 内核的固有代价；日常建议用系统代理(免密码)，passwordless TUN 需做一次性特权 helper(未做，待用户拍板)。
+- 验证：`swift build` 通过，`swift test` 170 通过。发布 0.1.19 装 /Applications。
+- 待用户真机：切换节点即时生效、连接监控页、各界面改动。TUN 免密码 helper 仍待拍板。
