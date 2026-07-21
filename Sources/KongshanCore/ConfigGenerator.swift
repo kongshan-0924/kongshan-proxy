@@ -157,6 +157,29 @@ public enum ConfigGenerator {
             uniquingKeysWith: { first, _ in first }
         )
         let groupNames = Set(groups.map(\.name)).union(["手动选择", "自动选择", "自建"])
+
+        // 机场常见"轮辐"结构：一个主组(如 TAGSS)汇聚全部节点、其它代理策略默认指向它，
+        // 而主组自身默认走"绕过代理"(直连) → 开了代理却全走直连、"手动选择"选的节点也不生效。
+        // 处理：只把这个主组默认接到"手动选择"，指向主组的策略(国外媒体→主组、兜底→主组)自然跟随，
+        // 用户在"手动选择"挑一次节点即可贯穿所有需代理的流量；地区子组/直连/拒绝组与显式选择都不动。
+        func wrapperKind(_ g: PolicyGroup) -> String? {
+            let ms = g.members.map { $0.uppercased() }
+            guard !ms.isEmpty else { return nil }
+            if ms.allSatisfy({ $0 == "DIRECT" }) { return "direct" }
+            if ms.allSatisfy({ $0 == "REJECT" || $0 == "REJECT-DROP" }) { return "reject" }
+            return nil
+        }
+        let proxyGroupNames = Set(groups.filter { wrapperKind($0) == nil }.map(\.name))
+        // 主组 = 被 ≥2 个其它组当作"首个成员(默认)"引用、且自身是代理组的那个。≥2 把汇聚型主组
+        // 与只被引用一次的地区子组(香港/日本)区分开，避免误改地区组。
+        // ponytail: 轮辐结构的启发式；层级式(主组在根、被引用 0 次)配置识别不到主组，此时仅
+        //           final 走手动选择、代理仍可用，可日后按需增强。
+        var firstMemberRefs: [String: Int] = [:]
+        for g in groups { if let first = g.members.first { firstMemberRefs[first, default: 0] += 1 } }
+        let masterGroup = firstMemberRefs
+            .filter { proxyGroupNames.contains($0.key) && $0.value >= 2 }
+            .max { $0.value < $1.value }?.key
+
         for group in groups {
             // 成员名解析成出站 tag；解析不到的丢弃，全丢光则回退到全部节点，
             // 避免生成空组导致 sing-box 校验失败、内核起不来。
@@ -172,13 +195,23 @@ public enum ConfigGenerator {
             if members.isEmpty { members = nodeTags }
             switch group.kind {
             case .selector:
-                // 优先恢复该组自己记住的节点；不在成员里则回退首个成员。
+                // 优先恢复该组自己记住的节点；不在成员里则回退。
                 let remembered = input.groupDefaults[group.name].flatMap { members.contains($0) ? $0 : nil }
+                var mem = members
+                let def: String
+                if group.name == masterGroup {
+                    // 主组默认接到"手动选择"：用户在"手动选择"挑一次节点，即可贯穿所有默认
+                    // 指向主组的策略与规则(国外媒体→主组、兜底→主组…)。
+                    if !mem.contains("手动选择") { mem.insert("手动选择", at: 0) }
+                    def = "手动选择"
+                } else {
+                    def = remembered ?? members[0]
+                }
                 outbounds.append([
                     "type": "selector",
                     "tag": group.name,
-                    "outbounds": members,
-                    "default": remembered ?? members[0]
+                    "outbounds": mem,
+                    "default": def
                 ])
             case .urltest:
                 outbounds.append([
@@ -265,7 +298,7 @@ public enum ConfigGenerator {
         var remote = dohServer(
             endpoint: endpoints.remote,
             tag: "dns-remote",
-            detour: "自动选择"
+            detour: "手动选择"
         )
         if !endpoints.remote.hostIsIPAddress {
             remote["domain_resolver"] = "dns-cn"
@@ -404,7 +437,7 @@ public enum ConfigGenerator {
         }
 
         guard let routing else {
-            return ["rules": [], "final": "自动选择"]
+            return ["rules": [], "final": "手动选择"]
         }
 
         let settings = try routing.settings.validated()
@@ -455,7 +488,7 @@ public enum ConfigGenerator {
         return [
             "rules": rules,
             "rule_set": ruleSets,
-            "final": "自动选择"
+            "final": "手动选择"
         ]
     }
 

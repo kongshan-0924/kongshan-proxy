@@ -1,19 +1,17 @@
 # 下一步
 
-## 🔴 待排查：开 TUN 后仪表盘出站 IP 一直跳 / 一会一变
+## 🔴 立即验证（0.1.16 刚修，等用户真机确认）
 
-用户反馈：TUN 已能正常开启且快，但开了之后**出站 IP 频繁变化**，怀疑规则或节点在自动切换。
+### A. 开代理是否生效 / 手动选择是否管用（已修，待确认）
+- 0.1.16 已把机场主组(TAGSS)与 final、DNS 都接到「手动选择」。**用户操作**：打开 0.1.16 → 代理页「手动选择」挑一个日本/香港节点 → 开系统代理 → 看仪表盘出口连通性 Google/GitHub 应变「可达」。
+- 若仍不可达：先确认所选节点本身可用（换一个节点/测速），再抓 `config.json` 看 `outbounds` 里 TAGSS 的 `default` 是否＝手动选择、`route.final` 是否＝手动选择。
+- 出站 IP 跳动应一并消失（final 不再是 urltest）。
 
-排查方向（按可能性）：
-1. **看当前 config.json 的 `route.final` 和主流量走向**：我们默认 `final: 自动选择`（urltest）。unmatched 流量走 urltest→最快节点，urltest 每 `interval`(5m) 重测、按 `tolerance` 切换。若 342 个节点里多个延迟接近，可能来回切 → IP 跳。
-   - 位置：`ConfigGenerator.route(...)` 里 `"final": "自动选择"`；urltest 生成在 `generate(...)` 顶部。
-   - 可选修法：把 `final` 或主组默认改成用户在「手动选择」里选的**固定节点**（稳定不跳）；或给 urltest 调大 `tolerance`(如 150ms)、拉长 `interval`。
-2. **订阅规则可能指向了 urltest / load-balance 组**：`ClashSubscriptionConverter.policyGroups` 把 Clash 的 `url-test/fallback/load-balance` 都映射成我们的 `.urltest`。若机场主组是 `load-balance`（本意是每条连接轮流用不同节点→每次 IP 不同），被当成 urltest 后行为不一致；反之若确是 urltest，多目标请求分散到不同组也会让"我的IP"每次不同（属正常）。
-   - 确认：`discoveredRules[activeConfigID]` 里主要 target 是哪个组，该组 kind 是不是 urltest。
-3. **DNS remote DoH 经 `自动选择`**：DNS 查询走 urltest，不同查询可能不同节点，但这影响解析不影响浏览出站 IP。
-4. 让用户切「出站模式=全局」并在「手动选择」选一个固定节点，看 IP 是否就稳定——能快速区分是"urltest 在跳"还是"规则把流量分到多组"。
-
-结论倾向：多半是 `自动选择`(urltest) 作为 final/主组导致的正常但不理想的行为。建议做一个开关或默认走手动选中的固定节点。
+### B. 🔴 TUN「一直弹密码框 / 起不来」——待用户用 0.1.16 复现取证
+- 现状：**无法从静态产物复现**。运行态干净（无残留 sing-box、无 tun-recovery.json、runtime 空）；日志证明 16:53 TUN 曾正常接管(utun4、路由 Chrome)。
+- 机制：`AppState.start(modes:)` 开 TUN 走 `privilegedLauncher.start`(弹 1 次密码)；若其后 `healthVerifier`(loopback ping Clash API, ~6s)或 `processMatches` 失败 → catch 里 `privilegedLauncher.stop()` 杀刚起的 root 内核**会再弹 1 次密码**（内核已自行退出时不弹）。故一次失败可能弹 2 次，用户重试就"一直弹"。
+- **要用户提供**：用 0.1.16 点一次 TUN，记下①App 顶部/提示条报的错，②`~/Library/Application Support/kongshan/logs/sing-box-tun.log` 新增尾部（找 FATAL/panic/EOF/permission/bad tun）。有这两样才能定位是提权失败、进程校验失败、还是内核起后即退。
+- 可选加固（待定位后）：失败 teardown 时若内核已退出就别再走提权 stop（已是现状）；可给 TUN 失败一个更明确的错误文案，减少用户盲目重试。
 
 ## 真机回归（本会话大量改动，务必过一遍）
 1. **系统代理**：点一下应"又快又不卡"（之前是托盘菜单 100% CPU 拖累，已修）。开启后提示条会显示"启动耗时 → …"，正常零点几秒。
@@ -22,9 +20,8 @@
 4. **托盘菜单**：每个策略子菜单最多 40 项，超出显示"在代理页选择全部（N 个）…"。
 5. 空闲 CPU 应为 0%，RSS <150MB（实测 141MB）。
 
-## 环境坑（必须让用户处理，否则反复出问题）
-- **CleanMyMac 5** 后台代理会反复删除 `~/Library/Application Support/kongshan`（订阅/设置/缓存）和 `.app`。
-  务必在 CleanMyMac 里把这两个路径 + 项目 `dist/` 加入**忽略/排除**。已发生多次数据与 App 被清。
+## 环境备注
+- 早前有一次 `~/Library/Application Support/kongshan` 数据与 `.app` 丢失，**经用户确认是那次手动删除**，并非 CleanMyMac 后台反复清理（此前交接文档把一次性事件误判为"反复删除"，已更正）。2026-07-21 实测：数据目录自当天 11:28 导入订阅后稳定留存到 16:57，app 完整（54MB）。**无需特意在 CleanMyMac 排除**，除非日后真的再次自动消失。
 - 用户是**笔记本(主屏,菜单栏) + 上方大外接屏**的多显示器；窗口已强制居中到主屏。
 
 ## 可选（非阻塞）

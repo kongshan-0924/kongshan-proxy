@@ -51,7 +51,7 @@ final class RoutingConfigTests: XCTestCase {
         XCTAssertEqual(routeRules[9]["rule_set"] as? [String], ["geosite-cn", "geoip-cn"])
         XCTAssertEqual(routeRules[9]["outbound"] as? String, "direct")
         XCTAssertTrue(routeRules.dropFirst().allSatisfy { $0["action"] as? String == "route" })
-        XCTAssertEqual(route["final"] as? String, "自动选择")
+        XCTAssertEqual(route["final"] as? String, "手动选择")
 
         let ruleSets = try XCTUnwrap(route["rule_set"] as? [[String: Any]])
         XCTAssertEqual(ruleSets.map { $0["tag"] as? String }, ["geosite-cn", "geoip-cn", "geosite-category-ads-all"])
@@ -443,6 +443,45 @@ extension RoutingConfigTests {
 
         let result = try await SingBoxProcess(binaryURL: singBoxURL).check(config: config)
         XCTAssertEqual(result.exitCode, 0, result.stderr)
+    }
+
+    /// 机场"轮辐"结构：被 ≥2 个策略默认引用、自身首选直连的主组，应改为默认「手动选择」，
+    /// 指向主组的策略(国外媒体/兜底)自然跟随不被强改；首选直连的服务组(微软)保持直连；final 走手动选择。
+    /// 这道题就是用户"开了代理没效果、在手动选择选节点不生效"的最小复现。
+    func testHubMasterDefaultsToManualSelectionAndBypassPreserved() throws {
+        let jp = ProxyNode(name: "JP 01", protocolType: .shadowsocks, server: "a.com", port: 443, password: "p", method: "aes-128-gcm")
+        var settings = RoutingSettings.defaults
+        settings.blockAds = false
+        settings.policyGroups = [
+            PolicyGroup(name: "绕过代理", kind: .selector, members: ["DIRECT"]),
+            PolicyGroup(name: "机场主组", kind: .selector, members: ["绕过代理", "JP 01"]),   // 主组自身首选直连
+            PolicyGroup(name: "国外媒体", kind: .selector, members: ["机场主组", "绕过代理"]),
+            PolicyGroup(name: "兜底", kind: .selector, members: ["机场主组", "绕过代理"]),
+            PolicyGroup(name: "微软服务", kind: .selector, members: ["绕过代理", "机场主组"])  // 服务组首选直连
+        ]
+        let config = try ConfigGenerator.generate(ConfigInput(
+            nodes: [jp],
+            selectedNodeID: jp.id,
+            runtime: RuntimeParameters(mixedPort: 18_902, clashPort: 18_903, secret: "s"),
+            routing: RoutingConfiguration(settings: settings, ruleSets: PreparedRuleSets(
+                geositeCN: URL(fileURLWithPath: "/tmp/geosite-cn.srs"),
+                geoipCN: URL(fileURLWithPath: "/tmp/geoip-cn.srs"),
+                ads: nil))
+        ))
+        let root = try XCTUnwrap(try JSONSerialization.jsonObject(with: config) as? [String: Any])
+        let outbounds = try XCTUnwrap(root["outbounds"] as? [[String: Any]])
+        func outbound(_ tag: String) -> [String: Any]? { outbounds.first { $0["tag"] as? String == tag } }
+
+        // 主组默认接到「手动选择」，且「手动选择」进入其成员（sing-box 要求 default ∈ outbounds）
+        XCTAssertEqual(outbound("机场主组")?["default"] as? String, "手动选择")
+        XCTAssertEqual((outbound("机场主组")?["outbounds"] as? [String])?.first, "手动选择")
+        // 指向主组的策略保持默认主组，未被强改（用户挑节点后经主组自然贯穿）
+        XCTAssertEqual(outbound("国外媒体")?["default"] as? String, "机场主组")
+        XCTAssertEqual(outbound("兜底")?["default"] as? String, "机场主组")
+        // 首选直连的服务组保持机场意图（指向直连包装组），不被拉去代理
+        XCTAssertEqual(outbound("微软服务")?["default"] as? String, "绕过代理")
+        // 兜底 final 走手动选择（顺带消除 urltest 作 final 导致的出站 IP 跳动）
+        XCTAssertEqual((root["route"] as? [String: Any])?["final"] as? String, "手动选择")
     }
 
     /// 成员全部解析不到时回退全部节点，绝不产出空组（空组会让内核校验失败）。

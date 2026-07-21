@@ -22,7 +22,7 @@ final class ConfigGeneratorTests: XCTestCase {
         XCTAssertEqual(outbound(tag: "自建", in: outbounds)?["outbounds"] as? [String], [ConfigGenerator.outboundTag(for: nodes[3])])
 
         let route = try XCTUnwrap(root["route"] as? [String: Any])
-        XCTAssertEqual(route["final"] as? String, "自动选择")
+        XCTAssertEqual(route["final"] as? String, "手动选择")
     }
 
     func testMapsProtocolSpecificOutboundFields() throws {

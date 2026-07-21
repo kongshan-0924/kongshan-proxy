@@ -40,7 +40,7 @@ final class DNSConfigTests: XCTestCase {
             tag: "dns-remote",
             server: "8.8.8.8",
             path: "/dns-query",
-            detour: "自动选择"
+            detour: "手动选择"
         )
         XCTAssertNil(dns["fakeip"])
         XCTAssertEqual(dns["final"] as? String, "dns-remote")

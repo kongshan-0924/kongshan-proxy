@@ -965,3 +965,14 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 - 唯一遗留问题：**开 TUN 后仪表盘出站 IP 一直跳/一会一变**（用户最后反馈，未排查）。假设与修法见 NEXT_STEPS 顶部（多半是 final=自动选择 urltest 或规则指向 urltest 组）。
 - 当前版本 0.1.15，已装 /Applications 并运行，代码推送 GitHub（eccc2c9，main 与远端一致）。
 - 提醒：CleanMyMac 反复删数据/App，用户需在其排除列表加入 kongshan 目录与 .app。
+
+## 2026-07-21 修「开代理没效果 / 手动选择不生效 / 出站IP跳」根因（0.1.16）
+- **确诊**（读真实 config.json + 订阅 proxy-groups）：机场是"轮辐"结构，主组 `🙂 TAGSS` 被 7 个策略当默认引用，而它自身首个成员是 `🎯 绕过代理`(直连) → "需代理"流量(国外媒体 66 条规则/漏网之鱼兜底/直接指向 TAGSS 的 25 条)全走**直连** → Google/GitHub 墙内不可达。同时我们内置 `手动选择` 不被任何 rule/final/组引用（`final=自动选择`），**用户在手动选择里选节点完全不生效**（孤儿组）。
+- **修复**（仅 `ConfigGenerator`，不新增数据模型/不动 UI）：
+  1. 识别机场主组＝被 ≥2 个其它组当"首个成员(默认)"引用、且自身非直连/拒绝包装的代理组；把它的默认接到 `手动选择`（并把手动选择放进其成员）。指向主组的策略(国外媒体/漏网之鱼…)自然跟随；微软/苹果/Steam→绕过代理=直连 的机场意图**保持不动**；地区子组(被引用<2)也不动。
+  2. `route.final`：`自动选择`(urltest) → `手动选择`（**顺带修掉出站 IP 跳动**：final 不再是自动测速切换组）。
+  3. DNS remote detour：`自动选择` → `手动选择`（DNS 也不再跳节点，统一走用户选的节点）。
+- **验证**：全量测试 168 通过(+1 新测 `testHubMasterDefaultsToManualSelectionAndBypassPreserved` 锁死行为)；另用 Python 按真实订阅结构模拟，主组正确识别为 TAGSS、各组默认符合预期。
+- 修改文件：`Sources/KongshanCore/ConfigGenerator.swift`（主组识别+final+DNS detour）、`Tests/KongshanCoreTests/{RoutingConfigTests,ConfigGeneratorTests,DNSConfigTests}.swift`。
+- 发布 0.1.16 到 dist + /Applications（54MB）。
+- **TUN(#3) 未复现**：当前运行态干净（无残留内核/无 tun-recovery.json/runtime 空），日志显示 16:53 TUN 曾正常接管(utun4、路由 Chrome 流量)。"一直弹密码框"是运行期现象，无法从静态产物复现。机制上：start 提权 1 次密码；若健康检查/进程校验失败 → catch 里 `privilegedLauncher.stop()` 会**再弹 1 次密码**去杀刚起的 root 内核（内核已自行退出时则不弹）。**需用户用 0.1.16 再点一次 TUN，抓当次错误提示 + `logs/sing-box-tun.log` 新增尾部**才能定位。
