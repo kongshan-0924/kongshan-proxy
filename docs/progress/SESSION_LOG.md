@@ -985,3 +985,15 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
   - `AppState`：`displayPolicyGroups` 有机场组时只返回机场组；加 `primaryGroupName`；`selectedMemberName`/`select` 把"在主组挑节点"视作选主节点(同步 selectedNodeID + 重探连通性)；`probeConnectivity` 改测**主组**(真实会走的路径)而非可能不同步的 selectedNode，探测端点换成更稳的 `gstatic/generate_204`。
 - 验证：`swift test` 168 通过（更新 `testHubMasterDefaultsToSelectedNodeAndBypassPreserved` 断言新行为：无内置组、主组默认真实节点、final=主组）。真实订阅模拟确认主组仍识别为 TAGSS。发布 0.1.17 到 dist + 暂存替换装 /Applications（未打断运行中的 0.1.16）。
 - **待用户真机确认**：关掉旧实例、重开 0.1.17 → 代理页只剩机场策略组 → 在 TAGSS 里挑节点 → 出口连通性应可达（现在测主组+稳定端点）。注意：用户旧的 groupSelections["🙂 TAGSS"]=台湾02 会被当作主组记住值，主组默认走台湾02；想换就在 TAGSS 里重挑。
+
+## 2026-07-21 ★真凶★：SS 节点缺 obfs 插件 → 能测速却打不开网站（0.1.18）
+- **关键澄清**（用户提供）：用户在国内，**跟 Claude 对话必须开另一个工作代理(Stash等)**；测 kongshan 时关掉它、只开 kongshan。**⇒ 我之前用 Bash 实测"代理已通"全是经用户的工作代理，不是 kongshan！** 而 App 那张连通性卡走 kongshan 自己内核测，一直显示不可达——**卡是对的，我错了**。教训：本项目里用 Bash 实测连通性会被用户的工作代理污染，不可信；要测 kongshan 必须走它自己的端口/内核或让用户隔离测。
+- **真凶**：机场 342 个节点**全部是 `type: ss` + `plugin: obfs`(simple-obfs, mode:http, host:*.microsoft.com) + cipher aes-128-gcm**。`ClashSubscriptionConverter` 根本没解析 `plugin`/`plugin-opts`，生成的是**裸 shadowsocks**。服务器要求 obfs 混淆 → 裸连能完成 TCP 握手(所以 TCP 测速 66ms 有值)但 SS 层被服务器丢弃 → **传不了任何数据 → 所有国外站不可达**。这解释了这一整轮"节点能测速/延迟正常，但开了代理打不开网站"。
+- **修复**：
+  - `Models.ProxyNode` 加 `pluginName`/`pluginOptions`（直接存 sing-box 就绪值）。
+  - `ClashSubscriptionConverter`：SS 解析 `plugin: obfs` → `obfs-local` + `obfs=<mode>;obfs-host=<host>`；不认识的插件(v2ray-plugin/shadow-tls…)抛 `unsupportedPlugin` 跳过该节点并计入 warnings（不静默生成坏节点）。
+  - `ConfigGenerator.outbound` SS：输出 `plugin`/`plugin_opts`。
+  - **打包 sing-box 1.13.14 实测 `sing-box check` 接受 `obfs-local`**（关键：确认内核支持）。
+- 验证：+2 测试(解析+生成+跳过不支持插件)，170 通过。发布 0.1.18 到 dist + 装 /Applications。
+- **待用户真机确认**：重开 0.1.18 → **刷新订阅一次**(重新解析出带 obfs 的节点；loadPersistedState 也会在启动时重解析存的 YAML) → 在 TAGSS 挑节点 → 应能打开国外网站、连通卡可达。这次是隔离测(用户关工作代理只开 kongshan)。
+- TUN password-loop 仍未复现取证（同一批节点坏，之前 TUN"起不来"也可能是这个连不通导致的健康/体验问题，obfs 修好后需重测）。
