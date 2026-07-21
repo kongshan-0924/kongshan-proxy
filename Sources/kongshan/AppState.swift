@@ -378,10 +378,13 @@ final class AppState {
     func initialize() async {
         guard !isReady else { return }
         do {
+            // 清理上次遗留的接管。常见情况（无残留记录）都是秒回的空操作；
+            // 只有真有残留 root TUN 内核时才会走授权，那正是我们要清掉的僵尸隧道。
             try await privilegedLauncher.recoverIfNeeded()
             try await systemProxyManager.recoverIfNeeded()
             try await systemDNSManager.recoverIfNeeded()
             try await storage.prepare()
+            // 大订阅 YAML 的解析已挪到后台线程（见 loadPersistedState），不再卡住启动。
             try await loadPersistedState()
             isReady = true
             loginItemStatus = await loginItemManager.currentStatus()
@@ -976,21 +979,32 @@ final class AppState {
 
     /// 某个策略组里可展示/可选的成员。空成员＝该组含全部节点；
     /// 有成员时保留原顺序，节点解析成节点、其余（子策略组 / DIRECT / REJECT）保留为引用。
+    /// 机场塞进 proxies 的套餐信息条目（剩余流量/到期）不是可用节点，从选项里剔除。
     func groupOptions(_ group: PolicyGroup) -> [GroupOption] {
         let pool = testableNodes
         guard !group.members.isEmpty else { return pool.map(GroupOption.node) }
         let byName = Dictionary(pool.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
-        return group.members.map { byName[$0].map(GroupOption.node) ?? .reference($0) }
+        let infoNames = Set(activeConfigNodes.filter(\.isSubscriptionInfo).map(\.name))
+        return group.members.compactMap { member in
+            if let node = byName[member] { return .node(node) }
+            if infoNames.contains(member) { return nil }
+            return .reference(member)
+        }
     }
 
     /// 每个策略组当前选中的成员名（节点名 / 子组名 / DIRECT / REJECT），键为组名。
     private(set) var groupSelections: [String: String] = [:]
 
     /// 某组当前选中的成员名；未记录时回退默认（手动选择用全局节点，其余用首个成员）。
+    /// 只在存下的选择仍是当前有效成员时才采用——否则（如升级前存的是旧 UUID）回退默认，
+    /// 不把无法解析的原始值直接显示出来。
     func selectedMemberName(in group: String) -> String? {
-        if let name = groupSelections[group] { return name }
+        let options = displayPolicyGroups.first { $0.name == group }.map(groupOptions) ?? []
+        if let name = groupSelections[group], options.contains(where: { $0.name == name }) {
+            return name
+        }
         if group == "手动选择" { return selectedNode?.name ?? testableNodes.first?.name }
-        return displayPolicyGroups.first { $0.name == group }.flatMap { groupOptions($0).first?.name }
+        return options.first?.name
     }
 
     /// 选中成员是节点时返回它（供托盘/副标题展示）；是子组则返回 nil。
@@ -1550,10 +1564,16 @@ final class AppState {
         }
         for source in subscriptions {
             guard let data = try await storage.readIfPresent(from: storage.cacheURL(for: source)),
-                  let yaml = String(data: data, encoding: .utf8),
-                  let result = try? ClashSubscriptionConverter.convert(yaml: yaml, sourceID: source.id) else {
+                  let yaml = String(data: data, encoding: .utf8) else {
                 continue
             }
+            // 大订阅的 YAML（上百节点 + 数千规则）解析很重，放到后台线程做，
+            // 别在主 actor 上同步解析，否则启动时界面会卡住转圈。
+            let sourceID = source.id
+            let converted = await Task.detached(priority: .userInitiated) {
+                try? ClashSubscriptionConverter.convert(yaml: yaml, sourceID: sourceID)
+            }.value
+            guard let result = converted else { continue }
             nodes.append(contentsOf: result.nodes)
             warnings.append(contentsOf: result.warnings)
             // 重启后配置自带的策略组与规则也要从缓存恢复，否则生效配置的策略/规则会是空的。

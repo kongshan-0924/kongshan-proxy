@@ -18,7 +18,7 @@ struct MenuBarView: View {
             Task { await state.testAllDelays() }
         }
         .keyboardShortcut("t")
-        .disabled(state.nodes.isEmpty || state.isBusy || state.isTestingAllDelays)
+        .disabled(state.testableNodes.isEmpty || state.isTestingAllDelays)
 
         Divider()
 
@@ -50,9 +50,10 @@ struct MenuBarView: View {
 
         Divider()
 
-        // 每个可手动指定的策略独立选成员，右侧显示上次测速结果
+        // 每个可手动指定的策略独立选成员，右侧显示上次测速结果。
+        // 名称截断，避免个别长名/长节点名把整个菜单撑得很宽。
         ForEach(state.displayPolicyGroups.filter { $0.kind == .selector }) { group in
-            Menu("\(group.name)：\(state.selectedMemberName(in: group.name) ?? "未选择")") {
+            Menu("\(Self.clip(group.name, 14))：\(Self.clip(state.selectedMemberName(in: group.name) ?? "未选择", 16))") {
                 optionMenuContent(for: group)
             }
             .disabled(state.isBusy || state.testableNodes.isEmpty)
@@ -120,6 +121,11 @@ struct MenuBarView: View {
                 Text("\(option.name)\(suffix)")
             }
         }
+    }
+
+    /// 截断过长文本，收窄菜单宽度。
+    private static func clip(_ text: String, _ max: Int) -> String {
+        text.count > max ? String(text.prefix(max)) + "…" : text
     }
 
     private func openMainWindow() {

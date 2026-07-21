@@ -866,3 +866,17 @@
 - Clash 配置里 GEOSITE/GEOIP/RULE-SET 规则仍不转换（converter 只认 DOMAIN*/IP-CIDR/PROCESS-NAME），靠内置 geosite-cn/geoip-cn/ads/private 兜底；规则页展示的是可解析规则。
 - 子组选择（如主组指向地区组）经 Clash API 生效并持久化为成员名，但生成默认仍取该组首个成员——重启后主组的子组选择由 groupDefaults 的 tag 恢复（子组名即 tag），OK。
 - 升级会一次性重置策略组选择（旧 UUID 值配不上节点名），用户重选即可。
+
+## 2026-07-21 六项优化：UUID/菜单、启动、TUN、审计、版本发布
+
+真机诊断（读实机进程/网络）：发现两个 root sing-box 孤儿（PPID 1，失败重试残留），且数据目录被 CleanMyMac 清空。
+
+1. 手动选择显示 UUID：旧持久化 groupSelections 是 UUID、新按成员名。selectedMemberName 现在校验存的值仍是当前有效成员，否则回退默认（不再直接显示原始 UUID）。groupOptions 剔除机场套餐信息条目。托盘菜单名截断（组≤14/成员≤16）收窄宽度；testAll 禁用条件改 testableNodes。
+2. 启动慢/转圈：loadPersistedState 在主 actor 同步解析大 YAML（上百节点+7539规则）阻塞 UI。改用 Task.detached 后台解析，主线程只赋值。
+3. TUN 点击转圈最终失败：孤儿 root 内核占着 utun+默认路由，新内核 auto_route 撞 `add route: file exists`。PrivilegedCommandBuilder.start 现在在同一次授权里先 `pkill -f <binary>` 清残留再启动（一次密码）。
+4. 内存/性能审计：所有流/重试/监听 Task 均 [weak self] 且存储可取消；无 Timer/轮询/死循环；缓冲有上限；scheduler 有 deinit。无泄漏/环。感知卡顿来自 2/3 + 孤儿核，已消除。
+5. 使用/运行速度：随 2/3 改善；空闲 0.0% CPU、~104MB。
+6. 版本发布：新增 VERSION 文件（唯一来源），build_app.sh 每次构建自增修订号并用 PlistBuddy 写进 staged Info.plist（模板不动，无 git 抖动）；CFBundleVersion=major*10000+minor*100+patch。设置-关于显示应用版本。本次 0.1.1 / build 101 已发布到 dist/。
+
+测试 165 通过；dist/kongshan.app 0.1.1 运行，空闲 0% CPU。
+注意：CleanMyMac 会把 ~/Library/Application Support/kongshan 当垃圾清掉，导致订阅/设置丢失，需在 CleanMyMac 里排除该目录；本次数据已被清，用户需重新导入订阅。

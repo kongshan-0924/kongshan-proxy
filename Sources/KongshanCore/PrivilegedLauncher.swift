@@ -121,13 +121,19 @@ public enum PrivilegedCommandBuilder {
     private static let prompt = "kongshan 需要管理员权限启动 TUN"
 
     public static func start(binaryURL: URL, fifoURL: URL, logURL: URL) -> String {
+        let binary = shellQuote(binaryURL.path)
         let command = [
             "umask 077",
             "export PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+            // 先清掉本 App 之前残留的 root 内核：失败重试或没正常停止会留下孤儿进程，
+            // 它们仍占着 utun 与默认路由，新内核 auto_route 会 `add route: file exists` 启动失败
+            //（现象就是点 TUN 一直转圈最后失败）。和本次启动同在一个授权里完成，只需输一次密码。
+            "/usr/bin/pkill -f \(binary) 2>/dev/null || true",
+            "/bin/sleep 1",
             // cat 的 stdin/stderr 必须一并重定向：只要后台管道还持有 osascript 的捕获描述符，
             // `do shell script` 就会一直等下去，launch 永不返回，配置也就写不进 FIFO，
             // 内核最终只会读到 EOF（实测现象：decode config at /dev/stdin: EOF）。
-            "/bin/cat \(shellQuote(fifoURL.path)) </dev/null 2>/dev/null | \(shellQuote(binaryURL.path)) run -c /dev/stdin >> \(shellQuote(logURL.path)) 2>&1 & /bin/echo $!"
+            "/bin/cat \(shellQuote(fifoURL.path)) </dev/null 2>/dev/null | \(binary) run -c /dev/stdin >> \(shellQuote(logURL.path)) 2>&1 & /bin/echo $!"
         ].joined(separator: "; ")
         return appleScript(command: command)
     }

@@ -777,6 +777,7 @@ private struct SettingsView: View {
                 }
 
                 Section("关于") {
+                    LabeledContent("应用版本", value: Self.appVersion)
                     LabeledContent("内核", value: "sing-box \(state.coreVersion)")
                     LabeledContent("接管能力", value: "系统代理 + TUN（可同时开启）")
                     LabeledContent("出站模式", value: OutboundMode.allCases.map(\.displayName).joined(separator: " / "))
@@ -830,6 +831,13 @@ private struct SettingsView: View {
         }
         // 绕过设置在别处应用（如恢复默认）后，草稿同步跟上。
         .onChange(of: state.routingSettings) { _, new in routingDraft = new }
+    }
+
+    /// 从打包进 App 的 Info.plist 读取版本，展示当前运行的是哪个构建。
+    static var appVersion: String {
+        let short = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""
+        return build.isEmpty ? short : "\(short) (\(build))"
     }
 
     private var speedTestMethodBinding: Binding<SpeedTestMethod> {

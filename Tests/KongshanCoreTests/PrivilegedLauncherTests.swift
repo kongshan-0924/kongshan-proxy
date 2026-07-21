@@ -23,6 +23,8 @@ final class PrivilegedLauncherTests: XCTestCase {
         XCTAssertTrue(script.contains("Kong'\\\\''s App"))
         XCTAssertTrue(script.contains("kong'\\\\''s log.txt"))
         XCTAssertFalse(script.contains("runtime-secret"))
+        // 回归防护：启动前必须先清掉本 App 残留的 root 内核（孤儿占路由会让新 TUN 起不来）。
+        XCTAssertTrue(script.contains("/usr/bin/pkill -f"))
     }
 
     func testStopCommandRechecksProcessCommandBeforeSendingInterrupt() throws {
