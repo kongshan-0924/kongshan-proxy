@@ -27,6 +27,10 @@ print "$app_version" > "$version_file"
 dist_dir="$project_dir/dist"
 app_path="$dist_dir/kongshan.app"
 mkdir -p "$dist_dir"
+# 让 Spotlight/启动服务永久忽略 dist：否则这里的 kongshan.app 会被自动索引、
+# 冒充成"第二个程序"出现在启动台/程序坞（用户根本没点开过它）。标准机制：
+# 目录内放 .metadata_never_index。运行的正式副本在 /Applications，dist 只是构建产物。
+touch "$dist_dir/.metadata_never_index"
 stage_dir=$(mktemp -d "$dist_dir/.kongshan-build.XXXXXX")
 stage_app="$stage_dir/kongshan.app"
 
@@ -50,4 +54,7 @@ if [[ -e "$app_path" ]]; then
     rm -rf "$app_path"
 fi
 mv "$stage_app" "$app_path"
+# 再保险：注销 dist 副本的启动服务登记，避免它出现在启动台/程序坞。
+lsregister="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+[[ -x "$lsregister" ]] && "$lsregister" -u "$app_path" 2>/dev/null || true
 print "Built $app_path  (版本 $app_version / build $build_number)"
