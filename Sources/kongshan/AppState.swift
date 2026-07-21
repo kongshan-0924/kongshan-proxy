@@ -1005,11 +1005,18 @@ final class AppState {
         await applyRoutingSettings(routingSettings)
     }
 
+    // 内置策略组用固定 ID：PolicyGroup(name:) 默认每次生成新 UUID，
+    // 而 displayPolicyGroups 是计算属性，每次访问都会新建这两个内置组。
+    // 一旦被 ForEach 按 Identifiable 的 id 渲染（托盘/代理页），每次求值 id 都变，
+    // SwiftUI 就以为列表变了 → 无限重渲染 → 单核 100% CPU（实测就是这个原因）。
+    @ObservationIgnored private static let manualGroupID = UUID(uuidString: "00000000-0000-0000-0000-0000000A0001")!
+    @ObservationIgnored private static let autoGroupID = UUID(uuidString: "00000000-0000-0000-0000-0000000A0002")!
+
     /// 代理页/托盘展示的策略：内置「手动选择/自动选择」+ 当前配置自带的策略组。
     var displayPolicyGroups: [PolicyGroup] {
         [
-            PolicyGroup(name: "手动选择", kind: .selector),
-            PolicyGroup(name: "自动选择", kind: .urltest)
+            PolicyGroup(id: Self.manualGroupID, name: "手动选择", kind: .selector),
+            PolicyGroup(id: Self.autoGroupID, name: "自动选择", kind: .urltest)
         ] + activeConfigPolicyGroups
     }
 

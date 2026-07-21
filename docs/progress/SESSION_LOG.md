@@ -942,3 +942,20 @@
 另：强烈怀疑是同时开着 Stash 的 TUN 在抢路由/劫持流量——用户测系统代理时也应先退 Stash。
 其他小改：pgrep 清理只有真杀到残留才 sleep 1（常态不白等）；健康检查上限 30→60（~6s）容忍首次建 TUN 稍慢。
 测试 167 通过；0.1.11 装 /Applications。
+
+## 2026-07-21 找到「很卡/CPU高」真凶：托盘菜单 O(n²) 死循环渲染（0.1.15）
+
+用户截图显示 kongshan 持续 99.9% CPU。实测：一启动加载 342 节点配置就稳定 ~100% CPU（与代理无关）。
+sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图里被无限重渲染。
+根因（本会话配置为中心重构引入）：
+1. MenuBarExtra 的菜单是「所有子菜单一次性全建」——15 个 selector 组 × 每组最多 342 节点 ≈ 5000 个菜单项。
+2. 每个 optionButton 调 isSelected → selectedMemberName → groupOptions，每次都重建一遍全节点字典（O(n)），
+   于是每次建菜单是 O(n²)（342²×组数≈百万级），且 SwiftUI 反复重求值 → 单核 100% + RSS 271MB。
+3. 附带：displayPolicyGroups 每次新建内置组用随机 UUID，ForEach 按 id 渲染会误判列表变化再加剧churn。
+修复：
+- 内置「手动选择/自动选择」用固定 UUID；ForEach 显式 id: \.name。
+- optionMenuContent 每组只算一次 selectedMemberName，optionButton 收 selected: Bool（O(1)/项）。
+- 子菜单每组最多列 40 项，超出显示「在代理页选择全部（N 个）…」。
+实测：CPU 从持续 100% → 空闲 0%（启动一次性 ~2s 峰值）；RSS 271MB → ~141MB。
+这也解释了之前「系统代理/TUN 开启很慢很卡」——App 一直 100% CPU，什么操作都卡，根本不是启动路径的问题。
+测试 167 通过；0.1.15 装 /Applications。

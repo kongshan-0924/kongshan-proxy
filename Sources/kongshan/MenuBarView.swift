@@ -52,7 +52,7 @@ struct MenuBarView: View {
 
         // 每个可手动指定的策略独立选成员，右侧显示上次测速结果。
         // 名称截断，避免个别长名/长节点名把整个菜单撑得很宽。
-        ForEach(state.displayPolicyGroups.filter { $0.kind == .selector }) { group in
+        ForEach(state.displayPolicyGroups.filter { $0.kind == .selector }, id: \.name) { group in
             Menu("\(Self.clip(group.name, 14))：\(Self.clip(state.selectedMemberName(in: group.name) ?? "未选择", 16))") {
                 optionMenuContent(for: group)
             }
@@ -89,19 +89,30 @@ struct MenuBarView: View {
         .keyboardShortcut("q")
     }
 
+    /// 托盘每个策略的子菜单最多列这么多项。菜单是「所有子菜单一次性全建出来」的，
+    /// 上百节点×十几个组会建出几千个菜单项，既占内存又拖慢渲染；超出的去代理页选。
+    private static let menuOptionLimit = 40
+
     @ViewBuilder
     private func optionMenuContent(for group: PolicyGroup) -> some View {
         let options = state.groupOptions(group)
         if options.isEmpty {
             Text("当前配置没有节点")
         } else {
-            ForEach(options) { option in
-                optionButton(option, in: group.name)
+            // 选中项每组只算一次。之前每个选项都调 isSelected→selectedMemberName→groupOptions
+            // 重建一遍全节点字典，几百节点×几十组就是 O(n²)，把 SwiftUI 菜单渲染顶到单核 100%。
+            let selectedName = state.selectedMemberName(in: group.name)
+            ForEach(options.prefix(Self.menuOptionLimit)) { option in
+                optionButton(option, selected: option.name == selectedName, in: group.name)
+            }
+            if options.count > Self.menuOptionLimit {
+                Divider()
+                Button("在代理页选择全部（\(options.count) 个）…") { openMainWindow() }
             }
         }
     }
 
-    private func optionButton(_ option: GroupOption, in group: String) -> some View {
+    private func optionButton(_ option: GroupOption, selected: Bool, in group: String) -> some View {
         Button {
             Task { await state.select(optionName: option.name, in: group) }
         } label: {
@@ -115,7 +126,7 @@ struct MenuBarView: View {
                 }
                 return ""
             }()
-            if state.isSelected(option, in: group) {
+            if selected {
                 Label("\(option.name)\(suffix)", systemImage: "checkmark")
             } else {
                 Text("\(option.name)\(suffix)")

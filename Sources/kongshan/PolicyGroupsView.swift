@@ -59,7 +59,7 @@ struct PolicyGroupsView: View {
 
     private var groupColumn: some View {
         List(selection: Binding(get: { currentGroup.name }, set: { selectedGroupName = $0 })) {
-            ForEach(state.displayPolicyGroups) { group in
+            ForEach(state.displayPolicyGroups, id: \.name) { group in
                 groupRow(group).tag(group.name)
             }
         }
