@@ -115,3 +115,13 @@
 ### 关键结论（新增）
 - 机场 proxy-groups 常是轮辐：一个主组汇聚全部节点、其它策略默认指向它；主组可能默认直连。要让"手动选择/用户选的节点"生效，必须把这个主组的默认接到用户可控的选择组，而不是只生成一个不被引用的内置组。
 - 改路由默认前，先读**真实生成的 config.json** 的 outbounds/route（`python3` 起一个分析脚本最快），别凭 UI 猜。
+
+## 2026-07-21（0.1.17）只用机场策略组 + 连通性卡误报
+
+- **「0.1.16 仍不可达」是误报**：内核日志(sing-box.log)证明代理已通(claude.ai/api.github.com 经所选节点成功建连、零报错)，config 也修复到位。是仪表盘连通性卡测 `www.google.com/generate_204`(常被拦)、且测 selectedNode 未必与真实路由同步所致。取证要点：config.json **不含 clash_api**(secret 不落盘)，查实时状态靠内核日志或给 sing-box pid 找监听端口(仍无 secret 无法调 API)。
+- **重构（用户拍板 Option B：只用配置自带策略组）**：
+  - `ConfigGenerator.primaryGroupName(among:)` 抽为 public，App 与生成器共用同一主组识别。
+  - 有机场策略组 → **不生成内置手动/自动选择**；主组默认指向真实节点(记住的→App当前节点→首个节点成员)；`final`/DNS/自定义规则兜底走 `primaryOutbound`(主组，识别不到则用户选中节点)。无机场组 → 仍生成手动/自动选择兜底。
+  - `AppState.displayPolicyGroups` 有机场组时只回机场组；`primaryGroupName` 计算属性；在主组挑节点＝选主节点(同步 selectedNodeID)；`probeConnectivity` 测主组(真实路径)+ gstatic 端点。
+- 测试 168 通过；0.1.17 发 dist + 暂存替换装 /Applications(未打断运行中的 0.1.16)。
+- **接手/真机**：让用户关旧实例、重开 0.1.17，代理页只剩机场组，在 TAGSS 挑节点。旧 groupSelections["🙂 TAGSS"]=台湾02 会成主组默认。TUN password-loop 仍待复现取证(见 NEXT_STEPS B)。

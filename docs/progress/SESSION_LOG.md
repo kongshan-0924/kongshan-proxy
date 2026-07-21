@@ -976,3 +976,12 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 - 修改文件：`Sources/KongshanCore/ConfigGenerator.swift`（主组识别+final+DNS detour）、`Tests/KongshanCoreTests/{RoutingConfigTests,ConfigGeneratorTests,DNSConfigTests}.swift`。
 - 发布 0.1.16 到 dist + /Applications（54MB）。
 - **TUN(#3) 未复现**：当前运行态干净（无残留内核/无 tun-recovery.json/runtime 空），日志显示 16:53 TUN 曾正常接管(utun4、路由 Chrome 流量)。"一直弹密码框"是运行期现象，无法从静态产物复现。机制上：start 提权 1 次密码；若健康检查/进程校验失败 → catch 里 `privilegedLauncher.stop()` 会**再弹 1 次密码**去杀刚起的 root 内核（内核已自行退出时则不弹）。**需用户用 0.1.16 再点一次 TUN，抓当次错误提示 + `logs/sing-box-tun.log` 新增尾部**才能定位。
+
+## 2026-07-21 「还是不可达」实为误报 + 按用户意愿只用机场策略组（0.1.17）
+- **关键发现**：0.1.16 装上后用户仍报"不可达"。查运行中内核日志（sing-box.log 19:24–19:25）证明**代理其实是通的**——claude.ai / api.github.com / datadog 全部经 `node-0d40ae4c`(香港03=手动选择) 成功建连(1ms)、零报错。config 也确认修复到位(TAGSS default=手动选择、final=手动选择)。所以"出口连通性 不可达"是**仪表盘那张探测卡在误报**（它测 `www.google.com/generate_204`——很多节点被 Google 拦/超时；且测的是 selectedNode 未必与真实路由同步）。config.json 落盘时不含 clash_api(secret 不落盘)，故无法从盘上直接查 secret，用内核日志取证。
+- **用户决策**：代理页 `手动选择` 和机场 `TAGSS` 都能选节点，重复又乱。用户选"**只用配置自带的策略组**"（去掉内置手动/自动选择）。
+- **重构（Option B）**：
+  - `ConfigGenerator`：抽出 `primaryGroupName(among:)`(公开，供 App 共用)。**有机场策略组时不再生成内置手动/自动选择**；主组(TAGSS)默认改为指向**真实节点**(记住的→App 当前节点→首个节点成员，绝不再默认走绕过代理直连)；`final`/DNS detour/自定义代理规则兜底 全部走 `primaryOutbound`(有机场组=主组，否则=手动选择)。订阅规则 `available` 改为按真正生成的出站过滤。无机场组(纯手动/自建)时仍生成手动/自动选择作兜底。
+  - `AppState`：`displayPolicyGroups` 有机场组时只返回机场组；加 `primaryGroupName`；`selectedMemberName`/`select` 把"在主组挑节点"视作选主节点(同步 selectedNodeID + 重探连通性)；`probeConnectivity` 改测**主组**(真实会走的路径)而非可能不同步的 selectedNode，探测端点换成更稳的 `gstatic/generate_204`。
+- 验证：`swift test` 168 通过（更新 `testHubMasterDefaultsToSelectedNodeAndBypassPreserved` 断言新行为：无内置组、主组默认真实节点、final=主组）。真实订阅模拟确认主组仍识别为 TAGSS。发布 0.1.17 到 dist + 暂存替换装 /Applications（未打断运行中的 0.1.16）。
+- **待用户真机确认**：关掉旧实例、重开 0.1.17 → 代理页只剩机场策略组 → 在 TAGSS 里挑节点 → 出口连通性应可达（现在测主组+稳定端点）。注意：用户旧的 groupSelections["🙂 TAGSS"]=台湾02 会被当作主组记住值，主组默认走台湾02；想换就在 TAGSS 里重挑。

@@ -445,11 +445,13 @@ extension RoutingConfigTests {
         XCTAssertEqual(result.exitCode, 0, result.stderr)
     }
 
-    /// 机场"轮辐"结构：被 ≥2 个策略默认引用、自身首选直连的主组，应改为默认「手动选择」，
-    /// 指向主组的策略(国外媒体/兜底)自然跟随不被强改；首选直连的服务组(微软)保持直连；final 走手动选择。
-    /// 这道题就是用户"开了代理没效果、在手动选择选节点不生效"的最小复现。
-    func testHubMasterDefaultsToManualSelectionAndBypassPreserved() throws {
+    /// 机场"轮辐"结构（只用配置自带策略组）：被 ≥2 个策略默认引用、自身首选直连的主组，
+    /// 其默认应改为指向「真实节点」(App 当前选中的节点)而非机场的绕过代理；不生成内置手动/自动选择；
+    /// 指向主组的策略(国外媒体/兜底)自然跟随不被强改；首选直连的服务组(微软)保持直连；final 走主组。
+    /// 这道题就是用户"开了代理没效果、选节点不生效"的最小复现。
+    func testHubMasterDefaultsToSelectedNodeAndBypassPreserved() throws {
         let jp = ProxyNode(name: "JP 01", protocolType: .shadowsocks, server: "a.com", port: 443, password: "p", method: "aes-128-gcm")
+        let jpTag = ConfigGenerator.outboundTag(for: jp)
         var settings = RoutingSettings.defaults
         settings.blockAds = false
         settings.policyGroups = [
@@ -472,16 +474,18 @@ extension RoutingConfigTests {
         let outbounds = try XCTUnwrap(root["outbounds"] as? [[String: Any]])
         func outbound(_ tag: String) -> [String: Any]? { outbounds.first { $0["tag"] as? String == tag } }
 
-        // 主组默认接到「手动选择」，且「手动选择」进入其成员（sing-box 要求 default ∈ outbounds）
-        XCTAssertEqual(outbound("机场主组")?["default"] as? String, "手动选择")
-        XCTAssertEqual((outbound("机场主组")?["outbounds"] as? [String])?.first, "手动选择")
-        // 指向主组的策略保持默认主组，未被强改（用户挑节点后经主组自然贯穿）
+        // 有机场策略组时不生成内置手动/自动选择
+        XCTAssertNil(outbound("手动选择"))
+        XCTAssertNil(outbound("自动选择"))
+        // 主组默认指向真实节点（App 当前选中的 JP 01），而非机场的「绕过代理」直连
+        XCTAssertEqual(outbound("机场主组")?["default"] as? String, jpTag)
+        // 指向主组的策略保持默认主组，未被强改（用户在主组挑节点后自然贯穿）
         XCTAssertEqual(outbound("国外媒体")?["default"] as? String, "机场主组")
         XCTAssertEqual(outbound("兜底")?["default"] as? String, "机场主组")
         // 首选直连的服务组保持机场意图（指向直连包装组），不被拉去代理
         XCTAssertEqual(outbound("微软服务")?["default"] as? String, "绕过代理")
-        // 兜底 final 走手动选择（顺带消除 urltest 作 final 导致的出站 IP 跳动）
-        XCTAssertEqual((root["route"] as? [String: Any])?["final"] as? String, "手动选择")
+        // final 走主组（顺带消除 urltest 作 final 导致的出站 IP 跳动）
+        XCTAssertEqual((root["route"] as? [String: Any])?["final"] as? String, "机场主组")
     }
 
     /// 成员全部解析不到时回退全部节点，绝不产出空组（空组会让内核校验失败）。

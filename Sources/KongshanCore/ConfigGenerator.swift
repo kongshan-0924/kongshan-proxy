@@ -120,6 +120,24 @@ public enum ConfigGenerator {
         "node-\(node.id.uuidString.lowercased())"
     }
 
+    /// 机场"轮辐"结构的主组：被 ≥2 个其它组当作"首个成员(默认)"引用、且自身是代理组
+    /// (非纯直连/拒绝包装)的那个，如 TAGSS。它汇聚全部节点、其它策略默认指向它，是用户挑主节点
+    /// 的地方。≥2 把汇聚型主组与只被引用一次的地区子组(香港/日本)区分开，避免误判。
+    /// AppState 也用它同步"当前节点"，故提取为可共享的纯函数。
+    public static func primaryGroupName(among groups: [PolicyGroup]) -> String? {
+        func isWrapper(_ g: PolicyGroup) -> Bool {
+            let ms = g.members.map { $0.uppercased() }
+            guard !ms.isEmpty else { return false }
+            return ms.allSatisfy { $0 == "DIRECT" } || ms.allSatisfy { $0 == "REJECT" || $0 == "REJECT-DROP" }
+        }
+        let proxyGroupNames = Set(groups.filter { !isWrapper($0) }.map(\.name))
+        var firstMemberRefs: [String: Int] = [:]
+        for g in groups { if let first = g.members.first { firstMemberRefs[first, default: 0] += 1 } }
+        return firstMemberRefs
+            .filter { proxyGroupNames.contains($0.key) && $0.value >= 2 }
+            .max { $0.value < $1.value }?.key
+    }
+
     public static func generate(_ input: ConfigInput) throws -> Data {
         guard !input.nodes.isEmpty else { throw ConfigGenerationError.noNodes }
 
@@ -135,110 +153,90 @@ public enum ConfigGenerator {
         }
 
         var outbounds = try input.nodes.map(outbound)
-        outbounds.append([
-            "type": "selector",
-            "tag": "手动选择",
-            "outbounds": nodeTags,
-            "default": selectedTag
-        ])
-        outbounds.append([
-            "type": "urltest",
-            "tag": "自动选择",
-            "outbounds": nodeTags,
-            "url": input.testURL,
-            "interval": "5m"
-        ])
 
-        // 策略组：配置自带的组（Netflix / 香港 …）或用户自建组。每组一个出站，
-        // 分流规则可指向它，托盘/代理页也能单独为它选节点（对应 Stash 的按策略分流）。
+        // 配置自带策略组（机场的 Netflix / 香港 … 或用户自建组）。
         let groups = (try? input.routing?.settings.validated().policyGroups) ?? []
         let nodeNameToTag = Dictionary(
             input.nodes.map { ($0.name, outboundTag(for: $0)) },
             uniquingKeysWith: { first, _ in first }
         )
-        let groupNames = Set(groups.map(\.name)).union(["手动选择", "自动选择", "自建"])
+        let hasAirportGroups = !groups.isEmpty
+        let masterGroup = primaryGroupName(among: groups)
 
-        // 机场常见"轮辐"结构：一个主组(如 TAGSS)汇聚全部节点、其它代理策略默认指向它，
-        // 而主组自身默认走"绕过代理"(直连) → 开了代理却全走直连、"手动选择"选的节点也不生效。
-        // 处理：只把这个主组默认接到"手动选择"，指向主组的策略(国外媒体→主组、兜底→主组)自然跟随，
-        // 用户在"手动选择"挑一次节点即可贯穿所有需代理的流量；地区子组/直连/拒绝组与显式选择都不动。
-        func wrapperKind(_ g: PolicyGroup) -> String? {
-            let ms = g.members.map { $0.uppercased() }
-            guard !ms.isEmpty else { return nil }
-            if ms.allSatisfy({ $0 == "DIRECT" }) { return "direct" }
-            if ms.allSatisfy({ $0 == "REJECT" || $0 == "REJECT-DROP" }) { return "reject" }
-            return nil
+        // 内置「手动选择/自动选择」只在机场没有自带策略组时生成，作为纯手动/自建节点的兜底选择器；
+        // 有机场组时完全不生成——用户直接在机场主组里挑主节点（对应 Stash：只用配置自带的策略组）。
+        var generatedNames = Set(groups.map(\.name))
+        if !hasAirportGroups {
+            outbounds.append([
+                "type": "selector", "tag": "手动选择",
+                "outbounds": nodeTags, "default": selectedTag
+            ])
+            outbounds.append([
+                "type": "urltest", "tag": "自动选择",
+                "outbounds": nodeTags, "url": input.testURL, "interval": "5m"
+            ])
+            generatedNames.formUnion(["手动选择", "自动选择"])
         }
-        let proxyGroupNames = Set(groups.filter { wrapperKind($0) == nil }.map(\.name))
-        // 主组 = 被 ≥2 个其它组当作"首个成员(默认)"引用、且自身是代理组的那个。≥2 把汇聚型主组
-        // 与只被引用一次的地区子组(香港/日本)区分开，避免误改地区组。
-        // ponytail: 轮辐结构的启发式；层级式(主组在根、被引用 0 次)配置识别不到主组，此时仅
-        //           final 走手动选择、代理仍可用，可日后按需增强。
-        var firstMemberRefs: [String: Int] = [:]
-        for g in groups { if let first = g.members.first { firstMemberRefs[first, default: 0] += 1 } }
-        let masterGroup = firstMemberRefs
-            .filter { proxyGroupNames.contains($0.key) && $0.value >= 2 }
-            .max { $0.value < $1.value }?.key
+        let manualTags = input.nodes.filter { $0.sourceID == nil }.map(outboundTag)
+        if !manualTags.isEmpty { generatedNames.insert("自建") }
+
+        // 主/兜底出站：有机场组→主组；识别不到主组(层级式机场)退到用户选的节点；无机场组→手动选择。
+        let primaryOutbound = hasAirportGroups ? (masterGroup ?? selectedTag) : "手动选择"
 
         for group in groups {
-            // 成员名解析成出站 tag；解析不到的丢弃，全丢光则回退到全部节点，
-            // 避免生成空组导致 sing-box 校验失败、内核起不来。
+            // 成员名解析成出站 tag；解析不到的丢弃，全丢光则回退到全部节点，避免空组让内核校验失败。
             var members = group.members.compactMap { member -> String? in
                 switch member.uppercased() {
                 case "DIRECT": return "direct"
                 case "REJECT", "REJECT-DROP": return "reject"
                 default:
                     if let tag = nodeNameToTag[member] { return tag }
-                    return groupNames.contains(member) ? member : nil
+                    return generatedNames.contains(member) ? member : nil
                 }
             }
             if members.isEmpty { members = nodeTags }
             switch group.kind {
             case .selector:
-                // 优先恢复该组自己记住的节点；不在成员里则回退。
                 let remembered = input.groupDefaults[group.name].flatMap { members.contains($0) ? $0 : nil }
-                var mem = members
                 let def: String
                 if group.name == masterGroup {
-                    // 主组默认接到"手动选择"：用户在"手动选择"挑一次节点，即可贯穿所有默认
-                    // 指向主组的策略与规则(国外媒体→主组、兜底→主组…)。
-                    if !mem.contains("手动选择") { mem.insert("手动选择", at: 0) }
-                    def = "手动选择"
+                    // 主组＝用户挑主节点的地方：默认必须指向真实节点（记住的→App 当前节点→首个节点成员），
+                    // 绝不默认走机场的"绕过代理"直连，否则开了代理仍全走直连。
+                    def = remembered
+                        ?? (members.contains(selectedTag) ? selectedTag : nil)
+                        ?? members.first { $0.hasPrefix("node-") }
+                        ?? members[0]
                 } else {
                     def = remembered ?? members[0]
                 }
                 outbounds.append([
-                    "type": "selector",
-                    "tag": group.name,
-                    "outbounds": mem,
-                    "default": def
+                    "type": "selector", "tag": group.name,
+                    "outbounds": members, "default": def
                 ])
             case .urltest:
                 outbounds.append([
-                    "type": "urltest",
-                    "tag": group.name,
-                    "outbounds": members,
-                    "url": input.testURL,
-                    "interval": "5m"
+                    "type": "urltest", "tag": group.name,
+                    "outbounds": members, "url": input.testURL, "interval": "5m"
                 ])
             }
         }
 
-        let manualTags = input.nodes.filter { $0.sourceID == nil }.map(outboundTag)
         if !manualTags.isEmpty {
-            let remembered = input.groupDefaults["自建"]
-                .flatMap { manualTags.contains($0) ? $0 : nil }
+            let remembered = input.groupDefaults["自建"].flatMap { manualTags.contains($0) ? $0 : nil }
             outbounds.append([
-                "type": "selector",
-                "tag": "自建",
-                "outbounds": manualTags,
-                "default": remembered ?? manualTags[0]
+                "type": "selector", "tag": "自建",
+                "outbounds": manualTags, "default": remembered ?? manualTags[0]
             ])
         }
         outbounds.append(["type": "direct", "tag": "direct"])
         outbounds.append(["type": "block", "tag": "reject"])
 
-        var route = try route(for: input.routing, outboundMode: input.outboundMode)
+        var route = try route(
+            for: input.routing,
+            outboundMode: input.outboundMode,
+            primaryOutbound: primaryOutbound,
+            availableGroups: generatedNames
+        )
         route["default_domain_resolver"] = "dns-cn"
         var prefixRules: [[String: Any]] = []
         if input.outboundMode == .rule {
@@ -258,7 +256,7 @@ public enum ConfigGenerator {
 
         let root: [String: Any] = [
             "log": ["level": "info", "timestamp": true],
-            "dns": try dns(for: input),
+            "dns": try dns(for: input, primaryOutbound: primaryOutbound),
             "inbounds": try inbounds(for: input),
             "outbounds": outbounds,
             "route": route,
@@ -272,7 +270,7 @@ public enum ConfigGenerator {
         return try encode(root)
     }
 
-    private static func dns(for input: ConfigInput) throws -> [String: Any] {
+    private static func dns(for input: ConfigInput, primaryOutbound: String) throws -> [String: Any] {
         let endpoints = try input.dnsSettings.endpoints()
         var servers: [[String: Any]] = []
 
@@ -298,7 +296,7 @@ public enum ConfigGenerator {
         var remote = dohServer(
             endpoint: endpoints.remote,
             tag: "dns-remote",
-            detour: "手动选择"
+            detour: primaryOutbound
         )
         if !endpoints.remote.hostIsIPAddress {
             remote["domain_resolver"] = "dns-cn"
@@ -424,12 +422,14 @@ public enum ConfigGenerator {
 
     private static func route(
         for routing: RoutingConfiguration?,
-        outboundMode: OutboundMode = .rule
+        outboundMode: OutboundMode = .rule,
+        primaryOutbound: String = "手动选择",
+        availableGroups: Set<String> = []
     ) throws -> [String: Any] {
         // 全局 / 直连不参与分流：不加载任何规则集，直接给一个兜底出口。
         switch outboundMode {
         case .global:
-            return ["rules": [], "final": "手动选择"]
+            return ["rules": [], "final": primaryOutbound]
         case .direct:
             return ["rules": [], "final": "direct"]
         case .rule:
@@ -437,24 +437,22 @@ public enum ConfigGenerator {
         }
 
         guard let routing else {
-            return ["rules": [], "final": "手动选择"]
+            return ["rules": [], "final": primaryOutbound]
         }
 
         let settings = try routing.settings.validated()
         var rules = settings.customRules
             .filter(\.enabled)
-            .map(customRouteRule)
+            .map { customRouteRule($0, fallback: primaryOutbound) }
 
         if let bypass = bypassRule(for: settings) {
             rules.append(bypass)
         }
 
         // 订阅自带规则：优先级低于用户规则与绕过，高于内置的私有网段/中国直连。
-        // 目标必须能解析到已存在的出站，否则内核校验会失败，因此逐条过滤。
+        // 目标必须能解析到已存在的出站（只认真正生成的出站），否则内核校验会失败，因此逐条过滤。
         if settings.useSubscriptionRules {
-            let available = Set(
-                ["direct", "reject", "手动选择", "自动选择", "自建"] + settings.policyGroups.map(\.name)
-            )
+            let available = availableGroups.union(["direct", "reject"])
             rules.append(contentsOf: mergedSubscriptionRules(routing.subscriptionRules, available: available))
         }
         rules.append([
@@ -488,7 +486,7 @@ public enum ConfigGenerator {
         return [
             "rules": rules,
             "rule_set": ruleSets,
-            "final": "手动选择"
+            "final": primaryOutbound
         ]
     }
 
@@ -502,13 +500,13 @@ public enum ConfigGenerator {
         }
     }
 
-    private static func customRouteRule(_ rule: CustomRouteRule) -> [String: Any] {
+    private static func customRouteRule(_ rule: CustomRouteRule, fallback: String) -> [String: Any] {
         let field = ruleField(for: rule.type)
 
         let outbound: String
         switch rule.action {
         case .direct: outbound = "direct"
-        case .proxy: outbound = rule.proxyGroup ?? "自动选择"
+        case .proxy: outbound = rule.proxyGroup ?? fallback
         case .reject: outbound = "reject"
         }
         return [field: [rule.value], "action": "route", "outbound": outbound]

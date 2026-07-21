@@ -1012,12 +1012,20 @@ final class AppState {
     @ObservationIgnored private static let manualGroupID = UUID(uuidString: "00000000-0000-0000-0000-0000000A0001")!
     @ObservationIgnored private static let autoGroupID = UUID(uuidString: "00000000-0000-0000-0000-0000000A0002")!
 
-    /// 代理页/托盘展示的策略：内置「手动选择/自动选择」+ 当前配置自带的策略组。
+    /// 当前配置的主组名（机场轮辐主组，如 TAGSS）——用户在这里挑主节点。
+    /// 与 ConfigGenerator 用同一套识别逻辑，保证 App 与生成的 config 一致。
+    var primaryGroupName: String? {
+        ConfigGenerator.primaryGroupName(among: activeConfigPolicyGroups)
+    }
+
+    /// 代理页/托盘展示的策略：有机场自带策略组时只显示它们（用户在主组里挑主节点，对应 Stash）；
+    /// 没有机场组时才回退内置「手动选择/自动选择」，供纯手动/自建节点选择。
     var displayPolicyGroups: [PolicyGroup] {
-        [
+        if !activeConfigPolicyGroups.isEmpty { return activeConfigPolicyGroups }
+        return [
             PolicyGroup(id: Self.manualGroupID, name: "手动选择", kind: .selector),
             PolicyGroup(id: Self.autoGroupID, name: "自动选择", kind: .urltest)
-        ] + activeConfigPolicyGroups
+        ]
     }
 
     /// 某个策略组里可展示/可选的成员。空成员＝该组含全部节点；
@@ -1046,7 +1054,15 @@ final class AppState {
         if let name = groupSelections[group], options.contains(where: { $0.name == name }) {
             return name
         }
-        if group == "手动选择" { return selectedNode?.name ?? testableNodes.first?.name }
+        // 主组 / 内置手动选择：默认跟随全局当前节点，回退到首个「节点」成员（不落到直连/子组引用上）。
+        if group == "手动选择" || group == primaryGroupName {
+            if let node = selectedNode, options.contains(where: { $0.name == node.name }) {
+                return node.name
+            }
+            if let firstNode = options.first(where: { if case .node = $0 { return true } else { return false } }) {
+                return firstNode.name
+            }
+        }
         return options.first?.name
     }
 
@@ -1085,12 +1101,14 @@ final class AppState {
             }
         }
         groupSelections[group] = name
-        if group == "手动选择", let node = activeConfigNodes.first(where: { $0.name == name }) {
+        // 在"主组"(或内置手动选择)里挑节点＝选主节点：同步全局当前节点，供仪表盘与连通性探测使用。
+        let isPrimaryPick = group == "手动选择" || group == primaryGroupName
+        if isPrimaryPick, let node = activeConfigNodes.first(where: { $0.name == name }) {
             selectedNodeID = node.id
         }
         // 组选择要落盘，否则重启后按策略分流的选择全部回退。
         try? await persistSettings()
-        if group == "手动选择", status == .on {
+        if isPrimaryPick, status == .on {
             connectivity = [:]
             Task { await probeConnectivity() }
         }
@@ -1106,26 +1124,38 @@ final class AppState {
 
     /// 开启接管后实测当前节点到固定目标的延迟。走 Clash API 的 delay 接口，
     /// 因此测的是「经该节点访问目标」的真实往返，而不是节点本身的握手延迟。
+    // 用 gstatic 的 generate_204（各客户端通用的连通性探测端点，比 www.google.com 稳，
+    // 不易被重定向/拦截误判为不可达）；GitHub 用其主页。
     static let connectivityTargets: [(name: String, url: String)] = [
-        ("Google", "https://www.google.com/generate_204"),
+        ("Google", "http://www.gstatic.com/generate_204"),
         ("GitHub", "https://github.com/")
     ]
 
     func probeConnectivity() async {
         guard !isProbingConnectivity else { return }
-        guard let clashAPIClient, status == .on, let node = selectedNode else {
+        guard let clashAPIClient, status == .on else {
+            connectivity = [:]
+            return
+        }
+        // 测"真实会走的出站"：有机场组就测主组(它当前选中的节点＝流量真正会走的那个)，
+        // 否则测全局当前节点。避免测到一个与实际路由不同步的节点而误报不可达。
+        let probeTag: String
+        if let primary = primaryGroupName {
+            probeTag = primary
+        } else if let node = selectedNode {
+            probeTag = ConfigGenerator.outboundTag(for: node)
+        } else {
             connectivity = [:]
             return
         }
         isProbingConnectivity = true
         defer { isProbingConnectivity = false }
 
-        let tag = ConfigGenerator.outboundTag(for: node)
         var results: [String: Int?] = [:]
         for target in Self.connectivityTargets {
             guard let url = URL(string: target.url) else { continue }
             do {
-                results[target.name] = try await clashAPIClient.delay(node: tag, testURL: url)
+                results[target.name] = try await clashAPIClient.delay(node: probeTag, testURL: url)
             } catch {
                 results.updateValue(nil, forKey: target.name)
             }
