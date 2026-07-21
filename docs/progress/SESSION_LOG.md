@@ -959,3 +959,9 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 实测：CPU 从持续 100% → 空闲 0%（启动一次性 ~2s 峰值）；RSS 271MB → ~141MB。
 这也解释了之前「系统代理/TUN 开启很慢很卡」——App 一直 100% CPU，什么操作都卡，根本不是启动路径的问题。
 测试 167 通过；0.1.15 装 /Applications。
+
+## 2026-07-21 会话收尾（上下文清理）
+- TUN 已可正常开启且快（自杀式 pkill 修复后）。系统代理/TUN 的「很卡」根因是托盘菜单 O(n²) 死循环渲染，已修（0.1.15，CPU 100%→0%，RSS→141MB）。
+- 唯一遗留问题：**开 TUN 后仪表盘出站 IP 一直跳/一会一变**（用户最后反馈，未排查）。假设与修法见 NEXT_STEPS 顶部（多半是 final=自动选择 urltest 或规则指向 urltest 组）。
+- 当前版本 0.1.15，已装 /Applications 并运行，代码推送 GitHub（eccc2c9，main 与远端一致）。
+- 提醒：CleanMyMac 反复删数据/App，用户需在其排除列表加入 kongshan 目录与 .app。

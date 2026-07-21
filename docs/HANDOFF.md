@@ -63,3 +63,32 @@
   4. 一个生效配置只用它自己的节点/策略/规则；多订阅不再合并成一个大池。
 - 下一步：按 NEXT_STEPS 真机验证 TUN/测速/配置切换，再继续 M4 人工验收。
 - 接手方式：先读本节 + SESSION_LOG 2026-07-21 两段。改生成/选择逻辑前，理解 activeConfig* 过滤链路与 GroupOption/memberTag 的 名字↔tag 映射；改 TUN 前记住 macOS utun 名约束。
+
+## 2026-07-21（最新 · 上下文清理前）当前状态 0.1.15
+
+### 本轮关键成果
+- **找到并修复「很卡/CPU 100%」真凶**：托盘菜单 MenuBarView 一次性建出所有子菜单（15 组×最多342节点≈5000 项），且每个 optionButton 调 isSelected→selectedMemberName→groupOptions 重建全节点字典（O(n)），每次建菜单 O(n²)，SwiftUI 反复重求值 → 单核持续 100% CPU + RSS 271MB。**这让整个 App（含开系统代理/TUN）都卡，根本不是代理路径问题**。修复：内置组固定 UUID + ForEach id:\.name；选中项每组只算一次、optionButton 收 selected:Bool（O(1)/项）；子菜单每组最多 40 项。实测 CPU 100%→0%、RSS→141MB。
+- **TUN 已可正常开启且快**：之前的 EOF 是我上一版的自杀式 `pkill -f <binary>`（匹配到执行启动命令的 shell 自己）导致，改为 `pgrep -x sing-box` + 路径核对。真机确认 TUN 能起、路由正常。
+- 系统代理/TUN 开启慢的其他优化：订阅规则合并 4780→166（config 1MB→470KB）、生成移出主线程、规则集缓存优先+15s超时、health 上限放宽到 ~6s、pgrep 清理只在真杀到残留才 sleep。
+- 「打不开/启动没反应」：多显示器下窗口被状态还原到外接屏角落 → 去掉 frameAutosave、isRestorable=false、每次居中到主屏、最小化先 deminiaturize。
+- 版本自增（VERSION 文件 + build_app.sh 用 PlistBuddy 写入）、发布 dist 并 cp 到 /Applications 运行。设置-关于显示版本。
+
+### 唯一已知未解决问题
+- **开 TUN 后仪表盘出站 IP 一直跳/一会一变**（用户最后反馈）。疑 `final: 自动选择`(urltest) 或订阅规则指向 urltest 组。排查方案见 NEXT_STEPS 顶部。
+
+### 环境（关键）
+- **CleanMyMac 5 在后台反复删除** kongshan 的数据目录和 .app，已导致多次数据/App 丢失。必须让用户在 CleanMyMac 排除 `~/Library/Application Support/kongshan`、`/Applications/kongshan.app`、项目 `dist/`。
+- GitHub 私有仓库：`kongshan-0924/kongshan-proxy`（remote origin 已设，main 与远端一致）。基线标签 `baseline-20260721`。用户 gh 登录名是 Ks-Ht，但仓库归 kongshan-0924（有写权限）。
+- 多显示器：笔记本(主屏/菜单栏) + 上方大外接屏。
+
+### 关键结论（避免重复踩坑）
+1. SwiftUI ForEach 的数据源若每次返回新身份（随机 UUID）或 body 里做 O(n) 计算×n 项，会导致持续重渲染/100% CPU。计算属性别在 body 热路径里重建大字典。用 `sample <pid>` 抓栈最快定位。
+2. TUN 启动的 osascript shell 命令行里含内核路径，**清理残留内核必须按进程名 `pgrep -x sing-box` 匹配，不能 `pkill -f <路径>`**（会杀自己）。
+3. macOS TUN 接口名必须 utunN 或不指定（我们不指定，自动分配）。
+4. 多显示器 + macOS 窗口状态还原会把窗口丢到看不见的屏；已用 isRestorable=false + 主屏居中解决。
+5. 测速默认 TCP 握手（不需内核）；系统代理/TUN 开启的规则集用缓存优先（别每次联网下载）。
+
+### 测试/验证
+- `swift test` 167 通过（1 跳过）。空闲 CPU 0%、RSS ~141MB。
+- 真机：TUN 可开、路由正常。系统代理待用户再确认顺畅（CPU 已不再被菜单吃满）。
+- 下一位接手：先读本节 + NEXT_STEPS + SESSION_LOG 2026-07-21 各段。动 UI 计算属性前想清楚是否在 ForEach 热路径。
