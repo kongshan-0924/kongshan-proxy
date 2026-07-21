@@ -900,3 +900,13 @@
    - 实测窗口从 (445,-1414)/屏1 变为 (375,125)/屏0，可见。
 
 测试 166 通过；0.1.6/build 106 已装到 /Applications 并运行。
+
+## 2026-07-21 修 TUN 又回到 EOF 失败（自杀式 pkill，0.1.7）
+
+真机 sing-box-tun.log 又是 `FATAL decode config at /dev/stdin: EOF`。根因是上一版给 TUN 启动加的
+预清理 `pkill -f <binary>`：`do shell script` 执行本命令的 shell，其命令行里也含内核路径
+（后段 `... | <binary> run -c /dev/stdin`），pkill -f 把这个 shell 连同后续启动一起杀了，
+配置写不进 FIFO，内核只读到 EOF；App 端等健康检查超时再回滚——就是「转圈很久最后失败」。
+改为按进程名精确匹配 `pgrep -x sing-box` 再核对可执行路径只杀自己的核，shell 名为 sh 不会被匹配。
+测试加回归断言：含 `pgrep -x sing-box`、不含 `pkill -f`。规则集缓存已存在（下载非瓶颈）。
+166 通过；0.1.7 已装 /Applications。

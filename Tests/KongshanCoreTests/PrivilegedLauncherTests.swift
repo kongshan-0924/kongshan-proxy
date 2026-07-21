@@ -23,8 +23,11 @@ final class PrivilegedLauncherTests: XCTestCase {
         XCTAssertTrue(script.contains("Kong'\\\\''s App"))
         XCTAssertTrue(script.contains("kong'\\\\''s log.txt"))
         XCTAssertFalse(script.contains("runtime-secret"))
-        // 回归防护：启动前必须先清掉本 App 残留的 root 内核（孤儿占路由会让新 TUN 起不来）。
-        XCTAssertTrue(script.contains("/usr/bin/pkill -f"))
+        // 回归防护：启动前先清掉本 App 残留的 root 内核（孤儿占路由会让新 TUN 起不来）。
+        // 必须按进程名匹配（pgrep -x sing-box），绝不能用 pkill -f 匹配完整命令行——
+        // 那会连正在执行本命令、命令行里也含内核路径的 shell 一起杀掉，导致配置写不进、内核读到 EOF。
+        XCTAssertTrue(script.contains("pgrep -x sing-box"))
+        XCTAssertFalse(script.contains("pkill -f"))
     }
 
     func testStopCommandRechecksProcessCommandBeforeSendingInterrupt() throws {

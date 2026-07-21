@@ -122,13 +122,21 @@ public enum PrivilegedCommandBuilder {
 
     public static func start(binaryURL: URL, fifoURL: URL, logURL: URL) -> String {
         let binary = shellQuote(binaryURL.path)
+        // 先清掉本 App 之前残留的 root 内核：失败重试或没正常停止会留下孤儿进程，
+        // 它们仍占着 utun 与默认路由，新内核 auto_route 会 `add route: file exists` 启动失败
+        //（现象就是点 TUN 一直转圈最后失败）。和本次启动同在一个授权里完成，只需输一次密码。
+        //
+        // 关键：必须按「进程名」精确匹配（pgrep -x sing-box），不能用 pkill -f 匹配完整命令行——
+        // 正在执行本命令的 shell 的命令行里也含内核路径，会把自己（连带后面的启动）一起杀掉，
+        // 导致配置写不进 FIFO、内核只读到 EOF（decode config at /dev/stdin: EOF）。
+        // 再对每个同名进程核对可执行路径，只杀我们自己的，绝不误伤别的 sing-box。
+        let cleanup = "for p in $(/usr/bin/pgrep -x sing-box 2>/dev/null); do "
+            + "case \"$(/bin/ps -p \"$p\" -o command= 2>/dev/null)\" in "
+            + "*\(binary)*) /bin/kill -INT \"$p\" 2>/dev/null ;; esac; done"
         let command = [
             "umask 077",
             "export PATH=/usr/bin:/bin:/usr/sbin:/sbin",
-            // 先清掉本 App 之前残留的 root 内核：失败重试或没正常停止会留下孤儿进程，
-            // 它们仍占着 utun 与默认路由，新内核 auto_route 会 `add route: file exists` 启动失败
-            //（现象就是点 TUN 一直转圈最后失败）。和本次启动同在一个授权里完成，只需输一次密码。
-            "/usr/bin/pkill -f \(binary) 2>/dev/null || true",
+            cleanup,
             "/bin/sleep 1",
             // cat 的 stdin/stderr 必须一并重定向：只要后台管道还持有 osascript 的捕获描述符，
             // `do shell script` 就会一直等下去，launch 永不返回，配置也就写不进 FIFO，
