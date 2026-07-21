@@ -889,3 +889,14 @@
 4. 其他提速：规则集缓存优先 + 后台日更；启动路径不再有可预见的网络等待。
 
 测试 166 通过；0.1.2/build 102 发布 dist、运行中。
+
+## 2026-07-21 修「新版打不开/启动没反应」（0.1.6）
+
+现象：点了没反应。两个叠加原因：
+1. CleanMyMac 5 后台代理把 dist/kongshan.app 整个删了（进程还在跑但没了 bundle，既看不到也无法重开）。已改为安装并从 /Applications 运行；根治需用户在 CleanMyMac 里排除该目录。
+2. 多显示器：主屏是笔记本（屏0，菜单栏所在），另有大外接屏（屏1）在其上方。窗口被 macOS 窗口状态还原（Resume）+ 旧的 frameAutosave 还原到外接屏一角（CG Y=-1414），用户在笔记本屏看不到。
+   - 去掉 setFrameAutosaveName；window.isRestorable=false 关掉状态还原；showMainWindow 里在激活前捕获主屏、showWindow 后（含 next-runloop 再补一次）把窗口居中到主屏；最小化先 deminiaturize。
+   - 清掉残留：defaults 的 "NSWindow Frame kongshan.main" 与 Saved Application State。
+   - 实测窗口从 (445,-1414)/屏1 变为 (375,125)/屏0，可见。
+
+测试 166 通过；0.1.6/build 106 已装到 /Applications 并运行。

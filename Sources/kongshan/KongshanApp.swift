@@ -55,22 +55,38 @@ final class KongshanAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     func showMainWindow() {
         let controller = mainWindowController ?? makeMainWindowController()
         mainWindowController = controller
+        // 在激活之前捕获主屏（菜单栏 / 程序坞所在屏，也就是用户启动时看的那块）。
+        // 一旦某个窗口被置为 key，NSScreen.main 会跟着窗口跑，就取不准了。
+        let homeScreen = NSScreen.main ?? NSScreen.screens.first
         // .accessory 策略下应用没有菜单栏，⌘Q/⌘W 与窗口菜单都不可用。
         // 主窗口打开期间切到 .regular（同时出现 Dock 图标），关闭后切回常驻托盘形态。
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
-        // 最小化的窗口用 makeKeyAndOrderFront 是唤不出来的，必须先取消最小化，
-        // 否则从程序坞点图标没反应。
-        if let window = controller.window, window.isMiniaturized {
-            window.deminiaturize(nil)
-        }
+        guard let window = controller.window else { return }
+        // 最小化的窗口用 makeKeyAndOrderFront 唤不出来，必须先取消最小化。
+        if window.isMiniaturized { window.deminiaturize(nil) }
         controller.showWindow(nil)
-        controller.window?.makeKeyAndOrderFront(nil)
-        // 外接屏拔掉后，自动保存的 frame 可能整个落在已消失的屏幕上，
-        // 表现为「点了没窗口」。不在任何屏幕上就重新居中。
-        if let window = controller.window, window.screen == nil {
-            window.center()
-        }
+        window.makeKeyAndOrderFront(nil)
+        // 摆到主屏。立即摆一次，再延到下一个 runloop 摆一次——SwiftUI 承载视图会在
+        // 布局完成后调整窗口尺寸/位置，早于它做会被覆盖，多显示器下就表现为「窗口跑到外接屏/看不到」。
+        placeOnScreen(window, homeScreen)
+        DispatchQueue.main.async { [weak self] in self?.placeOnScreen(window, homeScreen) }
+    }
+
+    /// 窗口若没有完整落在指定屏幕的可见区域内，就居中到该屏。
+    private func placeOnScreen(_ window: NSWindow, _ screen: NSScreen?) {
+        guard let screen, !screen.visibleFrame.contains(window.frame) else { return }
+        let visible = screen.visibleFrame
+        let size = window.frame.size
+        window.setFrame(
+            NSRect(
+                x: visible.midX - size.width / 2,
+                y: visible.midY - size.height / 2,
+                width: size.width,
+                height: size.height
+            ),
+            display: true
+        )
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -101,7 +117,10 @@ final class KongshanAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         window.minSize = NSSize(width: 880, height: 560)
         // 菜单栏应用关闭窗口后仍需常驻，窗口对象必须留存以便再次打开。
         window.isReleasedWhenClosed = false
-        window.setFrameAutosaveName("kongshan.main")
+        // 不做跨会话位置记忆：既不用 frameAutosaveName，也关掉 macOS 的窗口状态还原（Resume）。
+        // 多显示器下它们会把窗口还原到另一台外接屏 / 已断开的屏幕，用户点了却看不到，
+        // 表现为「打不开 / 没反应」。改为每次打开时居中到主屏（见 showMainWindow）。
+        window.isRestorable = false
         window.delegate = self
         window.contentView = NSHostingView(
             rootView: MainWindowView().environment(appState)
