@@ -866,3 +866,15 @@
 - Clash 配置里 GEOSITE/GEOIP/RULE-SET 规则仍不转换（converter 只认 DOMAIN*/IP-CIDR/PROCESS-NAME），靠内置 geosite-cn/geoip-cn/ads/private 兜底；规则页展示的是可解析规则。
 - 子组选择（如主组指向地区组）经 Clash API 生效并持久化为成员名，但生成默认仍取该组首个成员——重启后主组的子组选择由 groupDefaults 的 tag 恢复（子组名即 tag），OK。
 - 升级会一次性重置策略组选择（旧 UUID 值配不上节点名），用户重选即可。
+
+## 2026-07-21 — 用户再次查询最新进度
+
+- 已完成：汇总 HANDOFF「配置为中心」段 + PROGRESS/NEXT 给用户。
+- 修改文件：无。
+
+## 2026-07-21 — 手动选择 UUID 显示修复 + 托盘菜单收窄
+
+- 已完成：根因是 groupSelections 旧版存节点 UUID，UI 直接显示；加载时 sanitize 迁成节点名；托盘短标题/截断。
+- 修改：AppState.swift、MenuBarView.swift、PolicyGroupsView.swift、AppStateTests。
+- 测试：swift test 166 通过 0 失败（1 skip）。
+- 下一步：真机确认托盘「手动选择」显示节点名、菜单宽度。

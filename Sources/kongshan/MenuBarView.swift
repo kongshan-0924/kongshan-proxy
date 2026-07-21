@@ -2,14 +2,15 @@ import AppKit
 import KongshanCore
 import SwiftUI
 
-/// 菜单栏菜单。参考 Stash 的操作逻辑：顶部是仪表盘入口与测速全部，
-/// 接管方式与出站模式分开，策略组各自有子菜单可单独指定节点并显示延迟。
-/// 菜单是瞬时的，不建立任何 Clash WebSocket。
+/// 菜单栏菜单。短标题 + 截断节点名，避免状态栏下拉过宽。
 struct MenuBarView: View {
     @Environment(AppState.self) private var state
 
+    private static let titleMemberLimit = 18
+    private static let optionNameLimit = 36
+
     var body: some View {
-        Text(state.statusText)
+        Text(compactStatusText)
 
         Button("打开仪表盘") { openMainWindow() }
             .keyboardShortcut("d")
@@ -18,11 +19,11 @@ struct MenuBarView: View {
             Task { await state.testAllDelays() }
         }
         .keyboardShortcut("t")
-        .disabled(state.nodes.isEmpty || state.isBusy || state.isTestingAllDelays)
+        .disabled(state.testableNodes.isEmpty || state.isBusy || state.isTestingAllDelays)
 
         Divider()
 
-        Menu("出站模式：\(state.outboundMode.displayName)") {
+        Menu("出站模式") {
             Picker("出站模式", selection: outboundModeBinding) {
                 ForEach(OutboundMode.allCases, id: \.self) { mode in
                     Text(mode.displayName).tag(mode)
@@ -33,16 +34,14 @@ struct MenuBarView: View {
         }
         .disabled(state.isBusy || !state.isReady)
 
-        // 两种接管方式互不排斥，各自一个勾选项
-        Toggle(ProxyMode.systemProxy.displayName, isOn: modeBinding(.systemProxy))
+        Toggle("系统代理", isOn: modeBinding(.systemProxy))
             .keyboardShortcut("e")
             .disabled(state.isBusy || !state.isReady)
 
-        Toggle(ProxyMode.tun.displayName, isOn: modeBinding(.tun))
+        Toggle("TUN", isOn: modeBinding(.tun))
             .keyboardShortcut("u")
             .disabled(state.isBusy || !state.isReady)
 
-        // 内核可能因测速被拉起但没有接管，这里给一个明确的停止入口
         if state.isOn, state.activeModes.isEmpty {
             Button("停止内核") { Task { await state.stop() } }
                 .disabled(state.isBusy)
@@ -50,9 +49,9 @@ struct MenuBarView: View {
 
         Divider()
 
-        // 每个可手动指定的策略独立选成员，右侧显示上次测速结果
+        // 仅 selector；标题截断选中成员，避免 UUID/长节点名撑宽整栏
         ForEach(state.displayPolicyGroups.filter { $0.kind == .selector }) { group in
-            Menu("\(group.name)：\(state.selectedMemberName(in: group.name) ?? "未选择")") {
+            Menu(menuTitle(for: group)) {
                 optionMenuContent(for: group)
             }
             .disabled(state.isBusy || state.testableNodes.isEmpty)
@@ -75,17 +74,45 @@ struct MenuBarView: View {
 
         if let message = state.errorMessage ?? state.warnings.last {
             Divider()
-            Button(message.count > 48 ? String(message.prefix(48)) + "…" : message) {
+            Button(Self.ellipsis(message, limit: 40)) {
                 openMainWindow()
             }
         }
 
         Divider()
 
-        Button("退出 kongshan") {
+        Button("退出") {
             NSApplication.shared.terminate(nil)
         }
         .keyboardShortcut("q")
+    }
+
+    private var compactStatusText: String {
+        switch state.status {
+        case .off:
+            return "已关闭"
+        case .starting:
+            return "启动中…"
+        case .stopping:
+            return "关闭中…"
+        case .on where state.activeModes.isEmpty:
+            return "内核就绪"
+        case .on:
+            let modes = [ProxyMode.systemProxy, .tun]
+                .filter(state.activeModes.contains)
+                .map { $0 == .tun ? "TUN" : "系统代理" }
+            return modes.isEmpty ? "已开启" : modes.joined(separator: "+")
+        case .failed:
+            return "失败"
+        }
+    }
+
+    private func menuTitle(for group: PolicyGroup) -> String {
+        let member = state.selectedMemberName(in: group.name).map {
+            Self.ellipsis($0, limit: Self.titleMemberLimit)
+        } ?? "未选择"
+        let groupLabel = Self.ellipsis(group.name, limit: 12)
+        return "\(groupLabel)：\(member)"
     }
 
     @ViewBuilder
@@ -104,22 +131,28 @@ struct MenuBarView: View {
         Button {
             Task { await state.select(optionName: option.name, in: group) }
         } label: {
+            let label = Self.ellipsis(option.name, limit: Self.optionNameLimit)
             let suffix: String = {
                 if case let .node(node) = option {
                     switch state.delays[node.id] {
-                    case let .some(.some(value)): return "   \(value) ms"
-                    case .some(.none): return "   超时"
+                    case let .some(.some(value)): return "  \(value)ms"
+                    case .some(.none): return "  超时"
                     case .none: return ""
                     }
                 }
                 return ""
             }()
             if state.isSelected(option, in: group) {
-                Label("\(option.name)\(suffix)", systemImage: "checkmark")
+                Label("\(label)\(suffix)", systemImage: "checkmark")
             } else {
-                Text("\(option.name)\(suffix)")
+                Text("\(label)\(suffix)")
             }
         }
+    }
+
+    private static func ellipsis(_ text: String, limit: Int) -> String {
+        guard text.count > limit, limit > 1 else { return text }
+        return String(text.prefix(limit - 1)) + "…"
     }
 
     private func openMainWindow() {

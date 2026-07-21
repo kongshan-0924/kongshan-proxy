@@ -987,10 +987,53 @@ final class AppState {
     private(set) var groupSelections: [String: String] = [:]
 
     /// 某组当前选中的成员名；未记录时回退默认（手动选择用全局节点，其余用首个成员）。
+    /// 兼容旧版把节点 UUID 写进 groupSelections 的设置文件：能解析则显示节点名。
     func selectedMemberName(in group: String) -> String? {
-        if let name = groupSelections[group] { return name }
+        if let raw = groupSelections[group], let resolved = resolveMemberSelection(raw, in: group) {
+            return resolved
+        }
         if group == "手动选择" { return selectedNode?.name ?? testableNodes.first?.name }
         return displayPolicyGroups.first { $0.name == group }.flatMap { groupOptions($0).first?.name }
+    }
+
+    /// 把历史 UUID / 节点 tag / 成员名统一解析成可展示的成员名；无效则 nil。
+    private func resolveMemberSelection(_ raw: String, in group: String) -> String? {
+        let options = displayPolicyGroups.first { $0.name == group }.map(groupOptions) ?? []
+        let validNames = Set(options.map(\.name))
+        if validNames.contains(raw) { return raw }
+        // 旧版：值为节点 UUID 字符串
+        if let uuid = UUID(uuidString: raw),
+           let node = activeConfigNodes.first(where: { $0.id == uuid }),
+           validNames.contains(node.name) || options.isEmpty {
+            return node.name
+        }
+        // 旧版/误存：值为 outbound tag `node-<uuid>`
+        if raw.hasPrefix("node-"),
+           let uuid = UUID(uuidString: String(raw.dropFirst("node-".count))),
+           let node = activeConfigNodes.first(where: { $0.id == uuid }),
+           validNames.contains(node.name) || options.isEmpty {
+            return node.name
+        }
+        return nil
+    }
+
+    /// 清洗持久化的组选择：UUID/tag 迁成节点名，无效项删除，并回写磁盘。
+    private func sanitizeGroupSelections(persist: Bool = true) async {
+        var cleaned: [String: String] = [:]
+        for (group, raw) in groupSelections {
+            if let name = resolveMemberSelection(raw, in: group) {
+                cleaned[group] = name
+            }
+        }
+        // 手动选择：用当前节点名补上，避免菜单显示空或陈旧 UUID
+        if cleaned["手动选择"] == nil, let name = selectedNode?.name {
+            cleaned["手动选择"] = name
+        }
+        guard cleaned != groupSelections else { return }
+        groupSelections = cleaned
+        if persist {
+            try? await persistSettings()
+        }
     }
 
     /// 选中成员是节点时返回它（供托盘/副标题展示）；是子组则返回 nil。
@@ -1018,7 +1061,9 @@ final class AppState {
 
     /// 为某策略组切换成员（节点或子组）。「手动选择」选中节点时同步全局当前节点。
     func select(optionName name: String, in group: String) async {
-        guard let tag = memberTag(name) else { return }
+        // 入口统一解析：允许误传 UUID / node-tag，界面只存可读节点名。
+        let memberName = resolveMemberSelection(name, in: group) ?? name
+        guard let tag = memberTag(memberName) else { return }
         if let clashAPIClient, status == .on {
             do {
                 try await clashAPIClient.select(node: tag, in: group)
@@ -1027,8 +1072,8 @@ final class AppState {
                 return
             }
         }
-        groupSelections[group] = name
-        if group == "手动选择", let node = activeConfigNodes.first(where: { $0.name == name }) {
+        groupSelections[group] = memberName
+        if group == "手动选择", let node = activeConfigNodes.first(where: { $0.name == memberName }) {
             selectedNodeID = node.id
         }
         // 组选择要落盘，否则重启后按策略分流的选择全部回退。
@@ -1578,6 +1623,7 @@ final class AppState {
             routingSettings = try JSONDecoder().decode(RoutingSettings.self, from: data).validated()
         }
         ensureActiveConfig()
+        await sanitizeGroupSelections(persist: true)
     }
 
     private func persistSubscriptions() async throws {
@@ -1947,7 +1993,8 @@ final class AppState {
     /// 把持久化的「组名 → 成员名」翻译成配置里的出站 tag；解析不到的丢弃。
     private func resolvedGroupDefaults() -> [String: String] {
         var defaults: [String: String] = [:]
-        for (group, name) in groupSelections {
+        for (group, raw) in groupSelections {
+            let name = resolveMemberSelection(raw, in: group) ?? raw
             if let tag = memberTag(name) { defaults[group] = tag }
         }
         return defaults

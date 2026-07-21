@@ -63,3 +63,9 @@
   4. 一个生效配置只用它自己的节点/策略/规则；多订阅不再合并成一个大池。
 - 下一步：按 NEXT_STEPS 真机验证 TUN/测速/配置切换，再继续 M4 人工验收。
 - 接手方式：先读本节 + SESSION_LOG 2026-07-21 两段。改生成/选择逻辑前，理解 activeConfig* 过滤链路与 GroupOption/memberTag 的 名字↔tag 映射；改 TUN 前记住 macOS utun 名约束。
+
+## 2026-07-21 手动选择 UUID + 托盘宽度
+
+- 已完成：groupSelections 旧 UUID 迁移为节点名；托盘菜单短文案与截断。
+- 测试：166 通过。
+- 分支：feature/menu-display-and-uuid-fix。

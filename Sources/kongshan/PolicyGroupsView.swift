@@ -88,7 +88,12 @@ struct PolicyGroupsView: View {
 
     private func subtitle(for group: PolicyGroup) -> String {
         if group.kind == .urltest { return "自动选路 · \(state.groupOptions(group).count) 个" }
-        return state.selectedMemberName(in: group.name) ?? "未选择"
+        let name = state.selectedMemberName(in: group.name) ?? "未选择"
+        // 左列宽度有限，过长（含历史 UUID）中间截断
+        if name.count > 22 {
+            return String(name.prefix(10)) + "…" + String(name.suffix(8))
+        }
+        return name
     }
 
     private func groupSymbol(_ group: PolicyGroup) -> String {

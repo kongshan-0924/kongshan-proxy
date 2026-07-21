@@ -1483,6 +1483,55 @@ final class AppStateTests: XCTestCase {
         FileManager.default.temporaryDirectory
             .appending(path: "kongshan-app-state-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
     }
+    func testGroupSelectionUUIDLegacyMigratesToNodeName() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        try await storage.prepare()
+
+        let nodeID = UUID()
+        let node = ProxyNode(
+            id: nodeID,
+            sourceID: nil,
+            name: "香港 01",
+            protocolType: .hysteria2,
+            server: "hy.example.com",
+            port: 443,
+            password: "secret",
+            sni: "hy.example.com",
+            skipCertificateVerification: false
+        )
+        try await storage.writeAtomically(
+            try JSONEncoder().encode([node]),
+            to: root.appending(path: "manual-nodes.json")
+        )
+        let settings: [String: Any] = [
+            "selectedNodeID": nodeID.uuidString,
+            "testURL": "http://www.gstatic.com/generate_204",
+            "groupSelections": ["手动选择": nodeID.uuidString]
+        ]
+        try await storage.writeAtomically(
+            try JSONSerialization.data(withJSONObject: settings),
+            to: root.appending(path: "settings.json")
+        )
+
+        let state = AppState(
+            storage: storage,
+            subscriptionService: SubscriptionService(storage: storage) { _ in
+                HTTPDownload(data: Data(), statusCode: 500)
+            },
+            systemProxyManager: SystemProxyManager(storage: storage) { _, _ in
+                ProcessResult(exitCode: 0, stdout: "", stderr: "")
+            },
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            automaticallyInitialize: false
+        )
+        await state.initialize()
+
+        XCTAssertEqual(state.selectedMemberName(in: "手动选择"), "香港 01")
+        XCTAssertEqual(state.groupSelections["手动选择"], "香港 01")
+    }
+
 }
 
 @MainActor
