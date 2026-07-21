@@ -444,7 +444,7 @@ final class AppState {
             let prepared = try await ruleSetService.prepare(includeAds: routingSettings.blockAds, mirror: ruleSetSettings.mirror, allowsNetwork: ruleSetSettings.autoUpdate)
             warnings.append(contentsOf: prepared.warnings)
             let runtime = try runtimeFactory()
-            let config = try generateConfiguration(
+            let config = try await generateConfiguration(
                 runtime: runtime,
                 ruleSets: prepared.ruleSets,
                 routingSettings: routingSettings,
@@ -453,11 +453,7 @@ final class AppState {
                 tunSettings: tunSettings,
                 dnsSettings: dnsSettings
             )
-            let diagnostic = try ConfigGenerator.diagnosticSnapshot(from: config)
-            try await storage.writeAtomically(
-                diagnostic,
-                to: storage.rootDirectory.appending(path: "config.json")
-            )
+            try await writeDiagnosticConfig(config)
 
             let check = try await singBoxProcess.check(config: config)
             guard check.exitCode == 0 else {
@@ -1292,7 +1288,7 @@ final class AppState {
             let oldSettings = routingSettings
             let prepared = try await ruleSetService.prepare(includeAds: settings.blockAds, mirror: ruleSetSettings.mirror, allowsNetwork: ruleSetSettings.autoUpdate)
             warnings.append(contentsOf: prepared.warnings)
-            let newConfig = try generateConfiguration(
+            let newConfig = try await generateConfiguration(
                 runtime: runtime,
                 ruleSets: prepared.ruleSets,
                 routingSettings: settings,
@@ -1357,10 +1353,7 @@ final class AppState {
                 await armRunningSystemCoreIfAvailable()
             }
             try await persistRoutingSettings()
-            try await storage.writeAtomically(
-                ConfigGenerator.diagnosticSnapshot(from: newConfig),
-                to: storage.rootDirectory.appending(path: "config.json")
-            )
+            try await writeDiagnosticConfig(newConfig)
             errorMessage = nil
             markRuntimeStarted()
             resumeDashboardMonitoringIfNeeded()
@@ -1389,7 +1382,7 @@ final class AppState {
 
             let prepared = try await ruleSetService.prepare(includeAds: routingSettings.blockAds, mirror: ruleSetSettings.mirror, allowsNetwork: ruleSetSettings.autoUpdate)
             warnings.append(contentsOf: prepared.warnings)
-            let newConfig = try generateConfiguration(
+            let newConfig = try await generateConfiguration(
                 runtime: runtime,
                 ruleSets: prepared.ruleSets,
                 routingSettings: routingSettings,
@@ -1416,10 +1409,7 @@ final class AppState {
             tunSettings = requestedSettings
             currentConfig = newConfig
             try await persistSettings()
-            try await storage.writeAtomically(
-                ConfigGenerator.diagnosticSnapshot(from: newConfig),
-                to: storage.rootDirectory.appending(path: "config.json")
-            )
+            try await writeDiagnosticConfig(newConfig)
             errorMessage = nil
             markRuntimeStarted()
             resumeDashboardMonitoringIfNeeded()
@@ -1453,7 +1443,7 @@ final class AppState {
 
             let prepared = try await ruleSetService.prepare(includeAds: routingSettings.blockAds, mirror: ruleSetSettings.mirror, allowsNetwork: ruleSetSettings.autoUpdate)
             warnings.append(contentsOf: prepared.warnings)
-            let newConfig = try generateConfiguration(
+            let newConfig = try await generateConfiguration(
                 runtime: runtime,
                 ruleSets: prepared.ruleSets,
                 routingSettings: routingSettings,
@@ -1500,10 +1490,7 @@ final class AppState {
                 await armRunningSystemCoreIfAvailable()
             }
             try await persistSettings()
-            try await storage.writeAtomically(
-                ConfigGenerator.diagnosticSnapshot(from: newConfig),
-                to: storage.rootDirectory.appending(path: "config.json")
-            )
+            try await writeDiagnosticConfig(newConfig)
             errorMessage = nil
             markRuntimeStarted()
             resumeDashboardMonitoringIfNeeded()
@@ -1976,11 +1963,11 @@ final class AppState {
         outboundMode: OutboundMode,
         tunSettings: TunSettings,
         dnsSettings: DNSSettings
-    ) throws -> Data {
+    ) async throws -> Data {
         // 只用当前生效配置里的节点与它自带的策略组来生成配置。
         var scoped = routingSettings
         scoped.policyGroups = activeConfigPolicyGroups
-        return try ConfigGenerator.generate(ConfigInput(
+        let input = ConfigInput(
             nodes: activeConfigNodes,
             selectedNodeID: selectedNodeID,
             runtime: runtime,
@@ -1995,7 +1982,18 @@ final class AppState {
             tunSettings: tunSettings,
             dnsSettings: dnsSettings,
             groupDefaults: resolvedGroupDefaults()
-        ))
+        )
+        // 生成 + JSON 编码大配置（几百出站、上千规则）很吃 CPU，放后台线程，别卡住主线程 UI。
+        return try await Task.detached { try ConfigGenerator.generate(input) }.value
+    }
+
+    /// 写一份脱敏的 config.json 供排查用。脱敏要解析+重编码整份配置，也放后台线程，不卡 UI。
+    private func writeDiagnosticConfig(_ config: Data) async throws {
+        let diagnostic = try await Task.detached { try ConfigGenerator.diagnosticSnapshot(from: config) }.value
+        try await storage.writeAtomically(
+            diagnostic,
+            to: storage.rootDirectory.appending(path: "config.json")
+        )
     }
 
     /// 把持久化的「组名 → 成员名」翻译成配置里的出站 tag；解析不到的丢弃。

@@ -910,3 +910,15 @@
 改为按进程名精确匹配 `pgrep -x sing-box` 再核对可执行路径只杀自己的核，shell 名为 sh 不会被匹配。
 测试加回归断言：含 `pgrep -x sing-box`、不含 `pkill -f`。规则集缓存已存在（下载非瓶颈）。
 166 通过；0.1.7 已装 /Applications。
+
+## 2026-07-21 系统代理/TUN 开启很卡的真因（0.1.9）
+
+真机日志显示 TUN 内核其实已起来在路由（inbound/tun 有包）。慢+卡的真因是两处：
+1. 配置巨大：机场 7539 条规则里 4780 条被逐条塞进 route.rules，config.json 达 1MB、360 出站。
+2. 生成这份配置的 generateConfiguration + diagnosticSnapshot 是在主 actor 上同步跑（构建 dict + JSON 编码/再解析 1MB），把 UI 卡死——每次开代理/切配置/切模式都卡一下。
+   （sing-box check 本身只 0.11s，不是瓶颈。）
+修复：
+- ConfigGenerator.mergedSubscriptionRules：把「连续的同类型同出站」订阅规则并成一条（值进数组），4780→约166 条，语义与顺序不变；配置随之瘦身。
+- generateConfiguration 改 async，实际生成放 Task.detached 后台线程；diagnosticSnapshot 统一走 writeDiagnosticConfig 也放后台。主线程不再被大配置阻塞。
+另发现：用户同时开着 Stash 的 TUN（日志里满是 Stash 进程），两个 TUN 抢默认路由会互相干扰——需只留一个。
+测试 167 通过；0.1.9 已装 /Applications。

@@ -353,6 +353,42 @@ public enum ConfigGenerator {
         }
     }
 
+    /// 把订阅规则按「连续的同类型、同出站」合并成一条（多个值放进同一数组）。
+    /// 机场动辄几千条独立规则会让配置膨胀到 1MB+，拖慢生成/编码/内核解析，界面也会卡。
+    /// 合并后通常只剩一两百条；语义不变——单条规则里同一字段的多值是「或」，等价于多条连续规则；
+    /// 只合并「连续」段，因此匹配顺序（首个命中生效）与合并前完全一致。
+    static func mergedSubscriptionRules(
+        _ subscriptionRules: [SubscriptionRule],
+        available: Set<String>
+    ) -> [[String: Any]] {
+        var result: [[String: Any]] = []
+        var field: String?
+        var outbound: String?
+        var values: [String] = []
+
+        func flush() {
+            if let field, let outbound, !values.isEmpty {
+                result.append([field: values, "action": "route", "outbound": outbound])
+            }
+            values = []
+        }
+
+        for rule in subscriptionRules {
+            guard let target = resolvedOutbound(for: rule.target, available: available) else { continue }
+            let ruleField = ruleField(for: rule.type)
+            if ruleField == field, target == outbound {
+                values.append(rule.value)
+            } else {
+                flush()
+                field = ruleField
+                outbound = target
+                values = [rule.value]
+            }
+        }
+        flush()
+        return result
+    }
+
     private static func route(
         for routing: RoutingConfiguration?,
         outboundMode: OutboundMode = .rule
@@ -386,16 +422,7 @@ public enum ConfigGenerator {
             let available = Set(
                 ["direct", "reject", "手动选择", "自动选择", "自建"] + settings.policyGroups.map(\.name)
             )
-            rules.append(contentsOf: routing.subscriptionRules.compactMap { rule in
-                guard let outbound = resolvedOutbound(for: rule.target, available: available) else {
-                    return nil
-                }
-                return [
-                    ruleField(for: rule.type): [rule.value],
-                    "action": "route",
-                    "outbound": outbound
-                ]
-            })
+            rules.append(contentsOf: mergedSubscriptionRules(routing.subscriptionRules, available: available))
         }
         rules.append([
             "ip_is_private": true,

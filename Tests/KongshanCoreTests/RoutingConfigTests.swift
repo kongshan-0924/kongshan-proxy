@@ -472,3 +472,30 @@ extension RoutingConfigTests {
         )
     }
 }
+
+extension RoutingConfigTests {
+    /// 订阅规则合并：连续的同类型同出站并成一条（值进数组），换类型/换出站就断开——
+    /// 匹配顺序（首个命中生效）与合并前一致。几千条能压到一两百条，配置随之瘦身。
+    func testConsecutiveSubscriptionRulesMergePreservingOrder() {
+        let available: Set<String> = ["Proxies", "Netflix"]
+        let rules = [
+            SubscriptionRule(type: .domainSuffix, value: "a.com", target: "Proxies"),
+            SubscriptionRule(type: .domainSuffix, value: "b.com", target: "Proxies"),
+            SubscriptionRule(type: .domainSuffix, value: "n.com", target: "Netflix"),  // 换出站→断开
+            SubscriptionRule(type: .ipCIDR, value: "1.1.1.0/24", target: "Netflix"),   // 换类型→断开
+            SubscriptionRule(type: .domainSuffix, value: "d.com", target: "Proxies"),
+            SubscriptionRule(type: .domainSuffix, value: "x.com", target: "缺失组"),    // 目标不存在→丢弃
+        ]
+
+        let merged = ConfigGenerator.mergedSubscriptionRules(rules, available: available)
+
+        XCTAssertEqual(merged.count, 4)
+        XCTAssertEqual(merged[0]["domain_suffix"] as? [String], ["a.com", "b.com"])
+        XCTAssertEqual(merged[0]["outbound"] as? String, "Proxies")
+        XCTAssertEqual(merged[1]["domain_suffix"] as? [String], ["n.com"])
+        XCTAssertEqual(merged[1]["outbound"] as? String, "Netflix")
+        XCTAssertEqual(merged[2]["ip_cidr"] as? [String], ["1.1.1.0/24"])
+        XCTAssertEqual(merged[3]["domain_suffix"] as? [String], ["d.com"])
+        XCTAssertTrue(merged.allSatisfy { $0["action"] as? String == "route" })
+    }
+}
