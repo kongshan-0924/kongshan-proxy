@@ -153,18 +153,25 @@ struct DashboardView: View {
             MetricCard(symbol: "network", tint: .orange, caption: "当前出口 IP") {
                 exitDiagnosticsValue
             } corner: {
-                if state.isRefreshingExitDiagnostics {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Button {
-                        Task { await state.refreshExitDiagnostics() }
-                    } label: {
-                        Label("检测", systemImage: "arrow.clockwise")
-                            .font(.system(size: 10, weight: .semibold))
+                HStack(spacing: 7) {
+                    if let error = state.exitDiagnosticsError {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                            .help(error)
                     }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-                    .help("刷新出口 IP 并检测 DNS")
+                    if state.isRefreshingExitDiagnostics {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Button {
+                            Task { await state.refreshExitDiagnostics() }
+                        } label: {
+                            Label("检测", systemImage: "arrow.clockwise")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                        .help("刷新出口 IP 并检测 DNS")
+                    }
                 }
             }
 
@@ -232,9 +239,10 @@ struct DashboardView: View {
                 .help(report.dns.detail)
             }
         } else {
-            Text(state.isRefreshingExitDiagnostics ? "检测中…" : "待检测")
+            Text(state.isRefreshingExitDiagnostics ? "检测中…" : (state.exitDiagnosticsError == nil ? "待检测" : "获取失败"))
                 .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(state.exitDiagnosticsError == nil ? Color.secondary : Color.orange)
+                .help(state.exitDiagnosticsError ?? "")
         }
     }
 

@@ -1791,6 +1791,127 @@ final class AppState {
         try await kernelLogStore.exportText()
     }
 
+    func exportBackup() async throws -> Data {
+        var caches: [UUID: Data] = [:]
+        for source in subscriptions {
+            if let data = try await storage.readIfPresent(from: storage.cacheURL(for: source)) {
+                caches[source.id] = data
+            }
+        }
+        let settings = BackupSettings(
+            selectedNodeID: selectedNodeID,
+            testURL: testURLString,
+            preferredMode: preferredMode,
+            tunSettings: tunSettings,
+            dnsSettings: dnsSettings,
+            subscriptionUpdateSettings: subscriptionUpdateSettings,
+            ruleSetSettings: ruleSetSettings,
+            outboundMode: outboundMode,
+            groupSelections: groupSelections,
+            activeConfigID: activeConfigID,
+            speedTestMethod: speedTestMethod
+        )
+        return try JSONEncoder.sorted.encode(KongshanBackup(
+            version: KongshanBackup.currentVersion,
+            createdAt: now(),
+            subscriptions: subscriptions,
+            manualNodes: manualNodes,
+            settings: settings,
+            routingSettings: routingSettings,
+            subscriptionCaches: caches
+        ))
+    }
+
+    func importBackup(_ data: Data) async {
+        guard status == .off, !isBusy else {
+            errorMessage = "请先停止代理和内核，再导入备份"
+            return
+        }
+        do {
+            let backup = try KongshanBackup.decodeValidated(from: data)
+            let settings = backup.settings
+            let persisted = PersistedSettings(
+                selectedNodeID: settings.selectedNodeID,
+                testURL: settings.testURL,
+                preferredMode: settings.preferredMode,
+                tunSettings: settings.tunSettings,
+                dnsSettings: settings.dnsSettings,
+                subscriptionUpdateSettings: settings.subscriptionUpdateSettings,
+                ruleSetSettings: settings.ruleSetSettings,
+                outboundMode: settings.outboundMode,
+                groupSelections: settings.groupSelections,
+                activeConfigID: settings.activeConfigID,
+                speedTestMethod: settings.speedTestMethod
+            )
+
+            var importedNodes = backup.manualNodes
+            var importedGroups: [UUID: [PolicyGroup]] = [:]
+            var importedRules: [UUID: [SubscriptionRule]] = [:]
+            for source in backup.subscriptions {
+                guard let yamlData = backup.subscriptionCaches[source.id],
+                      let yaml = String(data: yamlData, encoding: .utf8) else { continue }
+                let converted = try ClashSubscriptionConverter.convert(yaml: yaml, sourceID: source.id)
+                importedNodes.append(contentsOf: converted.nodes)
+                importedGroups[source.id] = converted.policyGroups
+                importedRules[source.id] = converted.subscriptionRules
+            }
+
+            try await storage.prepare()
+            let filePayloads: [(URL, Data)] = [
+                (subscriptionsURL, try JSONEncoder.sorted.encode(backup.subscriptions)),
+                (manualNodesURL, try JSONEncoder.sorted.encode(backup.manualNodes)),
+                (settingsURL, try JSONEncoder.sorted.encode(persisted)),
+                (rulesURL, try JSONEncoder.sorted.encode(backup.routingSettings))
+            ] + backup.subscriptions.compactMap { source in
+                backup.subscriptionCaches[source.id].map { (storage.cacheURL(for: source), $0) }
+            }
+            var snapshots: [FileSnapshot] = []
+            for item in filePayloads {
+                snapshots.append(FileSnapshot(
+                    url: item.0,
+                    data: try await storage.readIfPresent(from: item.0)
+                ))
+            }
+            do {
+                for (url, payload) in filePayloads {
+                    try await storage.writeAtomically(payload, to: url)
+                }
+            } catch {
+                for snapshot in snapshots {
+                    if let old = snapshot.data {
+                        try? await storage.writeAtomically(old, to: snapshot.url)
+                    } else {
+                        try? FileManager.default.removeItem(at: snapshot.url)
+                    }
+                }
+                throw error
+            }
+
+            subscriptions = backup.subscriptions
+            nodes = importedNodes
+            discoveredPolicyGroups = importedGroups
+            discoveredRules = importedRules
+            selectedNodeID = settings.selectedNodeID
+            testURLString = settings.testURL
+            preferredMode = settings.preferredMode
+            tunSettings = settings.tunSettings
+            dnsSettings = settings.dnsSettings
+            subscriptionUpdateSettings = settings.subscriptionUpdateSettings
+            ruleSetSettings = settings.ruleSetSettings
+            outboundMode = settings.outboundMode
+            groupSelections = settings.groupSelections
+            activeConfigID = settings.activeConfigID
+            speedTestMethod = settings.speedTestMethod
+            routingSettings = backup.routingSettings
+            delays = [:]
+            ensureActiveConfig()
+            await rescheduleSubscriptionUpdates()
+            errorMessage = nil
+        } catch {
+            errorMessage = "导入备份失败：\(error.localizedDescription)"
+        }
+    }
+
     func dismissError() {
         errorMessage = nil
         if case .failed = status, activeModes.isEmpty { status = .off }
@@ -2598,6 +2719,11 @@ private struct PersistedSettings: Codable {
     /// 当前生效配置 ID 与测速方式，旧版设置文件没有这些字段。
     var activeConfigID: UUID?
     var speedTestMethod: SpeedTestMethod?
+}
+
+private struct FileSnapshot {
+    let url: URL
+    let data: Data?
 }
 
 private enum AppStateError: Error, LocalizedError {

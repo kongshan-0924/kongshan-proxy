@@ -1,5 +1,6 @@
 import KongshanCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct MainWindowView: View {
     @Environment(AppState.self) private var state
@@ -545,6 +546,11 @@ private struct SettingsView: View {
     @State private var testURLDraft = ""
     @State private var routingDraft = RoutingSettings.defaults
     @State private var tab: SettingsTab = .general
+    @State private var backupDocument: BackupDocument?
+    @State private var showsBackupExporter = false
+    @State private var showsBackupImporter = false
+    @State private var isPreparingBackup = false
+    @State private var backupNotice: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -811,6 +817,33 @@ private struct SettingsView: View {
                 }
                 }
                 if tab == .more {
+                Section("备份与恢复") {
+                    HStack {
+                        Button {
+                            prepareBackupExport()
+                        } label: {
+                            Label("导出配置与设置", systemImage: "square.and.arrow.up")
+                        }
+                        .disabled(isPreparingBackup)
+
+                        Button {
+                            showsBackupImporter = true
+                        } label: {
+                            Label("导入备份", systemImage: "square.and.arrow.down")
+                        }
+                        .disabled(state.isOn || state.isBusy)
+
+                        if isPreparingBackup { ProgressView().controlSize(.small) }
+                        Spacer()
+                        if let backupNotice {
+                            StatusBadge(text: backupNotice, tint: .green)
+                        }
+                    }
+                    Text("备份包含订阅链接、订阅配置快照、节点凭据和全部设置，可能含敏感信息；不包含日志、运行时密钥或恢复文件。导入前需先停止代理。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("数据与日志") {
                     LabeledContent("数据目录") {
                         Button("在 Finder 中显示") {
@@ -858,6 +891,58 @@ private struct SettingsView: View {
         }
         // 绕过设置在别处应用（如恢复默认）后，草稿同步跟上。
         .onChange(of: state.routingSettings) { _, new in routingDraft = new }
+        .fileExporter(
+            isPresented: $showsBackupExporter,
+            document: backupDocument,
+            contentType: .json,
+            defaultFilename: "kongshan-backup"
+        ) { result in
+            switch result {
+            case .success:
+                backupNotice = "已导出"
+            case let .failure(error):
+                state.errorMessage = "导出备份失败：\(error.localizedDescription)"
+            }
+            backupDocument = nil
+        }
+        .fileImporter(isPresented: $showsBackupImporter, allowedContentTypes: [.json]) { result in
+            switch result {
+            case let .success(url):
+                let access = url.startAccessingSecurityScopedResource()
+                defer { if access { url.stopAccessingSecurityScopedResource() } }
+                do {
+                    let data = try Data(contentsOf: url)
+                    Task {
+                        await state.importBackup(data)
+                        if state.errorMessage == nil {
+                            backupNotice = "已恢复"
+                            dnsDraft = state.dnsSettings
+                            subscriptionUpdateDraft = state.subscriptionUpdateSettings
+                            testURLDraft = state.testURLString
+                            routingDraft = state.routingSettings
+                        }
+                    }
+                } catch {
+                    state.errorMessage = "读取备份失败：\(error.localizedDescription)"
+                }
+            case let .failure(error):
+                state.errorMessage = "选择备份失败：\(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func prepareBackupExport() {
+        isPreparingBackup = true
+        backupNotice = nil
+        Task {
+            defer { isPreparingBackup = false }
+            do {
+                backupDocument = BackupDocument(data: try await state.exportBackup())
+                showsBackupExporter = true
+            } catch {
+                state.errorMessage = "准备备份失败：\(error.localizedDescription)"
+            }
+        }
     }
 
     /// 从打包进 App 的 Info.plist 读取版本，展示当前运行的是哪个构建。

@@ -1201,3 +1201,13 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 - 风险/注意事项：状态项文字仅在内核运行时出现，关闭时保持单图标；速率源仍是内核唯一推送，不增加轮询。
 - 下一步：实现版本化配置/设置 JSON 导出导入与 Settings → 更多 UI。
 - 下一位 Agent 如何接手：先写备份模型 round-trip/版本拒绝 RED；导入必须在停止状态，完整验证后才替换内存与磁盘，不得包含日志、缓存或运行时密钥。
+
+## 2026-07-22 配置与设置导出导入
+
+- 已完成：新增版本化 JSON 备份，包含订阅链接与配置快照、手动节点、节点选择、分流/DNS/TUN/测速/自动更新等设置；设置“更多”页增加导出和导入入口、敏感信息提示和结果状态；导入采用先解码/校验、后原子写入，写入失败时回滚目标文件。
+- 修改文件：新增 `Sources/kongshan/KongshanBackup.swift`、`Sources/kongshan/BackupDocument.swift`、`Tests/KongshanAppTests/KongshanBackupTests.swift`；修改 `Sources/kongshan/AppState.swift`、`Sources/kongshan/MainWindowView.swift`、`Sources/kongshan/DashboardView.swift`。
+- 测试结果：RED 验证备份类型与 AppState API 缺失；GREEN 5 项专项测试覆盖完整往返、版本拒绝、坏 JSON、实际 AppState 恢复和失败不修改已有状态，全部通过；设置页 FileDocument 界面编译通过。
+- 当前状态：代理运行中禁止导入；成功后立即重建订阅节点与当前 UI 状态；出口检测失败时卡片也会明确显示橙色警告与错误说明。
+- 风险/注意事项：备份包含订阅凭据和节点密码，必须当作敏感文件；不包含日志、规则集缓存、内核运行时 secret 或 recovery 文件。
+- 下一步：提交本阶段，执行全量测试、发布验证，构建唯一最新 App/DMG 供用户验收。
+- 下一位 Agent 如何接手：从全量验证开始；若失败只在当前功能分支修复，不合并 main；发布前再核对敏感备份提示。
