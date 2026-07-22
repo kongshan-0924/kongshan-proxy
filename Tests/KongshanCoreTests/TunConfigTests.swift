@@ -233,4 +233,31 @@ extension TunConfigTests {
         let decoded = try JSONDecoder().decode(TunSettings.self, from: JSONEncoder().encode(custom))
         XCTAssertEqual(decoded.stack, .gvisor)
     }
+
+    func testStripIPv6RemovesIPv6AddressesKeepsIPv4() {
+        let stripped = TunSettings.defaults.stripIPv6()
+        XCTAssertEqual(stripped.addresses, ["172.19.0.1/30"])
+        // 其它字段不变
+        XCTAssertEqual(stripped.mtu, TunSettings.defaults.mtu)
+        XCTAssertEqual(stripped.stack, TunSettings.defaults.stack)
+        XCTAssertEqual(stripped.strictRoute, TunSettings.defaults.strictRoute)
+        // dnsServerAddress 只看 IPv4，剥掉 IPv6 不影响
+        XCTAssertEqual(stripped.dnsServerAddress, TunSettings.defaults.dnsServerAddress)
+    }
+
+    func testStripIPv6NoOpWhenAlreadyIPv4Only() {
+        var v4Only = TunSettings.defaults
+        v4Only.addresses = ["10.0.0.1/24"]
+        // 已经没有 IPv6 时返回自身（不是新实例）
+        XCTAssertTrue(v4Only.stripIPv6() == v4Only)
+    }
+
+    func testStripIPv6OnIPv6OnlySettingsYieldsEmptyAddresses() {
+        // 极端情况：只有 IPv6 地址（用户自定义）。剥掉后变空数组——
+        // 这种配置本就无法工作，但行为要可预测：不静默保留 IPv6。
+        var v6Only = TunSettings.defaults
+        v6Only.addresses = ["fd00::1/64"]
+        let stripped = v6Only.stripIPv6()
+        XCTAssertEqual(stripped.addresses, [])
+    }
 }

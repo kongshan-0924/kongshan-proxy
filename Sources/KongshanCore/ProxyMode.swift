@@ -100,4 +100,17 @@ public struct TunSettings: Codable, Equatable, Sendable {
         }
         return "172.19.0.2"
     }
+
+    /// 返回去掉 IPv6 地址后的副本。物理网络没有全局 IPv6 时，
+    /// 给 TUN 配 IPv6 会让应用尝试 IPv6 直连，但 direct 出站无法到达
+    /// （en0 无全局 IPv6）→ "no route to host" → 应用不快速回退 IPv4 → 网断。
+    /// 剥掉后应用看不到 TUN 上的 IPv6，自然走 IPv4，DNS 仍照常解析 AAAA
+    /// 供代理出站使用。
+    public func stripIPv6() -> TunSettings {
+        let onlyIPv4 = addresses.filter { !$0.contains(":") }
+        guard onlyIPv4.count != addresses.count else { return self }
+        var copy = self
+        copy.addresses = onlyIPv4
+        return copy
+    }
 }

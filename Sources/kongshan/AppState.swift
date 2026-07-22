@@ -2363,6 +2363,13 @@ final class AppState {
         // 只用当前生效配置里的节点与它自带的策略组来生成配置。
         var scoped = routingSettings
         scoped.policyGroups = activeConfigPolicyGroups
+        // 物理网络没有全局 IPv6 时，TUN 不配 IPv6 地址——否则应用看到 TUN 的 IPv6
+        // 会尝试 IPv6 直连，而 direct 出站到 IPv6 目标会因 en0 无全局 IPv6 报
+        // "no route to host"，应用不快速回退 IPv4 → 用户感知"TUN 开了网断"。
+        // dnsServerAddress 只看 IPv4，剥掉 IPv6 不影响系统 DNS 指向。
+        let effectiveTun = enabledModes.contains(.tun) && !Self.physicalNetworkHasGlobalIPv6()
+            ? tunSettings.stripIPv6()
+            : tunSettings
         let input = ConfigInput(
             nodes: activeConfigNodes,
             selectedNodeID: selectedNodeID,
@@ -2375,7 +2382,7 @@ final class AppState {
             ),
             enabledModes: enabledModes,
             outboundMode: outboundMode,
-            tunSettings: tunSettings,
+            tunSettings: effectiveTun,
             dnsSettings: dnsSettings,
             groupDefaults: resolvedGroupDefaults()
         )
@@ -2702,6 +2709,39 @@ final class AppState {
         }
         return URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appending(path: "Vendor/sing-box/sing-box")
+    }
+
+    /// 物理网络是否有全局（非链路本地）IPv6 地址。
+    /// 排除 utun/lo/bridge/gif/stf 等虚拟/隧道接口——只看真实网卡（en/eth/pdp/ipsec）。
+    /// 用于决定 TUN 是否配 IPv6 地址：物理网络无 IPv6 时给 TUN 配 IPv6 会让应用
+    /// 尝试 IPv6 直连然后失败（"no route to host"），所以这种情况要剥掉 TUN 的 IPv6。
+    nonisolated private static func physicalNetworkHasGlobalIPv6() -> Bool {
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return false }
+        defer { freeifaddrs(ifaddr) }
+        var cursor = first
+        while true {
+            let name = String(cString: cursor.pointee.ifa_name)
+            let addr = cursor.pointee.ifa_addr
+            // 虚拟/隧道接口不算物理网络——utun 是其它 VPN，lo 是回环，bridge/gif/stf 是隧道。
+            let isPhysical = !name.hasPrefix("utun")
+                && !name.hasPrefix("lo")
+                && !name.hasPrefix("bridge")
+                && !name.hasPrefix("gif")
+                && !name.hasPrefix("stf")
+                && !name.hasPrefix("llw")
+                && !name.hasPrefix("awdl")
+            if isPhysical, let addr, addr.pointee.sa_family == sa_family_t(AF_INET6) {
+                let inet6 = addr.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee }
+                // 链路本地 fe80::/10 不算全局 IPv6——没有它物理网络仍不可达 IPv6 目标。
+                let bytes = inet6.sin6_addr.__u6_addr.__u6_addr8
+                let isLinkLocal = bytes.0 == 0xfe && (bytes.1 & 0xc0) == 0x80
+                if !isLinkLocal { return true }
+            }
+            guard let next = cursor.pointee.ifa_next else { break }
+            cursor = next
+        }
+        return false
     }
 }
 
