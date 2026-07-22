@@ -1038,3 +1038,20 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 - 风险/注意事项：移除紧凑图标侧栏功能，保留原生完整侧栏的显示/隐藏；不使用延时清理或私有 API。
 - 下一步：编写最小实施计划，按 RED→GREEN 修改并重打包。
 - 下一位 Agent 如何接手：先读本设计，测试应验证真实窗口只有一个原生侧栏切换项；不要修改代理/TUN 路径。
+
+## 2026-07-22 — TUN 免密码助手里程碑 2b（feat/tun-passwordless-helper 分支）
+
+- 已完成：helper 安全核心实现（`Sources/KongshanHelper/main.swift` 重写自骨架；`Sources/HelperProtocol/HelperProtocol.swift` 加 4 个可注入纯逻辑类型）。
+  - §2b.1 Unix socket 服务：stateDirectory(root 0700) → unlink → bind → chmod 0600 → listen；SIGTERM/SIGINT dispatch source 优雅退出；poll 1s 超时串行 accept。
+  - §2b.2 对端身份校验（拒绝优先）：`extractClientIdentity` 取 audit_token → SecCodeCopyGuestWithAttributes → SecCodeCheckValidityWithErrors(identifier 钉死) → SecCodeCopyStaticCode + SecCodeCopySigningInformation 取 identifier/cdhash → proc_pidpath 取可执行路径；纯函数 `HelperTrustEvaluation.isTrusted` 任一不过即 false。
+  - §2b.3 startTun 收 FD + 固定 exec：手写 CMSG 解析（CMSG_FIRSTHDR/DATA 宏 Swift 不可用）取 SCM_RIGHTS FD；sing-box 路径由 helper 自身位置推导 + exec 前 SecStaticCodeCheckValidity；posix_spawn 参数固定 run，configFD → stdin，日志 0644 重定向。
+  - §2b.4 stopTun/生命周期/自愈：只对 helper 自起 PID（state.kernelPID）发 SIGINT，且 proc_pidpath 验证确为内置 sing-box；30s 定时器 kill(clientPID,0) 检查 App 存活，不在则自动停内核。
+- 修改文件：`Sources/HelperProtocol/HelperProtocol.swift`（+83 行 4 个纯逻辑类型）、`Sources/KongshanHelper/main.swift`（骨架 → 完整实现 +497 行）。
+- 测试结果：`SWIFTPM_ENABLE_SANDBOX=NO swift build --target KongshanHelper --disable-sandbox` 通过。
+- 当前状态：里程碑 2b 代码完成并编译通过，待提交；3/4/5 待办。
+- 风险/注意事项：
+  1. helper 当前用 `SecStaticCodeCheckValidity(..., nil)` 只校验签名本身有效（ad-hoc 也通过），不钉 sing-box identifier。设计文档默认不钉 sing-box cdhash（路径已固定），与 §1.1 一致。
+  2. 自愈定时器 30s 周期、checkClientLiveness 在 clientPID > 0 时才动作。
+  3. trust.json 缺失/损坏一律静默断连（不泄露任何信息），与 §1.2 一致。
+- 下一步：里程碑 3（PrivilegedHelperClient + AppState 接线 + 设置→隧道 安装/卸载 UI）。
+- 接手方式：在 `feat/tun-passwordless-helper` 分支继续，每个里程碑单独提交，别推 main，别碰侧栏文件。

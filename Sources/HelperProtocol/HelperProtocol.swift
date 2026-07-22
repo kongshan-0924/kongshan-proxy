@@ -79,3 +79,86 @@ public enum HelperFramingError: Error, Equatable {
     case frameTooLarge
     case shortRead
 }
+
+// MARK: - 可注入纯逻辑（便于单测，不依赖系统 API）
+
+/// 对端调用方身份。已从 SecCode 提取好的纯数据，测试可直接构造。
+public struct HelperClientIdentity: Equatable, Sendable {
+    /// 签名是否有效（未被篡改）。
+    public var signatureValid: Bool
+    /// 代码签名 identifier，如 "com.kaysen.kongshan"。
+    public var signingIdentifier: String?
+    /// 可执行文件绝对路径。
+    public var executablePath: String?
+    /// cdhash（十六进制小写），nil 表示未提取到。
+    public var cdHashHex: String?
+
+    public init(signatureValid: Bool, signingIdentifier: String?, executablePath: String?, cdHashHex: String?) {
+        self.signatureValid = signatureValid
+        self.signingIdentifier = signingIdentifier
+        self.executablePath = executablePath
+        self.cdHashHex = cdHashHex
+    }
+}
+
+/// 对端身份判定。纯函数，不依赖 Security.framework / socket。
+/// 拒绝优先：任一校验不过即 false。
+public enum HelperTrustEvaluation {
+    public static func isTrusted(
+        identity: HelperClientIdentity,
+        trust: HelperTrustConfig,
+        expectedIdentifier: String = HelperConstants.clientSigningIdentifier
+    ) -> Bool {
+        // §1.2 拒绝优先：签名无效直接拒。
+        guard identity.signatureValid else { return false }
+        // identifier 必须精确匹配（防御深度：SecCode requirement 已校验，这里再兜底）。
+        guard identity.signingIdentifier == expectedIdentifier else { return false }
+        // §5.1 可执行路径必须 == 安装时钉死的路径。
+        guard identity.executablePath == trust.clientExecutablePath else { return false }
+        // §5.1 可选加固：钉 cdhash。pinned 为空字符串也视为不钉。
+        if let pinned = trust.pinnedCDHashHex, !pinned.isEmpty {
+            guard let actual = identity.cdHashHex,
+                  actual.lowercased() == pinned.lowercased() else { return false }
+        }
+        return true
+    }
+}
+
+/// helper 对一个请求的执行决策。纯逻辑，FD/进程操作由调用方按决策执行。
+public enum HelperRequestDecision: Equatable, Sendable {
+    /// 回 status 响应（helper 在跑、版本）。
+    case replyStatus
+    /// 起内核（调用方持有 configFD，按 §2b.3 执行）。
+    case startKernel
+    /// 停内核（§2b.4，只停自起的）。
+    case stopKernel
+    /// 拒绝（未鉴权 / 缺 FD / 状态不对）。
+    case reject(message: String)
+}
+
+/// 请求分发决策。纯函数，输入鉴权状态/上下文，输出该执行的动作。
+public enum HelperDecision {
+    public static func decide(
+        request: HelperRequest,
+        isTrusted: Bool,
+        hasConfigFD: Bool,
+        kernelRunning: Bool
+    ) -> HelperRequestDecision {
+        // §1.2 拒绝优先：未鉴权一律拒，连 status 都不回（不泄露任何信息给未鉴权方）。
+        guard isTrusted else { return .reject(message: "unauthorized") }
+        switch request {
+        case .status:
+            return .replyStatus
+        case .startTun:
+            // §1.3 配置必须经 FD 传，无 FD 拒绝。
+            guard hasConfigFD else { return .reject(message: "missing config fd") }
+            // 已在跑则拒绝，避免双起残留内核。
+            if kernelRunning { return .reject(message: "kernel already running") }
+            return .startKernel
+        case .stopTun:
+            // 没在跑的内核没东西可停。
+            guard kernelRunning else { return .reject(message: "no kernel running") }
+            return .stopKernel
+        }
+    }
+}
