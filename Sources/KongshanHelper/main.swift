@@ -196,12 +196,25 @@ func verifySingBoxSignature(at url: URL, pinnedCDHashHex: String?) throws {
 
 /// §2b.3 起内核：configFD 喂给 sing-box stdin，stdout/stderr 重定向到日志文件。
 /// 返回 sing-box PID。helper 在 spawn 后关闭自己持有的 configFD/logFD（子进程经 dup2 持有副本）。
+///
+/// 修复 N1：configFD/logFD 用 defer 关闭，保证任何抛出路径都不泄漏 FD。
+/// 原实现 close(configFD)/close(logFD) 只在 posix_spawn 之后——若
+/// verifySingBoxSignature（cdhash 不匹配）或 logOpenFailed 在其之前抛出，
+/// configFD 不关 → helper 泄漏 pipe 读端；App 后台写线程（修复 B）填满
+/// pipe 缓冲后永久阻塞（pipe 无 SO_SNDTIMEO）。defer 确保任何路径都关；
+/// App 侧则得 EPIPE 正常结束。
 func startSingBox(at url: URL, configFD: Int32, pinnedCDHashHex: String?) throws -> Int32 {
+    // N1：configFD 在函数入口即登记 defer 关闭。verify/spawn 任一抛错都保证关闭。
+    // posix_spawn 后子进程经 dup2 持有 stdin 副本，helper 关自己的读端不影响子进程。
+    defer { close(configFD) }
+
     try verifySingBoxSignature(at: url, pinnedCDHashHex: pinnedCDHashHex)
 
     // 日志文件：O_CREAT|O_APPEND，0644 让 App 可读（日志不含凭据）。
     let logFD = open(logURL.path, O_WRONLY | O_CREAT | O_APPEND, mode_t(0o644))
     guard logFD >= 0 else { throw HelperError.logOpenFailed }
+    // N1：logFD 打开成功后登记 defer 关闭（打开失败时 logFD=-1，不进此分支）。
+    defer { close(logFD) }
 
     var actions: posix_spawn_file_actions_t? = nil
     posix_spawn_file_actions_init(&actions)
@@ -223,9 +236,7 @@ func startSingBox(at url: URL, configFD: Int32, pinnedCDHashHex: String?) throws
     let spawnResult = argv.withUnsafeBufferPointer { argvBuf in
         posix_spawn(&pid, url.path, &actions, &attrs, argvBuf.baseAddress, nil)
     }
-    // helper 不再需要 configFD/logFD（子进程已有副本）。
-    close(configFD)
-    close(logFD)
+    // N1：configFD/logFD 已由 defer 关闭，不再显式 close（重复 close 会误关复用 FD）。
 
     guard spawnResult == 0, pid > 0 else { throw HelperError.spawnFailed(spawnResult) }
     return pid
