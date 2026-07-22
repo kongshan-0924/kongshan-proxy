@@ -1048,3 +1048,13 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 - 风险/注意事项：CLI XCTest 的 SwiftUI Scene 工具栏不可见，真实窗口测试得到 0 项而非产品截图中的 2 项，因此改为架构回归检查；打包 App 的按钮数量和点击行为仍保留为人工验收。
 - 下一步：按 finishing 流程合并回 main，在主工作区重出 0.1.21 并人工打开仪表盘/设置核对。
 - 下一位 Agent 如何接手：不要恢复 `isSidebarCompact`、自定义 navigation ToolbarItem 或 `removeSystemSidebarToggle`；如需紧凑侧栏，应先设计与原生按钮互斥的新方案。
+
+## 2026-07-22 0.1.21 单一副本安装待验收
+
+- 已完成：保持 `fix/sidebar-toggle` 未合并 main，将已验证的 0.1.21 安装到 `/Applications/kongshan.app` 并启动；清理旧 0.1.20 工作区 App/DMG，只保留主工作区一个 0.1.21 DMG。
+- 修改文件：仅更新项目记录；安装产物和 DMG 均为 git 忽略文件。
+- 测试结果：安装后版本 0.1.21/build 121，codesign strict 有效，进程从 `/Applications/kongshan.app` 运行；`mdfind` 只返回该 App，工作区没有其他 `.app`，DMG 只有 `dist/kongshan-0.1.21.dmg`。
+- 当前状态：等待用户人工检查各页面标题栏和原生侧栏隐藏/显示；main 保持在 0.1.20 基线。
+- 风险/注意事项：旧 0.1.20 和构建中间 App 已移入废纸篓，仍可恢复；不要在验收前清理 `fix/sidebar-toggle` worktree。
+- 下一步：用户明确验收通过后，本地合并分支到 main，再跑合并后测试并清理 worktree。
+- 下一位 Agent 如何接手：先确认用户验收结果；未通过就在 `fix/sidebar-toggle` 修，不要提前合并 main。

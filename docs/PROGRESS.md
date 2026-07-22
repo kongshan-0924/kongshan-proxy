@@ -106,5 +106,7 @@
 - [x] **★真凶★ SS 节点缺 obfs(simple-obfs)插件支持**：机场 342 节点全是 ss+plugin:obfs，转换器没解析→生成裸SS→服务器要obfs→能TCP握手(测速有值)但传不了数据→国外站全不可达。已解析 obfs→sing-box obfs-local（0.1.18）
 - [x] 双侧栏按钮根因定位与修复设计（0.1.20）
 - [x] 只保留 macOS 原生侧栏按钮并回归验证（0.1.21）
+- [x] 安装 0.1.21 并清理为单一可发现 App/单一最新版 DMG
+- [ ] 用户验收双侧栏修复后合并 `fix/sidebar-toggle` 到 main
 - [x] 诊断教训记录：国内用户测 kongshan 时，主机 curl 会经其"工作代理"污染，不可信；App 连通卡走 kongshan 内核才可信
 - [ ] 用户真机确认：0.1.18 刷新订阅→TAGSS挑节点→关工作代理只开kongshan→能打开国外网站
