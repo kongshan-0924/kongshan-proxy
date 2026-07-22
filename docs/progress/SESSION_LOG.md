@@ -1097,3 +1097,16 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
   1. helper 与 App 一起 ad-hoc 签名；helper 的 SecStaticCodeCheckValidity(nil) 接受 ad-hoc。
   2. plist 模板占位符 `__HELPER_PATH__` 由 Installer 替换为 bundledHelperURL.path。
 - 下一步：里程碑 5（单元测试 — 校验判定各拒绝分支/请求分发/trust缺失损坏）。
+
+## 2026-07-22 — TUN 免密码助手里程碑 5（feat/tun-passwordless-helper 分支）
+
+- 已完成：纯逻辑单元测试，覆盖每个拒绝分支 + 请求分发 + trust 解码。
+  - `Tests/HelperProtocolTests/HelperTrustEvaluationTests.swift`（新）：
+    - HelperTrustEvaluationTests（10）：签名无效/identifier 错或 nil/路径错或 nil/cdhash 钉但不匹配或 nil/空字符串视为不钉/全过放行/cdhash 钉且匹配放行。
+    - HelperDecisionTests（10）：未鉴权三种请求一律拒；status 放行；startTun 无FD/有FD空闲/有FD在跑/无FD在跑(FD优先)；stopTun 空闲/在跑。
+    - HelperTrustConfigDecodingTests（5）：有效解码/缺 cdhash 字段解码为 nil/损坏 JSON 抛错/缺 clientExecutablePath 抛错/空 data 抛错（trust.json 缺失损坏→helper 拒绝）。
+- 修改文件：新增 `Tests/HelperProtocolTests/HelperTrustEvaluationTests.swift`。
+- 测试结果：`swift test` 199 通过 1 跳过 0 失败（+25 新测试）。
+- 当前状态：里程碑 2b-5 全部完成。
+- 风险/注意事项：未写真装 daemon 的测试（铁律 §1.5）；真机安装授权验收由用户点一次。
+- 下一步：最终验证（确认未碰侧栏文件）+ 更新 HANDOFF/PROGRESS/NEXT_STEPS。
