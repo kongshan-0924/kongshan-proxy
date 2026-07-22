@@ -7,10 +7,10 @@ import Security
 //
 // ⚠️ 安全关键组件。设计与威胁模型见 docs/design/tun-passwordless-helper.md。
 // 铁律（任务书 §1，违反即打回）：
-//   §1.1 只 exec 内置 sing-box（路径由 helper 自身位置推导 + exec 前校验签名），参数固定 run，配置从 stdin。
-//        HelperRequest 无任何路径/命令/参数字段。
+//   §1.1 只 exec 内置 sing-box（路径从 trust.json 读，安装时钉死为 root-only 拷贝；exec 前校验签名 +
+//        cdhash 钉死），参数固定 `run -c /dev/stdin`，配置从只读管道 fd 读。HelperRequest 无任何路径/命令/参数字段。
 //   §1.2 拒绝优先：对端身份校验未过一律拒（含 status）。
-//   §1.3 配置不落盘、不进命令行/环境变量，只经 socket SCM_RIGHTS 传只读 FD → sing-box stdin。
+//   §1.3 配置不落盘、不进命令行/环境变量，只经 socket SCM_RIGHTS 传只读 FD → sing-box stdin（-c /dev/stdin）。
 //   §1.4 只杀自己起的、且命令行匹配内置 sing-box 的 PID。不接受外部传入 PID。
 //   §1.5 不在自动化里真安装 daemon（安装由用户在真机点一次授权）。
 //   §1.6 不弱化 PrivilegedLauncher 兜底（未装助手时 TUN 仍走它）。
@@ -339,7 +339,10 @@ func recvRequest(connfd: Int32) -> (request: HelperRequest?, configFD: Int32?) {
         guard let base = ptr.baseAddress else { return (-1, -1) }
         return recvBodyAndFD(connfd, body: base, length: length)
     }
-    guard received == length else { return (nil, nil) }
+    guard received == length else {
+        if fd >= 0 { close(fd) }  // 加固：body 短读但已收到 config fd → 关掉防泄漏（补齐 fd 卫生最后一处）
+        return (nil, nil)
+    }
 
     let request = try? HelperFraming.decode(HelperRequest.self, from: body)
     let configFD: Int32? = fd >= 0 ? fd : nil
