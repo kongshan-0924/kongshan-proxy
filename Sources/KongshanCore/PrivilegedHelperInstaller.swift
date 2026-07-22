@@ -90,6 +90,11 @@ public enum PrivilegedHelperInstaller {
         // ad-hoc 签名零成本可伪造，光验"签名有效"挡不住替换；必须钉 cdhash。
         // 修复 C②：算不出 cdhash fail-closed（拒绝安装），不静默写 null。
         let singBoxCDHashHex = try requireCDHashHex(at: bundledSingBoxURL)
+        // 加固（堵 §5.1 客户端伪造）：钉客户端 App 主可执行 cdhash（fail-closed）。
+        // 光验 identifier 挡不住"覆盖主可执行 + codesign -s - -i 同 identifier 重签"；钉 cdhash
+        // 让重签因 hash 变化被拒。须配合 build 的 hardened runtime（忽略 DYLD 注入）才完整堵住
+        // "同用户进程冒充 App 驱动 root helper"。代价：重构建 App（cdhash 变）需重装助手。
+        let clientCDHashHex = try requireCDHashHex(at: clientExecutableURL)
 
         // 修复 C.1：plist 指向 root-only helper 拷贝（用户改不动），不再直指 bundle。
         let installedHelperPath = installedHelperURL.path
@@ -101,6 +106,7 @@ public enum PrivilegedHelperInstaller {
         // 别字符串插值——clientPath/singBoxPath 可能含 JSON 元字符。
         let trustConfig = makeTrustConfig(
             clientExecutablePath: clientPath,
+            clientCDHashHex: clientCDHashHex,
             singBoxInstalledPath: installedSingBoxPath,
             singBoxCDHashHex: singBoxCDHashHex
         )
@@ -204,16 +210,18 @@ public enum PrivilegedHelperInstaller {
     }
 
     /// 修复 C①：构造 trustConfig，singBoxExecutablePath 指向 root-only 拷贝（不是 bundle）。
-    /// 纯函数便于单测：trust 字段从 bundle 路径推导会留 TOCTOU，必须指向 root-only 拷贝。
-    /// pinnedCDHashHex 留 nil（App 重构建即变，不钉；sing-box cdhash 才钉）。
+    /// 加固（堵 §5.1）：pinnedCDHashHex 钉客户端 App 主可执行的 cdhash——ad-hoc 下光验
+    /// identifier 可被"覆盖主可执行 + 同 identifier 重签"绕过，钉 cdhash 让重签因 hash 变化被拒。
+    /// 纯函数便于单测。clientCDHashHex 传 nil 表示不钉（旧行为）。
     static func makeTrustConfig(
         clientExecutablePath: String,
+        clientCDHashHex: String?,
         singBoxInstalledPath: String,
         singBoxCDHashHex: String?
     ) -> HelperTrustConfig {
         HelperTrustConfig(
             clientExecutablePath: clientExecutablePath,
-            pinnedCDHashHex: nil,
+            pinnedCDHashHex: clientCDHashHex,
             singBoxExecutablePath: singBoxInstalledPath,
             singBoxCDHashHex: singBoxCDHashHex
         )

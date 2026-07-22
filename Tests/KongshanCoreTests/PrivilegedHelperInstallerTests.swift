@@ -36,6 +36,7 @@ final class PrivilegedHelperInstallerC1Tests: XCTestCase {
         let bundlePath = PrivilegedHelperInstaller.bundledSingBoxURL.path
         let trust = PrivilegedHelperInstaller.makeTrustConfig(
             clientExecutablePath: clientPath,
+            clientCDHashHex: "clientcdhash11",
             singBoxInstalledPath: installedPath,
             singBoxCDHashHex: "aabbccdd"
         )
@@ -44,8 +45,8 @@ final class PrivilegedHelperInstallerC1Tests: XCTestCase {
         // client 路径与 cdhash 仍正确写入。
         XCTAssertEqual(trust.clientExecutablePath, clientPath)
         XCTAssertEqual(trust.singBoxCDHashHex, "aabbccdd")
-        // pinnedCDHashHex 留 nil（App 重构建即变，不钉；sing-box cdhash 才钉）。
-        XCTAssertNil(trust.pinnedCDHashHex)
+        // 加固：pinnedCDHashHex 现钉客户端 App cdhash（堵 §5.1 identifier 伪造）。
+        XCTAssertEqual(trust.pinnedCDHashHex, "clientcdhash11")
     }
 
     func testMakeTrustConfigCDHashPreservedForPinning() {
@@ -53,10 +54,13 @@ final class PrivilegedHelperInstallerC1Tests: XCTestCase {
         // 钉死变冗余但保留（多一层防御）。makeTrustConfig 不改 cdhash。
         let trust = PrivilegedHelperInstaller.makeTrustConfig(
             clientExecutablePath: "/x/kongshan",
+            clientCDHashHex: nil,
             singBoxInstalledPath: "/y/sing-box",
             singBoxCDHashHex: "deadbeef"
         )
         XCTAssertEqual(trust.singBoxCDHashHex, "deadbeef")
+        // clientCDHashHex 传 nil → 不钉（保留旧行为路径可测）。
+        XCTAssertNil(trust.pinnedCDHashHex)
     }
 }
 
