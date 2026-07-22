@@ -1118,3 +1118,13 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 - 风险/注意事项：真实标题栏位置仍需打包安装后人工确认；自动测试只证明单按钮架构和作用域正确。
 - 下一步：提交实现并运行 `verify_m4.sh` 全量验证和 0.1.22 单次发布构建。
 - 下一位 Agent 如何接手：若视觉不符，只调整 SwiftUI toolbar 作用域/placement，不引入 AppKit 时序清理。
+
+## 2026-07-22 0.1.22 全量验证、安装与真实界面检查
+
+- 已完成：`verify_m4.sh` 单次构建 0.1.22/build 122；生成并验证 DMG；将旧 0.1.21 App/DMG 与 worktree 构建副本移入废纸篓，安装并启动 `/Applications/kongshan.app`；发现并卸载旧 `kongshan 0.1.19` DMG 挂载卷。
+- 修改文件：`VERSION` 自动更新为 0.1.22；发布产物为主工作区 `dist/kongshan-0.1.22.dmg`，并追加本记录。
+- 测试结果：全量 171 项、1 项既有跳过、0 失败；M4 平均 CPU 0.000%、最大 RSS 111,280 KB；签名严格校验和 `hdiutil verify` 通过；DMG SHA-256 为 `301c79a41540482f664ff0bb9e6f7a8c75047b75c211116fd8497975231c4dd6`。
+- 当前状态：真实 App 展开时只有一个“隐藏侧边栏”toolbar 按钮，折叠后仍只有一个“显示侧边栏”按钮且保持左侧，再次点击已恢复侧栏；等待用户最终视觉验收。
+- 风险/注意事项：Computer Use 在完成展开/折叠/恢复核心验证后连接中止，未继续逐页自动点击；toolbar 位于 `MainWindowView` 根层，各页面共用，仍由用户作最终验收。
+- 下一步：完成单 App/单 DMG/分支与 main 边界核验，更新四份交接记录；用户通过前不合并 main。
+- 下一位 Agent 如何接手：0.1.22 已安装；先听取用户验收，不通过继续在 `fix/sidebar-toggle` 修，通过后才合并 main。
