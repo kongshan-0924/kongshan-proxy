@@ -194,32 +194,28 @@ func verifySingBoxSignature(at url: URL, pinnedCDHashHex: String?) throws {
     }
 }
 
-/// §2b.3 起内核：configFD 喂给 sing-box stdin，stdout/stderr 重定向到日志文件。
-/// 返回 sing-box PID。helper 在 spawn 后关闭自己持有的 configFD/logFD（子进程经 dup2 持有副本）。
+/// §2b.3 起内核：configFD 经 `-c /dev/stdin` 喂给 sing-box，stdout/stderr 重定向到日志文件。
+/// 返回 sing-box PID。configFD 由调用方（handleConnection）持有并在处理结束时关闭
+/// （子进程经 dup2 持有 stdin 副本，父进程关自己的读端不影响子进程）；logFD 由本函数 defer 关。
 ///
-/// 修复 N1：configFD/logFD 用 defer 关闭，保证任何抛出路径都不泄漏 FD。
-/// 原实现 close(configFD)/close(logFD) 只在 posix_spawn 之后——若
-/// verifySingBoxSignature（cdhash 不匹配）或 logOpenFailed 在其之前抛出，
-/// configFD 不关 → helper 泄漏 pipe 读端；App 后台写线程（修复 B）填满
-/// pipe 缓冲后永久阻塞（pipe 无 SO_SNDTIMEO）。defer 确保任何路径都关；
-/// App 侧则得 EPIPE 正常结束。
+/// 加固（BLOCKER②）：argv 必须带 `-c /dev/stdin`。stock sing-box 的 `run` 不带 -c 时只从 CWD
+/// 找 config.json、完全无视 stdin（实测 1.13.14：`run` 报 open config.json，`run -c /dev/stdin`
+/// 才读管道）；原实现只 dup 到 stdin 而无 -c → 配置从未送达，launchd CWD=/ 下秒退。配置仍走
+/// 只读管道 fd：内容不落盘、不进 argv/环境变量（§1.3 保持，argv 里只有路径字符串 /dev/stdin）。
+/// spawn 后短暂确认子进程未立即退出（配置错误会毫秒级 FATAL），否则会向 App 误报 started。
 func startSingBox(at url: URL, configFD: Int32, pinnedCDHashHex: String?) throws -> Int32 {
-    // N1：configFD 在函数入口即登记 defer 关闭。verify/spawn 任一抛错都保证关闭。
-    // posix_spawn 后子进程经 dup2 持有 stdin 副本，helper 关自己的读端不影响子进程。
-    defer { close(configFD) }
-
     try verifySingBoxSignature(at: url, pinnedCDHashHex: pinnedCDHashHex)
 
     // 日志文件：O_CREAT|O_APPEND，0644 让 App 可读（日志不含凭据）。
     let logFD = open(logURL.path, O_WRONLY | O_CREAT | O_APPEND, mode_t(0o644))
     guard logFD >= 0 else { throw HelperError.logOpenFailed }
-    // N1：logFD 打开成功后登记 defer 关闭（打开失败时 logFD=-1，不进此分支）。
+    // logFD 打开成功后登记 defer 关闭（打开失败时 logFD=-1，不进此分支）。configFD 归调用方，不在此关。
     defer { close(logFD) }
 
     var actions: posix_spawn_file_actions_t? = nil
     posix_spawn_file_actions_init(&actions)
     defer { posix_spawn_file_actions_destroy(&actions) }
-    // §1.3 configFD → sing-box stdin。配置不落盘、不进命令行/环境变量。
+    // §1.3 configFD → sing-box stdin（配合 `-c /dev/stdin` 读取）。配置不落盘、不进命令行/环境变量。
     posix_spawn_file_actions_adddup2(&actions, configFD, STDIN_FILENO)
     // 日志重定向。
     posix_spawn_file_actions_adddup2(&actions, logFD, STDOUT_FILENO)
@@ -229,16 +225,23 @@ func startSingBox(at url: URL, configFD: Int32, pinnedCDHashHex: String?) throws
     posix_spawnattr_init(&attrs)
     defer { posix_spawnattr_destroy(&attrs) }
 
-    // §1.1 参数固定 run（从 stdin 读配置，无 -c）。
+    // §1.1 参数固定 `run -c /dev/stdin`（配置从只读管道 fd 读，路径固定、内容不落盘）。
     var pid: pid_t = 0
-    let argv: [UnsafeMutablePointer<CChar>?] = [strdup(url.path), strdup("run"), nil]
+    let argv: [UnsafeMutablePointer<CChar>?] = [
+        strdup(url.path), strdup("run"), strdup("-c"), strdup("/dev/stdin"), nil
+    ]
     defer { argv.forEach { free($0) } }
     let spawnResult = argv.withUnsafeBufferPointer { argvBuf in
         posix_spawn(&pid, url.path, &actions, &attrs, argvBuf.baseAddress, nil)
     }
-    // N1：configFD/logFD 已由 defer 关闭，不再显式 close（重复 close 会误关复用 FD）。
-
     guard spawnResult == 0, pid > 0 else { throw HelperError.spawnFailed(spawnResult) }
+
+    // 配置无效时 sing-box 毫秒级 FATAL 退出；短暂确认存活再回 started，否则误报成功。
+    usleep(150_000)
+    var wstatus: Int32 = 0
+    if waitpid(pid, &wstatus, WNOHANG) == pid {
+        throw HelperError.spawnFailed(-1)  // 子进程已退出（多半配置无效）→ 不误报 started
+    }
     return pid
 }
 
@@ -299,20 +302,23 @@ func recvBodyAndFD(_ fd: Int32, body: UnsafeMutableRawPointer, length: Int) -> (
     let n = recvmsg(fd, &msg, 0)
     guard n >= 0 else { return (-1, -1) }
 
-    // 修复 D3：控制数据被截断 → cmsg 不完整，不可信，明确置 -1（别读残缺 cmsg）。
-    if (msg.msg_flags & Int32(MSG_CTRUNC)) != 0 { return (Int(n), -1) }
-
+    // 先从 cmsg 取出内核已装入的 fd（若有完整 SCM_RIGHTS 头）。
     // CMSG_DATA(cmsg) = (char*)cmsg + __DARWIN_ALIGN32(sizeof(cmsghdr))。
     let dataOffset = (MemoryLayout<cmsghdr>.size + 3) & ~3
-    // 修复 D3：进入 SCM_RIGHTS 分支前校验 msg_controllen >= dataOffset + sizeof(Int32)，
-    // 确保有完整 cmsghdr + Int32 数据，不会越界读。
+    // 修复 D3：校验 msg_controllen >= dataOffset + sizeof(Int32)，确保有完整 cmsghdr + Int32，不越界读。
     let minNeeded = dataOffset + MemoryLayout<Int32>.size
-    guard msg.msg_controllen >= socklen_t(minNeeded),
-          let control = msg.msg_control else { return (Int(n), -1) }
-    let cmsg = control.assumingMemoryBound(to: cmsghdr.self)
-    if cmsg.pointee.cmsg_level == SOL_SOCKET && cmsg.pointee.cmsg_type == SCM_RIGHTS {
-        let dataPtr = UnsafeMutableRawPointer(cmsg).advanced(by: dataOffset)
-        configFD = dataPtr.assumingMemoryBound(to: Int32.self).pointee
+    if msg.msg_controllen >= socklen_t(minNeeded), let control = msg.msg_control {
+        let cmsg = control.assumingMemoryBound(to: cmsghdr.self)
+        if cmsg.pointee.cmsg_level == SOL_SOCKET && cmsg.pointee.cmsg_type == SCM_RIGHTS {
+            configFD = UnsafeMutableRawPointer(cmsg).advanced(by: dataOffset)
+                .assumingMemoryBound(to: Int32.self).pointee
+        }
+    }
+    // 修复 D3 + 加固 finding4：控制数据被截断（攻击者塞了超过单 fd 缓冲的多个 fd）→ cmsg 不可信。
+    // 内核可能已装入能塞下的那个 fd；必须关掉再拒绝，否则每条这类消息泄漏 1 个 fd（鉴权后 DoS）。
+    if (msg.msg_flags & Int32(MSG_CTRUNC)) != 0 {
+        if configFD >= 0 { close(configFD) }
+        return (Int(n), -1)
     }
     return (Int(n), configFD)
 }
@@ -366,6 +372,9 @@ func handleConnection(connfd: Int32) {
     }
 
     let (request, configFD) = recvRequest(connfd: connfd)
+    // 加固（finding3）：收到的 configFD 由本函数持有，任何路径（解析失败 / 非 startKernel /
+    // startSingBox 抛错 / 成功）结束时都关闭，避免 fd 泄漏。startSingBox 只借它做 dup2，不自关。
+    defer { if let fd = configFD, fd >= 0 { close(fd) } }
     guard let request else { return }  // 解析失败 → 断连。
 
     // 修复 C：sing-box 路径从 trust 读。trust 缺路径 → startTun/stopTun 都做不了。
