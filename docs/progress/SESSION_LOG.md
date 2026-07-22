@@ -1078,3 +1078,13 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 - 风险/注意事项：CLI XCTest 仍不能直接读取真实 SwiftUI 标题栏，自动架构检查与打包 App 人工验收缺一不可。
 - 下一步：用户复核通过后调用 `writing-plans`，再按 RED→GREEN 实施并发布 0.1.22。
 - 下一位 Agent 如何接手：默认按钮必须在侧栏 `List` 作用域移除；固定按钮只允许一个，使用受控 `NavigationSplitViewVisibility`。
+
+## 2026-07-22 固定位置实施授权与计划
+
+- 已完成：用户复核书面设计并明确后续无需逐步确认；只在当前分支/worktree 修改，最终成品直接交付验收。实施计划已按 RED→GREEN、发布、单副本安装和交接拆分并自查。
+- 修改文件：新增 `docs/superpowers/plans/2026-07-22-fixed-sidebar-toggle-position.md`，追加本记录；产品代码尚未修改。
+- 测试结果：计划与设计逐项对应，无 TBD/TODO；确认 `verify_m4.sh` 会经 `verify_m3.sh` 调用 `build_app.sh` 并自动递增一次版本，计划已避免二次构建误升 0.1.23。
+- 当前状态：`fix/sidebar-toggle` 独立 worktree 已验证，准备运行基线测试并开始失败回归测试。
+- 风险/注意事项：验收通过前不合并 main；只有遇到真正阻断或高风险扩权才暂停询问。
+- 下一步：运行 `swift test` 基线，随后完成回归 RED、最小实现 GREEN、0.1.22 全量验证与安装。
+- 下一位 Agent 如何接手：直接执行计划，不再要求用户逐步确认；保持单分支、单 App、单最新版 DMG。
