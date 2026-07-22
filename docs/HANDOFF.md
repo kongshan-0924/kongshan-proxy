@@ -1,5 +1,22 @@
 # 项目交接
 
+## 2026-07-22 22:40 TUN 助手第三轮安全修复（feat/tun-passwordless-helper，4 提交完成，待维护者复审）
+
+- 已完成：按 `docs/design/tun-passwordless-helper-fixes.md`「第三轮」实现 C①/C②/N1 必修 + N2 可选，4 个独立提交留在 `feat/tun-passwordless-helper`（未推、未合 main）。
+- 提交：`dcf4914` C② fail-closed → `f13795f` C① sing-box 拷 root-only 消除 TOCTOU → `0760ec1` N1 defer close FD → `276dacf` N2 client pipe 清理。
+- 修复要点：
+  - C① [阻断·root 提权]：sing-box 没迁 root-only，trust.singBoxExecutablePath 指 bundle（admin 可写）→ verify→exec TOCTOU。修法与 helper 同构：`installedSingBoxURL = stateDirectory + "/sing-box"`，安装脚本加 cp/chown/chmod，trust 指向拷贝。提取 `makeTrustConfig` 纯函数单测。
+  - C② [低危]：`computeCDHashHex` nil 时静默写 null → 不钉 cdhash。提取 `failClosedCDHash(_:)` 纯函数，nil/空抛 `authorizationFailed`。
+  - N1 [可靠性]：`startSingBox` 早抛泄漏 configFD → App 写线程永久阻塞。顶部 `defer { close(configFD) }` + logFD 打开后 `defer { close(logFD) }`，删 spawn 后显式 close。
+  - N2 [可选·非安全]：`Client.start` 的 `pipe()` 后 sendFrame 抛错泄漏两端。do/catch 补关再 rethrow。
+- 修改文件：`Sources/KongshanCore/PrivilegedHelperInstaller.swift`、`Sources/KongshanHelper/main.swift`、`Sources/KongshanCore/PrivilegedHelperClient.swift`、`Tests/KongshanCoreTests/PrivilegedHelperInstallerTests.swift`（新增）。未碰侧栏、未 merge main、未真装 daemon（§1.5）。
+- 测试：`swift build` 通过；`swift test` **225 通过 1 跳过 0 失败**（+9 新：C① 5 + C② 4）。
+- 铁律复核：§1.1-1.6 全部仍生效（C① 只改 sing-box 加载位置，仍 internal/固定 run/stdin；C② 强化拒绝优先；N1/N2 不涉及铁律）。
+- 当前状态：4 提交在 `feat/tun-passwordless-helper`，未推。等维护者重跑独立对抗式安全审查（重点验 C① 是否真消除 TOCTOU），过了才合 main。
+- 风险：main 已升 0.1.23，与本分支在 AppState.swift/MainWindowView.swift 会冲突——维护者合并时手动解（本分支未 merge/rebase main，按要求）。N1 defer 不便纯函数单测（运行时保证），已在 commit 写思路说明。
+- 下一步：维护者重跑安全审查；通过后合 main（手动解冲突）；真机重打包验证零弹窗 TUN + 检查 `/Library/Application Support/kongshan/helper/sing-box` 存在且 root:wheel 755 + trust.json 指向它。
+- 接手方式：在 `feat/tun-passwordless-helper`，读 4 个 commit + SESSION_LOG 2026-07-22 22:40 段。
+
 ## 2026-07-22 TUN 免密码特权助手（feat/tun-passwordless-helper 分支，里程碑 2b-5 完成）
 
 - 已完成：按 `docs/design/tun-passwordless-helper-tasks.md` 实现里程碑 2b-5，4 个独立提交（每里程碑一条）。

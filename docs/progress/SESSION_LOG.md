@@ -1177,3 +1177,28 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 - `codex/network-observability-batch` @c35154b(在 .worktrees/sidebar-toggle-fix)：网络可观测批次，标 0.1.23，待了解。
 - `main` @ec29ab1：0.1.20 已发布，领先 origin/main 2 未推。
 - 提醒用户：多 agent 并行改 docs(HANDOFF/PROGRESS/NEXT_STEPS/SESSION_LOG 常处于未提交修改态)，合并时留意分叉/冲突。
+
+## 2026-07-22 22:40 — TUN 助手第三轮安全修复（feat/tun-passwordless-helper，4 提交）
+
+- 已完成：按 `docs/design/tun-passwordless-helper-fixes.md`「第三轮」实现 C①/C②/N1 必修 + N2 可选，4 个独立提交留在 `feat/tun-passwordless-helper` 分支（未推、未合 main）。
+- 提交序列（旧→新）：
+  1. `dcf4914` fix(helper): C② — computeCDHashHex 失败 fail-closed
+  2. `f13795f` fix(helper): C① — sing-box 拷 root-only 位置消除 verify→exec TOCTOU
+  3. `0760ec1` fix(helper): N1 — startSingBox 早失败泄漏 configFD + 卡死 App 写线程
+  4. `276dacf` fix(helper): N2 — PrivilegedHelperClient.start 早抛泄漏 pipe（可选·非安全）
+- 修复细节：
+  - **C① [阻断·root 提权，最关键]**：sing-box 没迁 root-only，trust.singBoxExecutablePath 仍指 bundle 内（/Applications 对 admin 组可写）→ verify→exec TOCTOU。修法与 helper 拷贝同构：新增 `installedSingBoxURL = stateDirectory + "/sing-box"`；安装脚本加 `rm -f / cp / chown root:wheel / chmod 755` 为 sing-box 拷一份；trust.singBoxExecutablePath 改指 root-only 拷贝；cdhash 仍按 bundle 算（同字节同 cdhash，钉死变冗余但保留）。卸载 `rm -rf stateDirectory` 一并删。提取纯函数 `makeTrustConfig` 便于单测。
+  - **C② [低危]**：`computeCDHashHex` 返回 nil 时无 guard 静默写 null → 不钉 cdhash。修法：提取纯函数 `failClosedCDHash(_:)`，nil/空抛 `authorizationFailed("无法计算 sing-box cdhash，拒绝安装")`；`requireCDHashHex(at:)` 委托给它；install 改用 `try requireCDHashHex(...)`。
+  - **N1 [可靠性]**：`startSingBox` 里 `close(configFD)/close(logFD)` 只在 posix_spawn 之后，verify/logOpenFailed 早抛会泄漏 configFD → App 后台写线程填满 pipe 缓冲后永久阻塞。修法：顶部 `defer { close(configFD) }`，logFD 打开成功后 `defer { close(logFD) }`，删掉 spawn 后显式 close。纯 defer 不便单测（运行时保证），在 commit message 写了失败路径不泄漏 fd 的思路说明。
+  - **N2 [可选·非安全]**：`PrivilegedHelperClient.start` 里 `pipe()` 后 `sendFrame` 抛错则 readEnd/writeEnd 无人关（App 进程内泄漏）。修法：do/catch 包住 sendFrame，catch 里补关两端再 rethrow。
+- 修改文件：`Sources/KongshanCore/PrivilegedHelperInstaller.swift`、`Sources/KongshanHelper/main.swift`、`Sources/KongshanCore/PrivilegedHelperClient.swift`、`Tests/KongshanCoreTests/PrivilegedHelperInstallerTests.swift`（新增）。未碰侧栏、未碰 main 分支、未在测试/脚本里真装 daemon（§1.5）。
+- 测试：`swift build` 通过；`swift test` **225 通过 1 跳过 0 失败**（+9 新单测：C① 5 个 + C② 4 个）。
+- 铁律复核（§1）：§1.1 仍只 exec 内置 sing-box（C① 只改加载位置，仍 internal/固定 run/stdin）；§1.2 拒绝优先（C② fail-closed）；§1.3 配置只经 FD（未改）；§1.4 只杀自起 PID（未改）；§1.5 未真装 daemon（测试都是纯函数）；§1.6 未弱化 osascript 兜底（未改）。
+- 当前状态：4 提交在 `feat/tun-passwordless-helper`，未推。等维护者重跑独立对抗式安全审查（重点验 C① 是否真消除 TOCTOU），过了才合 main。
+- 风险/注意事项：
+  1. C① 的 root-only sing-box 拷贝在 `stateDirectory/sing-box`，与 helper 同目录（0711 root）。sing-box 版本更新后需重装（`needsReinstall` 已覆盖：bundle cdhash 变 → 与 trust 钉死值不匹配 → 重装）。
+  2. C① 真机验证要点：安装后检查 `/Library/Application Support/kongshan/helper/sing-box` 存在且 `ls -l` 显示 root:wheel 755；trust.json 里 `singBoxExecutablePath` 指向该路径（不是 bundle）。
+  3. N1 的 defer 保证无法用纯函数单测覆盖；如需更强保证可加集成测试（起真 helper + 故意 cdhash 不匹配 + 验证 configFD 被关），但那需要真装 daemon（违反 §1.5），故未加。
+  4. main 已升到 0.1.23，与本分支在 AppState.swift/MainWindowView.swift 会冲突——那是维护者最后合并时手动解的，本分支未 merge/rebase main（按要求）。
+- 下一步：维护者重跑安全审查（重点 C① TOCTOU 是否真消除）；通过后合 `feat/tun-passwordless-helper` → main（手动解 AppState/MainWindowView 冲突）；真机重打包验证零弹窗 TUN。
+- 接手方式：在 `feat/tun-passwordless-helper` 分支，读本段 + 4 个 commit（dcf4914/f13795f/0760ec1/276dacf）。改 C① 前理解 installedSingBoxURL 与 installedHelperURL 同构关系；改 N1 前理解 defer 与 posix_spawn 子进程 dup2 的 FD 生命周期。

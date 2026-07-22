@@ -1,9 +1,16 @@
 # 下一步
 
-## 当前最高优先级：TUN 免密码助手 —— 第三轮 3 条修复后合并 main
+## 当前最高优先级：维护者重跑安全审查 → 合并 feat/tun-passwordless-helper → main
 
-分支 `feat/tun-passwordless-helper`（@2eb7934，未推）。功能 ~95% 完成，**两轮独立安全审查已做完**。
-**下一步 = 做「第三轮」3 条修复（用户已选 B：由接手方/我实现，不再交 Codex），然后重跑安全审查 + 合并 feat→main。**
+第三轮 4 条修复（C①/C②/N1/N2）已实现并提交在 `feat/tun-passwordless-helper`（@276dacf，未推）。
+`swift build` + `swift test` 全绿（225 通过 1 跳过 0 失败，+9 新单测）。
+**下一步 = 维护者重跑独立对抗式安全审查（重点验 C① 是否真消除 TOCTOU），过了才合 main。**
+
+### 维护者复审要点
+- C①：`/Library/Application Support/kongshan/helper/sing-box` 存在且 root:wheel 755；trust.json 里 `singBoxExecutablePath` 指向它（不是 bundle）；bundle 内 sing-box 被换/被 TOCTOU 交换都无法以 root 执行（root-only 路径不可写）。
+- C②：算不出 cdhash 拒绝安装（`failClosedCDHash(nil)` 抛 authorizationFailed）。
+- N1：startSingBox 各抛出路径均关 configFD（defer 兜底）。
+- 合并时手动解 AppState.swift / MainWindowView.swift 冲突（main 已升 0.1.23，本分支未 merge/rebase main）。
 
 ### 现状
 - 里程碑 2b–5（Codex）+ 第二轮修复 A/B/C/D1/D2/D3（Codex）已完成。`swift build`/`swift test` **216 通过 1 跳过**。未碰侧栏文件、无凭据落盘。

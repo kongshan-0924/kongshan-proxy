@@ -1,5 +1,6 @@
 # 项目进度
 
+- [x] TUN 助手第三轮安全修复（feat/tun-passwordless-helper）：C① sing-box 拷 root-only 消除 verify→exec TOCTOU + C② cdhash fail-closed + N1 defer close FD + N2 client pipe 清理（4 提交，225 测试全绿，待维护者复审）（2026-07-22）
 - [x] TUN 免密码特权助手里程碑 2b（feat/tun-passwordless-helper 分支）：helper 安全核心——socket 服务 + audit_token 身份校验纯函数 + startTun 收 SCM_RIGHTS FD 固定 exec 内置 sing-box + stopTun 只杀自起 PID + 30s 自愈（2026-07-22）
 - [x] TUN 免密码特权助手里程碑 3：PrivilegedHelperClient（actor，pipe+sendmsg 传 FD）+ PrivilegedHelperInstaller（一条 osascript 装/卸）+ AppState tunLauncher（helper 可达用 helper 否则回退）+ 设置→隧道「免密码助手」Section（2026-07-22）
 - [x] TUN 免密码特权助手里程碑 4：build_app.sh 打包 KongshanHelper + plist 模板到 .app；Installer 优先读 .app 内模板（占位符替换）（2026-07-22）
