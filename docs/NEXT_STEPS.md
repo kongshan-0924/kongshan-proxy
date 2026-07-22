@@ -1,21 +1,50 @@
 # 下一步
 
-## 当前最高优先级：TUN 免密码助手审查与真机验收
+## 当前最高优先级：TUN 免密码助手 —— 第三轮 3 条修复后合并 main
 
-1. 维护者安全审查 `feat/tun-passwordless-helper` 分支 4 个提交（2b-5），重点：
-   - §5.1 对端身份校验链路（audit_token → SecCode → identifier+path）是否可绕过。
-   - §1.3 配置是否真经 pipe FD 传、无落盘/无进命令行/环境变量。
-   - §1.4 stopTun 是否只杀自起 PID 且 proc_pidpath 验证。
-   - §1.2 trust.json 缺失/损坏是否一律拒。
+分支 `feat/tun-passwordless-helper`（@2eb7934，未推）。功能 ~95% 完成，**两轮独立安全审查已做完**。
+**下一步 = 做「第三轮」3 条修复（用户已选 B：由接手方/我实现，不再交 Codex），然后重跑安全审查 + 合并 feat→main。**
+
+### 现状
+- 里程碑 2b–5（Codex）+ 第二轮修复 A/B/C/D1/D2/D3（Codex）已完成。`swift build`/`swift test` **216 通过 1 跳过**。未碰侧栏文件、无凭据落盘。
+- **两轮独立安全审查（general-purpose subagent，prompt 见 SESSION_LOG）**：
+  - 第一轮：无严重提权洞；提出 2 功能阻断(socket 权限/大配置死锁)+中危(bundle 可写)+低危 → 已被第二轮修复。
+  - 第二轮复审：**A/B/D1/D2/D3 确认闭合**；**C 仍留一个真实(竞态门槛) root 提权面** → 第三轮必修。
+
+### 第三轮必修（详见 `docs/design/tun-passwordless-helper-fixes.md` 末尾「第三轮」）
+1. **C① [阻断·root 提权] sing-box verify→exec TOCTOU**：helper 已迁 root-only，但 sing-box 仍在 bundle(管理员组对 /Applications 可写)。`startSingBox` 先按路径校验 cdhash、之后按**同一路径** `posix_spawn`，攻击者可在两步间原子替换 → root 执行任意码。**修法：安装时把 sing-box 也拷到 `stateDirectory`(root:wheel 0755，与 helper 拷贝完全同构)，`trust.singBoxExecutablePath` 指向该 root-only 拷贝** → 路径不可写、TOCTOU 消失。改 `PrivilegedHelperInstaller`(加 sing-box 拷贝) + trust 字段。
+2. **C② [低危] fail-closed**：`computeCDHashHex` 返回 nil 时现在静默写 null=不钉；`install()` 加 `guard let … else { throw }`。
+3. **N1 [可靠性]**：`startSingBox`(helper) 失败(cdhash 不匹配等)不关 `configFD` → 泄漏 + 卡死 App 后台写线程；顶部 `defer { close(configFD) }` / `defer { close(logFD) }`，删 spawn 后显式 close。
+4. （可选 N2：`PrivilegedHelperClient.start` 早抛泄漏 pipe，加 defer。）
+
+### 做完后
+- `swift build`+`test` 全绿；**重跑独立对抗式安全审查**（重点 C① 是否真消除 TOCTOU + 无新洞）；过了 **合并 feat→main**。
+- **用户真机验收**：设置→隧道→「安装免密码助手」授权一次 → 开 TUN 应零弹窗。
+
+### 接手提示
+- **别重造**：功能已在分支上，只做上面 3 条。设计/威胁模型 `docs/design/tun-passwordless-helper.md`；三轮修复清单 `…-fixes.md`；实现任务书 `…-tasks.md`。铁律 §1.1–1.6 不变。别碰侧栏文件（`fix/sidebar-toggle` 在改）。
+- 另有并行分支：`fix/sidebar-toggle`（双侧栏按钮修复，待审查合并）、`codex/network-observability-batch`（网络可观测，0.1.23，待了解）。`main`=0.1.20 已发布、领先 origin 2 未推。
+
+## 审查范围明细（参考·下方原文）
+
+1. 维护者独立安全审查 `feat/tun-passwordless-helper` 分支 11 个提交（2b-5 里程碑 4 条 + 修复 A/B/C/D1/D2/D3 6 条 + 补单测 1 条），重点：
+   - **C 的 cdhash 钉死链路**：installer 算 bundle 内 sing-box cdhash 写 trust.json → helper exec 前用 `HelperSingBoxTrust.isCDHashMatched` 校验目标 cdhash == 钉死值。ad-hoc 签名零成本可伪造，光验"签名有效"挡不住替换。
+   - **C 的安装位置校验**：`HelperInstallLocation.isAllowed` 拒绝 App bundle 在 $HOME 下（家目录可写=bundle 可被替换）。前缀带 `/` 边界防 `kaysen2` 误匹配 `kaysen/`，空 home 拒绝。
+   - **C 的 helper 拷 root-only**：plist ProgramArguments 指向 stateDirectory/KongshanHelper（root:wheel 0755）不指 bundle；sing-box 路径从 trust.json 读（helper 被拷走后相对关系已变）。
+   - **D2 路径同源**：对端可执行路径从签名校验用的同一 `SecStaticCode` 经 `SecCodeCopyPath` 取，消除裸 PID 往返；`SecRequirementCreateWithString` 返回值检查（失败按拒绝）。
+   - **D3 CMSG 解析**：memset 清零 + MSG_CTRUNC + 长度校验，防读到未初始化内存当 fd。
+   - **A 权限值**：目录 0711 / socket 0666 共享常量 helper 与 installer 同步。
+   - §5.1 身份校验链路（audit_token → SecCode → identifier+path）/ §1.3 FD 不落盘 / §1.4 只杀自起 / §1.2 trust 缺失损坏一律拒。
 2. 审查通过后合并 `feat/tun-passwordless-helper` → `main`（别推 main，由维护者合）。
-3. 用户真机：重打包（`scripts/build_app.sh`）→ 装 /Applications → 设置→隧道点「安装免密码助手」（osascript 一次授权）→ 开 TUN 验证零弹窗。
+3. 用户真机：重打包（`scripts/build_app.sh`，注意 plist 模板已删、改结构化生成）→ **装 /Applications**（安装位置校验要求不在 $HOME）→ 设置→隧道点「安装免密码助手」（osascript 一次授权，会拷 helper 到 root-only + 算 cdhash 钉死 + 写 trust.json）→ 开 TUN 验证零弹窗。
 
-## TUN 免密码助手（feat/tun-passwordless-helper 分支，2026-07-22 完成）
+## TUN 免密码助手修复 A/B/C/D（feat/tun-passwordless-helper 分支，2026-07-22 完成）
 
-- 里程碑 2b-5 已实现并提交（4 条 commit），`swift test` 199 通过 1 跳过 0 失败。
-- 未碰侧栏文件；未在自动化里真安装 daemon（铁律 §1.5）。
-- 真机安装授权由用户点一次；未装时 TUN 仍走 `PrivilegedLauncher`（osascript 兜底，§1.6）。
-- 详见 `docs/HANDOFF.md` 顶部「TUN 免密码特权助手」段与 `docs/progress/SESSION_LOG.md` 2026-07-22 各段。
+- 6 条修复 + 补单测已全部完成并单独提交（7 条 commit：a08103f/b231631/c2fee14/0ee5928/e6e8d37/97ffaeb/ac28853）。
+- `swift test` **216 通过 1 跳过 0 失败**（199+17 新）。
+- 未碰侧栏文件（git 核对 7 个提交无 sidebar/MainWindowView/RoutingView）；未在自动化里真安装 daemon（铁律 §1.5）。
+- 修复任务书见 `docs/design/tun-passwordless-helper-fixes.md`，验收要求已满足（swift build+test 全绿、补单测、无 secret 落盘、每条单独提交、未碰侧栏、拿不准宁可更严）。
+- 详见 `docs/HANDOFF.md` 顶部「TUN 免密码助手安全审查修复 A/B/C/D」段与 `docs/progress/SESSION_LOG.md` 2026-07-22 修复段。
 
 ## 修复双侧栏按钮（另一分支 fix/sidebar-toggle）
 
