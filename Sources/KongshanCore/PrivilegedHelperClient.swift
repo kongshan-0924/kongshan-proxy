@@ -83,7 +83,16 @@ public actor PrivilegedHelperClient: PrivilegedLaunching {
         let writeEnd = pipeFDs[1]
 
         // 1) 先把读端经 sendmsg 交给 helper。
-        try sendFrame(HelperRequest.startTun, configFD: readEnd, on: fd)
+        // 修复 N2：sendFrame 抛错时 pipe 两端都没人关（App 进程内泄漏，非提权）。
+        // do/catch 在抛错路径补关两端，再 rethrow。成功后 readEnd 显式关（helper 已拿副本），
+        // writeEnd 交给后台线程写完再关。
+        do {
+            try sendFrame(HelperRequest.startTun, configFD: readEnd, on: fd)
+        } catch {
+            close(readEnd)
+            close(writeEnd)
+            throw error
+        }
         // helper 已通过 SCM_RIGHTS 拿到读端副本，App 关掉自己持有的读端。
         close(readEnd)
 
