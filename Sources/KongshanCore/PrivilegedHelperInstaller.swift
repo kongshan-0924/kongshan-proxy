@@ -120,14 +120,16 @@ public enum PrivilegedHelperInstaller {
         // helper 拷贝 0755 root:wheel（用户不可改）。
         let stateDir = HelperConstants.stateDirectory
         let parentDir = (stateDir as NSString).deletingLastPathComponent
+        // 修复 A：目录权限用共享常量，与 helper setupSocket 同步（别一处改了另一处漂移）。
+        let dirModeOctal = String(HelperConstants.socketDirectoryMode, radix: 8)  // "711"
         let command = [
             "set -e",
             "umask 077",
             "export PATH=/usr/bin:/bin:/usr/sbin:/sbin",
-            // stateDirectory 及其父 .../kongshan 都建出并显式 chmod 0711。
+            // stateDirectory 及其父 .../kongshan 都建出并显式 chmod 0711（修复 A）。
             "/bin/mkdir -p \(shellQuote(stateDir))",
-            "/bin/chmod 711 \(shellQuote(parentDir))",
-            "/bin/chmod 711 \(shellQuote(stateDir))",
+            "/bin/chmod \(dirModeOctal) \(shellQuote(parentDir))",
+            "/bin/chmod \(dirModeOctal) \(shellQuote(stateDir))",
             // 修复 C.1：拷 bundle helper → root-only 位置（先 rm 防旧残留，再 cp + chown + chmod）。
             "/bin/rm -f \(shellQuote(installedHelperPath))",
             "/bin/cp \(shellQuote(bundledHelperPath)) \(shellQuote(installedHelperPath))",

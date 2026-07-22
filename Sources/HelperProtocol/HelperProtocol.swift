@@ -14,6 +14,13 @@ public enum HelperConstants {
     public static let clientSigningIdentifier = "com.kaysen.kongshan"
     /// 协议版本，App/helper 不匹配时拒绝。
     public static let protocolVersion = 1
+    /// 修复 A：socket 目录权限（root 拥有，others 可穿越、不可列）。
+    /// helper 的 setupSocket 与 installer 的安装脚本都引用此常量，保证两处同步。
+    /// 安全主防线是 §5.1 audit_token 身份校验，从不依赖 socket 权限；但目录必须 root 拥有且
+    /// 非 world-writable，防 socket-squatting（攻击者 unlink 再 bind 假 helper 骗连）。
+    public static let socketDirectoryMode: Int = 0o711
+    /// 修复 A：socket 文件权限（others 可连）。App 是普通用户进程，需可 connect。
+    public static let socketFileMode: Int = 0o666
 }
 
 /// App → helper 的请求。**刻意不含任意路径/命令字段**——只有固定几个动作，
@@ -165,8 +172,9 @@ public enum HelperInstallLocation {
     ///   - homeDirectory: 当前用户家目录绝对路径。
     /// - Returns: bundle 不在家目录之下（且家目录非空）时 true。
     public static func isAllowed(bundleURL: URL, homeDirectory: String) -> Bool {
+        // 拒绝优先：家目录为空 → 无法判定，拒绝。
+        guard !homeDirectory.isEmpty else { return false }
         let home = URL(fileURLWithPath: homeDirectory).standardizedFileURL.path
-        guard !home.isEmpty else { return false }
         let bundle = bundleURL.standardizedFileURL.path
         if bundle == home { return false }
         if bundle.hasPrefix(home + "/") { return false }
