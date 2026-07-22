@@ -67,22 +67,11 @@ final class KongshanAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         if window.isMiniaturized { window.deminiaturize(nil) }
         controller.showWindow(nil)
         window.makeKeyAndOrderFront(nil)
-        removeSystemSidebarToggle(from: window)
         // 摆到主屏。立即摆一次，再延到下一个 runloop 摆一次——SwiftUI 承载视图会在
         // 布局完成后调整窗口尺寸/位置，早于它做会被覆盖，多显示器下就表现为「窗口跑到外接屏/看不到」。
         placeOnScreen(window, homeScreen)
         DispatchQueue.main.async { [weak self] in
             self?.placeOnScreen(window, homeScreen)
-            self?.removeSystemSidebarToggle(from: window)
-        }
-    }
-
-    private func removeSystemSidebarToggle(from window: NSWindow) {
-        guard let toolbar = window.toolbar else { return }
-        for (index, item) in toolbar.items.enumerated().reversed() {
-            if item.itemIdentifier == .toggleSidebar || item.itemIdentifier.rawValue.contains("toggleSidebar") {
-                toolbar.removeItem(at: index)
-            }
         }
     }
 

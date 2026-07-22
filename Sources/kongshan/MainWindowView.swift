@@ -4,39 +4,24 @@ import SwiftUI
 struct MainWindowView: View {
     @Environment(AppState.self) private var state
     @State private var selection: SidebarPage? = .dashboard
-    @State private var isSidebarCompact = false
 
     var body: some View {
         NavigationSplitView {
             List(selection: $selection) {
-                if isSidebarCompact {
-                    sidebarRowCompact(.dashboard)
-                    sidebarRowCompact(.nodes)
-                    sidebarRowCompact(.policyGroups)
-                    sidebarRowCompact(.routing)
-                    sidebarRowCompact(.connections)
-                    sidebarRowCompact(.logs)
-                    sidebarRowCompact(.settings)
-                } else {
-                    sidebarRow(.dashboard)
-                    Section("管理") {
-                        sidebarRow(.nodes)
-                        sidebarRow(.policyGroups)
-                        sidebarRow(.routing)
-                    }
-                    Section("其他") {
-                        sidebarRow(.connections)
-                        sidebarRow(.logs)
-                        sidebarRow(.settings)
-                    }
+                sidebarRow(.dashboard)
+                Section("管理") {
+                    sidebarRow(.nodes)
+                    sidebarRow(.policyGroups)
+                    sidebarRow(.routing)
+                }
+                Section("其他") {
+                    sidebarRow(.connections)
+                    sidebarRow(.logs)
+                    sidebarRow(.settings)
                 }
             }
             .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(
-                min: isSidebarCompact ? 56 : 186,
-                ideal: isSidebarCompact ? 64 : 200,
-                max: isSidebarCompact ? 72 : 250
-            )
+            .navigationSplitViewColumnWidth(min: 186, ideal: 200, max: 250)
             .safeAreaInset(edge: .bottom, spacing: 0) { sidebarStatus }
         } detail: {
             // 错误与警告在所有页面统一呈现；此前只有仪表盘显示，
@@ -63,19 +48,6 @@ struct MainWindowView: View {
                 }
             }
         }
-        .toolbar {
-            ToolbarItem(placement: .navigation) {
-                Button {
-                    withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
-                        isSidebarCompact.toggle()
-                    }
-                } label: {
-                    Image(systemName: "sidebar.left")
-                }
-                .help(isSidebarCompact ? "展开侧边栏" : "折叠侧边栏（仅图标）")
-            }
-        }
-        .toolbar(removing: .sidebarToggle)
         .navigationTitle("kongshan")
     }
 
@@ -84,47 +56,27 @@ struct MainWindowView: View {
             .tag(page)
     }
 
-    private func sidebarRowCompact(_ page: SidebarPage) -> some View {
-        HStack {
-            Spacer()
-            Image(systemName: page.symbol)
-                .font(.system(size: 14, weight: .medium))
-            Spacer()
-        }
-        .tag(page)
-        .help(page.title)
-    }
-
     /// 侧栏底部常驻状态条，任何页面下都能看到当前接管方式与节点。
     private var sidebarStatus: some View {
         VStack(alignment: .leading, spacing: 0) {
             Divider()
-            HStack(spacing: isSidebarCompact ? 0 : 8) {
-                if isSidebarCompact {
-                    Spacer()
-                    Circle()
-                        .fill(state.statusTint)
-                        .frame(width: 8, height: 8)
-                        .help("\(state.statusText) · \(state.selectedNode?.name ?? "未选择节点")")
-                    Spacer()
-                } else {
-                    Circle()
-                        .fill(state.statusTint)
-                        .frame(width: 7, height: 7)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(state.statusText)
-                            .font(.caption.weight(.medium))
-                            .lineLimit(1)
-                        Text(state.selectedNode?.name ?? "未选择节点")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                    Spacer(minLength: 0)
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(state.statusTint)
+                    .frame(width: 7, height: 7)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(state.statusText)
+                        .font(.caption.weight(.medium))
+                        .lineLimit(1)
+                    Text(state.selectedNode?.name ?? "未选择节点")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
+                Spacer(minLength: 0)
             }
-            .padding(.horizontal, isSidebarCompact ? 4 : 14)
+            .padding(.horizontal, 14)
             .padding(.vertical, 9)
         }
     }
