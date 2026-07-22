@@ -60,15 +60,17 @@ public struct NodeNameMetadata: Equatable, Sendable {
         return nil
     }
 
+    // 编译一次缓存复用：parse 会在节点列表里逐节点、每帧调用（测速时 delays 高频刷新），
+    // 不能每次都现编译正则，否则几百节点下就是每帧上千次 NSRegularExpression 编译 → 卡顿。
+    private static let multiplierRegexes: [NSRegularExpression] = [
+        #"(?i)(\d+(?:\.\d+)?)\s*(?:x|×|倍)"#,
+        #"倍率\s*[:：]?\s*(\d+(?:\.\d+)?)"#
+    ].compactMap { try? NSRegularExpression(pattern: $0) }
+
     private static func parsedMultiplier(in text: String) -> Double? {
-        let patterns = [
-            #"(?i)(\d+(?:\.\d+)?)\s*(?:x|×|倍)"#,
-            #"倍率\s*[:：]?\s*(\d+(?:\.\d+)?)"#
-        ]
         let range = NSRange(text.startIndex..<text.endIndex, in: text)
-        for pattern in patterns {
-            guard let regex = try? NSRegularExpression(pattern: pattern),
-                  let match = regex.firstMatch(in: text, range: range),
+        for regex in multiplierRegexes {
+            guard let match = regex.firstMatch(in: text, range: range),
                   let valueRange = Range(match.range(at: 1), in: text),
                   let value = Double(text[valueRange]), value > 0 else { continue }
             return value

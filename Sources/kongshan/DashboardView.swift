@@ -34,7 +34,10 @@ struct DashboardView: View {
         .navigationTitle("仪表盘")
         .onAppear {
             state.startDashboardMonitoring()
-            if state.exitDiagnostics == nil {
+            // 只在代理开启时自动检测出口：代理关闭时 refreshExitDiagnostics 会用真实 IP
+            // 直连 am.i.mullvad.net 并做 3 次 DNS 解析，且此时出口就是本机、无诊断意义。
+            // 手动「检测」按钮仍可用；start() 成功后与切主节点时也会自动触发。
+            if state.isOn, state.exitDiagnostics == nil {
                 Task { await state.refreshExitDiagnostics() }
             }
         }
