@@ -53,6 +53,18 @@ struct PolicyGroupsView: View {
                     Label(state.isTestingAllDelays ? "测速中…" : "测速全部", systemImage: "gauge.with.dots.needle.67percent")
                 }
                 .disabled(state.testableNodes.isEmpty || state.isTestingAllDelays)
+
+                Button {
+                    Task { await state.testAndSelectFastest(in: currentGroup.name) }
+                } label: {
+                    Label("测速并选最快", systemImage: "bolt.badge.checkmark")
+                }
+                .disabled(
+                    state.testableNodes.isEmpty
+                        || state.isTestingAllDelays
+                        || !isSelectable
+                )
+                .help(isSelectable ? "测速完成后自动选择当前策略中延迟最低的节点" : "自动策略由内核选择")
             }
         }
     }

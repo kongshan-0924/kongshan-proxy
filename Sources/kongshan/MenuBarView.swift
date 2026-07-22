@@ -98,6 +98,10 @@ struct MenuBarView: View {
                 Task { await state.testAllDelays() }
             }
             .disabled(state.testableNodes.isEmpty || state.isTestingAllDelays)
+            Button("测速并自动选最快") {
+                Task { await state.testAndSelectFastest(in: group.name) }
+            }
+            .disabled(state.testableNodes.isEmpty || state.isTestingAllDelays)
             Divider()
             // 选中项每组只算一次。之前每个选项都调 isSelected→selectedMemberName→groupOptions
             // 重建一遍全节点字典，几百节点×几十组就是 O(n²)，把 SwiftUI 菜单渲染顶到单核 100%。

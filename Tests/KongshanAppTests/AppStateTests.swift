@@ -14,8 +14,59 @@ private actor CallCounter {
     }
 }
 
+private func manualNode(name: String, server: String) -> ManualHysteria2 {
+    ManualHysteria2(
+        name: name,
+        server: server,
+        port: 443,
+        password: "secret",
+        sni: server,
+        skipCertificateVerification: false,
+        obfsPassword: nil,
+        uploadMbps: 20,
+        downloadMbps: 100
+    )
+}
+
 @MainActor
 final class AppStateTests: XCTestCase {
+    func testTestAndSelectFastestChoosesLowestSuccessfulNode() async {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let state = AppState(
+            storage: Storage(rootDirectory: root),
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            tcpPingProvider: { host, _ in .success(host == "fast.example" ? 18 : 90) },
+            automaticallyInitialize: false
+        )
+        await state.addManual(manualNode(name: "慢节点", server: "slow.example"))
+        await state.addManual(manualNode(name: "快节点", server: "fast.example"))
+
+        await state.testAndSelectFastest(in: "手动选择")
+
+        XCTAssertEqual(state.selectedNode?.name, "快节点")
+        XCTAssertEqual(state.delays[state.selectedNode!.id]!, 18)
+    }
+
+    func testTestAndSelectFastestKeepsSelectionWhenEveryTestFails() async {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let state = AppState(
+            storage: Storage(rootDirectory: root),
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            tcpPingProvider: { _, _ in .failure("timeout") },
+            automaticallyInitialize: false
+        )
+        await state.addManual(manualNode(name: "原节点", server: "first.example"))
+        await state.addManual(manualNode(name: "其他节点", server: "second.example"))
+        let originalID = state.selectedNodeID
+
+        await state.testAndSelectFastest(in: "手动选择")
+
+        XCTAssertEqual(state.selectedNodeID, originalID)
+        XCTAssertTrue(state.errorMessage?.contains("没有测速成功") == true)
+    }
+
     func testExitDiagnosticRefreshKeepsLastSuccessWhenNextRequestFails() async {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

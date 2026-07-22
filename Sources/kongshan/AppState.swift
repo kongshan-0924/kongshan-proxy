@@ -70,6 +70,7 @@ final class AppState {
     typealias ClashClientFactory = @Sendable (URL, String) -> ClashAPIClient
     typealias NowProvider = @Sendable () -> Date
     typealias ExitDiagnosticsProvider = @Sendable (String) async throws -> ExitDiagnosticsReport
+    typealias TCPPingProvider = @Sendable (String, Int) async -> DelayResult
 
     enum Status: Equatable {
         case off
@@ -244,6 +245,7 @@ final class AppState {
     @ObservationIgnored private let clashClientFactory: ClashClientFactory
     @ObservationIgnored private let now: NowProvider
     @ObservationIgnored private let exitDiagnosticsProvider: ExitDiagnosticsProvider
+    @ObservationIgnored private let tcpPingProvider: TCPPingProvider
     @ObservationIgnored private let kernelLogStore: KernelLogStore
     @ObservationIgnored private let subscriptionUpdateScheduler: SubscriptionUpdateScheduler
     @ObservationIgnored private let notificationSender: any NotificationSending
@@ -287,6 +289,7 @@ final class AppState {
         healthVerifier: HealthVerifier? = nil,
         clashClientFactory: ClashClientFactory? = nil,
         exitDiagnosticsProvider: ExitDiagnosticsProvider? = nil,
+        tcpPingProvider: TCPPingProvider? = nil,
         now: @escaping NowProvider = Date.init,
         automaticallyInitialize: Bool = true
     ) {
@@ -320,6 +323,9 @@ final class AppState {
         }
         self.exitDiagnosticsProvider = exitDiagnosticsProvider ?? { remoteDoH in
             try await ExitDiagnosticsService().run(remoteDoH: remoteDoH)
+        }
+        self.tcpPingProvider = tcpPingProvider ?? { host, port in
+            await TCPPinger.ping(host: host, port: port)
         }
         self.now = now
         self.kernelLogStore = resolvedLogStore
@@ -1266,7 +1272,7 @@ final class AppState {
     func testDelay(_ node: ProxyNode) async {
         // TCP 握手直连节点服务器，不需要内核在跑，快且稳。
         if speedTestMethod == .tcpPing {
-            let result = await TCPPinger.ping(host: node.server, port: node.port)
+            let result = await tcpPingProvider(node.server, node.port)
             applyDelay(result, to: node.id)
             return
         }
@@ -1315,13 +1321,17 @@ final class AppState {
                 let seed = min(16, nodes.count)
                 while next < seed {
                     let node = nodes[next]; next += 1
-                    group.addTask { (node.id, await TCPPinger.ping(host: node.server, port: node.port)) }
+                    group.addTask { [tcpPingProvider] in
+                        (node.id, await tcpPingProvider(node.server, node.port))
+                    }
                 }
                 while let (id, result) = await group.next() {
                     applyDelay(result, to: id)
                     if next < nodes.count {
                         let node = nodes[next]; next += 1
-                        group.addTask { (node.id, await TCPPinger.ping(host: node.server, port: node.port)) }
+                        group.addTask { [tcpPingProvider] in
+                            (node.id, await tcpPingProvider(node.server, node.port))
+                        }
                     }
                 }
             }
@@ -1356,6 +1366,31 @@ final class AppState {
                 }
             }
         }
+    }
+
+    func testAndSelectFastest(in group: String) async {
+        let candidates = displayPolicyGroups
+            .first { $0.name == group }
+            .map(groupOptions)?
+            .compactMap { option -> ProxyNode? in
+                guard case let .node(node) = option else { return nil }
+                return node
+            } ?? []
+        guard !candidates.isEmpty else {
+            errorMessage = "当前策略没有可测速的节点"
+            return
+        }
+
+        await testAllDelays()
+        let fastest = candidates.compactMap { node -> (ProxyNode, Int)? in
+            guard case let .some(.some(value)) = delays[node.id] else { return nil }
+            return (node, value)
+        }.min { $0.1 < $1.1 }
+        guard let fastest else {
+            errorMessage = "没有测速成功的节点，已保留当前选择"
+            return
+        }
+        await select(fastest.0, in: group)
     }
 
     /// 保存测速地址。界面上绑定的是草稿，校验通过才写进运行值，

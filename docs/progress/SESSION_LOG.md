@@ -1174,3 +1174,12 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 - 风险/注意事项：首个快照必须显示 0 B/s；短于/等于 0 的时间差与字节回退不得产生负数或尖峰。
 - 下一步：实现“测速并自动选最快”，只在当前 selector 策略的节点成员内选择最低成功延迟。
 - 下一位 Agent 如何接手：扩展 AppState 测速返回值/选择逻辑，先写全成功与全失败 RED，复用现有 `select(optionName:in:)`，不要复制切节点事务。
+## 2026-07-22 测速并自动选择最快节点
+
+- 已完成：为 TCP 测速注入可测试提供器；新增当前 selector 策略“测速并选最快”，复用原有有界并发测速和切节点事务；代理页与每个托盘策略子菜单增加一键入口；全失败时保持原节点并明确提示。
+- 修改文件：修改 `Sources/kongshan/AppState.swift`、`Sources/kongshan/PolicyGroupsView.swift`、`Sources/kongshan/MenuBarView.swift`、`Tests/KongshanAppTests/AppStateTests.swift`。
+- 测试结果：RED 验证 AppState 缺少测速注入点；GREEN 2 项 AppState 测试分别验证 18ms 节点胜过 90ms 节点，以及所有节点超时时保持原选择；全量 `swift test` 通过（1 项条件跳过）。
+- 当前状态：自动选择范围严格限制为当前策略的节点成员，不会误选策略引用或其它配置节点；切换仍会关闭旧连接并触发出口刷新。
+- 风险/注意事项：urltest 自动策略不可手动选择，按钮禁用；无成功测速结果不得改变当前组选择。
+- 下一步：实现分应用代理 UI，并允许 process_name 规则安全指向指定节点 tag。
+- 下一位 Agent 如何接手：先给 ConfigGenerator 写指定 node tag 的路由 RED；生成器必须过滤不存在的目标，避免 sing-box check 失败。
