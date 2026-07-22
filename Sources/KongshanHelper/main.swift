@@ -267,12 +267,16 @@ func readFully(_ fd: Int32, _ buffer: UnsafeMutableRawPointer, _ count: Int) -> 
 /// recvmsg 收 body 同时取 SCM_RIGHTS 里的只读 FD（§1.3）。无 FD 时 receivedFD 保持 -1。
 /// 注意：CMSG_FIRSTHDR / CMSG_DATA / CMSG_NXTHDR 是 C 宏，Swift 不可用，这里手写对等逻辑。
 /// 单 FD 场景只需首个 cmsg，不做 NXTHDR 遍历。
+///
+/// 修复 D3：控制缓冲清零 + 校验长度 + MSG_CTRUNC，防读到未初始化内存当 fd。
 func recvBodyAndFD(_ fd: Int32, body: UnsafeMutableRawPointer, length: Int) -> (received: Int, configFD: Int32) {
     var configFD: Int32 = -1
     var iov = iovec(iov_base: body, iov_len: length)
     // CMSG_SPACE(sizeof(Int32)) = __DARWIN_ALIGN32(sizeof(cmsghdr) + 4)。手算对齐到 4 字节。
     let cmsgSpace = (MemoryLayout<cmsghdr>.size + MemoryLayout<Int32>.size + 3) & ~3
     let cmsgBuf = UnsafeMutableRawBufferPointer.allocate(byteCount: cmsgSpace, alignment: MemoryLayout<Int>.alignment)
+    // 修复 D3：缓冲清零，防 recvmsg 未填满时读到未初始化内存当 fd。
+    memset(cmsgBuf.baseAddress, 0, cmsgSpace)
     defer { cmsgBuf.deallocate() }
 
     var msg = msghdr()
@@ -284,13 +288,18 @@ func recvBodyAndFD(_ fd: Int32, body: UnsafeMutableRawPointer, length: Int) -> (
     let n = recvmsg(fd, &msg, 0)
     guard n >= 0 else { return (-1, -1) }
 
-    // CMSG_FIRSTHDR：msg_controllen >= sizeof(cmsghdr) 时返回 msg_control 作为 cmsghdr 指针。
-    guard msg.msg_controllen >= socklen_t(MemoryLayout<cmsghdr>.size),
+    // 修复 D3：控制数据被截断 → cmsg 不完整，不可信，明确置 -1（别读残缺 cmsg）。
+    if (msg.msg_flags & Int32(MSG_CTRUNC)) != 0 { return (Int(n), -1) }
+
+    // CMSG_DATA(cmsg) = (char*)cmsg + __DARWIN_ALIGN32(sizeof(cmsghdr))。
+    let dataOffset = (MemoryLayout<cmsghdr>.size + 3) & ~3
+    // 修复 D3：进入 SCM_RIGHTS 分支前校验 msg_controllen >= dataOffset + sizeof(Int32)，
+    // 确保有完整 cmsghdr + Int32 数据，不会越界读。
+    let minNeeded = dataOffset + MemoryLayout<Int32>.size
+    guard msg.msg_controllen >= socklen_t(minNeeded),
           let control = msg.msg_control else { return (Int(n), -1) }
     let cmsg = control.assumingMemoryBound(to: cmsghdr.self)
     if cmsg.pointee.cmsg_level == SOL_SOCKET && cmsg.pointee.cmsg_type == SCM_RIGHTS {
-        // CMSG_DATA(cmsg) = (char*)cmsg + __DARWIN_ALIGN32(sizeof(cmsghdr))。
-        let dataOffset = (MemoryLayout<cmsghdr>.size + 3) & ~3
         let dataPtr = UnsafeMutableRawPointer(cmsg).advanced(by: dataOffset)
         configFD = dataPtr.assumingMemoryBound(to: Int32.self).pointee
     }
