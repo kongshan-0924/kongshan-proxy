@@ -116,6 +116,13 @@ struct MenuBarView: View {
         Button {
             Task { await state.select(optionName: option.name, in: group) }
         } label: {
+            let title: String = {
+                guard case let .node(node) = option else { return option.name }
+                let metadata = NodeNameMetadata.parse(node.name)
+                let flag = metadata.flag.flatMap { node.name.contains($0) ? nil : $0 + " " } ?? ""
+                let multiplier = metadata.multiplierText.map { "  \($0)" } ?? ""
+                return "\(flag)\(option.name)\(multiplier)"
+            }()
             let suffix: String = {
                 if case let .node(node) = option {
                     switch state.delays[node.id] {
@@ -127,9 +134,9 @@ struct MenuBarView: View {
                 return ""
             }()
             if selected {
-                Label("\(option.name)\(suffix)", systemImage: "checkmark")
+                Label("\(title)\(suffix)", systemImage: "checkmark")
             } else {
-                Text("\(option.name)\(suffix)")
+                Text("\(title)\(suffix)")
             }
         }
     }

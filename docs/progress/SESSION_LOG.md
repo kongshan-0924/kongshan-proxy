@@ -1156,3 +1156,12 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 - 风险/注意事项：依赖 Mullvad 公开接口，失败仅显示错误、不误报；DNS 结论是启发式判断，界面未作绝对安全承诺。
 - 下一步：实现节点名称旗帜/地区/倍率解析并接入已有搜索排序卡片。
 - 下一位 Agent 如何接手：先从 `Tests/KongshanCoreTests/NodeNameMetadataTests.swift` 写 RED，再新增纯解析器；不得修改订阅原始节点名。
+## 2026-07-22 节点旗帜、地区与倍率展示
+
+- 已完成：新增不修改订阅原名的节点元数据解析器；支持名称内双区域旗帜、常见英文/中文地区词和独立国家代码；支持 `3x`、`3×`、`3倍`、`倍率：1.5`；代理页节点卡显示推断旗帜并高亮倍率，托盘节点菜单同步显示。
+- 修改文件：新增 `Sources/KongshanCore/NodeNameMetadata.swift`、`Tests/KongshanCoreTests/NodeNameMetadataTests.swift`；修改 `Sources/kongshan/PolicyGroupsView.swift`、`Sources/kongshan/MenuBarView.swift`。
+- 测试结果：RED 验证解析器缺失；GREEN 5 项测试覆盖显式旗帜、JP/香港/洛杉矶/斐济、四种倍率形式、短代码边界和无元数据；修正中文关键词不应按 ASCII 短 token 处理后全部通过；`swift test` 全量回归退出码 0。
+- 当前状态：已有搜索、默认/名称/延迟排序完全保留；节点数据和选中逻辑未变，仅增强展示。
+- 风险/注意事项：地区是名称启发式推断，无法识别时不显示，不会猜错后写回节点；短国家码必须是独立 token，避免 `project` 误命中 JP。
+- 下一步：基于连接 WebSocket 累计字节快照计算单连接实时速率、顶部总速率和排序。
+- 下一位 Agent 如何接手：先写 `ConnectionRateTrackerTests` 的首帧、差分、回退、移除连接 RED；时间必须注入，禁止在测试里 sleep。

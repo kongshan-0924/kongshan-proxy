@@ -228,6 +228,12 @@ struct PolicyGroupsView: View {
                     Image(systemName: symbol(for: option, selected: isSelected))
                         .font(.system(size: 12))
                         .foregroundStyle(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
+                    if case let .node(node) = option,
+                       let flag = NodeNameMetadata.parse(node.name).flag,
+                       !node.name.contains(flag) {
+                        Text(flag)
+                            .font(.system(size: 15))
+                    }
                     Text(option.name)
                         .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
                         .lineLimit(2)
@@ -238,6 +244,15 @@ struct PolicyGroupsView: View {
                     switch option {
                     case let .node(node):
                         ProtocolTag(value: node.protocolType)
+                        if let multiplier = NodeNameMetadata.parse(node.name).multiplierText {
+                            Text(multiplier)
+                                .font(.caption2.weight(.bold).monospacedDigit())
+                                .foregroundStyle(.orange)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 2)
+                                .background(Color.orange.opacity(0.12), in: Capsule())
+                                .help("订阅节点倍率")
+                        }
                         Text("·").font(.caption2).foregroundStyle(.tertiary)
                         delayBadge(node)
                     case .reference:
