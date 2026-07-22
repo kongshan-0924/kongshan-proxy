@@ -6,16 +6,23 @@ import SwiftUI
 struct ConnectionsView: View {
     @Environment(AppState.self) private var state
     @State private var searchText = ""
+    @State private var sortOption: ConnectionSortOption = .defaultOrder
 
-    private var filteredConnections: [ConnectionDetail] {
+    private var filteredConnections: [ConnectionLiveDetail] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return state.connections }
-        return state.connections.filter { conn in
+        var result = query.isEmpty ? state.connections : state.connections.filter { conn in
             conn.host.localizedCaseInsensitiveContains(query)
                 || (conn.process?.localizedCaseInsensitiveContains(query) ?? false)
                 || conn.rule.localizedCaseInsensitiveContains(query)
                 || conn.chains.contains(where: { $0.localizedCaseInsensitiveContains(query) })
         }
+        switch sortOption {
+        case .defaultOrder: break
+        case .totalRate: result.sort { $0.totalRate > $1.totalRate }
+        case .uploadRate: result.sort { $0.uploadRate > $1.uploadRate }
+        case .downloadRate: result.sort { $0.downloadRate > $1.downloadRate }
+        }
+        return result
     }
 
     var body: some View {
@@ -26,6 +33,18 @@ struct ConnectionsView: View {
                 HStack {
                     SearchField(text: $searchText, placeholder: "搜索目标域名、进程或出站规则…")
                         .frame(maxWidth: 320)
+                    Menu {
+                        Picker("排序", selection: $sortOption) {
+                            ForEach(ConnectionSortOption.allCases) { option in
+                                Text(option.rawValue).tag(option)
+                            }
+                        }
+                    } label: {
+                        Label(sortOption.rawValue, systemImage: "arrow.up.arrow.down")
+                            .font(.caption)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
                     Spacer()
                     Text("当前显示 \(filteredConnections.count) / \(state.connections.count) 条")
                         .font(.caption2)
@@ -47,6 +66,13 @@ struct ConnectionsView: View {
     private var header: some View {
         PageHeader(title: "连接", subtitle: "实时活跃连接；显示出站链路与命中的规则") {
             HStack(spacing: 10) {
+                HStack(spacing: 8) {
+                    Label("↑ \(Self.rate(state.connections.totalUploadRate))", systemImage: "arrow.up.circle.fill")
+                        .foregroundStyle(.blue)
+                    Label("↓ \(Self.rate(state.connections.totalDownloadRate))", systemImage: "arrow.down.circle.fill")
+                        .foregroundStyle(.green)
+                }
+                .font(.caption.monospacedDigit())
                 Text("\(state.connections.count) 条")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -100,7 +126,7 @@ struct ConnectionsView: View {
         }
     }
 
-    private func row(_ conn: ConnectionDetail) -> some View {
+    private func row(_ conn: ConnectionLiveDetail) -> some View {
         HStack(alignment: .top, spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
@@ -129,10 +155,15 @@ struct ConnectionsView: View {
                     .truncationMode(.middle)
             }
             Spacer(minLength: 8)
-            Text("↑ \(Self.bytes(conn.upload))   ↓ \(Self.bytes(conn.download))")
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
-                .fixedSize()
+            VStack(alignment: .trailing, spacing: 2) {
+                Text("↑ \(Self.rate(conn.uploadRate))   ↓ \(Self.rate(conn.downloadRate))")
+                    .font(.caption2.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(conn.totalRate > 0 ? .primary : .secondary)
+                Text("累计 ↑ \(Self.bytes(conn.upload))   ↓ \(Self.bytes(conn.download))")
+                    .font(.system(size: 9).monospacedDigit())
+                    .foregroundStyle(.tertiary)
+            }
+            .fixedSize()
             Button {
                 Task { await state.closeConnection(conn.id) }
             } label: {
@@ -146,7 +177,7 @@ struct ConnectionsView: View {
         .padding(.vertical, 7)
     }
 
-    private func chainText(_ conn: ConnectionDetail) -> String {
+    private func chainText(_ conn: ConnectionLiveDetail) -> String {
         let chain = conn.chains.joined(separator: " → ")
         if conn.rule.isEmpty { return chain }
         return chain.isEmpty ? conn.rule : "\(conn.rule)   ·   \(chain)"
@@ -155,4 +186,17 @@ struct ConnectionsView: View {
     static func bytes(_ value: Int64) -> String {
         ByteCountFormatter.string(fromByteCount: value, countStyle: .binary)
     }
+
+    static func rate(_ value: Int64) -> String {
+        "\(bytes(value))/s"
+    }
+}
+
+private enum ConnectionSortOption: String, CaseIterable, Identifiable {
+    case defaultOrder = "累计流量"
+    case totalRate = "实时总速率"
+    case downloadRate = "下载速率"
+    case uploadRate = "上传速率"
+
+    var id: Self { self }
 }

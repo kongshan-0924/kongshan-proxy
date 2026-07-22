@@ -1165,3 +1165,12 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 - 风险/注意事项：地区是名称启发式推断，无法识别时不显示，不会猜错后写回节点；短国家码必须是独立 token，避免 `project` 误命中 JP。
 - 下一步：基于连接 WebSocket 累计字节快照计算单连接实时速率、顶部总速率和排序。
 - 下一位 Agent 如何接手：先写 `ConnectionRateTrackerTests` 的首帧、差分、回退、移除连接 RED；时间必须注入，禁止在测试里 sleep。
+## 2026-07-22 连接监控实时速率与排序
+
+- 已完成：复用现有每秒连接 WebSocket 推送，以连接 ID 的相邻累计字节/时间差计算每条上传、下载和总速率；顶部显示所有连接总上传/下载；每行同时显示实时 B/s 与累计流量；增加累计流量、实时总速率、下载、上传四种排序。
+- 修改文件：新增 `Sources/KongshanCore/ConnectionRateTracker.swift`、`Tests/KongshanCoreTests/ConnectionRateTrackerTests.swift`；修改 `Sources/kongshan/AppState.swift`、`Sources/kongshan/ConnectionsView.swift`。
+- 测试结果：RED 验证 tracker 类型缺失；GREEN 4 项测试覆盖首帧 0、两秒差分、累计计数回退、连接移除后重现；UI/应用目标编译通过；全量 `swift test` 通过（含 1 项条件跳过）。
+- 当前状态：连接页不增加网络请求，速率更新频率跟随内核 1 秒推送；离页、全部关闭会重置历史样本。
+- 风险/注意事项：首个快照必须显示 0 B/s；短于/等于 0 的时间差与字节回退不得产生负数或尖峰。
+- 下一步：实现“测速并自动选最快”，只在当前 selector 策略的节点成员内选择最低成功延迟。
+- 下一位 Agent 如何接手：扩展 AppState 测速返回值/选择逻辑，先写全成功与全失败 RED，复用现有 `select(optionName:in:)`，不要复制切节点事务。

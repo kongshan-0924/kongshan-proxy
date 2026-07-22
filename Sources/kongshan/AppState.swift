@@ -115,8 +115,9 @@ final class AppState {
     private(set) var coreVersion = "—"
     private(set) var isCheckingKernelUpdate = false
     /// 连接监控页的实时连接列表（仅该页可见时才轮询）。
-    private(set) var connections: [ConnectionDetail] = []
+    private(set) var connections: [ConnectionLiveDetail] = []
     @ObservationIgnored private var connectionsTask: Task<Void, Never>?
+    @ObservationIgnored private var connectionRateTracker = ConnectionRateTracker()
     private(set) var runtimeStartedAt: Date?
     private(set) var trafficHistory: [TrafficPoint] = []
     private(set) var liveLogs: [LiveLogEntry] = []
@@ -1214,7 +1215,9 @@ final class AppState {
                     let stream = await client.connectionDetailsStream()
                     for try await details in stream {
                         guard !Task.isCancelled else { break }
-                        self.connections = details.sorted { ($0.download + $0.upload) > ($1.download + $1.upload) }
+                        self.connections = self.connectionRateTracker
+                            .update(details, at: self.now())
+                            .sorted { ($0.download + $0.upload) > ($1.download + $1.upload) }
                     }
                 } catch {
                     // 流断开（内核重启 / 网络抖动）：等一会再重订。
@@ -1227,6 +1230,7 @@ final class AppState {
     func stopConnectionsMonitoring() {
         connectionsTask?.cancel()
         connectionsTask = nil
+        connectionRateTracker.reset()
         connections = []   // 离开监控页即清空，下次进入重新拉取
     }
 
@@ -1234,6 +1238,7 @@ final class AppState {
     func closeAllActiveConnections() async {
         guard let client = clashAPIClient else { return }
         try? await client.closeAllConnections()
+        connectionRateTracker.reset()
         connections = []
     }
 
