@@ -1,5 +1,7 @@
 # 项目进度
 
+- [x] **免密码 TUN 助手 加固+合并+交付 0.1.24（merge 64c2b00，2026-07-23）**：两轮独立对抗式安全审查——首轮实证 2 个 BLOCKER（配置缺 `-c /dev/stdin` 令 TUN 从未真起、§5.1 客户端可被同用户伪造→root），加固闭合（钉客户端 cdhash fail-closed + `--options runtime` hardened runtime 实测挡 DYLD 注入 + `-c /dev/stdin` + fd 卫生）；二轮 re-audit 无同用户→root 提权链、铁律保持。合并后 swift test 257 通过；构建 0.1.24（硬化签名验证 + 启动测试通过）、装 /Applications、单 DMG，旧版清理。真机待用户点「安装免密码助手」验收零弹窗 TUN
+- [ ] 用户真机验收：设置→隧道→安装免密码助手（授权一次）→ 开 TUN 应零弹窗（免密码 TUN 首次端到端）
 - [x] **审核并合并 0.1.23 → main 并推 origin（14ee357，2026-07-22）**：fix/tun-ipv6-no-route 超集 ff-only 合并；对抗式 subagent 复审整份 diff 无阻塞，合并前修 2 个 medium（出口诊断代理关时不自动直连 Mullvad；节点倍率正则改 static 缓存）；删除 sidebar/network-obs/ipv6 三条被包含分支 + 移除 worktree，现仅剩 `main` + `feat/tun-passwordless-helper`
 - [x] 修复 0.1.23 TUN 开启无效果：物理网络无全局 IPv6 时不给 TUN 配 IPv6 地址（fix/tun-ipv6-no-route，a6bb609）
 - [x] 真实出口 IP、地区/运营商与 DNS 一键自测（0.1.23）

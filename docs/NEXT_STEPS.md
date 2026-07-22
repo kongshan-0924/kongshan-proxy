@@ -1,34 +1,27 @@
 # 下一步
 
-## ✅ 合并已完成（2026-07-22）— main 升到 0.1.23
+## ✅ 免密码 TUN 助手已加固 + 合并 + 交付 0.1.24（2026-07-23）
 
-`fix/tun-ipv6-no-route`（超集）已 **ff-only 合并进 main 并推送 origin**（origin/main = `14ee357`）。一次带进：侧栏固定按钮修复 + 全部 network-obs 新功能 + TUN IPv6 修复 + 合并前 2 条审核修复。已删除被完全包含的 `fix/sidebar-toggle`、`codex/network-observability-batch`、`fix/tun-ipv6-no-route` 三条本地分支，并移除其 worktree（`.worktrees/` 已清）。
+免密码 TUN 特权助手（`feat/tun-passwordless-helper`）经两轮独立对抗式安全审查 + 加固后**已合并进 main**（merge `64c2b00`）。代码三方自动合并（AppState/MainWindowView 无冲突），合并后 `swift test` **257 通过**。已构建交付 **0.1.24**，装到 /Applications、打了 DMG、清理到只剩一个最新版。
 
-**现在只剩两条分支**：
-- `main` 0.1.23（已推 origin，`14ee357`）
-- `feat/tun-passwordless-helper`（独立，TUN 免密码助手，第三轮未完，见下）
+**当前状态**：
+- `main` = 0.1.24（本地领先 origin 若干提交，**待推**）。仅剩一条待清理分支 `feat/tun-passwordless-helper`（已完全并入，可删）。
+- 成品：`/Applications/kongshan.app` 0.1.24（已装、启动测试通过）；`dist/kongshan-0.1.24.dmg`（SHA-256 `7fd707cc0a6e059d83add13bbb6622b40c291355c4b4aad81d5f8212acee5f4e`）。旧 0.1.23 产物已删。
+- 硬化签名已验证：主可执行 + KongshanHelper 均 `flags=0x10002(adhoc,runtime)`，`--deep --strict` 校验有效。
 
-**合并前审核（我负责）结论**：独立对抗式 subagent 复审整份 Sources/ diff + 亲自精读 IPv6 修复 → **无阻塞问题**（无崩溃/数据竞争/备份回滚破损/明文 secret；IPv6 修复内存安全、fe80::/10 分类正确）。合并前修掉 2 个 medium（提交 `14ee357`）：
-1. 出口诊断 `onAppear` 无条件触发：代理关时会用真实 IP 直连 `am.i.mullvad.net` + 3 次 DNS。改为仅 `state.isOn` 时自动检测（手动「检测」按钮、start() 成功、切主节点三条路径保留/本就已门控）。
-2. `NodeNameMetadata.parsedMultiplier` 每次现编译 2 条正则、在节点列表逐节点每帧调用（测速时高频）→ 命中项目历史 O(n²)/CPU 雷区。改 `static let` 缓存编译，行为不变。
-另有 4 个 low 记为非阻塞待办（见文末「可选」）。
+**安全审查（我负责，两轮对抗式）结论**：第三轮（C①/C②/N1/N2）复核正确（C① 实测消除 TOCTOU）。首轮 re-audit 揪出并实证 2 个 BLOCKER → 加固闭合：
+1. **配置从没送达**：stock sing-box `run` 无视 stdin（缺 `-c /dev/stdin`）→ TUN 经助手从未真正起来过。改 argv `run -c /dev/stdin` + spawn 存活探测。
+2. **§5.1 客户端可被同用户伪造 → root**：identifier 可重签 + 客户端 cdhash 未钉 + ad-hoc 可写 + 无 hardened runtime。加固：安装钉客户端 cdhash（fail-closed）+ build `--options runtime`（实测 ad-hoc 也强制、挡 DYLD 注入）。二轮 re-audit：**无同用户→root 提权链**；逐向量（替换重签/DYLD/task/插件/配置武器化）均被挡，铁律 §1.1–1.6 保持。
 
-**⚠️ 已合并但尚未构建成 App**：`dist/kongshan-0.1.23.dmg` 是旧产物，**不含** IPv6 修复及其后合并的 2 条审核修复。要在真机跑需重新 `scripts/build_app.sh`（会自增版本，如 0.1.24）。
+**⚠️ 用户真机唯一待办 —— 验证零弹窗 TUN**：
+1. 打开 0.1.24 → **设置 → 隧道 → 「安装免密码助手」**，授权**一次**（osascript 弹密码，仅这一次）。
+2. 开 TUN，应**零弹窗**接管；关掉再开也不再弹。日志 `~/Library/Application Support/kongshan/logs/sing-box-tun.log` 应有 `inbound/tun` 正常路由（这是免密码 TUN 第一次真机端到端跑通——此前因 BLOCKER① 从未成功过）。
+3. 若「安装免密码助手」后仍每次弹密码：多半是 helper 不可达（`isReachable()` false），回退了 osascript 兜底（§1.6，功能正常只是没免密）。查 `/Library/Application Support/kongshan/helper/` 下 helper/sing-box/trust.json 是否 root:wheel、socket 是否建起。
+4. 顺带验 TUN IPv6 修复：中国站 + 国外站都通、无 `no route to host`。
 
-### 剩余工作（按优先级）
-1. **真机重打包验证**（见下方「真机重打包验证 TUN IPv6 修复」）——这份新 build 同时含 IPv6 修复 + 2 条审核修复 + 全部 0.1.23 功能与七类界面。
-2. **TUN 免密码助手第三轮**（`feat/tun-passwordless-helper`，见下）：做完 3 条修复 + 重跑安全审查 → 合 main。**届时会与已进 main 的 network-obs 在 `Sources/kongshan/AppState.swift` + `Sources/kongshan/MainWindowView.swift` 冲突，需手动解**。
+**剩余非阻塞待办**（记入「可选」）：helper 侧配置内容白名单（纵深，当前生成 schema 已无 root 写/执行落点）；trust.json 加版本号（防旧配置无 pin 静默降级，新装必钉故仅迁移期）。
 
-## 🔴 TUN 免密码助手 —— 第三轮 3 条修复未完（在 `feat/tun-passwordless-helper` 分支）
-
-> 所有设计/威胁模型/实现/三轮修复清单在 **`feat/tun-passwordless-helper` 分支** 的 `docs/design/tun-passwordless-helper*.md`（**本分支没有这些文件**，别以为丢了）。功能 ~95% 完成，两轮独立安全审查已做。用户已选"由接手方实现第三轮修复(不再交 Codex)"。
-
-**第三轮 3 条（做完 + 重跑安全审查过了即可合并）**：
-1. **C① [阻断·root 提权] sing-box verify→exec TOCTOU**：helper 已迁 root-only，但 sing-box 仍在 bundle(管理员组对 /Applications 可写)。`startSingBox`(KongshanHelper/main.swift)先按路径校验 cdhash、之后按**同一路径** posix_spawn，可被原子替换 → root 执行任意码。**修法：安装时把 sing-box 也拷到 `stateDirectory`(root:wheel 0755，与 helper 同构)，`trust.singBoxExecutablePath` 指向该拷贝** → 路径不可写、TOCTOU 消失。改 `PrivilegedHelperInstaller`(加 sing-box 拷贝) + trust 字段。
-2. **C② [低危] fail-closed**：`computeCDHashHex` 返回 nil 现静默写 null=不钉；`install()` 加 `guard let … else { throw }`。
-3. **N1 [可靠性]**：`startSingBox` 失败(cdhash 不匹配等)不关 `configFD` → 泄漏 + 卡死 App 后台写线程；顶部 `defer { close(configFD) }` / `defer { close(logFD) }`。
-
-**做完后**：`swift build`/`test` 全绿 → **重跑独立对抗式安全审查(重点 C① 是否真消除 TOCTOU)** → 合并。真机验收：设置→隧道→「安装免密码助手」授权一次 → 开 TUN 应零弹窗。
+**收尾（我做）**：推 main + 删已并入的 `feat/tun-passwordless-helper` 分支。
 
 ---
 

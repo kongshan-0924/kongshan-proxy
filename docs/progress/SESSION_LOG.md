@@ -1423,3 +1423,26 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
   4. main 已升到 0.1.23，与本分支在 AppState.swift/MainWindowView.swift 会冲突——那是维护者最后合并时手动解的，本分支未 merge/rebase main（按要求）。
 - 下一步：维护者重跑安全审查（重点 C① TOCTOU 是否真消除）；通过后合 `feat/tun-passwordless-helper` → main（手动解 AppState/MainWindowView 冲突）；真机重打包验证零弹窗 TUN。
 - 接手方式：在 `feat/tun-passwordless-helper` 分支，读本段 + 4 个 commit（dcf4914/f13795f/0760ec1/276dacf）。改 C① 前理解 installedSingBoxURL 与 installedHelperURL 同构关系；改 N1 前理解 defer 与 posix_spawn 子进程 dup2 的 FD 生命周期。
+
+## 2026-07-23 00:20 — 免密码 TUN 助手 加固+合并+交付 0.1.24（本会话）
+
+- 已完成：审核（两轮独立对抗式）+ 加固 + 合并 `feat/tun-passwordless-helper` → main（merge `64c2b00`）+ 构建交付 0.1.24。
+- 审核过程：
+  - 第三轮（C①/C②/N1/N2）复核：代码正确；C① 实测父目录链 root-only（`/Library/Application Support` = `drwxr-xr-x root:admin` 无组写位）→ verify→exec TOCTOU 真消除。build+test 225 通过。
+  - 首轮 re-audit（对抗式 subagent）揪出并**我亲自实证** 2 个 BLOCKER：
+    ① 内置 stock sing-box 1.13.14 `run` 无视 stdin：`printf … | sing-box run` 报 `open config.json`，`run -c /dev/stdin` 才读管道 → helper 缺 `-c /dev/stdin` → 配置从未送达、launchd CWD=/ 秒退 → **免密码 TUN 从未真正起来过**。
+    ② §5.1 客户端身份可被同用户伪造：requirement 只钉 `identifier`（无 anchor/TeamID）、客户端 cdhash 未钉、App ad-hoc、主可执行当前用户可写 → 覆盖+`codesign -s - -i com.kaysen.kongshan` 重签冒充 → 让 helper 以 root 跑任意配置 sing-box。
+  - 用户选「加固后再复审合并」。加固（3 提交）：
+    - `83fa28b`：argv `run -c /dev/stdin` + spawn 后 usleep+waitpid(WNOHANG) 存活探测（不误报 started）；configFD 所有权移交 handleConnection（defer 关）；recvBodyAndFD CTRUNC 关已装入 fd（finding3/4）。
+    - `7e8f625`：安装钉客户端 App cdhash（`requireCDHashHex` fail-closed → `makeTrustConfig(clientCDHashHex:)` → `trust.pinnedCDHashHex`）；`build_app.sh` 加 `--options runtime`。
+    - `ff49201`：recvRequest 短读关 fd + 修 §1.1 滞后注释。
+  - **实证 hardened runtime 有效**：编译 victim.c/evil.dylib，`DYLD_INSERT_LIBRARIES` 注入——ad-hoc only 生效（`!!! INJECTED`）、加 `--options runtime`（flags `0x10002(adhoc,runtime)`）后被内核忽略。ad-hoc 也被强制、无需 Developer ID。
+  - 二轮 re-audit：**未发现同用户→root 提权链**。逐向量：替换重签→cdhash 拒；DYLD/task 注入→hardened runtime + 无 get-task-allow；插件/框架→无 dlopen、不捆 dylib；配置武器化→生成 schema 无 root 写/执行落点（`log` 硬编码无 output、无 cache_file/external_ui、插件进程内实现、JSONSerialization 固定结构无注入）。铁律 §1.1–1.6 保持。剩 2 条非阻塞（配置未在信任边界收窄=纵深、trust.json 无版本）。
+- 合并：`git merge --no-ff`——代码三方自动合并（AppState/MainWindowView **无冲突**），仅 4 份文档冲突（并集/重写）。合并后 `swift test` **257 通过 1 跳过 0 失败**。集成点 `tunLauncher = helperClient.isReachable() ? helperClient : privilegedLauncher`（AppState:2718）保留无误。
+- 交付：`build_app.sh` 构建 0.1.24（合并后的脚本装 KongshanHelper 进 bundle + `--options runtime`）；硬化签名验证（主可执行 + KongshanHelper `flags=0x10002(adhoc,runtime)`、`--deep --strict` 有效）；装 /Applications 0.1.24、启动测试存活无崩溃；`make_dmg.sh` → `dist/kongshan-0.1.24.dmg`（SHA-256 `7fd707cc0a6e059d83add13bbb6622b40c291355c4b4aad81d5f8212acee5f4e`）；删旧 0.1.23 DMG → 只留一个最新版。
+- 修改文件：见上 3 提交 + 合并带入的全部 helper 文件；`VERSION`→0.1.24；HANDOFF/PROGRESS/NEXT_STEPS/本文件。
+- 测试结果：合并后 swift test 257/1跳过/0；构建签名 + 启动验证通过。
+- 当前状态：`main` 0.1.24 待推 origin；`feat/tun-passwordless-helper` 已完全并入待删。运行态确认：kongshan 未跑、7890 是用户的 Stash（工作代理），故替换 /Applications 安全、不掉线。
+- 风险/注意：免密码 TUN **需用户真机点「设置→隧道→安装免密码助手」授权一次**才生效（首次端到端）；`SecCodeCopyPath` 路径匹配需真机确认（不匹配则回退 osascript 兜底，功能正常无免密）。绝不在自动化真装 daemon（§1.5）。
+- 下一步：推 main + 删 `feat/tun-passwordless-helper`；用户真机验收零弹窗 TUN。
+- 接手方式：读本段 + NEXT_STEPS/HANDOFF 顶部。助手设计/威胁模型/审查文档在 `docs/design/tun-passwordless-helper*.md`（已随合并进 main）。

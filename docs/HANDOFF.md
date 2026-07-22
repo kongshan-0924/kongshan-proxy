@@ -1,5 +1,18 @@
 # 项目交接
 
+## 2026-07-23 免密码 TUN 助手 加固+合并+交付 0.1.24（本会话完成）
+
+- 已完成：审核（两轮独立对抗式）+ 加固 + 合并 `feat/tun-passwordless-helper` → main（merge `64c2b00`）+ 构建交付 0.1.24。
+- 审核裁决：第三轮（C①/C②/N1/N2）正确。首轮 re-audit 揪出并**实证** 2 个 BLOCKER：① stock sing-box `run` 无视 stdin（缺 `-c /dev/stdin`）→ 免密码 TUN 从未真正起来过；② §5.1 客户端身份可被同用户进程伪造（identifier 可重签 + 客户端 cdhash 未钉 + ad-hoc 主可执行可写 + 无 hardened runtime）→ 提权到 root。
+- 加固（3 提交 `83fa28b`/`7e8f625`/`ff49201`）：argv `run -c /dev/stdin` + spawn 存活探测；安装钉客户端 cdhash（fail-closed）；`build_app.sh` 加 `--options runtime`（**实测** ad-hoc 也被内核强制、DYLD 注入被挡）；helper fd 卫生补齐（finding3/4 + 短读关 fd）。
+- 二轮 re-audit：**未发现同用户→root 提权链**，逐向量（替换重签→cdhash 拒；DYLD/task 注入→hardened runtime；插件/框架→无 dlopen/不捆 dylib；配置武器化→生成 schema 无 root 写/执行落点）均被挡，铁律 §1.1–1.6 保持。剩 2 条非阻塞（配置未在信任边界收窄=纵深；trust.json 无版本）。
+- 修改文件：`Sources/KongshanHelper/main.swift`、`Sources/KongshanCore/PrivilegedHelperInstaller.swift`、`scripts/build_app.sh`、`Tests/KongshanCoreTests/PrivilegedHelperInstallerTests.swift` + 合并带入的全部 helper 文件；`VERSION`→0.1.24；4 份记录文档。
+- 测试结果：合并后 `swift test` **257 通过 1 跳过 0 失败**；构建 0.1.24 硬化签名验证（主可执行 + KongshanHelper `flags=0x10002(adhoc,runtime)`、`--deep --strict` 有效）；启动测试通过（hardened runtime 未阻断）。
+- 当前状态：`main` 0.1.24（**待推 origin**）；`/Applications/kongshan.app` 0.1.24、`dist/kongshan-0.1.24.dmg`（SHA-256 `7fd707cc…`），旧 0.1.23 产物已删。集成 `tunLauncher = helperClient.isReachable() ? helperClient : privilegedLauncher`。
+- 风险/注意：**免密码 TUN 需用户真机点「设置→隧道→安装免密码助手」授权一次**（此前 BLOCKER① 令其从未端到端跑通，路径匹配 `SecCodeCopyPath` 也需真机确认；不匹配则回退 osascript 兜底、功能正常只是没免密）。切勿在自动化里真装 daemon（§1.5）。
+- 下一步：用户真机验收零弹窗 TUN（见 NEXT_STEPS 顶部）。收尾：推 main、删已并入的 `feat/tun-passwordless-helper`。
+- 接手方式：读本节 + NEXT_STEPS 顶部。助手设计/威胁模型/审查在 `docs/design/tun-passwordless-helper*.md`（已随合并进 main）。
+
 ## 2026-07-22 审核并合并 0.1.23 → main（本会话完成）
 ## 2026-07-22 22:40 TUN 助手第三轮安全修复（feat/tun-passwordless-helper，4 提交完成，待维护者复审）
 
