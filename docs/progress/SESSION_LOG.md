@@ -1079,3 +1079,21 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
   2. 助手安装需 .app 内有 KongshanHelper 可执行（里程碑 4 打包）；未打包时安装按钮会报"找不到 helper"。
   3. `recoverIfNeeded` 在 helper 模式下：status 显示在跑则 stop（清理上次崩溃残留），与 PrivilegedLauncher 语义对齐。
 - 下一步：里程碑 4（build_app.sh 打包 helper + plist 模板到 .app）。
+
+## 2026-07-22 — TUN 免密码助手里程碑 4（feat/tun-passwordless-helper 分支）
+
+- 已完成：build_app.sh 打包 helper + plist 模板到 .app。
+  - `scripts/build_app.sh`：拷 `.build/.../release/KongshanHelper` → `Contents/MacOS/KongshanHelper`；
+    拷 `Resources/com.kaysen.kongshan.helper.plist` → `Contents/Resources/`（安装时读、替换占位符、写系统路径）。
+    `codesign --force --deep` 已覆盖 helper（与 sing-box 一起 ad-hoc 签名）。
+  - `Resources/com.kaysen.kongshan.helper.plist`（新）：LaunchDaemon plist 模板，Label=com.kaysen.kongshan.helper，
+    ProgramArguments 占位符 `__HELPER_PATH__`（安装时替换为 .app 内 helper 路径），KeepAlive+RunAtLoad。
+  - `PrivilegedHelperInstaller.install`：优先读 .app 内 plist 模板（替换占位符），读不到用内联兜底。
+- 修改文件：新增 `Resources/com.kaysen.kongshan.helper.plist`；改 `scripts/build_app.sh`、
+  `Sources/KongshanCore/PrivilegedHelperInstaller.swift`。
+- 测试结果：`swift build` 通过。build_app.sh 打包验证待跑。
+- 当前状态：里程碑 4 完成，5 待办。
+- 风险/注意事项：
+  1. helper 与 App 一起 ad-hoc 签名；helper 的 SecStaticCodeCheckValidity(nil) 接受 ad-hoc。
+  2. plist 模板占位符 `__HELPER_PATH__` 由 Installer 替换为 bundledHelperURL.path。
+- 下一步：里程碑 5（单元测试 — 校验判定各拒绝分支/请求分发/trust缺失损坏）。

@@ -42,10 +42,13 @@ trap cleanup EXIT
 
 mkdir -p "$stage_app/Contents/MacOS" "$stage_app/Contents/Resources"
 install -m 755 .build/arm64-apple-macosx/release/kongshan "$stage_app/Contents/MacOS/kongshan"
+install -m 755 .build/arm64-apple-macosx/release/KongshanHelper "$stage_app/Contents/MacOS/KongshanHelper"
 install -m 755 Vendor/sing-box/sing-box "$stage_app/Contents/Resources/sing-box"
 install -m 644 Resources/Info.plist "$stage_app/Contents/Info.plist"
 install -m 644 Resources/THIRD_PARTY_NOTICES.md "$stage_app/Contents/Resources/THIRD_PARTY_NOTICES.md"
 install -m 644 Resources/AppIcon.icns "$stage_app/Contents/Resources/AppIcon.icns"
+# LaunchDaemon plist 模板：安装时读它、替换占位符、写系统路径。占位符由 PrivilegedHelperInstaller 替换。
+install -m 644 Resources/com.kaysen.kongshan.helper.plist "$stage_app/Contents/Resources/com.kaysen.kongshan.helper.plist"
 # 把本次版本号写进 App 的 Info.plist（模板 Resources/Info.plist 保持不变，避免 git 抖动）。
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $app_version" "$stage_app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $build_number" "$stage_app/Contents/Info.plist"

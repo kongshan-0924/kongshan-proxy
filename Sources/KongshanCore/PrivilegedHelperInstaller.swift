@@ -55,7 +55,14 @@ public enum PrivilegedHelperInstaller {
         }
 
         let trustJSON = #"{"clientExecutablePath":"\#(clientPath)","pinnedCDHashHex":null}"#
-        let plistXML = plistTemplate(helperPath: helperPath)
+        // plist 优先读 .app 内模板（里程碑 4 打包），替换占位符；读不到用内联兜底。
+        let plistXML: String
+        if let templateURL = Bundle.main.url(forResource: HelperConstants.daemonLabel, withExtension: "plist"),
+           let template = try? String(contentsOf: templateURL, encoding: .utf8) {
+            plistXML = template.replacingOccurrences(of: "__HELPER_PATH__", with: helperPath)
+        } else {
+            plistXML = plistTemplate(helperPath: helperPath)
+        }
 
         // 一条 shell 命令完成全部 root 操作。先 bootout 旧实例（若有）再 bootstrap，幂等。
         // 用 'EOF' heredoc 写文件避免转义；printf 更稳，路径用 shellQuote。
