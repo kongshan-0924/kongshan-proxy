@@ -6,6 +6,9 @@ import SwiftUI
 struct RoutingView: View {
     @Environment(AppState.self) private var state
     @State private var ruleSearch = ""
+    @State private var runningApps: [AppState.RunningApp] = []
+    @State private var selectedProcess = ""
+    @State private var perAppTarget: PerAppTarget = .proxy
 
     private var activeName: String {
         state.configItems.first { $0.id == state.activeConfigID }?.name ?? "无"
@@ -19,6 +22,7 @@ struct RoutingView: View {
         }
         .pageBackground()
         .navigationTitle("规则")
+        .onAppear { refreshRunningApps() }
     }
 
     private var header: some View {
@@ -38,6 +42,15 @@ struct RoutingView: View {
 
     @ViewBuilder
     private var content: some View {
+        VStack(spacing: 0) {
+            perAppSection
+            Divider()
+            subscriptionRulesContent
+        }
+    }
+
+    @ViewBuilder
+    private var subscriptionRulesContent: some View {
         let all = state.subscriptionRules
         if all.isEmpty {
             ContentUnavailableView {
@@ -95,6 +108,128 @@ struct RoutingView: View {
         }
     }
 
+    private var perAppSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Label("分应用代理", systemImage: "app.badge.checkmark")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("按可执行进程名优先分流")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    refreshRunningApps()
+                } label: {
+                    Label("刷新 App", systemImage: "arrow.clockwise")
+                }
+                .controlSize(.small)
+            }
+
+            HStack(spacing: 10) {
+                Picker("App", selection: $selectedProcess) {
+                    if runningApps.isEmpty {
+                        Text("没有可选的运行中 App").tag("")
+                    } else {
+                        ForEach(runningApps) { app in
+                            Text("\(app.name)（\(app.processName)）").tag(app.processName)
+                        }
+                    }
+                }
+                .frame(maxWidth: 300)
+
+                Picker("走向", selection: $perAppTarget) {
+                    Text("直连").tag(PerAppTarget.direct)
+                    Text("默认代理").tag(PerAppTarget.proxy)
+                    if !state.testableNodes.isEmpty {
+                        Divider()
+                        ForEach(state.testableNodes) { node in
+                            let flag = NodeNameMetadata.parse(node.name).flag.map { "\($0) " } ?? ""
+                            Text("指定：\(flag)\(node.name)").tag(PerAppTarget.node(node.id))
+                        }
+                    }
+                }
+                .frame(maxWidth: 300)
+
+                Button {
+                    addPerAppRule()
+                } label: {
+                    Label("添加 / 更新", systemImage: "plus")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(selectedProcess.isEmpty || state.isApplyingRouting)
+                Spacer(minLength: 0)
+            }
+
+            if state.processRules.isEmpty {
+                Text("还没有分应用规则。选择一个正在运行的 App 后添加。")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            } else {
+                ScrollView(.horizontal) {
+                    HStack(spacing: 8) {
+                        ForEach(state.processRules) { rule in
+                            HStack(spacing: 6) {
+                                Text(rule.value)
+                                    .font(.caption.monospaced())
+                                Image(systemName: "arrow.right")
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(.tertiary)
+                                Text(state.processRuleTargetName(rule))
+                                    .font(.caption.weight(.medium))
+                                    .foregroundStyle(rule.action == .direct ? .green : .accentColor)
+                                Button(role: .destructive) {
+                                    Task { await state.removeProcessRule(rule.id) }
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(Theme.cardFill, in: Capsule())
+                        }
+                    }
+                }
+                .scrollIndicators(.hidden)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.35))
+    }
+
+    private func refreshRunningApps() {
+        runningApps = state.runningApplications
+        if !runningApps.contains(where: { $0.processName == selectedProcess }) {
+            selectedProcess = runningApps.first?.processName ?? ""
+        }
+    }
+
+    private func addPerAppRule() {
+        let action: RouteAction
+        let target: String?
+        switch perAppTarget {
+        case .direct:
+            action = .direct
+            target = nil
+        case .proxy:
+            action = .proxy
+            target = state.primaryGroupName ?? "手动选择"
+        case let .node(id):
+            guard let node = state.activeConfigNodes.first(where: { $0.id == id }) else { return }
+            action = .proxy
+            target = ConfigGenerator.outboundTag(for: node)
+        }
+        Task {
+            await state.upsertProcessRule(
+                processName: selectedProcess,
+                action: action,
+                proxyTarget: target
+            )
+        }
+    }
+
     private func targetTint(_ target: String) -> Color {
         switch target.uppercased() {
         case "DIRECT": .green
@@ -124,6 +259,12 @@ struct RoutingView: View {
             }
         )
     }
+}
+
+private enum PerAppTarget: Hashable {
+    case direct
+    case proxy
+    case node(UUID)
 }
 
 /// 可增删的字符串列表（绕过域名 / IP / 跳过 TUN 网段）。设置页的隧道分区复用。

@@ -267,7 +267,7 @@ public enum ConfigGenerator {
             for: input.routing,
             outboundMode: input.outboundMode,
             primaryOutbound: primaryOutbound,
-            availableGroups: generatedNames
+            availableGroups: generatedNames.union(nodeTags)
         )
         route["default_domain_resolver"] = "dns-cn"
         var prefixRules: [[String: Any]] = []
@@ -476,7 +476,7 @@ public enum ConfigGenerator {
         let settings = try routing.settings.validated()
         var rules = settings.customRules
             .filter(\.enabled)
-            .map { customRouteRule($0, fallback: primaryOutbound) }
+            .map { customRouteRule($0, fallback: primaryOutbound, available: availableGroups) }
 
         if let bypass = bypassRule(for: settings) {
             rules.append(bypass)
@@ -533,13 +533,22 @@ public enum ConfigGenerator {
         }
     }
 
-    private static func customRouteRule(_ rule: CustomRouteRule, fallback: String) -> [String: Any] {
+    private static func customRouteRule(
+        _ rule: CustomRouteRule,
+        fallback: String,
+        available: Set<String>
+    ) -> [String: Any] {
         let field = ruleField(for: rule.type)
 
         let outbound: String
         switch rule.action {
         case .direct: outbound = "direct"
-        case .proxy: outbound = rule.proxyGroup ?? fallback
+        case .proxy:
+            if let target = rule.proxyGroup, available.contains(target) {
+                outbound = target
+            } else {
+                outbound = fallback
+            }
         case .reject: outbound = "reject"
         }
         return [field: [rule.value], "action": "route", "outbound": outbound]

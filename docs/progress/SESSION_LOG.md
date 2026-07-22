@@ -1183,3 +1183,12 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 - 风险/注意事项：urltest 自动策略不可手动选择，按钮禁用；无成功测速结果不得改变当前组选择。
 - 下一步：实现分应用代理 UI，并允许 process_name 规则安全指向指定节点 tag。
 - 下一位 Agent 如何接手：先给 ConfigGenerator 写指定 node tag 的路由 RED；生成器必须过滤不存在的目标，避免 sing-box check 失败。
+## 2026-07-22 分应用代理 UI
+
+- 已完成：规则页新增分应用代理编辑器，可刷新并选择当前运行的普通/辅助 macOS App，设置直连、默认代理或指定当前节点；同进程规则采用 upsert；现有 process_name 规则以胶囊列表展示并可删除；生成器允许 node UUID tag 并把已失效目标安全回退默认代理。
+- 修改文件：修改 `Sources/KongshanCore/ConfigGenerator.swift`、`Sources/kongshan/AppState.swift`、`Sources/kongshan/RoutingView.swift`、`Tests/KongshanCoreTests/RoutingConfigTests.swift`、`Tests/KongshanAppTests/AppStateTests.swift`。
+- 测试结果：RED 验证悬空 node target 原样写入和 AppState 缺少规则 API；GREEN 验证有效 node tag 精确生效、失效 tag 回退、相同进程替换和删除；14 项 RoutingConfigTests 含多次真实 sing-box check 全通过；全量 `swift test` 通过（1 项条件跳过）。
+- 当前状态：process_name 底层与 UI 全链路接通，运行中更新继续走原有热重载/回滚事务；离线更新直接持久化。
+- 风险/注意事项：选择列表来自当前运行 App 的可执行文件名；指定节点订阅刷新后若节点 ID 消失会回退默认代理，避免阻断内核启动。
+- 下一步：让托盘状态项常驻显示实时上下行，并把仪表盘/托盘从 visibility Bool 改为共享消费者集合，消除订阅互相取消。
+- 下一位 Agent 如何接手：先扩展 dashboard monitor 测试覆盖 menu+dashboard 双消费者；必须断言 `/traffic` 只有一次请求且 dashboard 离开后仍在推送。

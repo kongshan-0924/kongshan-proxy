@@ -30,6 +30,28 @@ private func manualNode(name: String, server: String) -> ManualHysteria2 {
 
 @MainActor
 final class AppStateTests: XCTestCase {
+    func testPerAppRuleUpsertReplacesExistingProcessAndCanRemove() async {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let state = AppState(
+            storage: Storage(rootDirectory: root),
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            automaticallyInitialize: false
+        )
+
+        await state.upsertProcessRule(processName: "Game", action: .direct, proxyTarget: nil)
+        XCTAssertEqual(state.processRules.count, 1)
+        XCTAssertEqual(state.processRules.first?.action, .direct)
+
+        await state.upsertProcessRule(processName: "game", action: .proxy, proxyTarget: "node-target")
+        XCTAssertEqual(state.processRules.count, 1)
+        XCTAssertEqual(state.processRules.first?.value, "game")
+        XCTAssertEqual(state.processRules.first?.proxyGroup, "node-target")
+
+        await state.removeProcessRule(state.processRules[0].id)
+        XCTAssertTrue(state.processRules.isEmpty)
+    }
+
     func testTestAndSelectFastestChoosesLowestSuccessfulNode() async {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

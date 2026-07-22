@@ -176,6 +176,28 @@ final class AppState {
         let autoUpdate: Bool
     }
 
+    struct RunningApp: Identifiable, Hashable {
+        var id: String { processName }
+        let name: String
+        let processName: String
+    }
+
+    var runningApplications: [RunningApp] {
+        var seen = Set<String>()
+        return NSWorkspace.shared.runningApplications.compactMap { application in
+            guard !application.isTerminated,
+                  application.activationPolicy != .prohibited,
+                  let processName = application.executableURL?.lastPathComponent,
+                  !processName.isEmpty,
+                  seen.insert(processName).inserted else { return nil }
+            return RunningApp(name: application.localizedName ?? processName, processName: processName)
+        }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    var processRules: [CustomRouteRule] {
+        routingSettings.customRules.filter { $0.type == .processName }
+    }
+
     /// 全部配置：每个订阅一项，另有自建节点时追加「本地节点」。
     var configItems: [ConfigItem] {
         var items = subscriptions.map { source in
@@ -1534,6 +1556,46 @@ final class AppState {
             resumeLogMonitoringIfNeeded()
         } catch {
             errorMessage = "应用分流规则失败：\(error.localizedDescription)"
+        }
+    }
+
+    func upsertProcessRule(processName: String, action: RouteAction, proxyTarget: String?) async {
+        let processName = processName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !processName.isEmpty else {
+            errorMessage = "请选择要分流的应用"
+            return
+        }
+        var settings = routingSettings
+        settings.customRules.removeAll {
+            $0.type == .processName && $0.value.caseInsensitiveCompare(processName) == .orderedSame
+        }
+        let order = (settings.customRules.map(\.order).max() ?? -1) + 1
+        settings.customRules.append(CustomRouteRule(
+            order: order,
+            type: .processName,
+            value: processName,
+            action: action,
+            proxyGroup: action == .proxy ? proxyTarget : nil
+        ))
+        await applyRoutingSettings(settings)
+    }
+
+    func removeProcessRule(_ id: UUID) async {
+        var settings = routingSettings
+        settings.customRules.removeAll { $0.id == id && $0.type == .processName }
+        await applyRoutingSettings(settings)
+    }
+
+    func processRuleTargetName(_ rule: CustomRouteRule) -> String {
+        switch rule.action {
+        case .direct: return "直连"
+        case .reject: return "拒绝"
+        case .proxy:
+            guard let target = rule.proxyGroup else { return "默认代理" }
+            if let node = activeConfigNodes.first(where: { ConfigGenerator.outboundTag(for: $0) == target }) {
+                return node.name
+            }
+            return target == (primaryGroupName ?? "手动选择") ? "默认代理" : target
         }
     }
 

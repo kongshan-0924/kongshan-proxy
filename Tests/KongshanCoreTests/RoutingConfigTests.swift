@@ -230,6 +230,43 @@ extension RoutingConfigTests {
 }
 
 extension RoutingConfigTests {
+    func testProcessRuleCanTargetNodeTagAndStaleTargetFallsBackSafely() throws {
+        let node = ProxyNode(
+            id: UUID(uuidString: "00000000-0000-0000-0000-000000000088")!,
+            name: "指定节点",
+            protocolType: .shadowsocks,
+            server: "example.com",
+            port: 443,
+            password: "p",
+            method: "aes-128-gcm"
+        )
+        let nodeTag = ConfigGenerator.outboundTag(for: node)
+        var settings = RoutingSettings.defaults
+        settings.customRules = [
+            CustomRouteRule(order: 0, type: .processName, value: "Game.app", action: .proxy, proxyGroup: nodeTag),
+            CustomRouteRule(order: 1, type: .processName, value: "Old.app", action: .proxy, proxyGroup: "node-missing")
+        ]
+        let config = try ConfigGenerator.generate(ConfigInput(
+            nodes: [node],
+            selectedNodeID: node.id,
+            runtime: RuntimeParameters(mixedPort: 17_900, clashPort: 17_901, secret: "s"),
+            routing: RoutingConfiguration(
+                settings: settings,
+                ruleSets: PreparedRuleSets(
+                    geositeCN: URL(fileURLWithPath: "/tmp/geosite-cn.srs"),
+                    geoipCN: URL(fileURLWithPath: "/tmp/geoip-cn.srs"),
+                    ads: nil
+                )
+            )
+        ))
+
+        let root = try XCTUnwrap(try JSONSerialization.jsonObject(with: config) as? [String: Any])
+        let rules = try XCTUnwrap((root["route"] as? [String: Any])?["rules"] as? [[String: Any]])
+
+        XCTAssertEqual(rules[1]["outbound"] as? String, nodeTag)
+        XCTAssertEqual(rules[2]["outbound"] as? String, "手动选择")
+    }
+
     /// 自定义策略组要在配置里生成对应出站，且能被自定义规则引用。
     func testCustomPolicyGroupsBecomeOutboundsAndPassCoreCheck() async throws {
         let directory = FileManager.default.temporaryDirectory
