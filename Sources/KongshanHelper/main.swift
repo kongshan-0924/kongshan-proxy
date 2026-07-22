@@ -146,40 +146,56 @@ func peerPID(connfd: Int32) -> pid_t {
     return pid
 }
 
-// MARK: - 内置 sing-box：路径推导 + 签名校验 + 起停（§1.1 / §1.4）
+// MARK: - 内置 sing-box：路径 + 签名校验 + cdhash 钉死 + 起停（§1.1 / §1.4 / 修复 C）
 
-/// §1.1 内置 sing-box 路径：由 helper 自身可执行位置推导（同 .app 内 ../Resources/sing-box）。
-/// helper 不接受外部传入的路径。
-func singBoxURL() -> URL? {
-    let helperPath = CommandLine.arguments.first ?? ""
-    guard !helperPath.isEmpty else { return nil }
-    let helperURL = URL(fileURLWithPath: helperPath).standardizedFileURL.resolvingSymlinksInPath()
-    let resolved = helperURL
-        .deletingLastPathComponent()
-        .appendingPathComponent("../Resources/sing-box")
-        .standardizedFileURL
-        .resolvingSymlinksInPath()
-    guard FileManager.default.isExecutableFile(atPath: resolved.path) else { return nil }
-    return resolved
+/// 修复 C：sing-box 路径从 trust.json 读（安装时记录 bundle 内 sing-box 绝对路径），
+/// 不再从 helper 自身位置相对推导。helper 被拷到 root-only 位置后，相对关系已变；
+/// 且从 trust 读可让"bundle 内 sing-box 被换路径"也无济于事（路径仍是安装时记的）。
+/// trust.json 缺 singBoxExecutablePath → nil → 启动失败（拒绝优先）。
+func singBoxURL(from trust: HelperTrustConfig) -> URL? {
+    guard let path = trust.singBoxExecutablePath, !path.isEmpty else { return nil }
+    let url = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
+    guard FileManager.default.isExecutableFile(atPath: url.path) else { return nil }
+    return url
 }
 
-/// §1.1 exec 前校验内置 sing-box 签名有效（防被替换/篡改）。ad-hoc 签名也校验有效性。
-func verifySingBoxSignature(at url: URL) throws {
+/// §1.1 exec 前校验内置 sing-box：签名有效 + cdhash 钉死（修复 C）。
+/// ad-hoc 签名零成本可伪造，光验"签名有效"挡不住替换；必须钉 cdhash。
+/// cdhash 未钉（旧 trust.json）时只验签名有效（向后兼容）；新装必钉。
+func verifySingBoxSignature(at url: URL, pinnedCDHashHex: String?) throws {
     var staticCode: SecStaticCode?
     guard SecStaticCodeCreateWithPath(url as CFURL, [], &staticCode) == errSecSuccess, let staticCode else {
         throw HelperError.singBoxSignatureInvalid
     }
-    // nil requirement：只校验签名本身有效（未被篡改），不附加 identifier/TeamID 约束。
-    // sing-box 是本项目捆绑的，路径已由 helper 位置固定，无需再钉 identifier。
+    // 签名本身有效（未被篡改）。
     guard SecStaticCodeCheckValidity(staticCode, [], nil) == errSecSuccess else {
+        throw HelperError.singBoxSignatureInvalid
+    }
+    // 修复 C：cdhash 钉死。取 kSecCodeInfoUnique 比对 trust.json 钉死值。
+    var info: CFDictionary?
+    guard SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+          let info else {
+        // 取不到签名信息 → 若钉了 cdhash 则拒绝（拿不到就没法比），未钉则放行。
+        if let pinned = pinnedCDHashHex, !pinned.isEmpty {
+            throw HelperError.singBoxSignatureInvalid
+        }
+        return
+    }
+    let dict = info as! [String: Any]
+    var actualCDHashHex: String?
+    if let cdhash = dict[kSecCodeInfoUnique as String] as? Data {
+        actualCDHashHex = cdhash.map { String(format: "%02x", $0) }.joined()
+    }
+    // 纯函数判定（便于单测）：未钉放行，钉了必须匹配。
+    guard HelperSingBoxTrust.isCDHashMatched(actualCDHashHex: actualCDHashHex, pinnedCDHashHex: pinnedCDHashHex) else {
         throw HelperError.singBoxSignatureInvalid
     }
 }
 
 /// §2b.3 起内核：configFD 喂给 sing-box stdin，stdout/stderr 重定向到日志文件。
 /// 返回 sing-box PID。helper 在 spawn 后关闭自己持有的 configFD/logFD（子进程经 dup2 持有副本）。
-func startSingBox(at url: URL, configFD: Int32) throws -> Int32 {
-    try verifySingBoxSignature(at: url)
+func startSingBox(at url: URL, configFD: Int32, pinnedCDHashHex: String?) throws -> Int32 {
+    try verifySingBoxSignature(at: url, pinnedCDHashHex: pinnedCDHashHex)
 
     // 日志文件：O_CREAT|O_APPEND，0644 让 App 可读（日志不含凭据）。
     let logFD = open(logURL.path, O_WRONLY | O_CREAT | O_APPEND, mode_t(0o644))
@@ -311,7 +327,8 @@ func sendResponse(_ response: HelperResponse, connfd: Int32) {
 }
 
 /// 处理一个连接：鉴权 → 收请求 → 决策 → 执行 → 回响应 → 关连接。
-func handleConnection(connfd: Int32, singBox: URL) {
+/// sing-box 路径与 cdhash 从 trust.json 读（修复 C），不再用 helper 启动时推导的全局 singBox。
+func handleConnection(connfd: Int32) {
     defer { close(connfd) }
 
     // §5.1 对端身份校验。失败→拒绝（直接断连，不处理任何请求）。
@@ -328,6 +345,12 @@ func handleConnection(connfd: Int32, singBox: URL) {
 
     let (request, configFD) = recvRequest(connfd: connfd)
     guard let request else { return }  // 解析失败 → 断连。
+
+    // 修复 C：sing-box 路径从 trust 读。trust 缺路径 → startTun/stopTun 都做不了。
+    guard let singBox = singBoxURL(from: trust) else {
+        sendResponse(HelperResponse(ok: false, message: "sing-box path not configured", helperVersion: helperVersion), connfd: connfd)
+        return
+    }
 
     let kernelRunning = state.kernelPIDValue() > 0
     let decision = HelperDecision.decide(
@@ -353,7 +376,7 @@ func handleConnection(connfd: Int32, singBox: URL) {
             return
         }
         do {
-            let pid = try startSingBox(at: singBox, configFD: fd)
+            let pid = try startSingBox(at: singBox, configFD: fd, pinnedCDHashHex: trust.singBoxCDHashHex)
             state.setKernelPID(pid)
             // §2b.4 记录调用方 PID，供自愈检查。
             state.setClientPID(peerPID(connfd: connfd))
@@ -382,7 +405,8 @@ func handleConnection(connfd: Int32, singBox: URL) {
 // MARK: - 生命周期 / 自愈（§2b.4）
 
 /// §2b.4 自愈：调用方 App 长期不在 → 自动停内核，避免残留 root 内核接管网络。
-func checkClientLiveness(singBox: URL) {
+/// sing-box 路径从 trust.json 读（修复 C），与 handleConnection 同源。
+func checkClientLiveness() {
     let kernelPID = state.kernelPIDValue()
     guard kernelPID > 0 else { return }
     let clientPID = state.clientPIDValue()
@@ -390,6 +414,8 @@ func checkClientLiveness(singBox: URL) {
     // kill(pid, 0) 只检查进程存在（不发信号）。
     if kill(clientPID, 0) != 0 {
         // App 不在了，停自己起的内核。
+        guard let trust = HelperSecurity.loadTrustConfig(),
+              let singBox = singBoxURL(from: trust) else { return }
         let pid = state.clearKernelPID()
         try? stopSingBox(pid: pid, expectedURL: singBox)
     }
@@ -450,9 +476,12 @@ func setupSocket() -> Int32 {
 }
 
 /// 优雅退出：停内核（若在跑）、关 socket、unlink socket 文件。
-func shutdownHelper(listenFD: Int32, singBox: URL) {
+/// 修复 C：sing-box 路径从 trust.json 读（与 handleConnection/checkClientLiveness 同源）。
+/// trust 缺失/损坏时无法验证 PID 身份 → §1.4 拒绝优先，不盲杀（宁可残留也不杀错）。
+func shutdownHelper(listenFD: Int32) {
     let pid = state.clearKernelPID()
-    if pid > 0 {
+    if pid > 0, let trust = HelperSecurity.loadTrustConfig(),
+       let singBox = singBoxURL(from: trust) {
         try? stopSingBox(pid: pid, expectedURL: singBox)
     }
     shutdown(listenFD, Int32(SHUT_RDWR))
@@ -472,11 +501,10 @@ enum HelperSecurity {
     }
 }
 
-guard let singBox = singBoxURL() else {
-    FileHandle.standardError.write(Data("kongshan-helper: 找不到内置 sing-box，退出。\n".utf8))
-    exit(EXIT_FAILURE)
-}
-
+// 修复 C：helper 不再在启动时推导 sing-box 路径（singBoxURL() 无参版已移除）。
+// sing-box 路径改在每次连接时从 trust.json 读（handleConnection/checkClientLiveness/shutdownHelper）。
+// 这样 helper 被拷到 root-only 位置后不依赖相对路径；trust 缺 singBoxExecutablePath 时
+// startTun/stopTun 会回报错误（拒绝优先），status 仍需通过身份校验——trust 缺失则全部拒绝。
 rotateLogIfNeeded()
 
 let listenFD = setupSocket()
@@ -502,8 +530,8 @@ for sig in [SIGTERM, SIGINT] {
 // §2b.4 自愈定时器：每 30s 检查调用方 App 是否还在，不在则停内核。
 let livenessTimer = DispatchSource.makeTimerSource(queue: signalQueue)
 livenessTimer.schedule(deadline: .now() + 30, repeating: 30)
-livenessTimer.setEventHandler { [singBox] in
-    checkClientLiveness(singBox: singBox)
+livenessTimer.setEventHandler {
+    checkClientLiveness()
 }
 livenessTimer.resume()
 
@@ -516,13 +544,13 @@ while !state.shouldExitValue() {
     if n > 0 && (pfd.revents & Int16(POLLIN)) != 0 {
         let connfd = accept(listenFD, nil, nil)
         if connfd >= 0 {
-            handleConnection(connfd: connfd, singBox: singBox)
+            handleConnection(connfd: connfd)
         }
     } else if n < 0 && errno != EINTR {
         break
     }
 }
 
-shutdownHelper(listenFD: listenFD, singBox: singBox)
+shutdownHelper(listenFD: listenFD)
 FileHandle.standardError.write(Data("kongshan-helper: 已退出。\n".utf8))
 exit(EXIT_SUCCESS)
