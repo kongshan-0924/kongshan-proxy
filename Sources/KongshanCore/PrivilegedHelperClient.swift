@@ -71,20 +71,39 @@ public actor PrivilegedHelperClient: PrivilegedLaunching {
         guard let fd = connectSocket() else { throw PrivilegedHelperClientError.helperNotReachable }
         defer { close(fd) }
 
-        // §1.3 配置经 pipe 只读 FD 传：写端喂完 config 后关闭，读端经 SCM_RIGHTS 传给 helper。
+        // §1.3 配置经 pipe 只读 FD 传：读端经 SCM_RIGHTS 传给 helper，sing-box 从 stdin 读。
+        // 修复 B（死锁）：先把读端交给 helper（sendmsg 复制 FD 进 socket），helper spawn sing-box
+        // 开始读 stdin 后，再后台并发写配置。若先 writeAll 再 sendFrame，配置 > pipe 缓冲(~64KB)
+        // 会因无人读而阻塞 → 死锁。真实机场配置常达数百 KB。
         var pipeFDs: [Int32] = [0, 0]
         guard pipe(&pipeFDs) == 0 else {
             throw PrivilegedHelperClientError.pipeFailed(String(cString: strerror(errno)))
         }
         let readEnd = pipeFDs[0]
         let writeEnd = pipeFDs[1]
-        try writeAll(config, to: writeEnd)
-        close(writeEnd)
 
+        // 1) 先把读端经 sendmsg 交给 helper。
         try sendFrame(HelperRequest.startTun, configFD: readEnd, on: fd)
         // helper 已通过 SCM_RIGHTS 拿到读端副本，App 关掉自己持有的读端。
         close(readEnd)
 
+        // 2) 后台线程并发写配置到 writeEnd，sing-box 边读边排空 pipe。
+        //    helper 若拒绝且关掉读端，写端会得 EPIPE/SIGPIPE——后台线程容错退出，不卡死。
+        //    actor 上下文不能阻塞等它，写入结果通过 Data 捕获到错误变量，receiveFrame 后检查。
+        let writeErrorBox = WriteErrorBox()
+        let configCopy = config
+        Thread.detachNewThread {
+            // SIGPIPE 默认会终止进程，写端收到时需忽略（write 返回 -1/EPIPE）。
+            signal(SIGPIPE, SIG_IGN)
+            do {
+                try self.writeAllSync(configCopy, to: writeEnd)
+            } catch {
+                writeErrorBox.error = error
+            }
+            close(writeEnd)
+        }
+
+        // 3) 等 helper 响应（helper spawn 后即回，不依赖 sing-box 读完配置）。
         guard let response = receiveFrame(on: fd) else {
             throw PrivilegedHelperClientError.receiveFailed
         }
@@ -97,6 +116,34 @@ public actor PrivilegedHelperClient: PrivilegedLaunching {
         // binaryPath 仅用于 AppState 的进程监控/记录对齐；helper 模式下 App 不做 processMatches 校验
         //（helper 已用 proc_pidpath 验证）。填内置 sing-box 路径保持记录结构一致。
         return PrivilegedProcessRecord(pid: pid, binaryPath: binaryURL.path, launchedAt: now())
+    }
+
+    /// 后台线程用的写错误盒子（线程安全）。
+    private final class WriteErrorBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _error: Error?
+        var error: Error? {
+            get { lock.lock(); defer { lock.unlock() }; return _error }
+            set { lock.lock(); _error = newValue; lock.unlock() }
+        }
+    }
+
+    /// 同步写全部数据到 FD（后台线程用）。EPIPE 容错转 pipeFailed。
+    private nonisolated func writeAllSync(_ data: Data, to fd: Int32) throws {
+        try data.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) in
+            guard let base = ptr.baseAddress else { return }
+            var offset = 0
+            while offset < ptr.count {
+                let n = Darwin.write(fd, base.advanced(by: offset), ptr.count - offset)
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    // EPIPE：helper 关了读端（拒绝/异常），后台写直接退出，不视为致命错。
+                    if errno == EPIPE { return }
+                    throw PrivilegedHelperClientError.pipeFailed(String(cString: strerror(errno)))
+                }
+                offset += n
+            }
+        }
     }
 
     public func stop() async throws {
@@ -214,21 +261,6 @@ public actor PrivilegedHelperClient: PrivilegedLaunching {
                 throw PrivilegedHelperClientError.sendFailed(String(cString: strerror(errno)))
             }
             offset += n
-        }
-    }
-
-    private nonisolated func writeAll(_ data: Data, to fd: Int32) throws {
-        try data.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) in
-            guard let base = ptr.baseAddress else { return }
-            var offset = 0
-            while offset < ptr.count {
-                let n = Darwin.write(fd, base.advanced(by: offset), ptr.count - offset)
-                if n < 0 {
-                    if errno == EINTR { continue }
-                    throw PrivilegedHelperClientError.pipeFailed(String(cString: strerror(errno)))
-                }
-                offset += n
-            }
         }
     }
 
