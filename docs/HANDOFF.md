@@ -1,5 +1,15 @@
 # 项目交接
 
+## 2026-07-22 网络可观测与控制增强（0.1.23 待用户验收）
+
+- 已完成：仪表盘真实出口 IP/地区/运营商和 DNS 一键自测；节点名地区旗帜与倍率高亮；连接页单连接及顶部实时速率/排序；测速并自动选最快；分应用直连/默认代理/指定节点；托盘实时上下行；配置与设置 JSON 备份/恢复。
+- 修改文件：新增 `ExitDiagnostics.swift`、`NodeNameMetadata.swift`、`ConnectionRateTracker.swift`、`ExitDiagnosticsService.swift`、`KongshanBackup.swift`、`BackupDocument.swift` 及对应测试；更新 AppState、Dashboard、PolicyGroups、Connections、Routing、MenuBar、Settings、ConfigGenerator 等。
+- 测试结果：两次新鲜全量 `swift test` 均为 199 项、0 失败、1 项条件快照跳过；`verify_m4.sh` 通过，平均 CPU 0.000%、最大 RSS 115,280 KB；arm64、ad-hoc strict 签名、sing-box 1.13.14、真实规则集、残留检查和 DMG 校验通过。
+- 当前状态：所有代码与发布记录均在 `codex/network-observability-batch`，main 仍为 `ec29ab1` 未合并；`/Applications/kongshan.app` 正运行 0.1.23/build 123；唯一安装包为主工作区 `dist/kongshan-0.1.23.dmg`，SHA-256 `cb8e1ba96b0507df2ceb7c1a0fcb97a52eb7cb8224aa2c5f5358fa51608c7fa2`。
+- 风险/注意事项：DNS 泄漏是基于多次解析器结果的三态启发式判断，不作绝对安全承诺；出口检测依赖 Mullvad 公开接口；备份包含订阅与节点凭据，需当作敏感文件；旧产物仅移入废纸篓，可恢复。
+- 下一步：用户在真实节点/代理状态下验收七类界面与出口/DNS/速率数据；明确验收通过后才合并 main。
+- 接手方式：保留当前分支与 worktree；查问题先看 `docs/progress/SESSION_LOG.md` 本日各功能阶段；未收到“验收通过”不得合并 main。
+
 ## 2026-07-22 侧边栏按钮固定位置（0.1.22 待用户验收）
 
 - 已完成：使用受控 `NavigationSplitViewVisibility`，在侧栏作用域移除系统默认按钮，并以唯一 `.navigation` 按钮固定左上角；0.1.22 已完成构建、DMG、单副本安装和真实展开/折叠/恢复检查。

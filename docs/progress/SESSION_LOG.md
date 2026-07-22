@@ -1211,3 +1211,13 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 - 风险/注意事项：备份包含订阅凭据和节点密码，必须当作敏感文件；不包含日志、规则集缓存、内核运行时 secret 或 recovery 文件。
 - 下一步：提交本阶段，执行全量测试、发布验证，构建唯一最新 App/DMG 供用户验收。
 - 下一位 Agent 如何接手：从全量验证开始；若失败只在当前功能分支修复，不合并 main；发布前再核对敏感备份提示。
+
+## 2026-07-22 0.1.23 全量验证、单副本安装与交接
+
+- 已完成：依次完成 9 个功能阶段的代码与测试；构建 0.1.23/build 123，生成并校验 DMG；将 0.1.22 App/DMG 和 worktree 构建副本移入废纸篓，安装并启动唯一 `/Applications/kongshan.app`；使用真实安装包可视检查仪表盘、代理、连接、规则页。
+- 修改文件：`VERSION`、`docs/HANDOFF.md`、`docs/PROGRESS.md`、`docs/NEXT_STEPS.md`与本记录；成品为 `/Applications/kongshan.app` 及主工作区 `dist/kongshan-0.1.23.dmg`。
+- 测试结果：新鲜全量 `swift test` 199 项、0 失败、1 项条件快照跳过；`verify_m4.sh` 再次运行全量 199 项且通过 M3/M4 所有门禁，平均 CPU 0.000%、最大 RSS 115,280 KB；签名 strict、arm64、Info.plist、sing-box 1.13.14、真实规则集、残留检查和 `hdiutil verify` 通过；DMG SHA-256 为 `cb8e1ba96b0507df2ceb7c1a0fcb97a52eb7cb8224aa2c5f5358fa51608c7fa2`。
+- 当前状态：安装版 PID 89398 从 `/Applications/kongshan.app` 运行，Spotlight 仅索引该 App；工作区仅保留一份 0.1.23 DMG，无 kongshan DMG 挂载、sing-box 子进程或 recovery/FIFO 残留；分支仍为 `codex/network-observability-batch`，main 仍为 `ec29ab1`。
+- 风险/注意事项：Computer Use 已看到唯一左上角侧边栏按钮、测速并选最快、连接顶部速率和分应用 UI；切换设置页时原生 UI 通道中断，备份入口仅有编译与 5 项专项测试证据，需用户视觉验收；备份包含敏感凭据；DNS 判断为三态启发式。
+- 下一步：用户验收 0.1.23 真实出口、DNS、节点倍率、连接速率、自动选节点、分应用、托盘速率与备份恢复；收到明确通过后才合并 main。
+- 下一位 Agent 如何接手：保留当前 worktree/分支与已安装成品；验收反馈继续修在本分支；用户未说“验收通过”前不清理 worktree、不合并 main。
