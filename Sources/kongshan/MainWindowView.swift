@@ -639,6 +639,39 @@ private struct SettingsView: View {
                     Text("绕过域名/IP 会同时生效于分流规则、系统代理 bypass 与 TUN 排除三处。改动统一校验后应用。")
                 }
 
+                Section("免密码助手") {
+                    LabeledContent("状态", value: helperStatusText)
+                    Text("免密码助手让 TUN 启停无需每次输入密码：安装需一次管理员授权，之后开机自动运行。未装时 TUN 仍可用（每次弹密码）。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        if state.isHelperOperationInProgress {
+                            ProgressView().controlSize(.small)
+                        }
+                        Spacer()
+                        switch state.helperInstallStatus {
+                        case .notInstalled:
+                            Button("安装免密码助手") {
+                                Task { await state.installHelper() }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(state.isHelperOperationInProgress)
+                        case .installed:
+                            Button("卸载") {
+                                Task { await state.uninstallHelper() }
+                            }
+                            .disabled(state.isHelperOperationInProgress)
+                        case .needsReinstall:
+                            Button("重新安装（应用位置已变）") {
+                                Task { await state.installHelper() }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(state.isHelperOperationInProgress)
+                        }
+                    }
+                }
+                .onAppear { state.refreshHelperInstallStatus() }
+
                 }
                 if tab == .network {
                 Section("测速") {
@@ -970,6 +1003,14 @@ private struct SettingsView: View {
         let ordered: [ProxyMode] = [.systemProxy, .tun]
         let names = ordered.filter(state.activeModes.contains).map(\.displayName)
         return names.isEmpty ? "未开启" : names.joined(separator: " + ")
+    }
+
+    private var helperStatusText: String {
+        switch state.helperInstallStatus {
+        case .notInstalled: "未安装"
+        case .installed: "已安装"
+        case .needsReinstall: "需重装"
+        }
     }
 
     private var strictRouteBinding: Binding<Bool> {

@@ -1,6 +1,43 @@
 # 项目交接
 
 ## 2026-07-22 审核并合并 0.1.23 → main（本会话完成）
+## 2026-07-22 22:40 TUN 助手第三轮安全修复（feat/tun-passwordless-helper，4 提交完成，待维护者复审）
+
+- 已完成：按 `docs/design/tun-passwordless-helper-fixes.md`「第三轮」实现 C①/C②/N1 必修 + N2 可选，4 个独立提交留在 `feat/tun-passwordless-helper`（未推、未合 main）。
+- 提交：`dcf4914` C② fail-closed → `f13795f` C① sing-box 拷 root-only 消除 TOCTOU → `0760ec1` N1 defer close FD → `276dacf` N2 client pipe 清理。
+- 修复要点：
+  - C① [阻断·root 提权]：sing-box 没迁 root-only，trust.singBoxExecutablePath 指 bundle（admin 可写）→ verify→exec TOCTOU。修法与 helper 同构：`installedSingBoxURL = stateDirectory + "/sing-box"`，安装脚本加 cp/chown/chmod，trust 指向拷贝。提取 `makeTrustConfig` 纯函数单测。
+  - C② [低危]：`computeCDHashHex` nil 时静默写 null → 不钉 cdhash。提取 `failClosedCDHash(_:)` 纯函数，nil/空抛 `authorizationFailed`。
+  - N1 [可靠性]：`startSingBox` 早抛泄漏 configFD → App 写线程永久阻塞。顶部 `defer { close(configFD) }` + logFD 打开后 `defer { close(logFD) }`，删 spawn 后显式 close。
+  - N2 [可选·非安全]：`Client.start` 的 `pipe()` 后 sendFrame 抛错泄漏两端。do/catch 补关再 rethrow。
+- 修改文件：`Sources/KongshanCore/PrivilegedHelperInstaller.swift`、`Sources/KongshanHelper/main.swift`、`Sources/KongshanCore/PrivilegedHelperClient.swift`、`Tests/KongshanCoreTests/PrivilegedHelperInstallerTests.swift`（新增）。未碰侧栏、未 merge main、未真装 daemon（§1.5）。
+- 测试：`swift build` 通过；`swift test` **225 通过 1 跳过 0 失败**（+9 新：C① 5 + C② 4）。
+- 铁律复核：§1.1-1.6 全部仍生效（C① 只改 sing-box 加载位置，仍 internal/固定 run/stdin；C② 强化拒绝优先；N1/N2 不涉及铁律）。
+- 当前状态：4 提交在 `feat/tun-passwordless-helper`，未推。等维护者重跑独立对抗式安全审查（重点验 C① 是否真消除 TOCTOU），过了才合 main。
+- 风险：main 已升 0.1.23，与本分支在 AppState.swift/MainWindowView.swift 会冲突——维护者合并时手动解（本分支未 merge/rebase main，按要求）。N1 defer 不便纯函数单测（运行时保证），已在 commit 写思路说明。
+- 下一步：维护者重跑安全审查；通过后合 main（手动解冲突）；真机重打包验证零弹窗 TUN + 检查 `/Library/Application Support/kongshan/helper/sing-box` 存在且 root:wheel 755 + trust.json 指向它。
+- 接手方式：在 `feat/tun-passwordless-helper`，读 4 个 commit + SESSION_LOG 2026-07-22 22:40 段。
+
+## 2026-07-22 TUN 免密码特权助手（feat/tun-passwordless-helper 分支，里程碑 2b-5 完成）
+
+- 已完成：按 `docs/design/tun-passwordless-helper-tasks.md` 实现里程碑 2b-5，4 个独立提交（每里程碑一条）。
+  - 2b helper 安全核心（`Sources/KongshanHelper/main.swift`）：socket 服务 + audit_token 身份校验（纯函数 `HelperTrustEvaluation.isTrusted`）+ startTun 收 SCM_RIGHTS FD 固定 exec 内置 sing-box（exec 前 SecStaticCodeCheckValidity）+ stopTun 只杀自起 PID（proc_pidpath 验证）+ 30s 自愈定时器。
+  - 3 App 客户端 + 接线 + UI：`PrivilegedHelperClient`（actor，符合 `PrivilegedLaunching`，pipe+sendmsg 传 FD）+ `PrivilegedHelperInstaller`（一条 osascript 安装/卸载）+ AppState `tunLauncher`（helper 可达用 helper，否则回退 `privilegedLauncher`）+ 设置→隧道「免密码助手」Section。
+  - 4 打包：`build_app.sh` 拷 `KongshanHelper` → `Contents/MacOS/`、plist 模板 → `Contents/Resources/`；Installer 优先读 .app 内模板（占位符替换），内联兜底。
+  - 5 测试：25 个纯逻辑单测（isTrusted 各拒绝分支/decide 各分发/trust 解码缺失损坏）。
+- 修改文件：新增 `Sources/KongshanCore/PrivilegedHelperClient.swift`、`PrivilegedHelperInstaller.swift`、`Resources/com.kaysen.kongshan.helper.plist`、`Tests/HelperProtocolTests/HelperTrustEvaluationTests.swift`；改 `HelperProtocol.swift`、`KongshanHelper/main.swift`、`PrivilegedLauncher.swift`、`AppState.swift`、`MainWindowView.swift`、`build_app.sh`。
+- 测试结果：`swift build` 通过；`swift test` 199 通过 1 跳过 0 失败（+25）。
+- 当前状态：里程碑 2b-5 代码完成，4 提交在 `feat/tun-passwordless-helper` 分支，未推 main。
+- 风险/注意事项：
+  1. 铁律 §1 全部满足：固定 exec / 拒绝优先 / FD 不落盘 / 只杀自起 / 不在自动化装 daemon / 不弱化兜底。
+  2. 助手安装需用户在真机点一次「安装免密码助手」按钮（osascript 提权一次）；未装时 TUN 仍走 `PrivilegedLauncher`（osascript 每次弹密码）。
+  3. helper ad-hoc 签名，`SecStaticCodeCheckValidity(nil)` 接受；身份校验靠路径+identifier 钉死，默认不钉 cdhash。
+  4. 真机安装授权验收由用户完成；未在自动化里 bootstrap daemon。
+  5. 未碰侧栏文件（侧栏修复在 `fix/sidebar-toggle` 分支）。
+- 下一步：维护者审查（重点 §5.1 身份校验 / §1.3 FD 不落盘 / §1.4 只杀自起）；审查通过后合并 main；用户真机点一次安装授权验收。
+- 接手方式：在 `feat/tun-passwordless-helper` 分支上，先读 `docs/design/tun-passwordless-helper-tasks.md` 和 `docs/design/tun-passwordless-helper.md`；动 helper 安全逻辑前理解 audit_token→SecCode→identifier+path 链路与拒绝优先原则。
+
+## 2026-07-22 双侧栏按钮修复设计
 
 - 已完成：审核 + ff-only 合并超集分支 `fix/tun-ipv6-no-route` → main 并推 origin；分支整理到「`main` + `feat/tun-passwordless-helper`」两条。
 - 审核（我负责）：`swift test` 绿（202/1跳过/0）；亲读 IPv6 修复（getifaddrs 内存安全、fe80::/10 分类正确）；独立对抗式 subagent 复审整份 Sources/ diff（+2653/-264，36 文件）→ **无 blocker**（无崩溃/数据竞争/备份回滚破损/明文 secret）。合并前修 2 个 medium 并重测通过：①出口诊断代理关时不再用真实 IP 自动直连 Mullvad（`DashboardView.onAppear` 加 `state.isOn` 门控，手动「检测」按钮保留）②节点倍率正则改 `static let` 缓存（避免逐节点每帧现编译，命中项目历史 CPU 雷区）。

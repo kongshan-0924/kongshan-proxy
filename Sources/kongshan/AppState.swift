@@ -299,6 +299,13 @@ final class AppState {
     /// 避免连续点选节点时每次都同步落盘 settings.json。退出前 flush 确保最后一次选择不丢。
     @ObservationIgnored private var persistSettingsTask: Task<Void, Never>?
 
+    /// 特权助手客户端（零弹窗 TUN）。助手不可达时回退 `privilegedLauncher`（osascript）。
+    @ObservationIgnored private let helperClient: PrivilegedHelperClient
+    /// 助手安装状态（UI 展示 + 决定是否走 helper 路径）。
+    private(set) var helperInstallStatus: HelperInstallStatus = .notInstalled
+    /// 助手安装/卸载进行中（UI 禁用按钮）。
+    private(set) var isHelperOperationInProgress = false
+
     init(
         storage: Storage = Storage(),
         subscriptionService: SubscriptionService? = nil,
@@ -343,6 +350,7 @@ final class AppState {
             logStore: resolvedLogStore,
             logErrorHandler: logWarningRelay.send
         )
+        self.helperClient = PrivilegedHelperClient(binaryURL: binaryURL)
         self.runtimeFactory = runtimeFactory ?? Self.makeRuntimeParameters
         self.healthVerifier = healthVerifier ?? Self.waitUntilHealthy
         self.clashClientFactory = clashClientFactory ?? { controller, secret in
@@ -441,7 +449,7 @@ final class AppState {
         do {
             // 清理上次遗留的接管。常见情况（无残留记录）都是秒回的空操作；
             // 只有真有残留 root TUN 内核时才会走授权，那正是我们要清掉的僵尸隧道。
-            try await privilegedLauncher.recoverIfNeeded()
+            try await tunLauncher.recoverIfNeeded()
             try await systemProxyManager.recoverIfNeeded()
             try await systemDNSManager.recoverIfNeeded()
             try await storage.prepare()
@@ -532,7 +540,7 @@ final class AppState {
                 runtime.secret
             )
             if usesTun {
-                let record = try await privilegedLauncher.start(config: config)
+                let record = try await tunLauncher.start(config: config)
                 tunStarted = true
                 startedPID = record.pid
             } else {
@@ -580,7 +588,7 @@ final class AppState {
             if usesTun {
                 if tunStarted {
                     do {
-                        try await privilegedLauncher.stop()
+                        try await tunLauncher.stop()
                     } catch let stopError {
                         activeModes = modes
                         currentConfig = nil
@@ -648,7 +656,7 @@ final class AppState {
                 return
             }
             do {
-                try await privilegedLauncher.stop()
+                try await tunLauncher.stop()
             } catch {
                 setFailure("停止 TUN 失败：\(error.localizedDescription)")
                 if let previousPID { await armCoreExitMonitoring(pid: previousPID) }
@@ -704,7 +712,7 @@ final class AppState {
         } else {
             do {
                 await cancelCoreExitMonitoring()
-                try await privilegedLauncher.recoverIfNeeded()
+                try await tunLauncher.recoverIfNeeded()
                 try await systemProxyManager.recoverIfNeeded()
                 try await systemDNSManager.recoverIfNeeded()
                 clearRuntimeState()
@@ -2102,7 +2110,7 @@ final class AppState {
         suspendDashboardMonitoring()
         suspendLogMonitoring()
         do {
-            try await privilegedLauncher.stop()
+            try await tunLauncher.stop()
             activeModes = []
         } catch {
             status = .on
@@ -2115,7 +2123,7 @@ final class AppState {
 
         var newConfigurationRecord: PrivilegedProcessRecord?
         do {
-            let record = try await privilegedLauncher.start(config: newConfig)
+            let record = try await tunLauncher.start(config: newConfig)
             newConfigurationRecord = record
             activeModes = previousModes
             try await healthVerifier(client)
@@ -2126,7 +2134,7 @@ final class AppState {
             let updateError = error
             if let newConfigurationRecord {
                 do {
-                    try await privilegedLauncher.stop()
+                    try await tunLauncher.stop()
                     activeModes = []
                 } catch let stopError {
                     currentConfig = newConfig
@@ -2141,7 +2149,7 @@ final class AppState {
 
             var oldConfigurationRecord: PrivilegedProcessRecord?
             do {
-                let record = try await privilegedLauncher.start(config: oldConfig)
+                let record = try await tunLauncher.start(config: oldConfig)
                 oldConfigurationRecord = record
                 activeModes = previousModes
                 try await healthVerifier(client)
@@ -2155,10 +2163,10 @@ final class AppState {
                 return false
             } catch let rollbackError {
                 if oldConfigurationRecord != nil {
-                    try? await privilegedLauncher.stop()
+                    try? await tunLauncher.stop()
                 } else {
                     // start 失败时默认 launcher 也会清理临时记录；再次 stop 是幂等安全网。
-                    try? await privilegedLauncher.stop()
+                    try? await tunLauncher.stop()
                 }
                 // TUN 已经起不来了，接管的系统 DNS 不还原会导致全网解析瘫痪。
                 try? await systemDNSManager.restore()
@@ -2508,10 +2516,10 @@ final class AppState {
         do {
             let restartedPID: Int32
             if modes.contains(.tun) {
-                try await privilegedLauncher.recoverIfNeeded()
+                try await tunLauncher.recoverIfNeeded()
                 // 用户可能在此 await 期间点了 stop。
                 if stopRequestedDuringCrashHandling { return }
-                let record = try await privilegedLauncher.start(config: config)
+                let record = try await tunLauncher.start(config: config)
                 try await healthVerifier(client)
                 restartedPID = record.pid
             } else {
@@ -2531,7 +2539,7 @@ final class AppState {
             // 二次检查：start/healthVerify 期间用户可能点了 stop。
             if stopRequestedDuringCrashHandling {
                 if modes.contains(.tun) {
-                    try? await privilegedLauncher.stop()
+                    try? await tunLauncher.stop()
                 } else {
                     try? await singBoxProcess.stop()
                 }
@@ -2564,7 +2572,7 @@ final class AppState {
         }
         if modes.contains(.tun) {
             do {
-                try await privilegedLauncher.recoverIfNeeded()
+                try await tunLauncher.recoverIfNeeded()
             } catch {
                 cleanupMessages.append("TUN 清理失败：\(error.localizedDescription)")
             }
@@ -2701,6 +2709,59 @@ final class AppState {
 
     private var rulesURL: URL {
         storage.rootDirectory.appending(path: "rules.json")
+    }
+
+    // MARK: - 特权助手（零弹窗 TUN）
+
+    /// 当前 TUN 启停后端：助手可达则用 helper（零弹窗），否则回退 osascript 兜底。
+    /// 不改系统代理路径；未装助手时 TUN 仍走 `privilegedLauncher`（铁律 §1.6）。
+    private var tunLauncher: any PrivilegedLaunching {
+        helperClient.isReachable() ? helperClient : privilegedLauncher
+    }
+
+    /// 刷新助手安装状态（启动时、安装/卸载后、进入设置页时调用）。
+    func refreshHelperInstallStatus() {
+        let reachable = helperClient.isReachable()
+        helperInstallStatus = PrivilegedHelperInstaller.currentStatus(isReachable: reachable)
+    }
+
+    /// 安装免密码助手（一条 osascript 提权）。铁律 §1.5：仅在用户点按钮时触发。
+    func installHelper() async {
+        guard !isHelperOperationInProgress else { return }
+        isHelperOperationInProgress = true
+        defer { isHelperOperationInProgress = false }
+        do {
+            try await PrivilegedHelperInstaller.install(authorizer: { script, timeout in
+                try await OSAScriptAuthorizer.run(script: script, timeout: timeout)
+            })
+            // bootstrap 后 helper 需要一瞬启动，短等再自检。
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            refreshHelperInstallStatus()
+            if helperInstallStatus != .installed {
+                warnings.append("助手已安装但未自检通过，请重开 App 或重装")
+            }
+        } catch let error as PrivilegedLauncherError {
+            warnings.append("安装助手失败：\(error.localizedDescription)")
+        } catch {
+            warnings.append("安装助手失败：\(error.localizedDescription)")
+        }
+    }
+
+    /// 卸载免密码助手（一条 osascript 提权）。
+    func uninstallHelper() async {
+        guard !isHelperOperationInProgress else { return }
+        isHelperOperationInProgress = true
+        defer { isHelperOperationInProgress = false }
+        do {
+            try await PrivilegedHelperInstaller.uninstall(authorizer: { script, timeout in
+                try await OSAScriptAuthorizer.run(script: script, timeout: timeout)
+            })
+            refreshHelperInstallStatus()
+        } catch let error as PrivilegedLauncherError {
+            warnings.append("卸载助手失败：\(error.localizedDescription)")
+        } catch {
+            warnings.append("卸载助手失败：\(error.localizedDescription)")
+        }
     }
 
     private static func singBoxBinaryURL() -> URL {

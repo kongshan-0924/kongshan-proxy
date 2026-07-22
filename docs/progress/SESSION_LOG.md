@@ -1260,3 +1260,166 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 - 风险/注意：出口诊断代理关时不再自动检测（手动仍可，想看真实 IP 点「检测」）；倍率正则为 static let（惰性一次初始化、NSRegularExpression matching 线程安全）。
 - 下一步：用户 `scripts/build_app.sh` 重打包（自增版本）→ 真机验证 TUN IPv6 + 2 条审核修复 + 0.1.23 七类界面；之后收尾助手第三轮（`feat/tun-passwordless-helper`）。
 - 接手方式：读本段 + NEXT_STEPS 顶部「✅ 合并已完成」段。合并已落地 main 并推 origin，无需重做；助手第三轮在另一分支，合并会与 network-obs 在 AppState/MainWindowView 冲突需手动解。
+## 2026-07-22 — TUN 免密码助手里程碑 2b（feat/tun-passwordless-helper 分支）
+
+- 已完成：helper 安全核心实现（`Sources/KongshanHelper/main.swift` 重写自骨架；`Sources/HelperProtocol/HelperProtocol.swift` 加 4 个可注入纯逻辑类型）。
+  - §2b.1 Unix socket 服务：stateDirectory(root 0700) → unlink → bind → chmod 0600 → listen；SIGTERM/SIGINT dispatch source 优雅退出；poll 1s 超时串行 accept。
+  - §2b.2 对端身份校验（拒绝优先）：`extractClientIdentity` 取 audit_token → SecCodeCopyGuestWithAttributes → SecCodeCheckValidityWithErrors(identifier 钉死) → SecCodeCopyStaticCode + SecCodeCopySigningInformation 取 identifier/cdhash → proc_pidpath 取可执行路径；纯函数 `HelperTrustEvaluation.isTrusted` 任一不过即 false。
+  - §2b.3 startTun 收 FD + 固定 exec：手写 CMSG 解析（CMSG_FIRSTHDR/DATA 宏 Swift 不可用）取 SCM_RIGHTS FD；sing-box 路径由 helper 自身位置推导 + exec 前 SecStaticCodeCheckValidity；posix_spawn 参数固定 run，configFD → stdin，日志 0644 重定向。
+  - §2b.4 stopTun/生命周期/自愈：只对 helper 自起 PID（state.kernelPID）发 SIGINT，且 proc_pidpath 验证确为内置 sing-box；30s 定时器 kill(clientPID,0) 检查 App 存活，不在则自动停内核。
+- 修改文件：`Sources/HelperProtocol/HelperProtocol.swift`（+83 行 4 个纯逻辑类型）、`Sources/KongshanHelper/main.swift`（骨架 → 完整实现 +497 行）。
+- 测试结果：`SWIFTPM_ENABLE_SANDBOX=NO swift build --target KongshanHelper --disable-sandbox` 通过。
+- 当前状态：里程碑 2b 代码完成并编译通过，待提交；3/4/5 待办。
+- 风险/注意事项：
+  1. helper 当前用 `SecStaticCodeCheckValidity(..., nil)` 只校验签名本身有效（ad-hoc 也通过），不钉 sing-box identifier。设计文档默认不钉 sing-box cdhash（路径已固定），与 §1.1 一致。
+  2. 自愈定时器 30s 周期、checkClientLiveness 在 clientPID > 0 时才动作。
+  3. trust.json 缺失/损坏一律静默断连（不泄露任何信息），与 §1.2 一致。
+- 下一步：里程碑 3（PrivilegedHelperClient + AppState 接线 + 设置→隧道 安装/卸载 UI）。
+- 接手方式：在 `feat/tun-passwordless-helper` 分支继续，每个里程碑单独提交，别推 main，别碰侧栏文件。
+
+## 2026-07-22 — TUN 免密码助手里程碑 3（feat/tun-passwordless-helper 分支）
+
+- 已完成：App 客户端 + AppState 接线 + 设置→隧道 安装/卸载 UI。
+  - §3.1 `Sources/KongshanCore/PrivilegedHelperClient.swift`（新）：actor，符合 `PrivilegedLaunching`。
+    `start(config:)` 用 `pipe()` + `sendmsg`/`SCM_RIGHTS` 传只读 FD（§1.3）；`stop()`/`recoverIfNeeded()`
+    发 stopTun/status；`isReachable()` 非阻塞判定 socket 可连；SO_RCVTIMEO/SO_SNDTIMEO 防 helper 卡死。
+  - §3.1 `Sources/KongshanCore/PrivilegedHelperInstaller.swift`（新）：`install`/`uninstall` 各一条 osascript
+    提权（建 stateDirectory/trust.json/plist + bootstrap；bootout + 删文件）；plist 模板内联（KeepAlive+RunAtLoad，
+    ProgramArguments 指向 .app 内 KongshanHelper）；`currentStatus(isReachable:)` 三态（未装/已装/需重装）。
+  - §3.2 AppState 接线：加 `helperClient` + `helperInstallStatus` + `isHelperOperationInProgress`；
+    `tunLauncher` 计算属性（helper 可达则用 helper，否则回退 `privilegedLauncher`，§1.6 兜底保留）；
+    所有 TUN 启停/恢复调用点改走 `tunLauncher`；`installHelper()`/`uninstallHelper()`/`refreshHelperInstallStatus()`。
+  - §3.3 设置→隧道 加「免密码助手」Section：状态行 + 安装/卸载/重装按钮 + onAppear 刷新。
+  - `PrivilegedLauncher.swift`：`OSAScriptAuthorizer`/`OSAScriptRunner` 改 public 供 AppState 复用提权器。
+- 修改文件：新增 `PrivilegedHelperClient.swift`、`PrivilegedHelperInstaller.swift`；改 `AppState.swift`、
+  `MainWindowView.swift`、`PrivilegedLauncher.swift`。
+- 测试结果：`swift build` 通过；`swift test` 174 通过 1 跳过 0 失败。
+- 当前状态：里程碑 3 完成，4/5 待办。
+- 风险/注意事项：
+  1. `tunLauncher` 每次 TUN 操作前判 `helperClient.isReachable()`（同步 connect 本地 socket，ms 级）。
+  2. 助手安装需 .app 内有 KongshanHelper 可执行（里程碑 4 打包）；未打包时安装按钮会报"找不到 helper"。
+  3. `recoverIfNeeded` 在 helper 模式下：status 显示在跑则 stop（清理上次崩溃残留），与 PrivilegedLauncher 语义对齐。
+- 下一步：里程碑 4（build_app.sh 打包 helper + plist 模板到 .app）。
+
+## 2026-07-22 — TUN 免密码助手里程碑 4（feat/tun-passwordless-helper 分支）
+
+- 已完成：build_app.sh 打包 helper + plist 模板到 .app。
+  - `scripts/build_app.sh`：拷 `.build/.../release/KongshanHelper` → `Contents/MacOS/KongshanHelper`；
+    拷 `Resources/com.kaysen.kongshan.helper.plist` → `Contents/Resources/`（安装时读、替换占位符、写系统路径）。
+    `codesign --force --deep` 已覆盖 helper（与 sing-box 一起 ad-hoc 签名）。
+  - `Resources/com.kaysen.kongshan.helper.plist`（新）：LaunchDaemon plist 模板，Label=com.kaysen.kongshan.helper，
+    ProgramArguments 占位符 `__HELPER_PATH__`（安装时替换为 .app 内 helper 路径），KeepAlive+RunAtLoad。
+  - `PrivilegedHelperInstaller.install`：优先读 .app 内 plist 模板（替换占位符），读不到用内联兜底。
+- 修改文件：新增 `Resources/com.kaysen.kongshan.helper.plist`；改 `scripts/build_app.sh`、
+  `Sources/KongshanCore/PrivilegedHelperInstaller.swift`。
+- 测试结果：`swift build` 通过。build_app.sh 打包验证待跑。
+- 当前状态：里程碑 4 完成，5 待办。
+- 风险/注意事项：
+  1. helper 与 App 一起 ad-hoc 签名；helper 的 SecStaticCodeCheckValidity(nil) 接受 ad-hoc。
+  2. plist 模板占位符 `__HELPER_PATH__` 由 Installer 替换为 bundledHelperURL.path。
+- 下一步：里程碑 5（单元测试 — 校验判定各拒绝分支/请求分发/trust缺失损坏）。
+
+## 2026-07-22 — TUN 免密码助手里程碑 5（feat/tun-passwordless-helper 分支）
+
+- 已完成：纯逻辑单元测试，覆盖每个拒绝分支 + 请求分发 + trust 解码。
+  - `Tests/HelperProtocolTests/HelperTrustEvaluationTests.swift`（新）：
+    - HelperTrustEvaluationTests（10）：签名无效/identifier 错或 nil/路径错或 nil/cdhash 钉但不匹配或 nil/空字符串视为不钉/全过放行/cdhash 钉且匹配放行。
+    - HelperDecisionTests（10）：未鉴权三种请求一律拒；status 放行；startTun 无FD/有FD空闲/有FD在跑/无FD在跑(FD优先)；stopTun 空闲/在跑。
+    - HelperTrustConfigDecodingTests（5）：有效解码/缺 cdhash 字段解码为 nil/损坏 JSON 抛错/缺 clientExecutablePath 抛错/空 data 抛错（trust.json 缺失损坏→helper 拒绝）。
+- 修改文件：新增 `Tests/HelperProtocolTests/HelperTrustEvaluationTests.swift`。
+- 测试结果：`swift test` 199 通过 1 跳过 0 失败（+25 新测试）。
+- 当前状态：里程碑 2b-5 全部完成。
+- 风险/注意事项：未写真装 daemon 的测试（铁律 §1.5）；真机安装授权验收由用户点一次。
+- 下一步：最终验证（确认未碰侧栏文件）+ 更新 HANDOFF/PROGRESS/NEXT_STEPS。
+
+## 2026-07-22 — TUN 免密码助手安全审查修复 A/B/C/D（feat/tun-passwordless-helper 分支）
+
+照 `docs/design/tun-passwordless-helper-fixes.md` 修完 A/B/C/D1/D2/D3 六条 + 补单测，每条单独提交（7 个 commit）。铁律 §1 全程不变。
+
+### 提交与内容
+- `a08103f` **A（功能阻断）** socket 权限放松：目录 0711（others 可穿越不可列）/ socket 0666（others 可连），root 拥有且非 world-writable 防 socket-squatting。安全主防线是 audit_token 校验，不依赖 socket 权限。
+- `b231631` **B（功能阻断）** 大配置死锁：改"先交读端给 sing-box，再后台并发写"，写线程遇 EPIPE 容错退出，`signal(SIGPIPE, SIG_IGN)` 防进程终止。
+- `c2fee14` **C（中危安全）** 防 bundle 被换提权三件套：①helper 拷到 root-only 位置（stateDirectory/KongshanHelper，root:wheel 0755），plist ProgramArguments 指向拷贝不指 bundle；②安装时算 bundle 内 sing-box cdhash（kSecCodeInfoUnique）写进 trust.json，helper exec 前用纯函数 `HelperSingBoxTrust.isCDHashMatched` 校验，不匹配拒绝；③`HelperInstallLocation.isAllowed` 校验 App bundle 不在 $HOME 下（家目录可写=bundle 可被替换），前缀带 `/` 边界防 `kaysen2` 误匹配 `kaysen/`，空 home 拒绝。sing-box 路径改从 trust.json 读（helper 被拷走后相对关系已变）；入口处去掉 singBox 全局，shutdownHelper/liveness/handleConnection 全去 singBox 参数。
+- `0ee5928` **D1（低危）** plist/trust.json 结构化生成：plist 用 `PropertyListSerialization`、trust.json 用 `JSONEncoder`，base64 传输避免 shell 转义/注入；删除 plist 模板文件与 build_app.sh 打包步骤。
+- `e6e8d37` **D2（低危）** 路径与签名同源：对端可执行路径从签名校验用的同一 `SecStaticCode` 经 `SecCodeCopyPath` 取，消除裸 `proc_pidpath(LOCAL_PEERPID)` 的 PID 往返竞态；检查 `SecRequirementCreateWithString` 返回值（失败按拒绝，否则 nil requirement 只验"签名有效"不验 identifier）。peerPID 保留供自愈定时器记录 clientPID（与身份校验链路解耦）。
+- `97ffaeb` **D3（低危）** CMSG 手写解析健壮化：控制缓冲 `memset` 清零防读到未初始化内存当 fd；检查 `MSG_CTRUNC` 截断置 -1；进入 SCM_RIGHTS 分支前校验 `msg_controllen >= dataOffset + sizeof(Int32)`。
+- `ac28853` **补单测 + A 权限常量化**：新建 `Tests/HelperProtocolTests/HelperSecurityFixTests.swift`（17 个测试）——`HelperSingBoxTrustTests`（6）cdhash 钉死各分支、`HelperInstallLocationTests`（7）安装位置各分支、`HelperSocketPermissionTests`（4）权限值与位组合。socket 权限值提取为 `HelperConstants.socketDirectoryMode`/`socketFileMode` 共享常量，helper `setupSocket` 与 installer 安装脚本同步引用。修复 `testEmptyHomeRejected`（URL(fileURLWithPath: "") 标准化为 "/" 的问题，空值检查移到 URL 构造前）。
+
+### 修改文件
+`Sources/KongshanHelper/main.swift`、`Sources/HelperProtocol/HelperProtocol.swift`、`Sources/KongshanCore/PrivilegedHelperInstaller.swift`、`Sources/KongshanCore/PrivilegedHelperClient.swift`、`scripts/build_app.sh`、新增 `Tests/HelperProtocolTests/HelperSecurityFixTests.swift`、删除 `Resources/com.kaysen.kongshan.helper.plist`。**未碰任何侧栏文件**（git 核对 7 个提交无 sidebar/MainWindowView/RoutingView）。
+
+### 测试结果
+`swift build` 通过；`swift test` **216 通过 1 跳过 0 失败**（199+17 新）。
+
+### 当前状态
+6 条修复 + 补单测全部完成并单独提交在 `feat/tun-passwordless-helper` 分支，未推 main，等维护者独立安全审查。
+
+### 风险/注意事项
+1. 铁律 §1 全部保持：固定 exec 内置 sing-box / 拒绝优先 / 配置只经 FD 不落盘 / 只杀自起 PID / 不在自动化装 daemon / 不弱化 PrivilegedLauncher 兜底。
+2. trust.json 现含 sing-box cdhash 钉死值（0600 root），用户不可读改；helper exec 前校验目标 cdhash == 钉死值。
+3. cdhash 未钉（旧 trust.json）时只验签名有效（向后兼容）；新装必钉。
+4. 安装位置校验要求 App 不在 $HOME 下——用户须把 kongshan.app 放 /Applications 再点安装。
+5. 真机安装授权验收由用户完成；未在自动化里 bootstrap daemon。
+
+### 下一步
+维护者独立安全审查（重点 C 的 cdhash 钉死链路 / D2 路径同源 / D3 CMSG 解析 / A 权限值）；审查通过后合并 main；用户真机重打包→装 /Applications→点「安装免密码助手」→开 TUN 验证零弹窗。
+
+### 接手方式
+在 `feat/tun-passwordless-helper` 分支，先读 `docs/design/tun-passwordless-helper-fixes.md` 验收要求与 `docs/design/tun-passwordless-helper.md` 威胁模型；动 helper 安全逻辑前理解 audit_token→SecCode→identifier+path+cdhash 链路与拒绝优先原则；socket 权限值改了要同步 helper 与 installer 两处共享常量。
+
+## 2026-07-22 TUN 免密码助手：两轮安全审查 + 第三轮修复待做（上下文清理前）
+
+**状态**：分支 `feat/tun-passwordless-helper` @2eb7934（未推）。功能 ~95% 完成，两轮独立安全审查已做，**待做第三轮 3 条修复 → 重跑安全审查 → 合并 feat→main**。用户已选 **B（接手方/我实现这 3 条，不再交 Codex）**。
+
+**本会话就 TUN 助手做了什么**：
+- 出设计+威胁模型(`tun-passwordless-helper.md`) → 实现任务书(`…-tasks.md`) → Codex 实现里程碑 2b–5 → 我审+派 subagent 安全审查 → 出第二轮修复任务书(`…-fixes.md`) → Codex 修 A/B/C/D → 我复审+重跑安全审查 → 发现 C 的 TOCTOU → 出第三轮清单(`…-fixes.md` 末「第三轮」)。
+- 方案：ad-hoc 自用版，手动 LaunchDaemon + Unix socket，一次授权、日常零弹窗。铁律 §1.1–1.6（只 exec 内置 sing-box/拒绝优先/配置走 FD 不落盘/只杀自起/不自动装/不弱化 osascript 兜底）。
+
+**两轮安全审查结论（general-purpose subagent，各 ~70k/110k token）**：
+- 第一轮：核心设计站得住，无普通用户可直接利用的严重提权洞（§5.1 audit_token+签名+路径钉死这道命门成立）。找出：A socket 权限把 App 挡门外(功能阻断)、B 大配置 pipe 死锁(功能阻断)、C bundle 可写=提权(中危，/Applications 对 admin 组可写)、D1-3 低危。→ 第二轮全修。
+- 第二轮复审：**A/B/D1/D2/D3 确认闭合**。**C 未完全达成**——helper 迁了 root-only，但 **sing-box 没迁**，`trust.singBoxExecutablePath` 仍指 bundle(可写)，`startSingBox` 校验 cdhash 与 `posix_spawn` 是对同一路径的两次打开 → **verify→exec TOCTOU**，攻击者原子替换该文件即 root 执行(真实、竞态门槛)。另发现 N1(startSingBox 失败泄漏 configFD + 卡死 App 写线程)。
+
+**第三轮必修（做完即可判 SAFE TO MERGE，详见 `…-fixes.md`「第三轮」）**：
+1. C① 把 sing-box 也拷到 `stateDirectory`(root:wheel 0755，与 helper 同构)，`singBoxExecutablePath` 指向拷贝 → 路径不可写、消除 TOCTOU。改 `PrivilegedHelperInstaller`(加 sing-box cp+chown+chmod) + trust 字段。
+2. C② `computeCDHashHex` 返回 nil 就拒绝安装(`guard let … else throw`)。
+3. N1 `startSingBox` 顶部 `defer { close(configFD) }`/`defer { close(logFD) }`。
+（可选 N2：`PrivilegedHelperClient.start` pipe 早抛清理。）
+
+**重跑安全审查的方法**：派 general-purpose subagent，给它 `feat/tun-passwordless-helper` 分支 + 读 `main.swift`/`HelperProtocol.swift`/`PrivilegedHelperInstaller.swift`/`PrivilegedHelperClient.swift` + `…-fixes.md`，要它对抗式复核：C① 是否真把 sing-box exec 目标变为不可写(TOCTOU 消除)、N1 是否补上、A/B/D 是否仍闭合、有无新洞。重点：任何"普通用户进程借 helper 拿 root"的路径。
+
+**关键技术点（避免重踩）**：
+- §5.1 对端校验用 `getsockopt(LOCAL_PEERTOKEN)` → `SecCodeCopyGuestWithAttributes` → `SecCodeCheckValidityWithErrors`(identifier requirement) + `SecCodeCopyPath` 取路径(D2 后同源)。ad-hoc 无 TeamID，防线靠"路径钉死 == trust.clientExecutablePath"。
+- C 的护栏：helper 拷 root-only(plist 指拷贝) + sing-box cdhash 钉死(root-only trust.json) + 安装位置校验(拒 $HOME)。C① 后再加"sing-box 也 root-only"，TOCTOU 才真消。
+- 纯逻辑抽到 `HelperProtocol`(`HelperTrustEvaluation.isTrusted`/`HelperSingBoxTrust.isCDHashMatched`/`HelperInstallLocation.isAllowed`/`HelperDecision.decide`)，可单测；helper `main.swift` 做系统调用。
+- installer 用 base64 传 plist/trust.json(结构化生成 + `base64 -D` 落盘)避免 XML/JSON/shell 注入。
+
+**其它并行分支（本会话末发现，待处理）**：
+- `fix/sidebar-toggle` @4868411：双侧栏按钮修复(我合并 0.1.20 时 Gemini 自定义按钮+系统按钮重叠引入)，待审查合并。
+- `codex/network-observability-batch` @c35154b(在 .worktrees/sidebar-toggle-fix)：网络可观测批次，标 0.1.23，待了解。
+- `main` @ec29ab1：0.1.20 已发布，领先 origin/main 2 未推。
+- 提醒用户：多 agent 并行改 docs(HANDOFF/PROGRESS/NEXT_STEPS/SESSION_LOG 常处于未提交修改态)，合并时留意分叉/冲突。
+
+## 2026-07-22 22:40 — TUN 助手第三轮安全修复（feat/tun-passwordless-helper，4 提交）
+
+- 已完成：按 `docs/design/tun-passwordless-helper-fixes.md`「第三轮」实现 C①/C②/N1 必修 + N2 可选，4 个独立提交留在 `feat/tun-passwordless-helper` 分支（未推、未合 main）。
+- 提交序列（旧→新）：
+  1. `dcf4914` fix(helper): C② — computeCDHashHex 失败 fail-closed
+  2. `f13795f` fix(helper): C① — sing-box 拷 root-only 位置消除 verify→exec TOCTOU
+  3. `0760ec1` fix(helper): N1 — startSingBox 早失败泄漏 configFD + 卡死 App 写线程
+  4. `276dacf` fix(helper): N2 — PrivilegedHelperClient.start 早抛泄漏 pipe（可选·非安全）
+- 修复细节：
+  - **C① [阻断·root 提权，最关键]**：sing-box 没迁 root-only，trust.singBoxExecutablePath 仍指 bundle 内（/Applications 对 admin 组可写）→ verify→exec TOCTOU。修法与 helper 拷贝同构：新增 `installedSingBoxURL = stateDirectory + "/sing-box"`；安装脚本加 `rm -f / cp / chown root:wheel / chmod 755` 为 sing-box 拷一份；trust.singBoxExecutablePath 改指 root-only 拷贝；cdhash 仍按 bundle 算（同字节同 cdhash，钉死变冗余但保留）。卸载 `rm -rf stateDirectory` 一并删。提取纯函数 `makeTrustConfig` 便于单测。
+  - **C② [低危]**：`computeCDHashHex` 返回 nil 时无 guard 静默写 null → 不钉 cdhash。修法：提取纯函数 `failClosedCDHash(_:)`，nil/空抛 `authorizationFailed("无法计算 sing-box cdhash，拒绝安装")`；`requireCDHashHex(at:)` 委托给它；install 改用 `try requireCDHashHex(...)`。
+  - **N1 [可靠性]**：`startSingBox` 里 `close(configFD)/close(logFD)` 只在 posix_spawn 之后，verify/logOpenFailed 早抛会泄漏 configFD → App 后台写线程填满 pipe 缓冲后永久阻塞。修法：顶部 `defer { close(configFD) }`，logFD 打开成功后 `defer { close(logFD) }`，删掉 spawn 后显式 close。纯 defer 不便单测（运行时保证），在 commit message 写了失败路径不泄漏 fd 的思路说明。
+  - **N2 [可选·非安全]**：`PrivilegedHelperClient.start` 里 `pipe()` 后 `sendFrame` 抛错则 readEnd/writeEnd 无人关（App 进程内泄漏）。修法：do/catch 包住 sendFrame，catch 里补关两端再 rethrow。
+- 修改文件：`Sources/KongshanCore/PrivilegedHelperInstaller.swift`、`Sources/KongshanHelper/main.swift`、`Sources/KongshanCore/PrivilegedHelperClient.swift`、`Tests/KongshanCoreTests/PrivilegedHelperInstallerTests.swift`（新增）。未碰侧栏、未碰 main 分支、未在测试/脚本里真装 daemon（§1.5）。
+- 测试：`swift build` 通过；`swift test` **225 通过 1 跳过 0 失败**（+9 新单测：C① 5 个 + C② 4 个）。
+- 铁律复核（§1）：§1.1 仍只 exec 内置 sing-box（C① 只改加载位置，仍 internal/固定 run/stdin）；§1.2 拒绝优先（C② fail-closed）；§1.3 配置只经 FD（未改）；§1.4 只杀自起 PID（未改）；§1.5 未真装 daemon（测试都是纯函数）；§1.6 未弱化 osascript 兜底（未改）。
+- 当前状态：4 提交在 `feat/tun-passwordless-helper`，未推。等维护者重跑独立对抗式安全审查（重点验 C① 是否真消除 TOCTOU），过了才合 main。
+- 风险/注意事项：
+  1. C① 的 root-only sing-box 拷贝在 `stateDirectory/sing-box`，与 helper 同目录（0711 root）。sing-box 版本更新后需重装（`needsReinstall` 已覆盖：bundle cdhash 变 → 与 trust 钉死值不匹配 → 重装）。
+  2. C① 真机验证要点：安装后检查 `/Library/Application Support/kongshan/helper/sing-box` 存在且 `ls -l` 显示 root:wheel 755；trust.json 里 `singBoxExecutablePath` 指向该路径（不是 bundle）。
+  3. N1 的 defer 保证无法用纯函数单测覆盖；如需更强保证可加集成测试（起真 helper + 故意 cdhash 不匹配 + 验证 configFD 被关），但那需要真装 daemon（违反 §1.5），故未加。
+  4. main 已升到 0.1.23，与本分支在 AppState.swift/MainWindowView.swift 会冲突——那是维护者最后合并时手动解的，本分支未 merge/rebase main（按要求）。
+- 下一步：维护者重跑安全审查（重点 C① TOCTOU 是否真消除）；通过后合 `feat/tun-passwordless-helper` → main（手动解 AppState/MainWindowView 冲突）；真机重打包验证零弹窗 TUN。
+- 接手方式：在 `feat/tun-passwordless-helper` 分支，读本段 + 4 个 commit（dcf4914/f13795f/0760ec1/276dacf）。改 C① 前理解 installedSingBoxURL 与 installedHelperURL 同构关系；改 N1 前理解 defer 与 posix_spawn 子进程 dup2 的 FD 生命周期。

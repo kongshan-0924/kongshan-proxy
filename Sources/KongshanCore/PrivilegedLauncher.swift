@@ -67,14 +67,14 @@ public typealias PrivilegedConfigTransport = @Sendable (
 
 public typealias PrivilegedProcessInspector = @Sendable (_ pid: Int32) async throws -> String?
 
-typealias OSAScriptRunner = @Sendable (
+public typealias OSAScriptRunner = @Sendable (
     _ executable: URL,
     _ arguments: [String],
     _ timeout: TimeInterval
 ) async throws -> ProcessResult
 
-enum OSAScriptAuthorizer {
-    static func run(
+public enum OSAScriptAuthorizer {
+    public static func run(
         script: String,
         timeout: TimeInterval,
         runner: @escaping OSAScriptRunner = { executable, arguments, timeout in

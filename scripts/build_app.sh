@@ -42,6 +42,7 @@ trap cleanup EXIT
 
 mkdir -p "$stage_app/Contents/MacOS" "$stage_app/Contents/Resources"
 install -m 755 .build/arm64-apple-macosx/release/kongshan "$stage_app/Contents/MacOS/kongshan"
+install -m 755 .build/arm64-apple-macosx/release/KongshanHelper "$stage_app/Contents/MacOS/KongshanHelper"
 install -m 755 Vendor/sing-box/sing-box "$stage_app/Contents/Resources/sing-box"
 install -m 644 Resources/Info.plist "$stage_app/Contents/Info.plist"
 install -m 644 Resources/THIRD_PARTY_NOTICES.md "$stage_app/Contents/Resources/THIRD_PARTY_NOTICES.md"
@@ -49,7 +50,12 @@ install -m 644 Resources/AppIcon.icns "$stage_app/Contents/Resources/AppIcon.icn
 # 把本次版本号写进 App 的 Info.plist（模板 Resources/Info.plist 保持不变，避免 git 抖动）。
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $app_version" "$stage_app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $build_number" "$stage_app/Contents/Info.plist"
-codesign --force --deep --sign - --timestamp=none "$stage_app"
+# 加固（堵 §5.1）：--options runtime 开启 hardened runtime。它让内核忽略 DYLD_INSERT_LIBRARIES
+# （无 allow-dyld-environment-variables 权限），挡住"同用户把库注入正版进程冒充 App 连 helper"。
+# 与安装时钉客户端 cdhash（挡替换重签）合起来，才完整堵住免密码助手的同用户提权面。
+# ad-hoc 也会被内核强制 hardened runtime（无需 Developer ID）；App 不捆第三方 dylib，library
+# validation 不会挡自带库。改动后务必确认 App 仍能正常启动。
+codesign --force --deep --options runtime --sign - --timestamp=none "$stage_app"
 
 if [[ -e "$app_path" ]]; then
     rm -rf "$app_path"
