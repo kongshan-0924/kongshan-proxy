@@ -1,5 +1,15 @@
 # 项目交接
 
+## 2026-07-22 双侧栏按钮修复设计
+
+- 已完成：确认重复按钮由 0.1.20 自定义紧凑侧栏按钮与系统原生按钮叠加造成；用户已确认只保留原生按钮。
+- 修改文件：新增 `docs/superpowers/specs/2026-07-22-single-sidebar-toggle-design.md`，产品代码尚未修改。
+- 测试结果：仅完成根因诊断与方案确认。
+- 当前状态：设计待复核，随后进入 TDD 实施。
+- 风险/注意事项：修复会删除图标紧凑侧栏，但保留 macOS 原生显示/隐藏行为。
+- 下一步：写实施计划，补窗口级回归测试，删除自定义实现和 AppDelegate 清理逻辑。
+- 接手方式：不要用延时重试删除 toolbar item；直接回归原生 `NavigationSplitView`。
+
 - 已完成：M1–M4 代码与自动交付；M4 包含 Dashboard、日志、双 DoH、订阅自动更新、SMAppService、崩溃自愈和一键性能/残留验收。
 - 修改文件：最终新增 `verify_m4.sh`、README、M4 acceptance，并更新第三方声明、计划和全部接力记录；功能代码基线为 `46fe328`。
 - 测试结果：`zsh scripts/verify_m4.sh` 覆盖 138 项测试、release arm64、ad-hoc strict 签名、官方规则集和 M4 门禁；平均 CPU 0.040%、最大 RSS 118,336 KB，标记通过。

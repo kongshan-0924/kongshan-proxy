@@ -1028,3 +1028,13 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 - **统一到 main**：`git branch -f main HEAD` → checkout main → `git worktree remove --force .worktrees/gemini` → 删 gemini/trae 分支 → push。现只剩 main 一个分支/worktree。
 - **只留最新版**：装 0.1.20 到 /Applications；删本地旧 DMG(0.1.19)；GitHub 建 Release v0.1.20、删 v0.1.19(含 tag)；注销所有非 /Applications 的 LaunchServices 残留登记（Trash/已删 worktree/dist）。现系统只认 /Applications/kongshan.app(0.1.20)。
 - 待用户：退出运行中的旧版、重开即 0.1.20。
+
+## 2026-07-22 双侧栏按钮修复设计
+
+- 已完成：根据用户截图定位 0.1.20 自定义紧凑侧栏按钮与 `NavigationSplitView` 原生按钮重复；用户确认采用“只保留原生按钮”的最小方案，设计文档已落盘。
+- 修改文件：新增 `docs/superpowers/specs/2026-07-22-single-sidebar-toggle-design.md`，更新项目记录；产品代码尚未修改。
+- 测试结果：本阶段仅完成根因追踪与设计，无产品测试。
+- 当前状态：设计待用户复核后进入实施。
+- 风险/注意事项：移除紧凑图标侧栏功能，保留原生完整侧栏的显示/隐藏；不使用延时清理或私有 API。
+- 下一步：编写最小实施计划，按 RED→GREEN 修改并重打包。
+- 下一位 Agent 如何接手：先读本设计，测试应验证真实窗口只有一个原生侧栏切换项；不要修改代理/TUN 路径。

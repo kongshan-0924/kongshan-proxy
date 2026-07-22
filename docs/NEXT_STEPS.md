@@ -1,5 +1,11 @@
 # 下一步
 
+## 当前最高优先级：修复双侧栏按钮
+
+1. 按 `docs/superpowers/specs/2026-07-22-single-sidebar-toggle-design.md` 删除自定义紧凑侧栏和时序性系统按钮清理。
+2. 先增加真实窗口回归测试并确认 RED，再修改产品代码转 GREEN。
+3. 全量测试、构建、重打包并人工核对仪表盘/设置页只有一个按钮。
+
 ## 🔴🔴 真凶已修（0.1.18）：SS 缺 obfs 插件 → 能测速却打不开网站
 - 机场 342 节点全是 `ss + plugin:obfs`，旧转换器没解析 plugin → 生成裸 SS → 服务器要 obfs 混淆 → 裸连 TCP 通(测速有值)但传不了数据 → 全部国外站不可达。0.1.18 已解析 obfs→sing-box `obfs-local`。
 - **⚠️ 诊断教训**：用户在国内、跟 Claude 对话得开另一个工作代理；**用 Bash 实测连通性会经那个代理、不反映 kongshan**。App 连通卡走 kongshan 自己内核，才是可信信号（它一直报不可达＝对的）。以后测 kongshan 连通性别用主机 curl，除非确认已隔离。
