@@ -798,6 +798,36 @@ final class AppStateTests: XCTestCase {
         await fixture.state.stop()
     }
 
+    func testMenuAndDashboardShareOneMonitorUntilLastConsumerLeaves() async throws {
+        let streams = DashboardStreamFixture(sampleCount: 3)
+        let fixture = try await makeModeFixture(
+            initialMode: .systemProxy,
+            clashClientFactory: { controller, secret in
+                ClashAPIClient(
+                    controller: controller,
+                    secret: secret,
+                    streamFactory: streams.stream(for:)
+                )
+            }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        fixture.state.startMenuBarMonitoring()
+        fixture.state.startDashboardMonitoring()
+        try await waitUntil {
+            streams.requestCount(path: "/traffic") == 1
+                && streams.requestCount(path: "/connections") == 1
+        }
+
+        fixture.state.stopDashboardMonitoring()
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(streams.terminationCount, 0)
+
+        fixture.state.stopMenuBarMonitoring()
+        try await waitUntil { streams.terminationCount == 2 }
+        await fixture.state.stop()
+    }
+
     func testDashboardMonitoringDoesNothingWhileProxyIsOff() async throws {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

@@ -1192,3 +1192,12 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 - 风险/注意事项：选择列表来自当前运行 App 的可执行文件名；指定节点订阅刷新后若节点 ID 消失会回退默认代理，避免阻断内核启动。
 - 下一步：让托盘状态项常驻显示实时上下行，并把仪表盘/托盘从 visibility Bool 改为共享消费者集合，消除订阅互相取消。
 - 下一位 Agent 如何接手：先扩展 dashboard monitor 测试覆盖 menu+dashboard 双消费者；必须断言 `/traffic` 只有一次请求且 dashboard 离开后仍在推送。
+## 2026-07-22 托盘实时速率与共享订阅
+
+- 已完成：菜单栏状态项在内核运行时显示紧凑下载/上传速率，下拉菜单顶部显示完整 B/s；把单一 `isDashboardVisible` 改为 dashboard/menuBar 消费者集合，两个入口共享唯一 `/traffic` 与 `/connections` WebSocket，只有最后消费者离开才取消；应用启动即注册常驻托盘消费者。
+- 修改文件：修改 `Sources/kongshan/AppState.swift`、`Sources/kongshan/KongshanApp.swift`、`Sources/kongshan/MenuBarView.swift`、`Tests/KongshanAppTests/AppStateTests.swift`。
+- 测试结果：RED 验证缺少 menu 监控 API；GREEN 新测试断言 menu+dashboard 只有各 1 次 WebSocket 请求、dashboard 离开不终止、menu 最后离开才终止 2 条流；原 dashboard 幂等/关闭/离线测试同组 3 项通过；全量 `swift test` 通过（1 项条件跳过）。
+- 当前状态：此前已知的两个订阅互相取消问题已由幂等消费者集合消除；托盘速率在主窗口关闭后仍持续更新。
+- 风险/注意事项：状态项文字仅在内核运行时出现，关闭时保持单图标；速率源仍是内核唯一推送，不增加轮询。
+- 下一步：实现版本化配置/设置 JSON 导出导入与 Settings → 更多 UI。
+- 下一位 Agent 如何接手：先写备份模型 round-trip/版本拒绝 RED；导入必须在停止状态，完整验证后才替换内存与磁盘，不得包含日志、缓存或运行时密钥。

@@ -80,6 +80,11 @@ final class AppState {
         case failed(String)
     }
 
+    private enum DashboardMonitorConsumer: Hashable {
+        case dashboard
+        case menuBar
+    }
+
     var status: Status = .off
     var nodes: [ProxyNode] = []
     var subscriptions: [SubscriptionSource] = []
@@ -276,7 +281,7 @@ final class AppState {
     @ObservationIgnored private var runtime: RuntimeParameters?
     @ObservationIgnored private var currentConfig: Data?
     @ObservationIgnored private var dashboardTasks: [Task<Void, Never>] = []
-    @ObservationIgnored private var isDashboardVisible = false
+    @ObservationIgnored private var dashboardMonitorConsumers: Set<DashboardMonitorConsumer> = []
     @ObservationIgnored private var logTask: Task<Void, Never>?
     @ObservationIgnored private var isLogsVisible = false
     /// 断流重连（睡眠唤醒后 WebSocket 必断）。指数退避，收到数据即复位。
@@ -1740,13 +1745,23 @@ final class AppState {
     }
 
     func startDashboardMonitoring() {
-        isDashboardVisible = true
+        dashboardMonitorConsumers.insert(.dashboard)
         resumeDashboardMonitoringIfNeeded()
     }
 
     func stopDashboardMonitoring() {
-        isDashboardVisible = false
-        suspendDashboardMonitoring()
+        dashboardMonitorConsumers.remove(.dashboard)
+        if dashboardMonitorConsumers.isEmpty { suspendDashboardMonitoring() }
+    }
+
+    func startMenuBarMonitoring() {
+        dashboardMonitorConsumers.insert(.menuBar)
+        resumeDashboardMonitoringIfNeeded()
+    }
+
+    func stopMenuBarMonitoring() {
+        dashboardMonitorConsumers.remove(.menuBar)
+        if dashboardMonitorConsumers.isEmpty { suspendDashboardMonitoring() }
     }
 
     func startLogMonitoring() {
@@ -2041,7 +2056,7 @@ final class AppState {
     }
 
     private func resumeDashboardMonitoringIfNeeded() {
-        guard isDashboardVisible,
+        guard !dashboardMonitorConsumers.isEmpty,
               status == .on,
               let client = clashAPIClient,
               dashboardTasks.isEmpty else {
@@ -2174,7 +2189,7 @@ final class AppState {
     }
 
     private func dashboardStreamEnded(_ message: String) {
-        guard isDashboardVisible, status == .on else { return }
+        guard !dashboardMonitorConsumers.isEmpty, status == .on else { return }
         if warnings.last != message { warnings.append(message) }
         scheduleDashboardReconnect()
     }
@@ -2188,7 +2203,7 @@ final class AppState {
             try? await Task.sleep(for: .seconds(delay))
             guard let self, !Task.isCancelled else { return }
             self.dashboardRetryTask = nil
-            guard self.isDashboardVisible, self.status == .on else { return }
+            guard !self.dashboardMonitorConsumers.isEmpty, self.status == .on else { return }
             self.suspendDashboardMonitoring()
             self.resumeDashboardMonitoringIfNeeded()
         }

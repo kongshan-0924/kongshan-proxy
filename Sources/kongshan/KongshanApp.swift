@@ -21,7 +21,13 @@ private struct MenuBarStatusIcon: View {
     let state: AppState
 
     var body: some View {
-        Image(systemName: state.menuBarSymbol)
+        HStack(spacing: 4) {
+            Image(systemName: state.menuBarSymbol)
+            if state.isOn {
+                Text("↓\(MenuRateFormatter.compact(state.downloadRate)) ↑\(MenuRateFormatter.compact(state.uploadRate))")
+                    .monospacedDigit()
+            }
+        }
     }
 }
 
@@ -40,6 +46,9 @@ final class KongshanAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     /// 其余情况都是用户主动打开，直接展示主窗口。
     /// 自启开启时若用户手动重开应用，再次双击图标会走 reopen 打开窗口。
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // 状态项本身要持续显示速率，因此它是一个常驻监控消费者；仪表盘开关只增减
+        // 另一个消费者，不会再把托盘依赖的同一条 WebSocket 误取消。
+        appState.startMenuBarMonitoring()
         Task { @MainActor in
             guard await LoginItemManager().currentStatus() != .enabled else { return }
             showMainWindow()

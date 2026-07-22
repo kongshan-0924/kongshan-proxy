@@ -10,6 +10,9 @@ struct MenuBarView: View {
 
     var body: some View {
         Text(state.statusText)
+        if state.isOn {
+            Text("下载 \(MenuRateFormatter.full(state.downloadRate))   上传 \(MenuRateFormatter.full(state.uploadRate))")
+        }
 
         Button("打开仪表盘") { openMainWindow() }
             .keyboardShortcut("d")
@@ -173,5 +176,21 @@ struct MenuBarView: View {
             get: { state.loginItemStatus == .enabled },
             set: { enabled in Task { await state.setLaunchAtLoginEnabled(enabled) } }
         )
+    }
+}
+
+enum MenuRateFormatter {
+    static func compact(_ bytes: Int64) -> String {
+        let value = max(0, bytes)
+        switch value {
+        case 0..<1_024: return "\(value)B"
+        case 1_024..<1_048_576: return String(format: "%.1fK", Double(value) / 1_024)
+        case 1_048_576..<1_073_741_824: return String(format: "%.1fM", Double(value) / 1_048_576)
+        default: return String(format: "%.1fG", Double(value) / 1_073_741_824)
+        }
+    }
+
+    static func full(_ bytes: Int64) -> String {
+        "\(ByteCountFormatter.string(fromByteCount: max(0, bytes), countStyle: .binary))/s"
     }
 }
