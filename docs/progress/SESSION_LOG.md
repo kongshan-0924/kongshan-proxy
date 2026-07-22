@@ -1147,3 +1147,12 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 - 风险/注意事项：DNS 泄漏无法靠 IP 相等作绝对判断，成品文案必须保持“未发现明显泄漏/可能泄漏/无法判断”；第三方检测失败不可当作泄漏；用户验收前禁止合并 main。
 - 下一步：按 RED→GREEN 实现出口诊断模型、服务和仪表盘卡。
 - 下一位 Agent 如何接手：在当前 worktree/分支先运行 `swift test` 基线，然后从计划 Task 1 开始，严格先写失败测试。
+## 2026-07-22 出口 IP 与 DNS 一键自测
+
+- 已完成：删除 Google/GitHub 可达性探测，新增真实出口 IP、城市/国家、网络组织与 DNS 解析器自测；仪表盘进入、切换主节点和手动“检测”都会刷新；请求失败保留最后一次成功结果。
+- 修改文件：新增 `Sources/KongshanCore/ExitDiagnostics.swift`、`Sources/kongshan/ExitDiagnosticsService.swift`、`Tests/KongshanCoreTests/ExitDiagnosticsTests.swift`、`Tests/KongshanAppTests/ExitDiagnosticsServiceTests.swift`；修改 `Sources/kongshan/AppState.swift`、`Sources/kongshan/DashboardView.swift`、`Tests/KongshanAppTests/AppStateTests.swift`。
+- 测试结果：RED 已验证缺少模型、服务和 AppState 注入点；GREEN 的 6 项诊断模型测试、2 项服务测试、1 项 AppState 保留最后成功结果测试通过；`swift test` 全量回归退出码 0。
+- 当前状态：出口诊断功能代码完成，DNS 结论按远程 DoH 提供商/出口地区输出“未发现明显泄漏、可能泄漏、无法判断”。
+- 风险/注意事项：依赖 Mullvad 公开接口，失败仅显示错误、不误报；DNS 结论是启发式判断，界面未作绝对安全承诺。
+- 下一步：实现节点名称旗帜/地区/倍率解析并接入已有搜索排序卡片。
+- 下一位 Agent 如何接手：先从 `Tests/KongshanCoreTests/NodeNameMetadataTests.swift` 写 RED，再新增纯解析器；不得修改订阅原始节点名。

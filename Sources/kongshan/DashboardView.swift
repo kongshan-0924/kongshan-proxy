@@ -32,7 +32,12 @@ struct DashboardView: View {
         }
         .pageBackground()
         .navigationTitle("仪表盘")
-        .onAppear { state.startDashboardMonitoring() }
+        .onAppear {
+            state.startDashboardMonitoring()
+            if state.exitDiagnostics == nil {
+                Task { await state.refreshExitDiagnostics() }
+            }
+        }
         .onDisappear { state.stopDashboardMonitoring() }
     }
 
@@ -145,21 +150,21 @@ struct DashboardView: View {
                 }
             }
 
-            MetricCard(symbol: "bolt.horizontal", tint: .orange, caption: "出口连通性") {
-                connectivityValue
+            MetricCard(symbol: "network", tint: .orange, caption: "当前出口 IP") {
+                exitDiagnosticsValue
             } corner: {
-                if state.isProbingConnectivity {
+                if state.isRefreshingExitDiagnostics {
                     ProgressView().controlSize(.small)
-                } else if state.isOn {
+                } else {
                     Button {
-                        Task { await state.probeConnectivity() }
+                        Task { await state.refreshExitDiagnostics() }
                     } label: {
-                        Image(systemName: "arrow.clockwise")
+                        Label("检测", systemImage: "arrow.clockwise")
                             .font(.system(size: 10, weight: .semibold))
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
-                    .help("重新测试")
+                    .help("刷新出口 IP 并检测 DNS")
                 }
             }
 
@@ -201,45 +206,51 @@ struct DashboardView: View {
         return names.isEmpty ? "未开启" : names.joined(separator: " + ")
     }
 
-    /// 开启接管后经当前节点实测到 Google / GitHub 的往返延迟。
     @ViewBuilder
-    private var connectivityValue: some View {
-        if !state.isOn {
-            Text("—")
-        } else if state.connectivity.isEmpty {
-            Text(state.isProbingConnectivity ? "测试中…" : "待测试")
+    private var exitDiagnosticsValue: some View {
+        if let report = state.exitDiagnostics {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(report.exit.ip)
+                    .font(.system(size: 15, weight: .bold).monospacedDigit())
+                    .textSelection(.enabled)
+                Text(report.exit.location)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Text(report.exit.organization)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(dnsStatusTint(report.dns.status))
+                        .frame(width: 6, height: 6)
+                    Text(dnsStatusTitle(report.dns.status))
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(dnsStatusTint(report.dns.status))
+                }
+                .help(report.dns.detail)
+            }
+        } else {
+            Text(state.isRefreshingExitDiagnostics ? "检测中…" : "待检测")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.secondary)
-        } else {
-            VStack(alignment: .leading, spacing: 3) {
-                ForEach(AppState.connectivityTargets, id: \.name) { target in
-                    HStack(spacing: 6) {
-                        Text(target.name)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 46, alignment: .leading)
-                        connectivityReading(state.connectivity[target.name])
-                    }
-                }
-            }
         }
     }
 
-    @ViewBuilder
-    private func connectivityReading(_ value: Int??) -> some View {
-        switch value {
-        case let .some(.some(milliseconds)):
-            Text("\(milliseconds) ms")
-                .font(.system(size: 13, weight: .semibold).monospacedDigit())
-                .foregroundStyle(Theme.delayColor(milliseconds))
-        case .some(.none):
-            Text("不可达")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.red)
-        case .none:
-            Text("—")
-                .font(.system(size: 13).monospacedDigit())
-                .foregroundStyle(.tertiary)
+    private func dnsStatusTitle(_ status: DNSLeakStatus) -> String {
+        switch status {
+        case .clear: "DNS 未发现明显泄漏"
+        case .possible: "DNS 可能泄漏"
+        case .indeterminate: "DNS 无法判断"
+        }
+    }
+
+    private func dnsStatusTint(_ status: DNSLeakStatus) -> Color {
+        switch status {
+        case .clear: .green
+        case .possible: .orange
+        case .indeterminate: .secondary
         }
     }
 

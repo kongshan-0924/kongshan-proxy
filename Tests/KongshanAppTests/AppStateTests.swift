@@ -5,8 +5,46 @@ import XCTest
 @testable import KongshanCore
 @testable import kongshan
 
+private actor CallCounter {
+    private var value = 0
+
+    func increment() -> Int {
+        value += 1
+        return value
+    }
+}
+
 @MainActor
 final class AppStateTests: XCTestCase {
+    func testExitDiagnosticRefreshKeepsLastSuccessWhenNextRequestFails() async {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let attempts = CallCounter()
+        let success = ExitDiagnosticsReport(
+            exit: ExitIPInfo(ip: "203.0.113.8", country: "Japan", city: "Tokyo", organization: "Example ISP"),
+            resolvers: [],
+            dns: DNSLeakAssessment(status: .indeterminate, detail: "未取得 DNS 解析器结果"),
+            checkedAt: Date(timeIntervalSince1970: 100)
+        )
+        let state = AppState(
+            storage: Storage(rootDirectory: root),
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            exitDiagnosticsProvider: { _ in
+                if await attempts.increment() == 1 { return success }
+                throw URLError(.cannotConnectToHost)
+            },
+            automaticallyInitialize: false
+        )
+
+        await state.refreshExitDiagnostics()
+        XCTAssertEqual(state.exitDiagnostics, success)
+        XCTAssertNil(state.exitDiagnosticsError)
+
+        await state.refreshExitDiagnostics()
+        XCTAssertEqual(state.exitDiagnostics, success)
+        XCTAssertTrue(state.exitDiagnosticsError?.contains("出口诊断失败") == true)
+    }
+
     func testStartWithoutNodesFailsBeforeSystemProxyMutation() async {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

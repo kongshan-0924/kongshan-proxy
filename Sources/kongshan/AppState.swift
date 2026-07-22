@@ -69,6 +69,7 @@ final class AppState {
     typealias HealthVerifier = @Sendable (ClashAPIClient) async throws -> Void
     typealias ClashClientFactory = @Sendable (URL, String) -> ClashAPIClient
     typealias NowProvider = @Sendable () -> Date
+    typealias ExitDiagnosticsProvider = @Sendable (String) async throws -> ExitDiagnosticsReport
 
     enum Status: Equatable {
         case off
@@ -121,9 +122,9 @@ final class AppState {
     private(set) var liveLogs: [LiveLogEntry] = []
     private(set) var logLevel: CoreLogLevel = .info
     private(set) var isApplyingRouting = false
-    /// 开启接管后对固定目标的实测延迟：nil 表示失败/超时，缺键表示未测。
-    private(set) var connectivity: [String: Int?] = [:]
-    private(set) var isProbingConnectivity = false
+    private(set) var exitDiagnostics: ExitDiagnosticsReport?
+    private(set) var exitDiagnosticsError: String?
+    private(set) var isRefreshingExitDiagnostics = false
     private(set) var isTestingAllDelays = false
     /// 各订阅自带的策略组（来自 Clash 的 proxy-groups），键为订阅 ID。
     var discoveredPolicyGroups: [UUID: [PolicyGroup]] = [:]
@@ -207,7 +208,6 @@ final class AppState {
         groupSelections = [:]
         selectedNodeID = nil
         delays = [:]
-        connectivity = [:]
         selectFirstNodeIfNeeded()
         try? await persistSettings()
         await hotReloadAfterNodeChange()
@@ -242,6 +242,7 @@ final class AppState {
     @ObservationIgnored private let healthVerifier: HealthVerifier
     @ObservationIgnored private let clashClientFactory: ClashClientFactory
     @ObservationIgnored private let now: NowProvider
+    @ObservationIgnored private let exitDiagnosticsProvider: ExitDiagnosticsProvider
     @ObservationIgnored private let kernelLogStore: KernelLogStore
     @ObservationIgnored private let subscriptionUpdateScheduler: SubscriptionUpdateScheduler
     @ObservationIgnored private let notificationSender: any NotificationSending
@@ -284,6 +285,7 @@ final class AppState {
         runtimeFactory: RuntimeFactory? = nil,
         healthVerifier: HealthVerifier? = nil,
         clashClientFactory: ClashClientFactory? = nil,
+        exitDiagnosticsProvider: ExitDiagnosticsProvider? = nil,
         now: @escaping NowProvider = Date.init,
         automaticallyInitialize: Bool = true
     ) {
@@ -314,6 +316,9 @@ final class AppState {
         self.healthVerifier = healthVerifier ?? Self.waitUntilHealthy
         self.clashClientFactory = clashClientFactory ?? { controller, secret in
             ClashAPIClient(controller: controller, secret: secret)
+        }
+        self.exitDiagnosticsProvider = exitDiagnosticsProvider ?? { remoteDoH in
+            try await ExitDiagnosticsService().run(remoteDoH: remoteDoH)
         }
         self.now = now
         self.kernelLogStore = resolvedLogStore
@@ -346,6 +351,18 @@ final class AppState {
 
     var isBusy: Bool {
         status == .starting || status == .stopping || isApplyingRouting
+    }
+
+    func refreshExitDiagnostics() async {
+        guard !isRefreshingExitDiagnostics else { return }
+        isRefreshingExitDiagnostics = true
+        defer { isRefreshingExitDiagnostics = false }
+        do {
+            exitDiagnostics = try await exitDiagnosticsProvider(dnsSettings.remoteDoH)
+            exitDiagnosticsError = nil
+        } catch {
+            exitDiagnosticsError = "出口诊断失败：\(error.localizedDescription)"
+        }
     }
 
     var isOn: Bool {
@@ -519,7 +536,7 @@ final class AppState {
             }
             resumeDashboardMonitoringIfNeeded()
             resumeLogMonitoringIfNeeded()
-            Task { await probeConnectivity() }
+            Task { await refreshExitDiagnostics() }
             // 规则集用缓存优先保证启动快；开了自动更新就在启动后台悄悄刷新缓存，供下次用，不阻塞。
             refreshRuleSetCacheInBackgroundIfDue()
         } catch {
@@ -1125,8 +1142,7 @@ final class AppState {
         // 立即生效靠 Clash API 的 select 已经发出；落盘只关乎重启后恢复，延迟 500ms 无感知。
         schedulePersistSettingsDebounced()
         if isPrimaryPick, status == .on {
-            connectivity = [:]
-            Task { await probeConnectivity() }
+            Task { await refreshExitDiagnostics() }
         }
     }
 
@@ -1139,48 +1155,6 @@ final class AppState {
     /// ConfigGenerator 在有机场组时根本不生成「手动选择」出站。
     func select(_ node: ProxyNode) async {
         await select(optionName: node.name, in: primaryGroupName ?? "手动选择")
-    }
-
-    /// 开启接管后实测当前节点到固定目标的延迟。走 Clash API 的 delay 接口，
-    /// 因此测的是「经该节点访问目标」的真实往返，而不是节点本身的握手延迟。
-    // 用 gstatic 的 generate_204（各客户端通用的连通性探测端点，比 www.google.com 稳，
-    // 不易被重定向/拦截误判为不可达）；GitHub 用其主页。
-    static let connectivityTargets: [(name: String, url: String)] = [
-        ("Google", "http://www.gstatic.com/generate_204"),
-        ("GitHub", "https://github.com/")
-    ]
-
-    func probeConnectivity() async {
-        guard !isProbingConnectivity else { return }
-        guard let clashAPIClient, status == .on else {
-            connectivity = [:]
-            return
-        }
-        // 测"真实会走的出站"：有机场组就测主组(它当前选中的节点＝流量真正会走的那个)，
-        // 否则测全局当前节点。避免测到一个与实际路由不同步的节点而误报不可达。
-        let probeTag: String
-        if let primary = primaryGroupName {
-            probeTag = primary
-        } else if let node = selectedNode {
-            probeTag = ConfigGenerator.outboundTag(for: node)
-        } else {
-            connectivity = [:]
-            return
-        }
-        isProbingConnectivity = true
-        defer { isProbingConnectivity = false }
-
-        var results: [String: Int?] = [:]
-        for target in Self.connectivityTargets {
-            guard let url = URL(string: target.url) else { continue }
-            do {
-                results[target.name] = try await clashAPIClient.delay(node: probeTag, testURL: url)
-            } catch {
-                results.updateValue(nil, forKey: target.name)
-            }
-        }
-        // 一次性赋值，避免逐条写触发多次 SwiftUI 事务。
-        connectivity = results
     }
 
     /// 启动时读取打包内核版本（运行 `sing-box version`），让"关于"页即使没开代理也显示版本号。
@@ -2466,7 +2440,6 @@ final class AppState {
         currentConfig = nil
         mixedPort = nil
         activeModes = []
-        connectivity = [:]
     }
 
     private var subscriptionsURL: URL {
