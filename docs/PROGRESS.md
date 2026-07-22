@@ -1,5 +1,6 @@
 # 项目进度
 
+- [x] **审核并合并 0.1.23 → main 并推 origin（14ee357，2026-07-22）**：fix/tun-ipv6-no-route 超集 ff-only 合并；对抗式 subagent 复审整份 diff 无阻塞，合并前修 2 个 medium（出口诊断代理关时不自动直连 Mullvad；节点倍率正则改 static 缓存）；删除 sidebar/network-obs/ipv6 三条被包含分支 + 移除 worktree，现仅剩 `main` + `feat/tun-passwordless-helper`
 - [x] 修复 0.1.23 TUN 开启无效果：物理网络无全局 IPv6 时不给 TUN 配 IPv6 地址（fix/tun-ipv6-no-route，a6bb609）
 - [x] 真实出口 IP、地区/运营商与 DNS 一键自测（0.1.23）
 - [x] 节点名地区旗帜与倍率解析/高亮（0.1.23）
@@ -9,7 +10,7 @@
 - [x] 托盘实时上下行与 dashboard/menu 唯一共享订阅（0.1.23）
 - [x] 版本化配置/设置 JSON 导出导入，导入校验与失败回滚（0.1.23）
 - [x] 0.1.23 全量 199 项测试、M4 验证、单 App/单 DMG 安装交付
-- [ ] 用户验收 0.1.23 后合并 `codex/network-observability-batch` 到 main
+- [x] 合并 `codex/network-observability-batch`（0.1.23 全部功能）到 main（经 fix/tun-ipv6-no-route 超集，2026-07-22）；真机验收改在重打包后进行
 
 - [x] 读取任务文档（2026-07-20）
 - [x] 初始化持久化记录（2026-07-20）
@@ -120,6 +121,6 @@
 - [x] 安装 0.1.21 并清理为单一可发现 App/单一最新版 DMG
 - [x] 人工发现 0.1.21 折叠后按钮迁到最右侧，并确认固定左上角设计
 - [x] 实施、验证并单副本安装 0.1.22 固定左上角按钮
-- [ ] 用户验收 0.1.22 后合并 `fix/sidebar-toggle` 到 main
+- [x] 合并 `fix/sidebar-toggle`（0.1.22 侧栏固定按钮）到 main（经 fix/tun-ipv6-no-route 超集，2026-07-22）
 - [x] 诊断教训记录：国内用户测 kongshan 时，主机 curl 会经其"工作代理"污染，不可信；App 连通卡走 kongshan 内核才可信
 - [ ] 用户真机确认：0.1.18 刷新订阅→TAGSS挑节点→关工作代理只开kongshan→能打开国外网站

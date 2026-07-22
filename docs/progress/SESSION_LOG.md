@@ -1242,3 +1242,21 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
   4. 未碰侧栏文件；未碰 helper 安全逻辑（在另一分支 `feat/tun-passwordless-helper`）。
 - 下一步：用户真机重打包验证；通过后合并 `fix/tun-ipv6-no-route` → main（或先合进 `codex/network-observability-batch` 再统一合 main）。
 - 接手方式：在 `fix/tun-ipv6-no-route` 分支，先读本段 + commit a6bb609。改探测逻辑前理解 getifaddrs 链路与 fe80::/10 判定；改 stripIPv6 前理解 dnsServerAddress 只看 IPv4 的依赖。
+
+## 2026-07-22 22:15 — 审核并合并 0.1.23 → main（本会话）
+
+- 已完成：按用户「按计划合并，你来负责审核」，审核后把超集分支 `fix/tun-ipv6-no-route` ff-only 合并进 main 并推 origin，整理分支到两条。
+- 审核（我负责）：
+  - `swift test` 绿（202 通过 1 跳过 0 失败）；确认 ff-only 可行（main 是分支祖先，线性历史，无冲突）。
+  - 亲自精读 IPv6 修复（a6bb609）：`stripIPv6` 纯函数正确；`physicalNetworkHasGlobalIPv6` 的 getifaddrs 遍历内存安全（defer freeifaddrs、空 ifa_addr 判空、withMemoryRebound 正确），fe80::/10 判定 `bytes.0==0xfe && (bytes.1&0xc0)==0x80` 正确。干净（唯一理论瑕疵 ULA fc00::/7 会被当全局，用户场景 fe80:: only 不受影响）。
+  - 派独立对抗式 general-purpose subagent 复审整份 Sources/ diff（+2653/-264，36 文件，重点 AppState.swift + 红线合规）→ **无 blocker**：无崩溃/强解包/数据竞争、备份回滚完整、导入有 `status==.off` 守卫、备份不含运行时 clash_api secret（secret 运行期生成不落盘）。
+- 合并前修 2 个 medium（提交 `14ee357`，再跑 swift test 仍 202/1跳过/0）：
+  1. `DashboardView.onAppear` 无条件触发 refreshExitDiagnostics → 代理关时用真实 IP 直连 `am.i.mullvad.net` + 3 次 DNS。改为仅 `state.isOn` 时自动检测；手动「检测」按钮与 start()/切主节点（本就 `status==.on` 门控）三条路径不变。门控加在调用点、非 refreshExitDiagnostics 内 → AppStateTests 直接调该函数不受影响。
+  2. `NodeNameMetadata.parsedMultiplier` 每次现编译 2 条 NSRegularExpression，而 parse 在节点列表逐节点每帧调用（测速 delays 高频）→ 几百节点每帧上千次编译，命中项目历史 O(n²)/CPU 雷区。改 `static let multiplierRegexes` 缓存，行为不变。
+- 合并与整理：`git merge --ff-only`（main `14ee357` == 分支）→ `git push origin main`（`5069aa3..14ee357`）。删被完全包含的 `fix/sidebar-toggle`、`codex/network-observability-batch`（先 `git worktree remove .worktrees/sidebar-toggle-fix`，确认无未提交改动）、`fix/tun-ipv6-no-route` 三条本地分支；`git worktree prune` + 清 `.worktrees`。
+- 修改文件：`Sources/KongshanCore/NodeNameMetadata.swift`、`Sources/kongshan/DashboardView.swift`（审核修复）；docs（HANDOFF/PROGRESS/NEXT_STEPS/本文件）。
+- 测试结果：`swift test` 202 通过 1 跳过 0 失败（修复前后各一次，均绿）。
+- 当前状态：`main` 0.1.23（origin/main = `14ee357`，领先 0）+ `feat/tun-passwordless-helper`（助手，第三轮未完）。**⚠️ 已合并但尚未构建成 App**：`dist/kongshan-0.1.23.dmg` 是旧产物，不含 IPv6 + 2 条审核修复。
+- 风险/注意：出口诊断代理关时不再自动检测（手动仍可，想看真实 IP 点「检测」）；倍率正则为 static let（惰性一次初始化、NSRegularExpression matching 线程安全）。
+- 下一步：用户 `scripts/build_app.sh` 重打包（自增版本）→ 真机验证 TUN IPv6 + 2 条审核修复 + 0.1.23 七类界面；之后收尾助手第三轮（`feat/tun-passwordless-helper`）。
+- 接手方式：读本段 + NEXT_STEPS 顶部「✅ 合并已完成」段。合并已落地 main 并推 origin，无需重做；助手第三轮在另一分支，合并会与 network-obs 在 AppState/MainWindowView 冲突需手动解。

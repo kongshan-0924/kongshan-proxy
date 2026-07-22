@@ -1,19 +1,23 @@
 # 下一步
 
-## 跨分支盘点与合并计划（2026-07-22 最新）
+## ✅ 合并已完成（2026-07-22）— main 升到 0.1.23
 
-**分支拓扑**（各分支都"落后 main = 0"，即都含 main；main 领先 origin 2 个 docs 提交未推）：
-- `main` 0.1.20（基线）
-- `fix/sidebar-toggle` 0.1.22（双侧栏按钮修复）
-- `codex/network-observability-batch` 0.1.23（⊇ sidebar-toggle；一批新功能：出口 IP/DNS 诊断、节点地区+倍率、实时每连接速率、测速自动选最快、分应用代理、托盘实时速率、配置备份/恢复）
-- **`fix/tun-ipv6-no-route` 0.1.23（当前分支，最全）= ⊇ network-obs + 新增「物理网无全局 IPv6 时不给 TUN 配 IPv6」修复**。即除"免密码助手"外什么都有。
-- `feat/tun-passwordless-helper` 0.1.20（**独立**，不含上面这些；TUN 免密码特权助手，第三轮修复未完，见下）
+`fix/tun-ipv6-no-route`（超集）已 **ff-only 合并进 main 并推送 origin**（origin/main = `14ee357`）。一次带进：侧栏固定按钮修复 + 全部 network-obs 新功能 + TUN IPv6 修复 + 合并前 2 条审核修复。已删除被完全包含的 `fix/sidebar-toggle`、`codex/network-observability-batch`、`fix/tun-ipv6-no-route` 三条本地分支，并移除其 worktree（`.worktrees/` 已清）。
 
-**建议合并顺序**：
-1. **推 main**（`git push origin main`，2 个 docs 提交，顺手）。
-2. **审 + 合 `fix/tun-ipv6-no-route` → main**：它是超集（含侧栏修复 + 全部 network-obs 功能 + IPv6 修复），一次带进。非安全关键、建议派 subagent 做回归/正确性审查（先 `swift build`/`test` 确认绿），过了 `git checkout main && git merge --ff-only fix/tun-ipv6-no-route && git push`。main→0.1.23。
-3. **删** `fix/sidebar-toggle`、`codex/network-observability-batch`（都被 `fix/tun-ipv6-no-route` 完全包含）。
-4. **（最后）`feat/tun-passwordless-helper`**：先做第三轮 3 条修复 + 重跑安全审查（见下），再合 main。届时 main 已 0.1.23，**会与 network-obs 在 `Sources/kongshan/AppState.swift` + `Sources/kongshan/MainWindowView.swift` 冲突，需手动解**。
+**现在只剩两条分支**：
+- `main` 0.1.23（已推 origin，`14ee357`）
+- `feat/tun-passwordless-helper`（独立，TUN 免密码助手，第三轮未完，见下）
+
+**合并前审核（我负责）结论**：独立对抗式 subagent 复审整份 Sources/ diff + 亲自精读 IPv6 修复 → **无阻塞问题**（无崩溃/数据竞争/备份回滚破损/明文 secret；IPv6 修复内存安全、fe80::/10 分类正确）。合并前修掉 2 个 medium（提交 `14ee357`）：
+1. 出口诊断 `onAppear` 无条件触发：代理关时会用真实 IP 直连 `am.i.mullvad.net` + 3 次 DNS。改为仅 `state.isOn` 时自动检测（手动「检测」按钮、start() 成功、切主节点三条路径保留/本就已门控）。
+2. `NodeNameMetadata.parsedMultiplier` 每次现编译 2 条正则、在节点列表逐节点每帧调用（测速时高频）→ 命中项目历史 O(n²)/CPU 雷区。改 `static let` 缓存编译，行为不变。
+另有 4 个 low 记为非阻塞待办（见文末「可选」）。
+
+**⚠️ 已合并但尚未构建成 App**：`dist/kongshan-0.1.23.dmg` 是旧产物，**不含** IPv6 修复及其后合并的 2 条审核修复。要在真机跑需重新 `scripts/build_app.sh`（会自增版本，如 0.1.24）。
+
+### 剩余工作（按优先级）
+1. **真机重打包验证**（见下方「真机重打包验证 TUN IPv6 修复」）——这份新 build 同时含 IPv6 修复 + 2 条审核修复 + 全部 0.1.23 功能与七类界面。
+2. **TUN 免密码助手第三轮**（`feat/tun-passwordless-helper`，见下）：做完 3 条修复 + 重跑安全审查 → 合 main。**届时会与已进 main 的 network-obs 在 `Sources/kongshan/AppState.swift` + `Sources/kongshan/MainWindowView.swift` 冲突，需手动解**。
 
 ## 🔴 TUN 免密码助手 —— 第三轮 3 条修复未完（在 `feat/tun-passwordless-helper` 分支）
 

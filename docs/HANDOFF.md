@@ -1,5 +1,16 @@
 # 项目交接
 
+## 2026-07-22 审核并合并 0.1.23 → main（本会话完成）
+
+- 已完成：审核 + ff-only 合并超集分支 `fix/tun-ipv6-no-route` → main 并推 origin；分支整理到「`main` + `feat/tun-passwordless-helper`」两条。
+- 审核（我负责）：`swift test` 绿（202/1跳过/0）；亲读 IPv6 修复（getifaddrs 内存安全、fe80::/10 分类正确）；独立对抗式 subagent 复审整份 Sources/ diff（+2653/-264，36 文件）→ **无 blocker**（无崩溃/数据竞争/备份回滚破损/明文 secret）。合并前修 2 个 medium 并重测通过：①出口诊断代理关时不再用真实 IP 自动直连 Mullvad（`DashboardView.onAppear` 加 `state.isOn` 门控，手动「检测」按钮保留）②节点倍率正则改 `static let` 缓存（避免逐节点每帧现编译，命中项目历史 CPU 雷区）。
+- 修改文件：`Sources/KongshanCore/NodeNameMetadata.swift`、`Sources/kongshan/DashboardView.swift`（审核修复，`14ee357`）；4 份记录文档。
+- 测试结果：`swift test` 202 通过 1 跳过 0 失败。
+- 当前状态：`origin/main = 14ee357`（0.1.23，领先 0）；本地仅 `main` + `feat/tun-passwordless-helper`。**⚠️ `dist/kongshan-0.1.23.dmg` 为旧产物，不含 IPv6 + 2 条审核修复**——真机跑需重打包（自增版本）。
+- 风险/注意：合并前的 4 条 low 待办（tray 常驻 WebSocket、备份 remoteDoH 未校 https、分应用规则按主进程名匹配、stripIPv6 纯 IPv6 配置产空地址）见 NEXT_STEPS 文末，非阻塞。
+- 下一步：用户 `scripts/build_app.sh` 重打包 → 真机验证 IPv6 修复 + 审核修复 + 0.1.23 界面；再收尾助手第三轮。
+- 接手方式：读本节 + NEXT_STEPS 顶部「✅ 合并已完成」。助手第三轮在 `feat/tun-passwordless-helper`，合并会与 network-obs 在 AppState/MainWindowView 冲突需手动解。
+
 ## 2026-07-22 修复 0.1.23 TUN 开启无效果（fix/tun-ipv6-no-route，1 提交完成）
 
 - 已完成：诊断 0.1.23 真机 TUN「开了没效果」根因并修复，1 提交（a6bb609）在 `fix/tun-ipv6-no-route` 分支（基于 `codex/network-observability-batch`）。
