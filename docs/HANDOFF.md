@@ -1,5 +1,20 @@
 # 项目交接
 
+## 2026-07-22 修复 0.1.23 TUN 开启无效果（fix/tun-ipv6-no-route，1 提交完成）
+
+- 已完成：诊断 0.1.23 真机 TUN「开了没效果」根因并修复，1 提交（a6bb609）在 `fix/tun-ipv6-no-route` 分支（基于 `codex/network-observability-batch`）。
+- 根因（确诊）：用户 Wi-Fi（en0）只有链路本地 `fe80::`，无全局 IPv6；但 TUN 默认配了 `fdfe:dcba:9876::1/126`。TUN 起来后应用看到 IPv6 接口 + AAAA → 尝试 IPv6 直连中国 IPv6（240e:...）→ `direct` 出站因 en0 无全局 IPv6 报 `no route to host` → 应用不快速回退 IPv4 → 网断。代理流量其实正常（ChatGPT/Google 经 hysteria2）。证据：`sing-box-tun.log` 全是 `outbound/direct[direct]: ... no route to host` 且目标全 240e:...；`ifconfig en0` 仅 fe80::；`netstat -rn -f inet6` 默认路由全在 utun0/1/2/3/5。
+- 修复（ponytail 最短根因修复，3 文件 +81/-1）：
+  - `TunSettings.stripIPv6()`（ProxyMode.swift）：纯函数剥 IPv6 保 IPv4；`dnsServerAddress` 只看 IPv4 不受影响。
+  - `AppState.physicalNetworkHasGlobalIPv6()`：`getifaddrs` 排除 utun/lo/bridge/gif/stf/llw/awdl，跳过 fe80::/10 链路本地。
+  - `generateConfiguration` 入口统一处理：TUN 模式且物理网络无全局 IPv6 时调 stripIPv6。start / applyRoutingSettings / applyDnsSettings 三条路径都受益；持久化与备份仍写原始 tunSettings。
+- 修改文件：`Sources/KongshanCore/ProxyMode.swift`、`Sources/kongshan/AppState.swift`、`Tests/KongshanCoreTests/TunConfigTests.swift`。未碰侧栏、未碰 helper。
+- 测试：`swift build` 通过；`swift test` 202 通过 1 跳过 0 失败（+3 新）。真机验证探针返回 false（en0 仅 fe80::）。
+- 当前状态：1 提交在 `fix/tun-ipv6-no-route`，未推。
+- 风险/注意事项：切到有 IPv6 的网络探测自动返回 true，TUN 自动恢复 IPv6；探针排除 utun 等虚拟接口，其它 VPN 的 IPv6 不会被误判。
+- 下一步：用户真机重打包验证；通过后合 `fix/tun-ipv6-no-route` → main（或先合进 codex 分支再统一合 main）。
+- 接手方式：在 `fix/tun-ipv6-no-route`，读 commit a6bb609 + SESSION_LOG 2026-07-22 21:30 段。改探测前理解 getifaddrs 链路与 fe80::/10 判定。
+
 ## 2026-07-22 网络可观测与控制增强（0.1.23 待用户验收）
 
 - 已完成：仪表盘真实出口 IP/地区/运营商和 DNS 一键自测；节点名地区旗帜与倍率高亮；连接页单连接及顶部实时速率/排序；测速并自动选最快；分应用直连/默认代理/指定节点；托盘实时上下行；配置与设置 JSON 备份/恢复。

@@ -1221,3 +1221,24 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 - 风险/注意事项：Computer Use 已看到唯一左上角侧边栏按钮、测速并选最快、连接顶部速率和分应用 UI；切换设置页时原生 UI 通道中断，备份入口仅有编译与 5 项专项测试证据，需用户视觉验收；备份包含敏感凭据；DNS 判断为三态启发式。
 - 下一步：用户验收 0.1.23 真实出口、DNS、节点倍率、连接速率、自动选节点、分应用、托盘速率与备份恢复；收到明确通过后才合并 main。
 - 下一位 Agent 如何接手：保留当前 worktree/分支与已安装成品；验收反馈继续修在本分支；用户未说“验收通过”前不清理 worktree、不合并 main。
+
+## 2026-07-22 21:30 — 修复 0.1.23 TUN 开启无效果（fix/tun-ipv6-no-route）
+
+- 已完成：诊断 0.1.23 真机 TUN「开了没效果」根因并修复，单独提交在 `fix/tun-ipv6-no-route` 分支（基于 `codex/network-observability-batch`）。
+- 根因（确诊，非猜测）：读 `~/Library/Application Support/kongshan/logs/sing-box-tun.log` + `ifconfig en0` + `netstat -rn -f inet6`：
+  - 用户 Wi-Fi（en0）只有链路本地 `fe80::1b:4389:ef6:27ee%en0`，**没有全局 IPv6**；默认 IPv6 路由全在 utun0/1/2/3/5（其它 VPN）。
+  - 但 TUN 默认配置含 IPv6 `fdfe:dcba:9876::1/126`。TUN 起来后应用看到 IPv6 接口 + DNS 返回 AAAA → 尝试 IPv6 直连（如 `240e:f7:ef00:35::4f` 中国电信 IPv6）→ sing-box 路由到 `direct` 出站 → en0 无全局 IPv6 → `dial tcp [240e:...]: connect: no route to host` → 应用不快速回退 IPv4 → 用户感知"TUN 开了反而网断"。
+  - 代理流量其实正常：ChatGPT/Google/Cloudflare 的 IPv6 经 `outbound/hysteria2[node-04af7392...]` 成功建连。问题只在 direct 出站到中国 IPv6。
+- 修复（ponytail 最短根因修复，3 文件 +81/-1）：
+  - `TunSettings.stripIPv6()`（ProxyMode.swift）：纯函数，剥掉含 `:` 的 IPv6 地址，保留 IPv4；`dnsServerAddress` 只看 IPv4，剥掉 IPv6 不影响系统 DNS 指向。
+  - `AppState.physicalNetworkHasGlobalIPv6()`（AppState.swift）：`getifaddrs` 枚举，排除 utun/lo/bridge/gif/stf/llw/awdl 虚拟接口，跳过 `fe80::/10` 链路本地。
+  - `generateConfiguration` 入口统一处理：`enabledModes` 含 `.tun` 且物理网络无全局 IPv6 时调 `stripIPv6`。三条重载路径（start / applyRoutingSettings / applyDnsSettings）都自动受益；持久化与备份仍写用户原始 tunSettings，不丢配置。
+- 测试：`swift build` 通过；`swift test` **202 通过 1 跳过 0 失败**（+3 新：stripIPv6 各分支）。真机验证 getifaddrs 探针在当前机器返回 false（en0 仅 fe80:: 链路本地）。
+- 当前状态：1 提交在 `fix/tun-ipv6-no-route` 分支（a6bb609），未推。
+- 风险/注意事项：
+  1. 切到有 IPv6 的网络时探测自动返回 true，TUN 自动恢复 IPv6，无需用户干预。
+  2. 探针排除 utun 等虚拟接口——其它 VPN 起的 IPv6 不会被误判为物理网络 IPv6。
+  3. 极端情况：用户自定义只含 IPv6 的 TUN 地址会被剥成空数组（这种配置本就无法工作，但行为可预测）。
+  4. 未碰侧栏文件；未碰 helper 安全逻辑（在另一分支 `feat/tun-passwordless-helper`）。
+- 下一步：用户真机重打包验证；通过后合并 `fix/tun-ipv6-no-route` → main（或先合进 `codex/network-observability-batch` 再统一合 main）。
+- 接手方式：在 `fix/tun-ipv6-no-route` 分支，先读本段 + commit a6bb609。改探测逻辑前理解 getifaddrs 链路与 fe80::/10 判定；改 stripIPv6 前理解 dnsServerAddress 只看 IPv4 的依赖。

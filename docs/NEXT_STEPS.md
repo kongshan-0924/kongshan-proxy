@@ -1,6 +1,17 @@
 # 下一步
 
-## 当前最高优先级：验收 0.1.23 网络可观测与控制增强
+## 当前最高优先级：真机重打包验证 TUN IPv6 修复（fix/tun-ipv6-no-route）
+
+1. 在 `fix/tun-ipv6-no-route` 分支跑 `scripts/build_app.sh` 重打包，安装到 /Applications。
+2. 开 TUN，确认：
+   - `~/Library/Application Support/kongshan/logs/sing-box-tun.log` **不再有** `outbound/direct[direct]: ... no route to host` 针对 240e:... 的错误。
+   - 中国网站正常打开（不再因 IPv6 直连失败卡住）。
+   - 国外网站经代理正常（ChatGPT/Google 等）。
+   - `config.json` 的 TUN inbound `address` 只有 `172.19.0.1/30`，没有 `fdfe:dcba:9876::1/126`。
+3. 通过后合并 `fix/tun-ipv6-no-route` → main（或先合进 `codex/network-observability-batch` 再统一合 main，因为本分支就基于 codex）。
+4. 注意：切到有 IPv6 的网络时，探测会自动返回 true，TUN 自动恢复 IPv6 地址，无需手动改设置。
+
+## 验收 0.1.23 网络可观测与控制增强
 
 1. 打开已运行的 `/Applications/kongshan.app`（0.1.23/build 123），仪表盘点“检测”，确认出口 IP、地区/运营商和 DNS 三态结果符合当前节点。
 2. 在“代理”页检查旗帜/倍率，点“测速并选最快”；开启代理后到“连接”页确认每条速率、总速率和排序，并检查托盘速率。
