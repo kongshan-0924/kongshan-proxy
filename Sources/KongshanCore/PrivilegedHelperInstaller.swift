@@ -66,19 +66,25 @@ public enum PrivilegedHelperInstaller {
 
         // 一条 shell 命令完成全部 root 操作。先 bootout 旧实例（若有）再 bootstrap，幂等。
         // 用 'EOF' heredoc 写文件避免转义；printf 更稳，路径用 shellQuote。
+        // 权限（修复 A）：目录 0711（others 可穿越、不可列），socket 0666（others 可连）。
+        // trust.json 0600 root（含 cdhash 等钉死值，用户不可读改）。plist 0644。
+        let stateDir = HelperConstants.stateDirectory
+        let parentDir = (stateDir as NSString).deletingLastPathComponent
         let command = [
             "set -e",
             "umask 077",
             "export PATH=/usr/bin:/bin:/usr/sbin:/sbin",
-            // stateDirectory：root 0700。
-            "/bin/mkdir -p \(shellQuote(HelperConstants.stateDirectory))",
-            "/bin/chmod 700 \(shellQuote(HelperConstants.stateDirectory))",
-            // trust.json：root 0600。
+            // stateDirectory 及其父 .../kongshan 都建出并显式 chmod 0711。
+            "/bin/mkdir -p \(shellQuote(stateDir))",
+            "/bin/chmod 711 \(shellQuote(parentDir))",
+            "/bin/chmod 711 \(shellQuote(stateDir))",
+            // trust.json：root 0600（含钉死的 sing-box cdhash，用户不可读改）。
             "/usr/bin/printf '%s' \(shellQuote(trustJSON)) > \(shellQuote(HelperConstants.trustConfigPath))",
             "/bin/chmod 600 \(shellQuote(HelperConstants.trustConfigPath))",
             // plist：root 0644（launchd 需可读）。
             "/usr/bin/printf '%s' \(shellQuote(plistXML)) > \(shellQuote(plistPath))",
             "/bin/chmod 644 \(shellQuote(plistPath))",
+            // socket 由 helper 自己建（chmod 0666），这里不预建。
             // 先 bootout 旧实例（失败无害），再 bootstrap。
             "/bin/launchctl bootout system/\(HelperConstants.daemonLabel) 2>/dev/null || true",
             "/bin/launchctl bootstrap system \(shellQuote(plistPath))"

@@ -407,11 +407,20 @@ func rotateLogIfNeeded() {
 
 // MARK: - socket 服务（§2b.1）
 
-/// §2b.1 建立 Unix domain socket：stateDirectory(root 0700) → unlink 旧 socket → bind → chmod 0600 → listen。
+/// §2b.1 建立 Unix domain socket。
+///
+/// 权限（修复 A）：目录 `0711` root 拥有（others 可穿越、不可列），socket `0666`（others 可连）。
+/// 安全主防线是 §5.1 audit_token 对端校验，从不依赖 socket 文件权限——设计本就假设
+/// "同用户任意进程都能连"。但目录必须 root 拥有且非 world-writable，否则攻击者可 unlink
+/// socket 再 bind 假 helper 做骗连（socket-squatting，虽拿不到 root，但避免）。
 func setupSocket() -> Int32 {
-    // stateDirectory：root 拥有、0700。
-    _ = mkdir(HelperConstants.stateDirectory, mode_t(0o700))
-    chmod(HelperConstants.stateDirectory, mode_t(0o700))
+    // stateDirectory 及其父 .../kongshan 都设 0711 root。
+    // mkdir -p 等价：从最深已有祖先向下建，每层 chmod 0711。
+    _ = mkdir(HelperConstants.stateDirectory, mode_t(0o711))
+    chmod(HelperConstants.stateDirectory, mode_t(0o711))
+    // 父目录 .../kongshan。installer 也会 chmod 它，这里 helper 启动时兜底。
+    let parent = (HelperConstants.stateDirectory as NSString).deletingLastPathComponent
+    chmod(parent, mode_t(0o711))
 
     // 清掉可能残留的旧 socket 文件。
     unlink(HelperConstants.socketPath)
@@ -434,8 +443,8 @@ func setupSocket() -> Int32 {
     }
     guard bindResult == 0 else { close(fd); return -1 }
 
-    // §5.5 socket 0600（仅 root 可读写）。权限是次要防线，§5.1 校验才是主防线。
-    chmod(HelperConstants.socketPath, mode_t(0o600))
+    // socket 0666：others 可连（App 普通用户进程）。主防线是 §5.1 身份校验。
+    chmod(HelperConstants.socketPath, mode_t(0o666))
     guard listen(fd, 5) == 0 else { close(fd); return -1 }
     return fd
 }
