@@ -2,7 +2,7 @@ import Foundation
 import XCTest
 
 final class MainWindowToolbarTests: XCTestCase {
-    func testMainWindowUsesOnlyNativeSidebarToggle() throws {
+    func testMainWindowUsesOneFixedSidebarToggle() throws {
         let testFile = URL(fileURLWithPath: #filePath)
         let projectRoot = testFile
             .deletingLastPathComponent()
@@ -17,9 +17,14 @@ final class MainWindowToolbarTests: XCTestCase {
             encoding: .utf8
         )
 
+        XCTAssertTrue(mainWindowSource.contains("@State private var columnVisibility: NavigationSplitViewVisibility = .all"))
+        XCTAssertTrue(mainWindowSource.contains("NavigationSplitView(columnVisibility: $columnVisibility)"))
+        XCTAssertTrue(mainWindowSource.contains(".toolbar(removing: .sidebarToggle)"))
+        XCTAssertEqual(
+            mainWindowSource.components(separatedBy: "ToolbarItem(placement: .navigation)").count - 1,
+            1
+        )
         XCTAssertFalse(mainWindowSource.contains("isSidebarCompact"))
-        XCTAssertFalse(mainWindowSource.contains("ToolbarItem(placement: .navigation)"))
-        XCTAssertFalse(mainWindowSource.contains(".toolbar(removing: .sidebarToggle)"))
         XCTAssertFalse(appSource.contains("removeSystemSidebarToggle"))
     }
 }

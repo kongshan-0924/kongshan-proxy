@@ -1088,3 +1088,23 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 - 风险/注意事项：验收通过前不合并 main；只有遇到真正阻断或高风险扩权才暂停询问。
 - 下一步：运行 `swift test` 基线，随后完成回归 RED、最小实现 GREEN、0.1.22 全量验证与安装。
 - 下一位 Agent 如何接手：直接执行计划，不再要求用户逐步确认；保持单分支、单 App、单最新版 DMG。
+
+## 2026-07-22 固定位置实施基线
+
+- 已完成：确认当前目录是 `fix/sidebar-toggle` linked worktree，main 未参与实施；运行产品代码修改前的完整测试基线。
+- 修改文件：将 `MainWindowToolbarTests` 改为固定位置目标的失败回归检查，产品代码尚未修改。
+- 测试结果：基线 `swift test` 执行 171 项、1 项既有跳过、0 失败。
+- 当前状态：准备运行定向测试确认缺失的受控可见性、正确移除和唯一固定按钮均为 RED。
+- 风险/注意事项：该测试锁死可验证的 SwiftUI 架构，不能替代打包 App 标题栏人工验收。
+- 下一步：运行定向测试记录 RED，再提交回归测试。
+- 下一位 Agent 如何接手：必须先保留 RED 证据，再改 `MainWindowView.swift`。
+
+## 2026-07-22 固定位置回归测试 RED
+
+- 已完成：运行 `MainWindowToolbarTests/testMainWindowUsesOneFixedSidebarToggle`，确认测试确实能捕获 0.1.21 的迁移按钮架构。
+- 修改文件：`Tests/KongshanAppTests/MainWindowToolbarTests.swift` 与本记录。
+- 测试结果：定向 1 项按预期失败，共 4 个断言失败：缺少可见性状态、受控 `NavigationSplitView`、默认按钮移除和唯一 `.navigation` 按钮。
+- 当前状态：RED 证据完整，尚未修改产品代码。
+- 风险/注意事项：不得为了转绿放宽断言；实现必须与已批准设计一致。
+- 下一步：提交 RED 测试，再以最小 SwiftUI 修改转绿。
+- 下一位 Agent 如何接手：修改范围仅 `MainWindowView.swift`，不要增加 AppKit 观察器或紧凑侧栏。
