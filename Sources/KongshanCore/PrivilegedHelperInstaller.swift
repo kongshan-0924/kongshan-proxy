@@ -80,7 +80,8 @@ public enum PrivilegedHelperInstaller {
 
         // 修复 C.2：算 bundle 内 sing-box 的 cdhash，钉死进 trust.json。
         // ad-hoc 签名零成本可伪造，光验"签名有效"挡不住替换；必须钉 cdhash。
-        let singBoxCDHashHex = computeCDHashHex(at: bundledSingBoxURL)
+        // 修复 C②：算不出 cdhash fail-closed（拒绝安装），不静默写 null。
+        let singBoxCDHashHex = try requireCDHashHex(at: bundledSingBoxURL)
 
         // 修复 C.1：plist 指向 root-only helper 拷贝（用户改不动），不再直指 bundle。
         let installedHelperPath = installedHelperURL.path
@@ -165,6 +166,24 @@ public enum PrivilegedHelperInstaller {
         let dict = info as! [String: Any]
         guard let cdhash = dict[kSecCodeInfoUnique as String] as? Data else { return nil }
         return cdhash.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// 修复 C②：算 sing-box cdhash；失败 fail-closed（拒绝安装），不静默写 null。
+    /// 静默写 null 等于不钉 cdhash，签名损坏/回归时会静默降级。委托给纯函数
+    /// `failClosedCDHash` 便于单测覆盖 fail-closed 行为。
+    private static func requireCDHashHex(at url: URL) throws -> String {
+        try failClosedCDHash(computeCDHashHex(at: url))
+    }
+
+    /// 修复 C②：cdhash 计算 fail-closed 的纯函数判定。便于单测：nil/空 cdhash 抛错，
+    /// 非空原样返回。install 经 requireCDHashHex(at:) 调用，最终落到此判定。
+    static func failClosedCDHash(_ hex: String?) throws -> String {
+        guard let hex, !hex.isEmpty else {
+            throw PrivilegedLauncherError.authorizationFailed(
+                "无法计算 sing-box cdhash，拒绝安装（签名损坏或 codesign 缺失）"
+            )
+        }
+        return hex
     }
 
     /// 卸载：一条 osascript 提权完成 bootout、删 plist/socket/stateDirectory。
