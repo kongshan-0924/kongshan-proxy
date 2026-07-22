@@ -38,6 +38,14 @@ public enum PrivilegedHelperInstaller {
         URL(fileURLWithPath: HelperConstants.stateDirectory + "/KongshanHelper")
     }
 
+    /// 修复 C①：sing-box 也拷到 root-only 位置（stateDirectory/sing-box，root:wheel 0755）。
+    /// trust.singBoxExecutablePath 指向这个拷贝，不再指 bundle——否则 verify→exec 之间存在
+    /// TOCTOU：bundle 内 sing-box 对 admin 组可写（/Applications），攻击者在校验后、posix_spawn
+    /// 前原子替换 → root 执行任意二进制。与 helper 拷贝完全同构（同目录、同权限、同 chown）。
+    public static var installedSingBoxURL: URL {
+        URL(fileURLWithPath: HelperConstants.stateDirectory + "/sing-box")
+    }
+
     /// App 主可执行路径（写入 trust.json 的 clientExecutablePath）。
     public static var clientExecutableURL: URL {
         Bundle.main.executableURL ?? Bundle.main.bundleURL.appending(path: "Contents/MacOS/kongshan")
@@ -85,13 +93,15 @@ public enum PrivilegedHelperInstaller {
 
         // 修复 C.1：plist 指向 root-only helper 拷贝（用户改不动），不再直指 bundle。
         let installedHelperPath = installedHelperURL.path
+        // 修复 C①：sing-box 也拷到 root-only 位置，trust 指向拷贝（不再指 bundle），
+        // 消除 verify→exec 的 TOCTOU。cdhash 仍按 bundle 内 sing-box 算（同字节 → 同 cdhash）。
+        let installedSingBoxPath = installedSingBoxURL.path
 
         // trust.json：JSONEncoder 结构化生成（修复 C 加 singBox 字段；D1 trust.json 部分在此完成）。
         // 别字符串插值——clientPath/singBoxPath 可能含 JSON 元字符。
-        let trustConfig = HelperTrustConfig(
+        let trustConfig = makeTrustConfig(
             clientExecutablePath: clientPath,
-            pinnedCDHashHex: nil,
-            singBoxExecutablePath: singBoxPath,
+            singBoxInstalledPath: installedSingBoxPath,
             singBoxCDHashHex: singBoxCDHashHex
         )
         let encoder = JSONEncoder()
@@ -136,6 +146,13 @@ public enum PrivilegedHelperInstaller {
             "/bin/cp \(shellQuote(bundledHelperPath)) \(shellQuote(installedHelperPath))",
             "/usr/sbin/chown root:wheel \(shellQuote(installedHelperPath))",
             "/bin/chmod 755 \(shellQuote(installedHelperPath))",
+            // 修复 C①：sing-box 也拷到 root-only 位置（与 helper 同构）。
+            // trust.singBoxExecutablePath 指向此拷贝，verify→exec 都在同一路径上，
+            // 但路径在 0711 root 目录内、文件 root:wheel 755，攻击者无法原子替换 → 无 TOCTOU。
+            "/bin/rm -f \(shellQuote(installedSingBoxPath))",
+            "/bin/cp \(shellQuote(singBoxPath)) \(shellQuote(installedSingBoxPath))",
+            "/usr/sbin/chown root:wheel \(shellQuote(installedSingBoxPath))",
+            "/bin/chmod 755 \(shellQuote(installedSingBoxPath))",
             // trust.json：base64 解码写入，root 0600（含钉死的 sing-box cdhash，用户不可读改）。
             "/usr/bin/printf '%s' \(shellQuote(trustBase64)) | /usr/bin/base64 -D > \(shellQuote(HelperConstants.trustConfigPath))",
             "/usr/sbin/chown root:wheel \(shellQuote(HelperConstants.trustConfigPath))",
@@ -184,6 +201,22 @@ public enum PrivilegedHelperInstaller {
             )
         }
         return hex
+    }
+
+    /// 修复 C①：构造 trustConfig，singBoxExecutablePath 指向 root-only 拷贝（不是 bundle）。
+    /// 纯函数便于单测：trust 字段从 bundle 路径推导会留 TOCTOU，必须指向 root-only 拷贝。
+    /// pinnedCDHashHex 留 nil（App 重构建即变，不钉；sing-box cdhash 才钉）。
+    static func makeTrustConfig(
+        clientExecutablePath: String,
+        singBoxInstalledPath: String,
+        singBoxCDHashHex: String?
+    ) -> HelperTrustConfig {
+        HelperTrustConfig(
+            clientExecutablePath: clientExecutablePath,
+            pinnedCDHashHex: nil,
+            singBoxExecutablePath: singBoxInstalledPath,
+            singBoxCDHashHex: singBoxCDHashHex
+        )
     }
 
     /// 卸载：一条 osascript 提权完成 bootout、删 plist/socket/stateDirectory。
