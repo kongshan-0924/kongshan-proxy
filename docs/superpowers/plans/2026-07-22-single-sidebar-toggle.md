@@ -125,7 +125,7 @@ Expected: exit 0 and `verified successfully`.
 
 Record the root cause, deleted custom implementation, RED/GREEN result, full verification result, artifact version, remaining manual visual check, and exact handoff instructions in all four project record files.
 
-- [ ] **Step 4: Verify repository state and commit**
+- [x] **Step 4: Verify repository state and commit**
 
 Run: `git diff --check`
 
@@ -136,6 +136,6 @@ git add VERSION docs/HANDOFF.md docs/PROGRESS.md docs/NEXT_STEPS.md docs/progres
 git commit -m "release: 0.1.21 single sidebar toggle"
 ```
 
-- [ ] **Step 5: Report the manual boundary**
+- [x] **Step 5: Report the manual boundary**
 
 Report that automated toolbar inspection and full verification passed. Keep dashboard/settings visual clicking as an explicit manual check unless a fresh UI screenshot is obtained from the packaged app.
