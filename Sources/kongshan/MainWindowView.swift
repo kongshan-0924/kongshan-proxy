@@ -4,9 +4,10 @@ import SwiftUI
 struct MainWindowView: View {
     @Environment(AppState.self) private var state
     @State private var selection: SidebarPage? = .dashboard
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             List(selection: $selection) {
                 sidebarRow(.dashboard)
                 Section("管理") {
@@ -22,6 +23,7 @@ struct MainWindowView: View {
             }
             .listStyle(.sidebar)
             .navigationSplitViewColumnWidth(min: 186, ideal: 200, max: 250)
+            .toolbar(removing: .sidebarToggle)
             .safeAreaInset(edge: .bottom, spacing: 0) { sidebarStatus }
         } detail: {
             // 错误与警告在所有页面统一呈现；此前只有仪表盘显示，
@@ -46,6 +48,17 @@ struct MainWindowView: View {
                         SettingsView()
                     }
                 }
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button {
+                    columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
+                } label: {
+                    Image(systemName: "sidebar.left")
+                }
+                .help(columnVisibility == .detailOnly ? "显示侧边栏" : "隐藏侧边栏")
+                .accessibilityLabel(columnVisibility == .detailOnly ? "显示侧边栏" : "隐藏侧边栏")
             }
         }
         .navigationTitle("kongshan")

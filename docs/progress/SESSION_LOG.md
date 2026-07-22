@@ -1108,3 +1108,13 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 - 风险/注意事项：不得为了转绿放宽断言；实现必须与已批准设计一致。
 - 下一步：提交 RED 测试，再以最小 SwiftUI 修改转绿。
 - 下一位 Agent 如何接手：修改范围仅 `MainWindowView.swift`，不要增加 AppKit 观察器或紧凑侧栏。
+
+## 2026-07-22 固定位置最小实现 GREEN
+
+- 已完成：使用 `NavigationSplitViewVisibility` 受控分栏，在侧栏 `List` 正确移除系统默认按钮，并增加唯一 `.navigation` 固定按钮切换 `.all`/`.detailOnly`；补齐帮助和辅助功能标签。
+- 修改文件：`Sources/kongshan/MainWindowView.swift` 与本记录。
+- 测试结果：定向回归 1/1 通过；App 测试 48 项、1 项既有快照跳过、0 失败。
+- 当前状态：最小产品实现已转绿，未修改 `KongshanApp.swift` 或任何代理/TUN 路径。
+- 风险/注意事项：真实标题栏位置仍需打包安装后人工确认；自动测试只证明单按钮架构和作用域正确。
+- 下一步：提交实现并运行 `verify_m4.sh` 全量验证和 0.1.22 单次发布构建。
+- 下一位 Agent 如何接手：若视觉不符，只调整 SwiftUI toolbar 作用域/placement，不引入 AppKit 时序清理。
