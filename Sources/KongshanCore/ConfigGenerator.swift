@@ -115,6 +115,17 @@ public enum ConfigGenerationError: Error, Equatable, LocalizedError {
     }
 }
 
+/// 配置生成结果。warnings 供 AppState 上层透传给用户（非致命问题）。
+public struct ConfigGenerationResult: Sendable {
+    public let config: Data
+    public let warnings: [String]
+
+    public init(config: Data, warnings: [String]) {
+        self.config = config
+        self.warnings = warnings
+    }
+}
+
 public enum ConfigGenerator {
     public static func outboundTag(for node: ProxyNode) -> String {
         "node-\(node.id.uuidString.lowercased())"
@@ -139,8 +150,13 @@ public enum ConfigGenerator {
     }
 
     public static func generate(_ input: ConfigInput) throws -> Data {
+        try generateWithWarnings(input).config
+    }
+
+    public static func generateWithWarnings(_ input: ConfigInput) throws -> ConfigGenerationResult {
         guard !input.nodes.isEmpty else { throw ConfigGenerationError.noNodes }
 
+        var warnings: [String] = []
         let nodeTags = input.nodes.map(outboundTag)
         let selectedTag: String
         if let selectedNodeID = input.selectedNodeID {
@@ -156,6 +172,22 @@ public enum ConfigGenerator {
 
         // 配置自带策略组（机场的 Netflix / 香港 … 或用户自建组）。
         let groups = (try? input.routing?.settings.validated().policyGroups) ?? []
+        // 同名节点冲突记录 warning：机场若给了两个同名节点，策略组按名字引用时只能解析到第一个，
+        // 第二个节点的 tag（已是唯一 UUID 形式 node-<uuid>）不会被任何组用到。
+        // 不静默吞掉——告诉用户，让他们知道这些节点在机场主组里其实没生效。
+        var seenNames: Set<String> = []
+        var duplicateNames: Set<String> = []
+        for node in input.nodes {
+            if !seenNames.insert(node.name).inserted {
+                duplicateNames.insert(node.name)
+            }
+        }
+        if !duplicateNames.isEmpty {
+            let sorted = duplicateNames.sorted()
+            warnings.append(
+                "机场下发存在同名节点：\(sorted.joined(separator: "、"))。策略组按名字解析时只会命中第一个，其余同名节点不会出现在组里。"
+            )
+        }
         let nodeNameToTag = Dictionary(
             input.nodes.map { ($0.name, outboundTag(for: $0)) },
             uniquingKeysWith: { first, _ in first }
@@ -267,7 +299,8 @@ public enum ConfigGenerator {
                 ]
             ]
         ]
-        return try encode(root)
+        let config = try encode(root)
+        return ConfigGenerationResult(config: config, warnings: warnings)
     }
 
     private static func dns(for input: ConfigInput, primaryOutbound: String) throws -> [String: Any] {
@@ -548,7 +581,31 @@ public enum ConfigGenerator {
                 root["experimental"] = experimental
             }
         }
+        // 节点凭据同样敏感：用户把 config.json 贴群/发 issue 时若不脱敏，
+        // password / uuid / obfs-password 会直接泄漏全部节点凭据。
+        // secret 已随 clash_api 一并移除；这里递归遍历所有 outbound 字段。
+        if var outbounds = root["outbounds"] as? [[String: Any]] {
+            for index in outbounds.indices {
+                outbounds[index] = Self.redactOutbound(outbounds[index])
+            }
+            root["outbounds"] = outbounds
+        }
         return try encode(root)
+    }
+
+    /// 递归脱敏单个 outbound 的所有凭据字段，保留结构（type/tag/server/port 等非敏感项不变）。
+    /// obfs.password 嵌套在 dict 里，单独处理；其它字段都是顶层 String。
+    private static func redactOutbound(_ outbound: [String: Any]) -> [String: Any] {
+        var value = outbound
+        let stringSecrets: Set<String> = ["password", "uuid"]
+        for key in stringSecrets where value[key] is String {
+            value[key] = "<redacted>"
+        }
+        if var obfs = value["obfs"] as? [String: Any], obfs["password"] is String {
+            obfs["password"] = "<redacted>"
+            value["obfs"] = obfs
+        }
+        return value
     }
 
     private static func outbound(_ node: ProxyNode) throws -> [String: Any] {

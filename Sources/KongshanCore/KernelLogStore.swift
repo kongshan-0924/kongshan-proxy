@@ -25,6 +25,10 @@ public actor KernelLogStore {
     private var bufferedLines: [String] = []
     private var externalMonitorSource: KernelLogSource?
     private var externalMonitor: DispatchSourceFileSystemObject?
+    /// 缓存写文件句柄，避免每条日志都 open/seek/close。
+    /// sing-box info 级别在繁忙时段每秒数十条，旧实现每条都 FileHandle(forWritingTo:) + seekToEnd + close，
+    /// IO 开销非必要。句柄在 actor 内串行访问，安全。轮转时关闭并重新打开。
+    private var writeHandles: [KernelLogSource: FileHandle] = [:]
 
     public init(
         directory: URL = AppIdentity.supportDirectory
@@ -41,6 +45,9 @@ public actor KernelLogStore {
 
     deinit {
         externalMonitor?.cancel()
+        for handle in writeHandles.values {
+            try? handle.close()
+        }
     }
 
     public func append(_ line: SingBoxLogLine) throws {
@@ -62,9 +69,9 @@ public actor KernelLogStore {
 
         let existingSize = fileSize(at: fileURL)
         if existingSize > 0, existingSize + data.count > maxFileBytes {
-            try rotate(fileURL)
+            try rotate(fileURL, source: source)
         }
-        try append(data, to: fileURL)
+        try append(data, to: fileURL, source: source)
     }
 
     public func recentLines() -> [String] {
@@ -82,7 +89,7 @@ public actor KernelLogStore {
         )
         let fileURL = directory.appending(path: source.fileName)
         if fileSize(at: fileURL) >= maxFileBytes {
-            try rotate(fileURL)
+            try rotate(fileURL, source: source)
         }
         if !FileManager.default.fileExists(atPath: fileURL.path) {
             try Data().write(to: fileURL, options: .atomic)
@@ -158,7 +165,12 @@ public actor KernelLogStore {
         return size.intValue
     }
 
-    private func rotate(_ fileURL: URL) throws {
+    private func rotate(_ fileURL: URL, source: KernelLogSource) throws {
+        // 轮转前先关闭缓存句柄：rotate 会删掉原文件，句柄会指向已删除的 inode，
+        // 后续写会写到旧 inode（"幽灵文件"），新文件不会被写入。
+        if let handle = writeHandles.removeValue(forKey: source) {
+            try? handle.close()
+        }
         let archiveURL = fileURL.appendingPathExtension("1")
         if FileManager.default.fileExists(atPath: archiveURL.path) {
             try FileManager.default.removeItem(at: archiveURL)
@@ -200,7 +212,7 @@ public actor KernelLogStore {
         }
     }
 
-    private func append(_ data: Data, to fileURL: URL) throws {
+    private func append(_ data: Data, to fileURL: URL, source: KernelLogSource) throws {
         if !FileManager.default.fileExists(atPath: fileURL.path) {
             try data.write(to: fileURL, options: .atomic)
             try FileManager.default.setAttributes(
@@ -210,9 +222,17 @@ public actor KernelLogStore {
             return
         }
 
-        let handle = try FileHandle(forWritingTo: fileURL)
-        defer { try? handle.close() }
-        try handle.seekToEnd()
+        // O3: 复用缓存句柄，避免每条日志都 open/seek/close。
+        // 句柄在 actor 内串行访问；rotate 时已 close 并清缓存，这里会重新打开。
+        let handle: FileHandle
+        if let cached = writeHandles[source] {
+            handle = cached
+        } else {
+            let newHandle = try FileHandle(forWritingTo: fileURL)
+            try newHandle.seekToEnd()
+            writeHandles[source] = newHandle
+            handle = newHandle
+        }
         try handle.write(contentsOf: data)
     }
 }

@@ -28,6 +28,9 @@ final class PrivilegedLauncherTests: XCTestCase {
         // 那会连正在执行本命令、命令行里也含内核路径的 shell 一起杀掉，导致配置写不进、内核读到 EOF。
         XCTAssertTrue(script.contains("pgrep -x sing-box"))
         XCTAssertFalse(script.contains("pkill -f"))
+        // 路径匹配用 grep -F（固定字符串），不用 case glob——规避路径含 * ? [ 等 glob 元字符。
+        XCTAssertTrue(script.contains("grep -F"))
+        XCTAssertFalse(script.contains("case \"$("))
     }
 
     func testStopCommandRechecksProcessCommandBeforeSendingInterrupt() throws {
@@ -40,6 +43,9 @@ final class PrivilegedLauncherTests: XCTestCase {
         XCTAssertTrue(script.contains("/bin/kill -INT 42"))
         XCTAssertTrue(script.contains("Kong'\\\\''s App"))
         XCTAssertTrue(script.contains("exit 64"))
+        // stop 同样用 grep -F 做固定字符串匹配。
+        XCTAssertTrue(script.contains("grep -F"))
+        XCTAssertFalse(script.contains("case \"$process\""))
         XCTAssertThrowsError(try PrivilegedCommandBuilder.stop(
             pid: 1,
             binaryURL: URL(fileURLWithPath: "/tmp/sing-box")

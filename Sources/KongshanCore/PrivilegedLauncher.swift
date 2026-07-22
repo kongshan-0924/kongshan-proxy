@@ -131,9 +131,14 @@ public enum PrivilegedCommandBuilder {
         // 导致配置写不进 FIFO、内核只读到 EOF（decode config at /dev/stdin: EOF）。
         // 再对每个同名进程核对可执行路径，只杀我们自己的，绝不误伤别的 sing-box。
         // 只有真的杀掉了残留内核才 sleep 1 等路由/utun 释放；没有残留（常态）就不白等这 1 秒。
+        //
+        // 路径匹配用 grep -F（固定字符串），不用 case glob——若路径里含 * ? [ 等 glob 元字符，
+        // case 模式会被当通配符解释，导致匹配错位或漏匹配。grep -F 永远按字面量比较。
+        let rawPath = shellQuote(binaryURL.path)
         let cleanup = "killed=0; for p in $(/usr/bin/pgrep -x sing-box 2>/dev/null); do "
-            + "case \"$(/bin/ps -p \"$p\" -o command= 2>/dev/null)\" in "
-            + "*\(binary)*) /bin/kill -INT \"$p\" 2>/dev/null; killed=1 ;; esac; done; "
+            + "cmd=$(/bin/ps -p \"$p\" -o command= 2>/dev/null); "
+            + "if /usr/bin/printf '%s' \"$cmd\" | /usr/bin/grep -F -- \(rawPath) >/dev/null 2>&1; then "
+            + "/bin/kill -INT \"$p\" 2>/dev/null; killed=1; fi; done; "
             + "[ \"$killed\" = 1 ] && /bin/sleep 1 || true"
         let command = [
             "umask 077",
@@ -152,11 +157,15 @@ public enum PrivilegedCommandBuilder {
             throw PrivilegedLauncherError.invalidPID(String(pid))
         }
 
+        // 与 start 保持一致：用 resolvingSymlinksInPath 解析符号链接，
+        // 与 init 中存储的 binaryPath 完全对齐，避免 ps 输出（已解析）与模式不一致。
+        // 同样用 grep -F 做固定字符串匹配，规避路径含 glob 元字符的边缘情况。
+        let resolvedPath = shellQuote(binaryURL.standardizedFileURL.resolvingSymlinksInPath().path)
         let command = [
             "umask 077",
             "export PATH=/usr/bin:/bin:/usr/sbin:/sbin",
             "process=$(/bin/ps -p \(pid) -o command=)",
-            "case \"$process\" in *\(shellQuote(binaryURL.standardizedFileURL.path))*) /bin/kill -INT \(pid) ;; *) /bin/echo 'kongshan: refusing to stop an unexpected process' >&2; exit 64 ;; esac"
+            "if /usr/bin/printf '%s' \"$process\" | /usr/bin/grep -F -- \(resolvedPath) >/dev/null 2>&1; then /bin/kill -INT \(pid); else /bin/echo 'kongshan: refusing to stop an unexpected process' >&2; exit 64; fi"
         ].joined(separator: "; ")
         return appleScript(command: command)
     }

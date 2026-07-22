@@ -104,12 +104,17 @@ public enum ClashSubscriptionConverter {
         )
     }
 
-    /// 由订阅 ID + 节点名（+ 同名序号）推导确定性 UUID（SHA-256 前 16 字节，
-    /// 按 RFC 4122 撥版本/变体位）。同一订阅刷新前后同名节点拿到同一个 ID。
+    /// 由订阅 ID + 节点名（+ 同名序号）推导确定性 UUID：取 SHA-256 前 16 字节，
+    /// 按 RFC 4122 拨版本/变体位。同一订阅刷新前后同名节点拿到同一个 ID。
+    ///
+    /// 注意：严格意义上这不是合法的 UUID v5——RFC 4122 v5 规定用 SHA-1，这里用 SHA-256。
+    /// 之所以选 SHA-256：CryptoKit 没有内置 SHA-1，引入会多一个依赖；
+    /// 而 UUID 在本项目里只用作稳定 ID，不需要跨系统互操作，所以采用「自定义确定性 UUID」
+    /// （合法的 UUID 格式 + 确定性派生），版本位设成 5 只是为了表明"基于名字哈希"的语义。
     static func stableNodeID(sourceID: UUID, name: String, occurrence: Int) -> UUID {
         let material = "\(sourceID.uuidString)|\(name)|\(occurrence)"
         var digest = [UInt8](SHA256.hash(data: Data(material.utf8)))
-        digest[6] = (digest[6] & 0x0F) | 0x50   // 版本 5 风格
+        digest[6] = (digest[6] & 0x0F) | 0x50   // 版本 5 风格（基于名字哈希）
         digest[8] = (digest[8] & 0x3F) | 0x80   // RFC 4122 变体
         return UUID(uuid: (
             digest[0], digest[1], digest[2], digest[3],

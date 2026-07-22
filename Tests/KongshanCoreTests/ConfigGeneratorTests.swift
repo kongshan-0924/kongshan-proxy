@@ -58,6 +58,23 @@ final class ConfigGeneratorTests: XCTestCase {
         XCTAssertFalse(text.contains("51909"))
         XCTAssertNil((root["experimental"] as? [String: Any])?["clash_api"])
         XCTAssertEqual(((root["inbounds"] as? [[String: Any]])?.first)?["listen_port"] as? Int, 51_080)
+
+        // 节点凭据同样必须脱敏：用户把 config.json 贴群/发 issue 时不能泄漏。
+        // nodes 里各协议的密码 / uuid / obfs-password 必须替换为 <redacted>。
+        // 注意：outbound 的 tag 字段（"node-<uuid>"）本身含 UUID 字符串，是节点标识不是凭据，
+        // 不应被脱敏；所以这里只检查凭据字段本身，不检查整个文本是否含 UUID 子串。
+        XCTAssertFalse(text.contains("c2VjcmV0"))
+        XCTAssertFalse(text.contains("\"mask\""))
+        XCTAssertTrue(text.contains("<redacted>"))
+
+        let outbounds = try XCTUnwrap(root["outbounds"] as? [[String: Any]])
+        let ss = try XCTUnwrap(outbounds.first { $0["tag"] as? String == "node-00000000-0000-0000-0000-000000000001" })
+        XCTAssertEqual(ss["password"] as? String, "<redacted>")
+        let vmess = try XCTUnwrap(outbounds.first { $0["tag"] as? String == "node-00000000-0000-0000-0000-000000000003" })
+        XCTAssertEqual(vmess["uuid"] as? String, "<redacted>")
+        let hy = try XCTUnwrap(outbounds.first { $0["tag"] as? String == "node-00000000-0000-0000-0000-000000000004" })
+        let obfs = try XCTUnwrap(hy["obfs"] as? [String: Any])
+        XCTAssertEqual(obfs["password"] as? String, "<redacted>")
     }
 
     func testRejectsEmptyNodeList() {

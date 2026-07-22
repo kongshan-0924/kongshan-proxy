@@ -93,10 +93,11 @@ final class RuleSetServiceTests: XCTestCase {
 
         XCTAssertEqual(result.warnings.count, 2)
         XCTAssertEqual(try Data(contentsOf: result.ruleSets.geositeCN), Data("valid-old".utf8))
-        XCTAssertEqual(recorder.values, [
-            Data("invalid-new".utf8), Data("valid-old".utf8),
-            Data("invalid-new".utf8), Data("valid-old".utf8)
-        ])
+        // 并发下载（O2）后验证顺序不再确定：两个规则集各产生「下载验证 + 缓存验证」两次，
+        // 共 4 次。只校验集合与次数，不锁顺序。
+        XCTAssertEqual(recorder.values.count, 4)
+        XCTAssertEqual(recorder.values.filter { $0 == Data("invalid-new".utf8) }.count, 2)
+        XCTAssertEqual(recorder.values.filter { $0 == Data("valid-old".utf8) }.count, 2)
     }
 
     func testInvalidCacheIsNotUsedAfterDownloadFailure() async throws {
@@ -113,10 +114,15 @@ final class RuleSetServiceTests: XCTestCase {
             _ = try await service.prepare(includeAds: false, forceRefresh: true)
             XCTFail("Expected unusable cache failure")
         } catch {
-            XCTAssertTrue(error.localizedDescription.contains("geosite-cn"))
-            XCTAssertTrue(error.localizedDescription.contains("缓存"))
+            // 并发下哪个规则集先抛错不确定，接受 geosite-cn 或 geoip-cn。
+            let message = error.localizedDescription
+            XCTAssertTrue(message.contains("geosite-cn") || message.contains("geoip-cn"))
+            XCTAssertTrue(message.contains("缓存"))
         }
-        XCTAssertEqual(recorder.values, [Data("invalid-old".utf8)])
+        // 并发下两个规则集都可能在校验缓存时记录一次（取消是协作式的，第二个
+        // 任务可能已经走到 validator 调用）。校验：至少一次、且全是 invalid-old。
+        XCTAssertGreaterThanOrEqual(recorder.values.count, 1)
+        XCTAssertTrue(recorder.values.allSatisfy { $0 == Data("invalid-old".utf8) })
     }
 
     func testFailureWithoutCacheIsReported() async throws {
@@ -132,8 +138,10 @@ final class RuleSetServiceTests: XCTestCase {
             _ = try await service.prepare(includeAds: false, forceRefresh: true)
             XCTFail("Expected missing cache failure")
         } catch {
-            XCTAssertTrue(error.localizedDescription.contains("geosite-cn"))
-            XCTAssertTrue(error.localizedDescription.contains("缓存"))
+            // 并发下哪个规则集先抛错不确定，接受 geosite-cn 或 geoip-cn。
+            let message = error.localizedDescription
+            XCTAssertTrue(message.contains("geosite-cn") || message.contains("geoip-cn"))
+            XCTAssertTrue(message.contains("缓存"))
         }
     }
 

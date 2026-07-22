@@ -61,6 +61,14 @@ private final class ProcessExecution: @unchecked Sendable {
         process.standardInput = inputPipe
         process.standardOutput = outputPipe
         process.standardError = errorPipe
+        // 强制子进程用英文 locale：networksetup 在中文系统下会把"无 bypass domains"
+        // 之类的提示本地化成中文，导致 SystemProxyCommands.bypassDomains 与
+        // SystemDNSCommands.servers 的英文文案匹配失败，把中文提示当成域名/服务器写回系统。
+        // LANG/LC_ALL=en_US.UTF-8 让 networksetup 等工具稳定输出英文。
+        var env = ProcessInfo.processInfo.environment
+        env["LANG"] = "en_US.UTF-8"
+        env["LC_ALL"] = "en_US.UTF-8"
+        process.environment = env
     }
 
     func run() async throws -> ProcessResult {
@@ -111,10 +119,10 @@ private final class ProcessExecution: @unchecked Sendable {
 
         let processID = process.processIdentifier
         continuation?.resume(throwing: ProcessRunnerError.timedOut)
-        process.terminate()
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.2) {
-            if kill(processID, 0) == 0 { kill(processID, SIGKILL) }
-        }
+        // 超时路径下子进程已不可信任（死循环 / hang 住），SIGTERM 的优雅清理窗口无意义。
+        // 直接 SIGKILL 立即回收，省掉旧实现的 0.2s asyncAfter 等待。
+        // process.terminate() 内部也是发 SIGTERM，超时场景下多半无效，这里直接走 SIGKILL。
+        if kill(processID, 0) == 0 { kill(processID, SIGKILL) }
     }
 
     private func complete(_ result: Result<ProcessResult, Error>) {

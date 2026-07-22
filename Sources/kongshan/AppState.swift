@@ -261,6 +261,12 @@ final class AppState {
     @ObservationIgnored private var monitoredCorePID: Int32?
     @ObservationIgnored private var crashRestartLimiter = CrashRestartLimiter()
     @ObservationIgnored private var isHandlingCoreCrash = false
+    /// 崩溃自愈期间用户点 stop 的中止信号。handleUnexpectedCoreExit 在每个 await 之后检查，
+    /// 若置位则不再恢复 .on 状态、不再 arm 监控，让 stop() 接管清理。
+    @ObservationIgnored private var stopRequestedDuringCrashHandling = false
+    /// 切节点等高频操作的落盘防抖任务。500ms 内的多次切节点只触发一次磁盘写入，
+    /// 避免连续点选节点时每次都同步落盘 settings.json。退出前 flush 确保最后一次选择不丢。
+    @ObservationIgnored private var persistSettingsTask: Task<Void, Never>?
 
     init(
         storage: Storage = Storage(),
@@ -451,7 +457,7 @@ final class AppState {
             warnings.append(contentsOf: prepared.warnings)
             mark("规则集")
             let runtime = try runtimeFactory()
-            let config = try await generateConfiguration(
+            let (config, configWarnings) = try await generateConfiguration(
                 runtime: runtime,
                 ruleSets: prepared.ruleSets,
                 routingSettings: routingSettings,
@@ -460,6 +466,7 @@ final class AppState {
                 tunSettings: tunSettings,
                 dnsSettings: dnsSettings
             )
+            warnings.append(contentsOf: configWarnings)
             mark("生成")
             try await writeDiagnosticConfig(config)
             mark("落盘")
@@ -543,7 +550,13 @@ final class AppState {
     }
 
     func stop() async {
-        guard !isBusy, status != .off else { return }
+        // 崩溃自愈期间 isBusy 包含 .starting，旧实现的 guard 会直接 return，用户点停止无响应。
+        // 这里特殊放行：置位 stopRequestedDuringCrashHandling 让 handleUnexpectedCoreExit 中止，
+        // 然后继续走正常 stop 流程（还原系统代理 / DNS、停内核）。
+        if isHandlingCoreCrash {
+            stopRequestedDuringCrashHandling = true
+        }
+        guard !isBusy || isHandlingCoreCrash, status != .off else { return }
         let stoppingModes = activeModes
         // 内核可能在「未接管」状态下运行（测速用），此时没有模式但仍要停进程。
         guard !stoppingModes.isEmpty || runtime != nil else {
@@ -632,6 +645,8 @@ final class AppState {
     }
 
     func prepareForTermination() async -> Bool {
+        // 退出前先冲掉未完成的防抖落盘（用户切节点后 500ms 内退出会丢最后一次选择）。
+        await flushPersistSettingsIfNeeded()
         if !activeModes.isEmpty {
             await stop()
             return status == .off
@@ -1106,7 +1121,9 @@ final class AppState {
             selectedNodeID = node.id
         }
         // 组选择要落盘，否则重启后按策略分流的选择全部回退。
-        try? await persistSettings()
+        // 切节点是高频操作（用户连续点选多个节点试延迟），用 debounce 合并 500ms 内的多次落盘。
+        // 立即生效靠 Clash API 的 select 已经发出；落盘只关乎重启后恢复，延迟 500ms 无感知。
+        schedulePersistSettingsDebounced()
         if isPrimaryPick, status == .on {
             connectivity = [:]
             Task { await probeConnectivity() }
@@ -1117,8 +1134,11 @@ final class AppState {
         await select(optionName: node.name, in: group)
     }
 
+    /// 默认在「主组」里挑节点：有机场组时主组是机场的轮辐主组（如 TAGSS），
+    /// 没有时退到内置「手动选择」。直接硬编码"手动选择"会在机场组模式下 404——
+    /// ConfigGenerator 在有机场组时根本不生成「手动选择」出站。
     func select(_ node: ProxyNode) async {
-        await select(optionName: node.name, in: "手动选择")
+        await select(optionName: node.name, in: primaryGroupName ?? "手动选择")
     }
 
     /// 开启接管后实测当前节点到固定目标的延迟。走 Clash API 的 delay 接口，
@@ -1204,20 +1224,27 @@ final class AppState {
 
     // MARK: - 连接监控
 
-    /// 连接监控页出现时开始轮询连接详情；离开时停止（省得没人看还在拉）。
+    /// 连接监控页出现时订阅 WebSocket 推送；离开时停止（取消订阅释放 socket）。
+    /// 旧实现用 1.5s 轮询 GET /connections，每次都建 HTTP 请求 + 全量解析；
+    /// 改用 WebSocket 推送后由内核按 1s 间隔主动推，省掉轮询请求，对笔记本电池更友好。
     func startConnectionsMonitoring() {
         guard connectionsTask == nil else { return }
         connectionsTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self, let client = self.clashAPIClient, self.status == .on else {
-                    self?.connections = []
                     try? await Task.sleep(for: .seconds(1.5))
                     continue
                 }
-                if let snapshot = try? await client.connectionsSnapshot() {
-                    self.connections = snapshot.sorted { ($0.download + $0.upload) > ($1.download + $1.upload) }
+                do {
+                    let stream = await client.connectionDetailsStream()
+                    for try await details in stream {
+                        guard !Task.isCancelled else { break }
+                        self.connections = details.sorted { ($0.download + $0.upload) > ($1.download + $1.upload) }
+                    }
+                } catch {
+                    // 流断开（内核重启 / 网络抖动）：等一会再重订。
+                    try? await Task.sleep(for: .seconds(1.5))
                 }
-                try? await Task.sleep(for: .seconds(1.5))
             }
         }
     }
@@ -1418,7 +1445,7 @@ final class AppState {
             let oldSettings = routingSettings
             let prepared = try await ruleSetService.prepare(includeAds: settings.blockAds, mirror: ruleSetSettings.mirror, allowsNetwork: ruleSetSettings.autoUpdate)
             warnings.append(contentsOf: prepared.warnings)
-            let newConfig = try await generateConfiguration(
+            let (newConfig, configWarnings) = try await generateConfiguration(
                 runtime: runtime,
                 ruleSets: prepared.ruleSets,
                 routingSettings: settings,
@@ -1427,6 +1454,7 @@ final class AppState {
                 tunSettings: tunSettings,
                 dnsSettings: dnsSettings
             )
+            warnings.append(contentsOf: configWarnings)
             let check = try await singBoxProcess.check(config: newConfig)
             guard check.exitCode == 0 else {
                 throw AppStateError.coreCheckFailed(check.stderr)
@@ -1512,7 +1540,7 @@ final class AppState {
 
             let prepared = try await ruleSetService.prepare(includeAds: routingSettings.blockAds, mirror: ruleSetSettings.mirror, allowsNetwork: ruleSetSettings.autoUpdate)
             warnings.append(contentsOf: prepared.warnings)
-            let newConfig = try await generateConfiguration(
+            let (newConfig, configWarnings) = try await generateConfiguration(
                 runtime: runtime,
                 ruleSets: prepared.ruleSets,
                 routingSettings: routingSettings,
@@ -1521,6 +1549,7 @@ final class AppState {
                 tunSettings: requestedSettings,
                 dnsSettings: dnsSettings
             )
+            warnings.append(contentsOf: configWarnings)
             let check = try await singBoxProcess.check(config: newConfig)
             guard check.exitCode == 0 else {
                 throw AppStateError.coreCheckFailed(check.stderr)
@@ -1573,7 +1602,7 @@ final class AppState {
 
             let prepared = try await ruleSetService.prepare(includeAds: routingSettings.blockAds, mirror: ruleSetSettings.mirror, allowsNetwork: ruleSetSettings.autoUpdate)
             warnings.append(contentsOf: prepared.warnings)
-            let newConfig = try await generateConfiguration(
+            let (newConfig, configWarnings) = try await generateConfiguration(
                 runtime: runtime,
                 ruleSets: prepared.ruleSets,
                 routingSettings: routingSettings,
@@ -1582,6 +1611,7 @@ final class AppState {
                 tunSettings: tunSettings,
                 dnsSettings: settings
             )
+            warnings.append(contentsOf: configWarnings)
             let check = try await singBoxProcess.check(config: newConfig)
             guard check.exitCode == 0 else {
                 throw AppStateError.coreCheckFailed(check.stderr)
@@ -1783,6 +1813,27 @@ final class AppState {
             )),
             to: settingsURL
         )
+    }
+
+    /// 切节点等高频操作 500ms 防抖落盘。立即生效靠 Clash API 的 select 已发出；
+    /// 落盘只关乎重启后恢复——延迟 500ms 用户无感知，但能避免连续点选时每次都同步 IO。
+    private func schedulePersistSettingsDebounced() {
+        persistSettingsTask?.cancel()
+        persistSettingsTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled, let self else { return }
+            self.persistSettingsTask = nil
+            try? await self.persistSettings()
+        }
+    }
+
+    /// 退出前调用：取消未完成的防抖并立即落盘，确保最后一次切节点不丢。
+    private func flushPersistSettingsIfNeeded() async {
+        if persistSettingsTask != nil {
+            persistSettingsTask?.cancel()
+            persistSettingsTask = nil
+            try? await persistSettings()
+        }
     }
 
     private func persistRoutingSettings() async throws {
@@ -2094,7 +2145,7 @@ final class AppState {
         outboundMode: OutboundMode,
         tunSettings: TunSettings,
         dnsSettings: DNSSettings
-    ) async throws -> Data {
+    ) async throws -> (Data, [String]) {
         // 只用当前生效配置里的节点与它自带的策略组来生成配置。
         var scoped = routingSettings
         scoped.policyGroups = activeConfigPolicyGroups
@@ -2115,7 +2166,8 @@ final class AppState {
             groupDefaults: resolvedGroupDefaults()
         )
         // 生成 + JSON 编码大配置（几百出站、上千规则）很吃 CPU，放后台线程，别卡住主线程 UI。
-        return try await Task.detached { try ConfigGenerator.generate(input) }.value
+        let result = try await Task.detached { try ConfigGenerator.generateWithWarnings(input) }.value
+        return (result.config, result.warnings)
     }
 
     /// 写一份脱敏的 config.json 供排查用。脱敏要解析+重编码整份配置，也放后台线程，不卡 UI。
@@ -2211,7 +2263,11 @@ final class AppState {
         }
 
         isHandlingCoreCrash = true
-        defer { isHandlingCoreCrash = false }
+        defer {
+            isHandlingCoreCrash = false
+            // 清掉中止信号，避免泄漏到下一次崩溃自愈。
+            stopRequestedDuringCrashHandling = false
+        }
         await cancelCoreExitMonitoring()
         suspendDashboardMonitoring()
         suspendLogMonitoring()
@@ -2232,16 +2288,33 @@ final class AppState {
             let restartedPID: Int32
             if modes.contains(.tun) {
                 try await privilegedLauncher.recoverIfNeeded()
+                // 用户可能在此 await 期间点了 stop。
+                if stopRequestedDuringCrashHandling { return }
                 let record = try await privilegedLauncher.start(config: config)
                 try await healthVerifier(client)
                 restartedPID = record.pid
             } else {
                 try await singBoxProcess.start(config: config)
+                if stopRequestedDuringCrashHandling {
+                    // 已起内核但用户要停：把刚起的内核停掉，让 stop() 的清理路径接手。
+                    try? await singBoxProcess.stop()
+                    return
+                }
                 try await healthVerifier(client)
                 guard let pid = await singBoxProcess.currentPID else {
                     throw AppStateError.missingRuntimeState
                 }
                 restartedPID = pid
+            }
+
+            // 二次检查：start/healthVerify 期间用户可能点了 stop。
+            if stopRequestedDuringCrashHandling {
+                if modes.contains(.tun) {
+                    try? await privilegedLauncher.stop()
+                } else {
+                    try? await singBoxProcess.stop()
+                }
+                return
             }
 
             activeModes = modes
@@ -2251,6 +2324,7 @@ final class AppState {
             resumeDashboardMonitoringIfNeeded()
             resumeLogMonitoringIfNeeded()
         } catch {
+            if stopRequestedDuringCrashHandling { return }
             await finishCoreCrash(
                 modes: modes,
                 message: "内核崩溃后自动重启失败：\(error.localizedDescription)"

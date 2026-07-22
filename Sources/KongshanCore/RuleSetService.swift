@@ -131,33 +131,76 @@ public actor RuleSetService {
         forceRefresh: Bool = false
     ) async throws -> RuleSetPreparationResult {
         try await storage.prepare()
+
+        // 三个规则集并发下载 + 校验：旧实现串行 await，首次启动无缓存时累积延迟。
+        // 并发后总时间≈最慢的那个，而不是三个之和。缓存命中路径不变（直接 return）。
+        // 之所以能并发：prepare 是 nonisolated static，loader/validator/storage 都是 Sendable，
+        // 不会被 RuleSetService actor mailbox 串行化。
+        var resources = [Self.geositeCN, Self.geoipCN]
+        if includeAds { resources.append(Self.ads) }
+
+        var collected: [(tag: String, url: URL, warnings: [String])] = []
+        try await withThrowingTaskGroup(of: (String, URL, [String]).self) { [storage, loader, validator] group in
+            for resource in resources {
+                group.addTask {
+                    let (url, warnings) = try await Self.prepare(
+                        resource,
+                        mirror: mirror,
+                        allowsNetwork: allowsNetwork,
+                        forceRefresh: forceRefresh,
+                        storage: storage,
+                        loader: loader,
+                        validator: validator
+                    )
+                    return (resource.tag, url, warnings)
+                }
+            }
+            // withThrowingTaskGroup：任一子任务抛错就整体抛，行为与旧串行 try 一致。
+            for try await item in group { collected.append(item) }
+        }
+
         var warnings: [String] = []
+        var geositeURL: URL?
+        var geoipURL: URL?
+        var adsURL: URL?
+        for item in collected {
+            if !item.warnings.isEmpty {
+                warnings.append(contentsOf: item.warnings)
+            }
+            switch item.tag {
+            case Self.geositeCN.tag: geositeURL = item.url
+            case Self.geoipCN.tag: geoipURL = item.url
+            case Self.ads.tag: adsURL = item.url
+            default: break
+            }
+        }
 
-        let geositeCN = try await prepare(Self.geositeCN, mirror: mirror, allowsNetwork: allowsNetwork, forceRefresh: forceRefresh, warnings: &warnings)
-        let geoipCN = try await prepare(Self.geoipCN, mirror: mirror, allowsNetwork: allowsNetwork, forceRefresh: forceRefresh, warnings: &warnings)
-        let ads = includeAds
-            ? try await prepare(Self.ads, mirror: mirror, allowsNetwork: allowsNetwork, forceRefresh: forceRefresh, warnings: &warnings)
-            : nil
-
+        guard let geositeCN = geositeURL, let geoipCN = geoipURL else {
+            throw RuleSetServiceError.unavailable(tag: "core", reason: "核心规则集缺失")
+        }
         return RuleSetPreparationResult(
-            ruleSets: PreparedRuleSets(geositeCN: geositeCN, geoipCN: geoipCN, ads: ads),
+            ruleSets: PreparedRuleSets(geositeCN: geositeCN, geoipCN: geoipCN, ads: adsURL),
             warnings: warnings
         )
     }
 
-    private func prepare(
+    /// 单个规则集的下载 + 校验 + 缓存。nonisolated 以便外层并发调用。
+    /// 缓存优先：非强制刷新时，只要本地已有该规则集就直接用，绝不在启动路径上等网络。
+    /// 缓存是写入时校验过的（且 sing-box check 启动前还会再校验一次整份配置），这里不重复校验以省时间。
+    private static func prepare(
         _ resource: Resource,
         mirror: RuleSetMirror,
         allowsNetwork: Bool,
         forceRefresh: Bool,
-        warnings: inout [String]
-    ) async throws -> URL {
+        storage: Storage,
+        loader: @escaping Loader,
+        validator: @escaping Validator
+    ) async throws -> (URL, [String]) {
         let cacheURL = storage.rootDirectory.appending(path: "rule-sets/\(resource.tag).srs")
-        // 缓存优先：非强制刷新时，只要本地已有该规则集就直接用，绝不在启动路径上等网络。
-        // 缓存是写入时校验过的（且 sing-box check 启动前还会再校验一次整份配置），这里不重复校验以省时间。
         if !forceRefresh, FileManager.default.fileExists(atPath: cacheURL.path) {
-            return cacheURL
+            return (cacheURL, [])
         }
+        var warnings: [String] = []
         do {
             guard allowsNetwork else {
                 throw RuleSetServiceError.unavailable(tag: resource.tag, reason: "无缓存且自动更新已关闭")
@@ -184,7 +227,7 @@ public actor RuleSetService {
                 )
             }
             try await storage.writeAtomically(download.data, to: cacheURL)
-            return cacheURL
+            return (cacheURL, warnings)
         } catch {
             guard (try? await storage.readIfPresent(from: cacheURL)) != nil else {
                 throw RuleSetServiceError.unavailable(tag: resource.tag, reason: error.localizedDescription)
@@ -198,7 +241,7 @@ public actor RuleSetService {
                 )
             }
             warnings.append("规则集 \(resource.tag) 更新失败，继续使用最后成功缓存：\(error.localizedDescription)")
-            return cacheURL
+            return (cacheURL, warnings)
         }
     }
 

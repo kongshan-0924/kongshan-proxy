@@ -153,9 +153,17 @@ public actor SystemDNSManager {
         try await restoreFromDisk()
     }
 
-    /// 网络服务集合变化后的补挂：只处理「新出现或 DNS 不再指向我们」的服务，
-    /// 把它们此刻的状态并入快照后再覆盖，保证之后还原时一并复位。
+    /// 网络服务集合变化后的补挂：只处理「DNS 不再包含我们的 hijack 服务器」的服务，
+    /// 把新出现的服务并入快照后再补挂，保证之后还原时一并复位。
     /// 没有活动快照（未接管）时静默返回。
+    ///
+    /// 关键：补挂不覆盖用户在 session 期间手动加的其它 DNS（如 8.8.8.8）。
+    /// 旧实现的 `current.servers != [server]` 判定会在用户加过任何 DNS 后强行改回 `[server]`，
+    /// 静默丢失用户的修改。现在分三种情况：
+    /// 1. `current == [server]`：用户没动，无需补挂，保留快照原值。
+    /// 2. `current` 含 `server` 且有别的服务器：用户加了 DNS → 把加的并入快照（restore 时还原成用户加的），不补挂。
+    /// 3. `current` 不含 `server`：hijack 服务器被移除（新服务或被重置）→ 补挂 `[server] + current`，保留用户已有的服务器；
+    ///    新服务（不在快照里）才并入快照，已存在快照的保留原值（restore 仍写回原始值）。
     public func reassert(server: String) async throws {
         try beginTransaction()
         defer { transactionInProgress = false }
@@ -168,22 +176,53 @@ public actor SystemDNSManager {
         )
         var stale: [String] = []
         var discovered: [DNSServiceSnapshot] = []
+        var refreshedExisting: [DNSServiceSnapshot] = []
         for service in services {
             let current = try await capture(service: service)
-            guard current.servers != [server] else { continue }
-            stale.append(service)
-            if !snapshot.services.contains(where: { $0.name == service }) {
-                discovered.append(current)
-            }
-        }
-        guard !stale.isEmpty else { return }
+            let inSnapshot = snapshot.services.first { $0.name == service }
 
+            if current.servers.contains(server) {
+                // 情况 1 / 2：hijack 仍在。
+                if current.servers != [server] {
+                    // 情况 2：用户在 session 期间加了别的 DNS。把这些并入快照，restore 时还原成用户加的。
+                    // 即便该服务不在原快照里，refreshedExisting 的项也只会被 merged 用同名覆盖，
+                    // 不在 snapshot.services 里的服务本来就走 discovered 路径或不入快照——这里无副作用。
+                    let userAdded = current.servers.filter { $0 != server }
+                    refreshedExisting.append(DNSServiceSnapshot(name: service, servers: userAdded))
+                }
+                // 情况 1：保留快照原值，无需补挂。
+                continue
+            }
+
+            // 情况 3：hijack 服务器被移除。
+            stale.append(service)
+            if inSnapshot == nil {
+                // 新服务：把当前状态（不含 server）并入快照，restore 时还原到这次的状态。
+                discovered.append(DNSServiceSnapshot(name: service, servers: current.servers))
+            }
+            // 已在快照的服务被重置：保留快照原值（不更新），restore 时仍写回原始值。
+        }
+
+        // 合并：snapshot 为基底，refreshedExisting 覆盖同名项（保留用户修改），discovered 追加（新服务）。
+        var merged = snapshot.services.map { existing in
+            refreshedExisting.first { $0.name == existing.name } ?? existing
+        }
+        for entry in discovered where !merged.contains(where: { $0.name == entry.name }) {
+            merged.append(entry)
+        }
+
+        // 即便没有需要补挂的服务，也要持久化合并后的快照（保留用户修改 / 并入新服务）。
         try await persist(DNSRecoverySnapshot(
             capturedAt: snapshot.capturedAt,
-            services: snapshot.services + discovered
+            services: merged
         ))
+        guard !stale.isEmpty else { return }
+
         for service in stale {
-            _ = try await execute(SystemDNSCommands.set(service: service, servers: [server]))
+            // server 放最前；保留用户已有的服务器（current 不含 server，所以直接拼）。
+            let existing = try await capture(service: service).servers
+            let combined = existing.isEmpty ? [server] : [server] + existing
+            _ = try await execute(SystemDNSCommands.set(service: service, servers: combined))
         }
     }
 

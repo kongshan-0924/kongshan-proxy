@@ -177,7 +177,7 @@ public actor ClashAPIClient {
         return rawConnections.map(ConnectionDetail.init(payload:))
     }
 
-    public func delay(
+    public nonisolated func delay(
         node: String,
         testURL: URL,
         timeoutMilliseconds: Int = 5_000
@@ -213,6 +213,9 @@ public actor ClashAPIClient {
         while start < nodes.count {
             let end = min(start + limit, nodes.count)
             let batch = Array(nodes[start..<end])
+            // delay 是 nonisolated，子任务可以真正并发执行 URLSession 请求，
+            // 不会被 actor mailbox 串行化（旧实现里 delay 是 actor 方法，
+            // limit=8 的"并发"实际退化成 8 个请求并发但响应处理排队）。
             await withTaskGroup(of: (String, DelayResult).self) { group in
                 for node in batch {
                     group.addTask { [self] in
@@ -259,6 +262,24 @@ public actor ClashAPIClient {
         }
     }
 
+    /// 连接详情的 WebSocket 推送流。监控页用它替代 1.5s 轮询：
+    /// 推送由内核按 `interval` 主动发，省掉客户端的轮询请求 + 减少 UI 抖动。
+    public func connectionDetailsStream(intervalMilliseconds: Int = 1000) -> AsyncThrowingStream<[ConnectionDetail], Error> {
+        guard let request = webSocketRequest(
+            path: ["connections"],
+            queryItems: [URLQueryItem(name: "interval", value: String(intervalMilliseconds))]
+        ) else {
+            return failedStream(ClashAPIError.invalidResponse)
+        }
+        return decodeStream(request) { data in
+            guard let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let connections = payload["connections"] as? [[String: Any]] else {
+                throw ClashAPIError.invalidPayload
+            }
+            return connections.map(ConnectionDetail.init(payload:))
+        }
+    }
+
     public func logStream(level: CoreLogLevel) -> AsyncThrowingStream<CoreLogEntry, Error> {
         guard let request = webSocketRequest(
             path: ["logs"],
@@ -276,15 +297,15 @@ public actor ClashAPIClient {
         }
     }
 
-    private func request(path: [String]) -> URLRequest {
+    private nonisolated func request(path: [String]) -> URLRequest {
         authenticatedRequest(url: url(path: path))
     }
 
-    private func url(path: [String]) -> URL {
+    private nonisolated func url(path: [String]) -> URL {
         path.reduce(controller) { partial, component in partial.appending(path: component) }
     }
 
-    private func webSocketRequest(
+    private nonisolated func webSocketRequest(
         path: [String],
         queryItems: [URLQueryItem] = []
     ) -> URLRequest? {
@@ -339,13 +360,13 @@ public actor ClashAPIClient {
         }
     }
 
-    private func authenticatedRequest(url: URL) -> URLRequest {
+    private nonisolated func authenticatedRequest(url: URL) -> URLRequest {
         var request = URLRequest(url: url)
         request.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
         return request
     }
 
-    private func perform(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+    private nonisolated func perform(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw ClashAPIError.invalidResponse }
         guard (200...299).contains(http.statusCode) else {
@@ -371,6 +392,7 @@ public actor ClashAPIClient {
                             continuation.yield(Data(text.utf8))
                         @unknown default:
                             continuation.finish(throwing: ClashAPIError.invalidPayload)
+                            socket.cancel(with: .goingAway, reason: nil)
                             return
                         }
                     }
@@ -383,6 +405,10 @@ public actor ClashAPIClient {
                     } else {
                         continuation.finish(throwing: error)
                     }
+                    // 错误路径也要显式 cancel socket：onTermination 只在 consumer 终止流时触发，
+                    // 若 consumer 已停止迭代但未显式 finish（如 AsyncThrowingStream 被丢弃），
+                    // socket 会滞留。这里幂等地 cancel 一下，确保资源释放。
+                    socket.cancel(with: .goingAway, reason: nil)
                 }
             }
             continuation.onTermination = { @Sendable _ in

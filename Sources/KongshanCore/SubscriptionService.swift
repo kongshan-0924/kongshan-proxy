@@ -167,18 +167,29 @@ public actor SubscriptionService {
                 suggestedName: Self.suggestedName(from: download)
             )
         } catch {
+            let refreshError = error
+            // 缓存兜底：网络失败或新 YAML 解析失败时，若缓存可读且能解析，沿用缓存。
+            // 这里区分「缓存也解析失败」——旧实现用 try? 把缓存解析错误吞掉，
+            // 抛出的 refreshFailedWithoutCache 只带 refreshError，用户看不到缓存也坏了。
+            // 改成显式 try，缓存解析失败时把两路错误都报给用户。
             if let cachedData = try? await storage.readIfPresent(from: storage.cacheURL(for: subscription)),
-               let yaml = String(data: cachedData, encoding: .utf8),
-               let conversion = try? ClashSubscriptionConverter.convert(yaml: yaml, sourceID: subscription.id) {
-                return SubscriptionRefreshResult(
-                    nodes: conversion.nodes,
-                    warnings: conversion.warnings + ["订阅更新失败，继续使用缓存：\(error.localizedDescription)"],
-                    usedCache: true,
-                    policyGroups: conversion.policyGroups,
-                    subscriptionRules: conversion.subscriptionRules
-                )
+               let yaml = String(data: cachedData, encoding: .utf8) {
+                do {
+                    let conversion = try ClashSubscriptionConverter.convert(yaml: yaml, sourceID: subscription.id)
+                    return SubscriptionRefreshResult(
+                        nodes: conversion.nodes,
+                        warnings: conversion.warnings + ["订阅更新失败，继续使用缓存：\(refreshError.localizedDescription)"],
+                        usedCache: true,
+                        policyGroups: conversion.policyGroups,
+                        subscriptionRules: conversion.subscriptionRules
+                    )
+                } catch let cacheError {
+                    throw SubscriptionServiceError.refreshFailedWithoutCache(
+                        "\(refreshError.localizedDescription)（缓存解析也失败：\(cacheError.localizedDescription)）"
+                    )
+                }
             }
-            throw SubscriptionServiceError.refreshFailedWithoutCache(error.localizedDescription)
+            throw SubscriptionServiceError.refreshFailedWithoutCache(refreshError.localizedDescription)
         }
     }
 }

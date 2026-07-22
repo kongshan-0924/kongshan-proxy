@@ -87,12 +87,16 @@ public actor SingBoxProcess {
         try inputPipe.fileHandleForWriting.close()
     }
 
-    public func restart(config: Data) throws {
-        stop()
+    public func restart(config: Data) async throws {
+        await stop()
         try start(config: config)
     }
 
-    public func stop() {
+    /// 停止内核。把 waitUntilExit 放到 Task.detached 里 await，避免阻塞 actor mailbox。
+    /// 旧实现里 waitUntilExit 同步阻塞，若 sing-box 不响应 SIGINT，
+    /// actor 会阻塞 2.2 秒（到 SIGKILL），期间 isRunning/currentPID/restart 等全部排队，
+    /// 崩溃自愈路径里这会拖长恢复时间。
+    public func stop() async {
         guard let process else { return }
         stopping = true
         let processID = process.processIdentifier
@@ -103,7 +107,7 @@ public actor SingBoxProcess {
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.2) {
             if kill(processID, 0) == 0 { kill(processID, SIGKILL) }
         }
-        process.waitUntilExit()
+        await Task.detached { [process] in process.waitUntilExit() }.value
         clearStreams()
         self.process = nil
         stopping = false

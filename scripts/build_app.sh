@@ -5,7 +5,8 @@ project_dir=${0:A:h:h}
 cd "$project_dir"
 
 zsh scripts/fetch_sing_box.sh
-swift build -c release --arch arm64
+# 本机环境沙盒被禁用（sandbox-exec: Operation not permitted），必须显式 --disable-sandbox。
+SWIFTPM_ENABLE_SANDBOX=NO swift build -c release --arch arm64 --disable-sandbox
 
 # 版本号：VERSION 文件是唯一来源，每次构建自增修订号（x.y.Z）。
 # 用 KONGSHAN_KEEP_VERSION=1 可跳过自增（重出同一版时用）。
