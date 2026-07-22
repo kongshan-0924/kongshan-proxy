@@ -93,11 +93,14 @@ func extractClientIdentity(connfd: Int32) -> HelperClientIdentity? {
 
     // §5.1 校验签名有效 + identifier == clientSigningIdentifier。
     // 用 requirement 一次性校验；失败则 signatureValid=false（纯函数据此拒绝）。
+    // 修复 D2：别丢弃 SecRequirementCreateWithString 返回值——它失败时 requirement 为 nil，
+    // SecCodeCheckValidityWithErrors(nil) 只验"签名有效"不验 identifier → 不安全（任意 identifier 都过）。
+    // 失败按拒绝处理：reqCreated=false → signatureValid=false。
     var requirement: SecRequirement?
     let reqString = "identifier \"\(HelperConstants.clientSigningIdentifier)\""
-    _ = SecRequirementCreateWithString(reqString as CFString, [], &requirement)
+    let reqCreated = (SecRequirementCreateWithString(reqString as CFString, [], &requirement) == errSecSuccess)
     let checkStatus = SecCodeCheckValidityWithErrors(code, [], requirement, nil)
-    let signatureValid = (checkStatus == errSecSuccess)
+    let signatureValid = reqCreated && (checkStatus == errSecSuccess)
 
     // 取签名信息：identifier + cdhash（kSecCodeInfoUnique）。
     // SecCodeCopySigningInformation 需要 SecStaticCode，先由 guest code 转换。
@@ -117,16 +120,15 @@ func extractClientIdentity(connfd: Int32) -> HelperClientIdentity? {
     }
 
     // §5.1 取对端可执行路径，须 == trust.clientExecutablePath。
-    // SecCodeCopyPath 只接受 SecStaticCode；运行进程的 SecCode 用 proc_pidpath 取可执行路径更直接。
+    // 修复 D2：路径从签名校验/签名信息用的同一 SecStaticCode 取（SecCodeCopyPath），
+    // 别再 proc_pidpath(裸 LOCAL_PEERPID)——消除"socket → PID → path"的裸 PID 往返
+    //（PID 与签名链路无关，且有竞态）。取不到 staticCode 或路径 → executablePath=nil
+    // → 纯函数 isTrusted 因路径不匹配拒绝（拒绝优先）。
     var executablePath: String?
-    let peerPIDValue = peerPID(connfd: connfd)
-    if peerPIDValue > 0 {
-        var pathBuf = [CChar](repeating: 0, count: Int(MAXPATHLEN))
-        let pathLen = proc_pidpath(peerPIDValue, &pathBuf, UInt32(MAXPATHLEN))
-        if pathLen > 0 {
-            let nullIndex = pathBuf.firstIndex(of: 0) ?? pathBuf.count
-            let pathString = String(decoding: pathBuf[0..<nullIndex].map { UInt8(bitPattern: $0) }, as: UTF8.self)
-            executablePath = URL(fileURLWithPath: pathString).resolvingSymlinksInPath().path
+    if let staticCode {
+        var pathURL: CFURL?
+        if SecCodeCopyPath(staticCode, [], &pathURL) == errSecSuccess, let pathURL {
+            executablePath = (pathURL as URL).resolvingSymlinksInPath().path
         }
     }
 
