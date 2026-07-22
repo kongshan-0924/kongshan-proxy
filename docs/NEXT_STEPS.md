@@ -1,10 +1,10 @@
 # 下一步
 
-## 当前最高优先级：0.1.21 人工界面确认
+## 当前最高优先级：0.1.22 固定侧边栏按钮
 
-1. 打开已运行的 0.1.21，在仪表盘、设置及其他页面确认标题栏始终只有一个 macOS 原生侧栏按钮。
-2. 点击该按钮，确认侧栏可以隐藏并重新显示。
-3. 用户验收通过后，再把 `fix/sidebar-toggle` 合并到 main；验收前保持分支和 worktree 不动。
+1. 用户复核 `docs/superpowers/specs/2026-07-22-fixed-sidebar-toggle-position-design.md`。
+2. 按 RED→GREEN 实施唯一固定左上角按钮，构建并安装 0.1.22。
+3. 人工确认各页面按钮唯一、展开/折叠不移动；通过后再把 `fix/sidebar-toggle` 合并到 main。
 
 ## 🔴🔴 真凶已修（0.1.18）：SS 缺 obfs 插件 → 能测速却打不开网站
 - 机场 342 节点全是 `ss + plugin:obfs`，旧转换器没解析 plugin → 生成裸 SS → 服务器要 obfs 混淆 → 裸连 TCP 通(测速有值)但传不了数据 → 全部国外站不可达。0.1.18 已解析 obfs→sing-box `obfs-local`。
