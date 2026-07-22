@@ -1,14 +1,14 @@
 # 项目交接
 
-## 2026-07-22 双侧栏按钮修复设计
+## 2026-07-22 双侧栏按钮修复（0.1.21）
 
-- 已完成：确认重复按钮由 0.1.20 自定义紧凑侧栏按钮与系统原生按钮叠加造成；用户已确认只保留原生按钮。
-- 修改文件：新增 `docs/superpowers/specs/2026-07-22-single-sidebar-toggle-design.md`，产品代码尚未修改。
-- 测试结果：仅完成根因诊断与方案确认。
-- 当前状态：设计待复核，随后进入 TDD 实施。
-- 风险/注意事项：修复会删除图标紧凑侧栏，但保留 macOS 原生显示/隐藏行为。
-- 下一步：写实施计划，补窗口级回归测试，删除自定义实现和 AppDelegate 清理逻辑。
-- 接手方式：不要用延时重试删除 toolbar item；直接回归原生 `NavigationSplitView`。
+- 已完成：删除 0.1.20 新增的自定义紧凑侧栏按钮，只保留 `NavigationSplitView` 原生按钮；同时删除 AppDelegate 中依赖时序的系统按钮清理。
+- 修改文件：`MainWindowView.swift`、`KongshanApp.swift`、新增 `MainWindowToolbarTests.swift`，并更新设计、计划和全部项目记录。
+- 测试结果：回归检查先命中 4 处重复机制（RED），修改后定向 1/1、App 48/48、全量 171 项（1 项既有快照跳过）0 失败；`verify_m4.sh` 通过，平均 CPU 0.000%，最大 RSS 107,168 KB；0.1.21 DMG 校验有效。
+- 当前状态：修复位于 `fix/sidebar-toggle`，产物为该 worktree 的 `dist/kongshan-0.1.21.dmg`；等待合并回 main 并安装人工确认。
+- 风险/注意事项：命令行 XCTest 不暴露 SwiftUI 标题栏按钮，不能伪造窗口计数；自动测试改锁死“无自定义按钮/无时序删除”架构，最终视觉仍需打开打包 App 核对。
+- 下一步：合并到 main，生成主工作区产物并人工确认仪表盘、设置及其他页面都只有一个按钮。
+- 接手方式：保持原生侧栏显示/隐藏，不要重新增加紧凑图标侧栏或延时删除 toolbar item。
 
 - 已完成：M1–M4 代码与自动交付；M4 包含 Dashboard、日志、双 DoH、订阅自动更新、SMAppService、崩溃自愈和一键性能/残留验收。
 - 修改文件：最终新增 `verify_m4.sh`、README、M4 acceptance，并更新第三方声明、计划和全部接力记录；功能代码基线为 `46fe328`。

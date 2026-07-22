@@ -1038,3 +1038,13 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 - 风险/注意事项：移除紧凑图标侧栏功能，保留原生完整侧栏的显示/隐藏；不使用延时清理或私有 API。
 - 下一步：编写最小实施计划，按 RED→GREEN 修改并重打包。
 - 下一位 Agent 如何接手：先读本设计，测试应验证真实窗口只有一个原生侧栏切换项；不要修改代理/TUN 路径。
+
+## 2026-07-22 双侧栏按钮修复实施（0.1.21）
+
+- 已完成：按用户批准方案移除自定义紧凑侧栏、紧凑行/状态布局、`.toolbar(removing: .sidebarToggle)` 和 AppDelegate 的两次时序清理，只保留系统原生侧栏按钮。
+- 修改文件：`Sources/kongshan/MainWindowView.swift`、`Sources/kongshan/KongshanApp.swift`、新增 `Tests/KongshanAppTests/MainWindowToolbarTests.swift`，更新设计、计划、版本与项目记录。
+- 测试结果：回归检查在旧代码上 4 个断言 RED，修复后定向 1/1、App 48/48、全量 171 项（1 项既有快照跳过）0 失败；`verify_m4.sh` 最终输出通过，平均 CPU 0.000%、最大 RSS 107,168 KB；`hdiutil verify` 确认 23 MB 的 0.1.21 DMG 有效。
+- 当前状态：分支 `fix/sidebar-toggle` 已生成 `dist/kongshan.app` 0.1.21 和 `dist/kongshan-0.1.21.dmg`，尚未合并/安装。
+- 风险/注意事项：CLI XCTest 的 SwiftUI Scene 工具栏不可见，真实窗口测试得到 0 项而非产品截图中的 2 项，因此改为架构回归检查；打包 App 的按钮数量和点击行为仍保留为人工验收。
+- 下一步：按 finishing 流程合并回 main，在主工作区重出 0.1.21 并人工打开仪表盘/设置核对。
+- 下一位 Agent 如何接手：不要恢复 `isSidebarCompact`、自定义 navigation ToolbarItem 或 `removeSystemSidebarToggle`；如需紧凑侧栏，应先设计与原生按钮互斥的新方案。

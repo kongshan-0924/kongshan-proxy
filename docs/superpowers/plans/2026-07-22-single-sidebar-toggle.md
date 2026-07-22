@@ -4,7 +4,7 @@
 
 **Goal:** Remove the duplicate sidebar toolbar button and retain only the native macOS `NavigationSplitView` toggle.
 
-**Architecture:** Revert the custom compact-sidebar layer added in 0.1.20 and rely on SwiftUI/AppKit's native sidebar presentation. A real-window regression test counts both the native toolbar item and the custom tooltip-based item so the current duplicate fails and the native-only implementation passes.
+**Architecture:** Revert the custom compact-sidebar layer added in 0.1.20 and rely on SwiftUI/AppKit's native sidebar presentation. The regression test locks the native-only source invariant; CLI XCTest does not expose SwiftUI Scene titlebar items, so final packaged-window appearance remains a manual check.
 
 **Tech Stack:** Swift 6, SwiftUI, AppKit, XCTest, Swift Package Manager.
 
@@ -15,47 +15,17 @@
 **Files:**
 - Create: `Tests/KongshanAppTests/MainWindowToolbarTests.swift`
 
-- [ ] **Step 1: Write the failing real-window test**
+- [x] **Step 1: Write the failing regression test**
 
-```swift
-import AppKit
-import XCTest
-@testable import kongshan
+The implemented test reads the two production source files and rejects `isSidebarCompact`, the custom navigation `ToolbarItem`, `.toolbar(removing: .sidebarToggle)`, and `removeSystemSidebarToggle`. This replaced the planned window count after three fixture attempts proved CLI XCTest exposes zero SwiftUI titlebar items.
 
-@MainActor
-final class MainWindowToolbarTests: XCTestCase {
-    func testMainWindowHasExactlyOneSidebarToggle() throws {
-        let existingWindows = Set(NSApp.windows.map(ObjectIdentifier.init))
-        let delegate = KongshanAppDelegate()
-        delegate.showMainWindow()
-        RunLoop.current.run(until: Date().addingTimeInterval(1))
-
-        let window = try XCTUnwrap(NSApp.windows.first {
-            !existingWindows.contains(ObjectIdentifier($0)) && $0.title == "kongshan"
-        })
-        defer { window.close() }
-
-        let sidebarItems = (window.toolbar?.items ?? []).filter { item in
-            item.itemIdentifier == .toggleSidebar ||
-                item.toolTip?.contains("侧边栏") == true ||
-                item.toolTip?.contains("边栏") == true
-        }
-        XCTAssertEqual(
-            sidebarItems.count,
-            1,
-            "窗口只能保留一个侧栏按钮：\(sidebarItems.map { $0.itemIdentifier.rawValue })"
-        )
-    }
-}
-```
-
-- [ ] **Step 2: Run the focused test and verify RED**
+- [x] **Step 2: Run the focused test and verify RED**
 
 Run: `swift test --filter MainWindowToolbarTests/testMainWindowHasExactlyOneSidebarToggle`
 
 Expected: FAIL because the real window contains the native toggle plus the 0.1.20 custom compact-sidebar toolbar item.
 
-- [ ] **Step 3: Commit the regression test**
+- [x] **Step 3: Commit the regression test**
 
 ```bash
 git add Tests/KongshanAppTests/MainWindowToolbarTests.swift
@@ -68,7 +38,7 @@ git commit -m "test: reproduce duplicate sidebar buttons"
 - Modify: `Sources/kongshan/MainWindowView.swift:4-130`
 - Modify: `Sources/kongshan/KongshanApp.swift:55-88`
 
-- [ ] **Step 1: Remove custom compact-sidebar state and branches**
+- [x] **Step 1: Remove custom compact-sidebar state and branches**
 
 In `MainWindowView`, remove `isSidebarCompact`, `sidebarRowCompact`, the custom navigation `ToolbarItem`, `.toolbar(removing: .sidebarToggle)`, and all conditional widths/status layouts. Keep the native structure:
 
@@ -98,7 +68,7 @@ NavigationSplitView {
 
 Restore `sidebarStatus` to one non-conditional `HStack(spacing: 8)` with 14-point horizontal padding.
 
-- [ ] **Step 2: Delete the timing-dependent AppKit cleanup**
+- [x] **Step 2: Delete the timing-dependent AppKit cleanup**
 
 In `KongshanAppDelegate.showMainWindow()`, remove both `removeSystemSidebarToggle(from:)` calls. Delete the method entirely:
 
@@ -106,19 +76,19 @@ In `KongshanAppDelegate.showMainWindow()`, remove both `removeSystemSidebarToggl
 private func removeSystemSidebarToggle(from window: NSWindow) { ... }
 ```
 
-- [ ] **Step 3: Run the focused test and verify GREEN**
+- [x] **Step 3: Run the focused test and verify GREEN**
 
 Run: `swift test --filter MainWindowToolbarTests/testMainWindowHasExactlyOneSidebarToggle`
 
 Expected: PASS with exactly one native `.toggleSidebar` item.
 
-- [ ] **Step 4: Run the app test target**
+- [x] **Step 4: Run the app test target**
 
 Run: `swift test --filter KongshanAppTests`
 
 Expected: all app tests pass; snapshot test may report its existing environment-based skip.
 
-- [ ] **Step 5: Commit the minimal product fix**
+- [x] **Step 5: Commit the minimal product fix**
 
 ```bash
 git add Sources/kongshan/MainWindowView.swift Sources/kongshan/KongshanApp.swift
@@ -135,13 +105,13 @@ git commit -m "fix(ui): keep one native sidebar toggle"
 - Modify: `docs/progress/SESSION_LOG.md`
 - Create: `dist/kongshan-0.1.21.dmg` (ignored build artifact)
 
-- [ ] **Step 1: Run full automated verification**
+- [x] **Step 1: Run full automated verification**
 
 Run: `zsh scripts/verify_m4.sh`
 
 Expected: all Swift tests pass, release app is arm64 and strictly ad-hoc signed, idle checks pass, final line is `M4 automated verification passed`. The build script advances `VERSION` from 0.1.20 to 0.1.21.
 
-- [ ] **Step 2: Build and verify the DMG**
+- [x] **Step 2: Build and verify the DMG**
 
 Run: `zsh scripts/make_dmg.sh`
 
@@ -151,7 +121,7 @@ Run: `hdiutil verify dist/kongshan-0.1.21.dmg`
 
 Expected: exit 0 and `verified successfully`.
 
-- [ ] **Step 3: Update durable project records**
+- [x] **Step 3: Update durable project records**
 
 Record the root cause, deleted custom implementation, RED/GREEN result, full verification result, artifact version, remaining manual visual check, and exact handoff instructions in all four project record files.
 

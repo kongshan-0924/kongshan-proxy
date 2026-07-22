@@ -14,7 +14,7 @@
 
 - `MainWindowView.swift`：删除 `isSidebarCompact`、自定义 toolbar、紧凑行和相关条件布局，恢复单一完整侧栏。
 - `KongshanApp.swift`：删除 `removeSystemSidebarToggle` 及其调用，让系统按钮正常存在。
-- 测试：使用真实 `NSWindow` + `NSHostingView` 布局后检查窗口工具栏中只有一个侧栏切换项。
+- 测试：锁死主窗口不再声明自定义侧栏 ToolbarItem、紧凑状态或 AppKit 时序清理；命令行 XCTest 不暴露 SwiftUI Scene 标题栏，打包 App 的单按钮结果保留人工视觉确认。
 
 不修改 AppState、代理内核、系统代理、TUN、订阅或持久化逻辑。
 
