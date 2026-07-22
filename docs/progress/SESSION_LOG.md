@@ -1138,3 +1138,12 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 - 风险/注意事项：废纸篓中的旧版本未永久删除，可恢复；用户验收前不要清理 worktree 或合并 main。
 - 下一步：用户验收；通过后执行本地合并、合并后全量测试与 worktree 清理。
 - 下一位 Agent 如何接手：先读取本节和 HANDOFF 顶部；只有收到“验收通过”才进入 main 合并流程。
+## 2026-07-22 网络可观测与控制增强：设计与实施计划
+
+- 已完成：基于用户清单核对仪表盘、节点、连接 WebSocket、测速、process_name 路由、托盘监控与持久化现状；将重复的出口连通性/出口 IP 合并成一套出口诊断；确定使用 Mullvad 公开连接检查接口并采用 DNS 三态启发式结论；建立独立分支 `codex/network-observability-batch`。
+- 修改文件：新增 `docs/superpowers/specs/2026-07-22-network-observability-and-control-design.md`、`docs/superpowers/plans/2026-07-22-network-observability-and-control.md`；追加本记录。
+- 测试结果：本阶段仅设计与只读代码/API 核验，尚未修改生产代码；实测 Mullvad `/json` 返回 IP/城市/国家/组织，`/config` 返回 DNS 唯一域名，唯一小写 UUID 查询返回解析器列表。
+- 当前状态：需求边界、数据结构、UI 落点、错误/隐私策略和 9 阶段 TDD 计划已固定；上一版侧边栏修复完整保留。
+- 风险/注意事项：DNS 泄漏无法靠 IP 相等作绝对判断，成品文案必须保持“未发现明显泄漏/可能泄漏/无法判断”；第三方检测失败不可当作泄漏；用户验收前禁止合并 main。
+- 下一步：按 RED→GREEN 实现出口诊断模型、服务和仪表盘卡。
+- 下一位 Agent 如何接手：在当前 worktree/分支先运行 `swift test` 基线，然后从计划 Task 1 开始，严格先写失败测试。
