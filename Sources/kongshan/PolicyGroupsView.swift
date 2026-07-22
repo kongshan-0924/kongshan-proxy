@@ -6,6 +6,8 @@ import SwiftUI
 struct PolicyGroupsView: View {
     @Environment(AppState.self) private var state
     @State private var selectedGroupName: String?
+    @State private var searchText = ""
+    @State private var sortOption: NodeSortOption = .defaultOrder
 
     private var currentGroup: PolicyGroup {
         let groups = state.displayPolicyGroups
@@ -108,30 +110,97 @@ struct PolicyGroupsView: View {
 
     // MARK: - 右列：成员
 
-    private var nodeColumn: some View {
-        ScrollView {
-            let options = state.groupOptions(currentGroup)
-            if options.isEmpty {
-                ContentUnavailableView(
-                    "当前配置没有节点",
-                    systemImage: "tray",
-                    description: Text("请先在「配置」页导入订阅并设为生效。")
-                )
-                .frame(maxWidth: .infinity, minHeight: 260)
-            } else {
-                if !isSelectable {
-                    hintBanner("「\(currentGroup.name)」由内核按测速自动选路，无法手动指定。")
+    private var processedOptions: [GroupOption] {
+        let options = state.groupOptions(currentGroup)
+        var result = options
+
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !query.isEmpty {
+            result = result.filter { option in
+                switch option {
+                case let .node(node):
+                    return node.name.localizedCaseInsensitiveContains(query)
+                        || node.server.localizedCaseInsensitiveContains(query)
+                case let .reference(name):
+                    return name.localizedCaseInsensitiveContains(query)
                 }
-                LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 190), spacing: 12)],
-                    spacing: 12
-                ) {
-                    ForEach(options) { option in
-                        optionCard(option)
-                    }
-                }
-                .padding(18)
             }
+        }
+
+        switch sortOption {
+        case .defaultOrder:
+            break
+        case .nameAscending:
+            result.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        case .latencyAscending:
+            result.sort { opt1, opt2 in
+                delayValue(for: opt1) < delayValue(for: opt2)
+            }
+        }
+        return result
+    }
+
+    private func delayValue(for option: GroupOption) -> Int {
+        guard case let .node(node) = option else { return 999_999 }
+        guard let delay = state.delays[node.id] else { return 888_888 }
+        guard let ms = delay else { return 999_000 }
+        return ms
+    }
+
+    private var nodeColumn: some View {
+        VStack(spacing: 0) {
+            // 工具条：搜索框 + 排序菜单
+            HStack(spacing: 10) {
+                SearchField(text: $searchText, placeholder: "搜索节点或域名…")
+                    .frame(maxWidth: 260)
+                Spacer()
+                Menu {
+                    Picker("排序", selection: $sortOption) {
+                        ForEach(NodeSortOption.allCases) { opt in
+                            Label(opt.rawValue, systemImage: opt.symbol).tag(opt)
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: sortOption.symbol)
+                        Text(sortOption.rawValue)
+                    }
+                    .font(.caption)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+
+            Divider()
+
+            ScrollView {
+                let options = processedOptions
+                if options.isEmpty {
+                    ContentUnavailableView(
+                        searchText.isEmpty ? "当前配置没有节点" : "未匹配到相关节点",
+                        systemImage: searchText.isEmpty ? "tray" : "magnifyingglass",
+                        description: Text(searchText.isEmpty ? "请先在「配置」页导入订阅并设为生效。" : "请尝试搜索其他关键字。")
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 240)
+                } else {
+                    if !isSelectable {
+                        hintBanner("「\(currentGroup.name)」由内核按测速自动选路，无法手动指定。")
+                    }
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 190), spacing: 12)],
+                        spacing: 12
+                    ) {
+                        ForEach(options) { option in
+                            optionCard(option)
+                        }
+                    }
+                    .padding(18)
+                }
+            }
+            .scrollIndicators(.hidden)
         }
     }
 

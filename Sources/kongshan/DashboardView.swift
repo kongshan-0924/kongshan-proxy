@@ -7,20 +7,68 @@ struct DashboardView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            PageHeader(title: "仪表盘", subtitle: nil) {
-                HStack(spacing: 8) {
-                    Picker("出站模式", selection: outboundModeBinding) {
-                        ForEach(OutboundMode.allCases, id: \.self) { mode in
-                            Text(mode.displayName).tag(mode)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .controlSize(.small)
-                    .frame(width: 180)
-                    .help(state.outboundMode.detail)
-                    .disabled(state.isBusy || !state.isReady)
+            PageHeader(title: "仪表盘", subtitle: "系统状态与实时网络流量监控")
 
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    heroControlCard
+                    coreOnlyBanner
+                    metrics
+                    trafficChart
+
+                    if state.nodes.isEmpty {
+                        ContentUnavailableView(
+                            "还没有节点",
+                            systemImage: "point.3.connected.trianglepath.dotted",
+                            description: Text("请在“配置”页导入 Clash 订阅或添加手动 Hysteria2。")
+                        )
+                        .frame(maxWidth: .infinity, minHeight: 150)
+                    }
+                }
+                .padding(.horizontal, 22)
+                .padding(.bottom, 22)
+            }
+            .scrollIndicators(.hidden)
+        }
+        .pageBackground()
+        .navigationTitle("仪表盘")
+        .onAppear { state.startDashboardMonitoring() }
+        .onDisappear { state.stopDashboardMonitoring() }
+    }
+
+    // MARK: - Hero 控制面板
+
+    private var heroControlCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 14) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(state.statusTint)
+                            .frame(width: 9, height: 9)
+                        Text(state.statusText)
+                            .font(.system(size: 16, weight: .bold))
+                    }
+                    if let selected = state.selectedNode {
+                        HStack(spacing: 6) {
+                            Text("节点:")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(selected.name)
+                                .font(.caption.weight(.medium))
+                                .lineLimit(1)
+                            ProtocolTag(value: selected.protocolType)
+                        }
+                    } else {
+                        Text("未启用或未选择节点")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Spacer()
+
+                HStack(spacing: 10) {
                     ModePill(
                         title: ProxyMode.systemProxy.displayName,
                         isActive: state.activeModes.contains(.systemProxy),
@@ -38,29 +86,42 @@ struct DashboardView: View {
                 }
             }
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    coreOnlyBanner
-                    metrics
-                    trafficChart
+            Divider()
 
-                    if state.nodes.isEmpty {
-                        ContentUnavailableView(
-                            "还没有节点",
-                            systemImage: "point.3.connected.trianglepath.dotted",
-                            description: Text("请在“节点”页导入 Clash 订阅或添加手动 Hysteria2。")
-                        )
-                        .frame(maxWidth: .infinity, minHeight: 150)
+            HStack(spacing: 12) {
+                Text("分流模式:")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Picker("出站模式", selection: outboundModeBinding) {
+                    ForEach(OutboundMode.allCases, id: \.self) { mode in
+                        Text(mode.displayName).tag(mode)
                     }
                 }
-                .padding(.horizontal, 22)
-                .padding(.bottom, 22)
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .controlSize(.small)
+                .frame(width: 220)
+                .help(state.outboundMode.detail)
+                .disabled(state.isBusy || !state.isReady)
+
+                Spacer()
+
+                if state.isOn {
+                    Button {
+                        Task { await state.stop() }
+                    } label: {
+                        Label("断开全部", systemImage: "power")
+                            .font(.caption.weight(.medium))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red.opacity(0.85))
+                    .controlSize(.small)
+                    .disabled(state.isBusy)
+                }
             }
         }
-        .pageBackground()
-        .navigationTitle("仪表盘")
-        .onAppear { state.startDashboardMonitoring() }
-        .onDisappear { state.stopDashboardMonitoring() }
+        .card(padding: 16)
     }
 
     // MARK: - 指标卡

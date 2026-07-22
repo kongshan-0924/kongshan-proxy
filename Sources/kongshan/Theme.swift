@@ -221,3 +221,54 @@ extension PageHeader where Trailing == EmptyView {
     }
 }
 
+/// 节点排序选项。
+enum NodeSortOption: String, CaseIterable, Identifiable {
+    case defaultOrder = "默认排序"
+    case latencyAscending = "延迟最低"
+    case nameAscending = "名称排序"
+
+    var id: Self { self }
+    var symbol: String {
+        switch self {
+        case .defaultOrder: "arrow.up.arrow.down"
+        case .latencyAscending: "bolt.horizontal"
+        case .nameAscending: "textformat.abc"
+        }
+    }
+}
+
+/// 通用搜索框：带搜索图标与一键清除按钮。
+struct SearchField: View {
+    @Binding var text: String
+    var placeholder: String = "搜索…"
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+            TextField(placeholder, text: $text)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+            if !text.isEmpty {
+                Button {
+                    text = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
+        .overlay(
+            RoundedRectangle(cornerRadius: 7)
+                .strokeBorder(.quaternary.opacity(0.7), lineWidth: 0.5)
+        )
+    }
+}
+
+

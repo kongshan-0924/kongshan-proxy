@@ -5,11 +5,37 @@ import SwiftUI
 /// 支持单条关闭与右上角一键全部关闭。只在本页可见时轮询，离开即停。
 struct ConnectionsView: View {
     @Environment(AppState.self) private var state
+    @State private var searchText = ""
+
+    private var filteredConnections: [ConnectionDetail] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return state.connections }
+        return state.connections.filter { conn in
+            conn.host.localizedCaseInsensitiveContains(query)
+                || (conn.process?.localizedCaseInsensitiveContains(query) ?? false)
+                || conn.rule.localizedCaseInsensitiveContains(query)
+                || conn.chains.contains(where: { $0.localizedCaseInsensitiveContains(query) })
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
+            if state.status == .on && !state.connections.isEmpty {
+                HStack {
+                    SearchField(text: $searchText, placeholder: "搜索目标域名、进程或出站规则…")
+                        .frame(maxWidth: 320)
+                    Spacer()
+                    Text("当前显示 \(filteredConnections.count) / \(state.connections.count) 条")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+                Divider()
+            }
             content
         }
         .pageBackground()
@@ -50,15 +76,26 @@ struct ConnectionsView: View {
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(state.connections) { conn in
-                        row(conn)
-                        Divider()
+            let list = filteredConnections
+            if list.isEmpty {
+                ContentUnavailableView(
+                    "未匹配到相关连接",
+                    systemImage: "magnifyingglass",
+                    description: Text("请尝试搜索其他关键字。")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(list) { conn in
+                            row(conn)
+                            Divider()
+                        }
                     }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 6)
+                .scrollIndicators(.hidden)
             }
         }
     }

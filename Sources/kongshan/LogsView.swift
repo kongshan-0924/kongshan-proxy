@@ -9,6 +9,13 @@ struct LogsView: View {
     @State private var exportDocument: LogExportDocument?
     @State private var showsExporter = false
     @State private var isPreparingExport = false
+    @State private var filterText = ""
+
+    private var filteredLogs: [LiveLogEntry] {
+        let query = filterText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return state.liveLogs }
+        return state.liveLogs.filter { $0.entry.message.localizedCaseInsensitiveContains(query) }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -55,8 +62,11 @@ struct LogsView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .controlSize(.small)
-            .frame(width: 210)
+            .frame(width: 180)
             .disabled(!state.isOn)
+
+            SearchField(text: $filterText, placeholder: "搜索日志关键词…")
+                .frame(maxWidth: 220)
 
             Toggle("暂停自动滚动", isOn: $pausesAutomaticScroll)
                 .toggleStyle(.checkbox)
@@ -64,7 +74,7 @@ struct LogsView: View {
 
             Spacer()
 
-            Text("\(state.liveLogs.count) / \(KernelLogStore.defaultBufferedLineLimit)")
+            Text("\(filteredLogs.count) / \(state.liveLogs.count)")
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.tertiary)
         }
@@ -75,8 +85,9 @@ struct LogsView: View {
     private var logList: some View {
         ScrollViewReader { proxy in
             ScrollView {
+                let logs = filteredLogs
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(state.liveLogs) { item in
+                    ForEach(logs) { item in
                         LogEntryRow(item: item)
                             .id(item.id)
                         Divider().opacity(0.4)
@@ -84,22 +95,23 @@ struct LogsView: View {
                 }
                 .padding(.horizontal, 20)
             }
+            .scrollIndicators(.hidden)
             .background(Color(nsColor: .textBackgroundColor))
             .overlay {
-                if state.liveLogs.isEmpty {
+                if filteredLogs.isEmpty {
                     ContentUnavailableView(
-                        state.isOn ? "等待内核日志" : "代理未启动",
-                        systemImage: "doc.text.magnifyingglass",
+                        filterText.isEmpty ? (state.isOn ? "等待内核日志" : "代理未启动") : "未匹配到相关日志",
+                        systemImage: filterText.isEmpty ? "doc.text.magnifyingglass" : "magnifyingglass",
                         description: Text(
-                            state.isOn
-                                ? "内核产生日志后将实时显示，内存最多保留 2000 行。"
-                                : "开启代理后才会连接实时日志推送。"
+                            filterText.isEmpty
+                                ? (state.isOn ? "内核产生日志后将实时显示，内存最多保留 2000 行。" : "开启代理后才会连接实时日志推送。")
+                                : "请尝试搜索其他关键字。"
                         )
                     )
                 }
             }
             .onChange(of: state.liveLogs.count) {
-                guard !pausesAutomaticScroll, let lastID = state.liveLogs.last?.id else { return }
+                guard !pausesAutomaticScroll, let lastID = filteredLogs.last?.id else { return }
                 proxy.scrollTo(lastID, anchor: .bottom)
             }
         }

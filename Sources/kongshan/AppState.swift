@@ -1232,6 +1232,7 @@ final class AppState {
         connectionsTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self, let client = self.clashAPIClient, self.status == .on else {
+                    self?.connections = []   // 未运行/已停止时清空，避免残留旧连接列表
                     try? await Task.sleep(for: .seconds(1.5))
                     continue
                 }
@@ -1252,6 +1253,7 @@ final class AppState {
     func stopConnectionsMonitoring() {
         connectionsTask?.cancel()
         connectionsTask = nil
+        connections = []   // 离开监控页即清空，下次进入重新拉取
     }
 
     /// 一键关闭全部连接。
