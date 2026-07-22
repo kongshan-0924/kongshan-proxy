@@ -1,6 +1,23 @@
 # 下一步
 
-## 当前最高优先级：修复双侧栏按钮
+## 当前最高优先级：TUN 免密码助手审查与真机验收
+
+1. 维护者安全审查 `feat/tun-passwordless-helper` 分支 4 个提交（2b-5），重点：
+   - §5.1 对端身份校验链路（audit_token → SecCode → identifier+path）是否可绕过。
+   - §1.3 配置是否真经 pipe FD 传、无落盘/无进命令行/环境变量。
+   - §1.4 stopTun 是否只杀自起 PID 且 proc_pidpath 验证。
+   - §1.2 trust.json 缺失/损坏是否一律拒。
+2. 审查通过后合并 `feat/tun-passwordless-helper` → `main`（别推 main，由维护者合）。
+3. 用户真机：重打包（`scripts/build_app.sh`）→ 装 /Applications → 设置→隧道点「安装免密码助手」（osascript 一次授权）→ 开 TUN 验证零弹窗。
+
+## TUN 免密码助手（feat/tun-passwordless-helper 分支，2026-07-22 完成）
+
+- 里程碑 2b-5 已实现并提交（4 条 commit），`swift test` 199 通过 1 跳过 0 失败。
+- 未碰侧栏文件；未在自动化里真安装 daemon（铁律 §1.5）。
+- 真机安装授权由用户点一次；未装时 TUN 仍走 `PrivilegedLauncher`（osascript 兜底，§1.6）。
+- 详见 `docs/HANDOFF.md` 顶部「TUN 免密码特权助手」段与 `docs/progress/SESSION_LOG.md` 2026-07-22 各段。
+
+## 修复双侧栏按钮（另一分支 fix/sidebar-toggle）
 
 1. 按 `docs/superpowers/specs/2026-07-22-single-sidebar-toggle-design.md` 删除自定义紧凑侧栏和时序性系统按钮清理。
 2. 先增加真实窗口回归测试并确认 RED，再修改产品代码转 GREEN。

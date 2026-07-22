@@ -1,5 +1,24 @@
 # 项目交接
 
+## 2026-07-22 TUN 免密码特权助手（feat/tun-passwordless-helper 分支，里程碑 2b-5 完成）
+
+- 已完成：按 `docs/design/tun-passwordless-helper-tasks.md` 实现里程碑 2b-5，4 个独立提交（每里程碑一条）。
+  - 2b helper 安全核心（`Sources/KongshanHelper/main.swift`）：socket 服务 + audit_token 身份校验（纯函数 `HelperTrustEvaluation.isTrusted`）+ startTun 收 SCM_RIGHTS FD 固定 exec 内置 sing-box（exec 前 SecStaticCodeCheckValidity）+ stopTun 只杀自起 PID（proc_pidpath 验证）+ 30s 自愈定时器。
+  - 3 App 客户端 + 接线 + UI：`PrivilegedHelperClient`（actor，符合 `PrivilegedLaunching`，pipe+sendmsg 传 FD）+ `PrivilegedHelperInstaller`（一条 osascript 安装/卸载）+ AppState `tunLauncher`（helper 可达用 helper，否则回退 `privilegedLauncher`）+ 设置→隧道「免密码助手」Section。
+  - 4 打包：`build_app.sh` 拷 `KongshanHelper` → `Contents/MacOS/`、plist 模板 → `Contents/Resources/`；Installer 优先读 .app 内模板（占位符替换），内联兜底。
+  - 5 测试：25 个纯逻辑单测（isTrusted 各拒绝分支/decide 各分发/trust 解码缺失损坏）。
+- 修改文件：新增 `Sources/KongshanCore/PrivilegedHelperClient.swift`、`PrivilegedHelperInstaller.swift`、`Resources/com.kaysen.kongshan.helper.plist`、`Tests/HelperProtocolTests/HelperTrustEvaluationTests.swift`；改 `HelperProtocol.swift`、`KongshanHelper/main.swift`、`PrivilegedLauncher.swift`、`AppState.swift`、`MainWindowView.swift`、`build_app.sh`。
+- 测试结果：`swift build` 通过；`swift test` 199 通过 1 跳过 0 失败（+25）。
+- 当前状态：里程碑 2b-5 代码完成，4 提交在 `feat/tun-passwordless-helper` 分支，未推 main。
+- 风险/注意事项：
+  1. 铁律 §1 全部满足：固定 exec / 拒绝优先 / FD 不落盘 / 只杀自起 / 不在自动化装 daemon / 不弱化兜底。
+  2. 助手安装需用户在真机点一次「安装免密码助手」按钮（osascript 提权一次）；未装时 TUN 仍走 `PrivilegedLauncher`（osascript 每次弹密码）。
+  3. helper ad-hoc 签名，`SecStaticCodeCheckValidity(nil)` 接受；身份校验靠路径+identifier 钉死，默认不钉 cdhash。
+  4. 真机安装授权验收由用户完成；未在自动化里 bootstrap daemon。
+  5. 未碰侧栏文件（侧栏修复在 `fix/sidebar-toggle` 分支）。
+- 下一步：维护者审查（重点 §5.1 身份校验 / §1.3 FD 不落盘 / §1.4 只杀自起）；审查通过后合并 main；用户真机点一次安装授权验收。
+- 接手方式：在 `feat/tun-passwordless-helper` 分支上，先读 `docs/design/tun-passwordless-helper-tasks.md` 和 `docs/design/tun-passwordless-helper.md`；动 helper 安全逻辑前理解 audit_token→SecCode→identifier+path 链路与拒绝优先原则。
+
 ## 2026-07-22 双侧栏按钮修复设计
 
 - 已完成：确认重复按钮由 0.1.20 自定义紧凑侧栏按钮与系统原生按钮叠加造成；用户已确认只保留原生按钮。

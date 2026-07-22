@@ -1,5 +1,11 @@
 # 项目进度
 
+- [x] TUN 免密码特权助手里程碑 2b（feat/tun-passwordless-helper 分支）：helper 安全核心——socket 服务 + audit_token 身份校验纯函数 + startTun 收 SCM_RIGHTS FD 固定 exec 内置 sing-box + stopTun 只杀自起 PID + 30s 自愈（2026-07-22）
+- [x] TUN 免密码特权助手里程碑 3：PrivilegedHelperClient（actor，pipe+sendmsg 传 FD）+ PrivilegedHelperInstaller（一条 osascript 装/卸）+ AppState tunLauncher（helper 可达用 helper 否则回退）+ 设置→隧道「免密码助手」Section（2026-07-22）
+- [x] TUN 免密码特权助手里程碑 4：build_app.sh 打包 KongshanHelper + plist 模板到 .app；Installer 优先读 .app 内模板（占位符替换）（2026-07-22）
+- [x] TUN 免密码特权助手里程碑 5：25 个纯逻辑单测（isTrusted 各拒绝分支/decide 各分发/trust 解码缺失损坏）；swift test 199 通过 1 跳过 0 失败（2026-07-22）
+- [ ] 维护者安全审查（重点 §5.1 身份校验 / §1.3 FD 不落盘 / §1.4 只杀自起）后合并 main
+- [ ] 用户真机点一次「安装免密码助手」按钮授权验收
 - [x] 读取任务文档（2026-07-20）
 - [x] 初始化持久化记录（2026-07-20）
 - [x] 应用名称确定为 `kongshan`（2026-07-20）
