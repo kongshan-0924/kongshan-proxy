@@ -1,5 +1,33 @@
 # 下一步
 
+## 跨分支盘点与合并计划（2026-07-22 最新）
+
+**分支拓扑**（各分支都"落后 main = 0"，即都含 main；main 领先 origin 2 个 docs 提交未推）：
+- `main` 0.1.20（基线）
+- `fix/sidebar-toggle` 0.1.22（双侧栏按钮修复）
+- `codex/network-observability-batch` 0.1.23（⊇ sidebar-toggle；一批新功能：出口 IP/DNS 诊断、节点地区+倍率、实时每连接速率、测速自动选最快、分应用代理、托盘实时速率、配置备份/恢复）
+- **`fix/tun-ipv6-no-route` 0.1.23（当前分支，最全）= ⊇ network-obs + 新增「物理网无全局 IPv6 时不给 TUN 配 IPv6」修复**。即除"免密码助手"外什么都有。
+- `feat/tun-passwordless-helper` 0.1.20（**独立**，不含上面这些；TUN 免密码特权助手，第三轮修复未完，见下）
+
+**建议合并顺序**：
+1. **推 main**（`git push origin main`，2 个 docs 提交，顺手）。
+2. **审 + 合 `fix/tun-ipv6-no-route` → main**：它是超集（含侧栏修复 + 全部 network-obs 功能 + IPv6 修复），一次带进。非安全关键、建议派 subagent 做回归/正确性审查（先 `swift build`/`test` 确认绿），过了 `git checkout main && git merge --ff-only fix/tun-ipv6-no-route && git push`。main→0.1.23。
+3. **删** `fix/sidebar-toggle`、`codex/network-observability-batch`（都被 `fix/tun-ipv6-no-route` 完全包含）。
+4. **（最后）`feat/tun-passwordless-helper`**：先做第三轮 3 条修复 + 重跑安全审查（见下），再合 main。届时 main 已 0.1.23，**会与 network-obs 在 `Sources/kongshan/AppState.swift` + `Sources/kongshan/MainWindowView.swift` 冲突，需手动解**。
+
+## 🔴 TUN 免密码助手 —— 第三轮 3 条修复未完（在 `feat/tun-passwordless-helper` 分支）
+
+> 所有设计/威胁模型/实现/三轮修复清单在 **`feat/tun-passwordless-helper` 分支** 的 `docs/design/tun-passwordless-helper*.md`（**本分支没有这些文件**，别以为丢了）。功能 ~95% 完成，两轮独立安全审查已做。用户已选"由接手方实现第三轮修复(不再交 Codex)"。
+
+**第三轮 3 条（做完 + 重跑安全审查过了即可合并）**：
+1. **C① [阻断·root 提权] sing-box verify→exec TOCTOU**：helper 已迁 root-only，但 sing-box 仍在 bundle(管理员组对 /Applications 可写)。`startSingBox`(KongshanHelper/main.swift)先按路径校验 cdhash、之后按**同一路径** posix_spawn，可被原子替换 → root 执行任意码。**修法：安装时把 sing-box 也拷到 `stateDirectory`(root:wheel 0755，与 helper 同构)，`trust.singBoxExecutablePath` 指向该拷贝** → 路径不可写、TOCTOU 消失。改 `PrivilegedHelperInstaller`(加 sing-box 拷贝) + trust 字段。
+2. **C② [低危] fail-closed**：`computeCDHashHex` 返回 nil 现静默写 null=不钉；`install()` 加 `guard let … else { throw }`。
+3. **N1 [可靠性]**：`startSingBox` 失败(cdhash 不匹配等)不关 `configFD` → 泄漏 + 卡死 App 后台写线程；顶部 `defer { close(configFD) }` / `defer { close(logFD) }`。
+
+**做完后**：`swift build`/`test` 全绿 → **重跑独立对抗式安全审查(重点 C① 是否真消除 TOCTOU)** → 合并。真机验收：设置→隧道→「安装免密码助手」授权一次 → 开 TUN 应零弹窗。
+
+---
+
 ## 当前最高优先级：真机重打包验证 TUN IPv6 修复（fix/tun-ipv6-no-route）
 
 1. 在 `fix/tun-ipv6-no-route` 分支跑 `scripts/build_app.sh` 重打包，安装到 /Applications。
