@@ -1017,3 +1017,14 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 - **DMG 打包**：新增 `scripts/make_dmg.sh`（拖拽安装式：kongshan.app + /Applications 软链，UDZO 压缩）。产出 `dist/kongshan-0.1.19.dmg`（23M，hdiutil verify 通过）。
 - **推送 + 发布**：7 个提交推上 `kongshan-0924/kongshan-proxy`（main 同步）；创建 GitHub Release **v0.1.19**，附 DMG 资产。地址 https://github.com/kongshan-0924/kongshan-proxy/releases/tag/v0.1.19
 - 提醒：ad-hoc 签名，别人首次打开需右键→打开绕 Gatekeeper。
+
+## 2026-07-22 合并两位协作 agent 的工作，统一到 main，发布 0.1.20
+- 排查发现：gemini/main/trae 三分支提交点相同(439f089=0.1.19)，真正差异在**未提交的 worktree 改动**：
+  - **Trae agent**（本 worktree 已暂存）：核心层安全加固+性能（PrivilegedLauncher grep -F、Storage 0700/0600、ConfigGenerator 全凭据脱敏、ProcessRunner 强制 en_US.UTF-8 修中文 networksetup、ClashAPIClient nonisolated 并发测速、RuleSetService 并发下载、KernelLogStore 句柄缓存、SingBoxProcess async）。+457 行，已在 0.1.19 二进制里、170 测试通过。
+  - **Gemini agent**（.worktrees/gemini）：UI 增强（连接/节点/日志搜索、节点排序、仪表盘控制卡、侧栏折叠）。+384 行。
+  - 两人改的文件**不重叠**（Trae=核心，Gemini=界面）。
+- 各起一个 general-purpose subagent **并行审查**两份 diff：均 **SAFE TO MERGE**，无安全/正确性阻断项。Trae 列 6 条低危边缘项、Gemini 列 2 条观感建议。
+- 合并顺序：提交 Trae 核心 → 复制 Gemini 7 个 UI 文件 → 顺手修连接页停止后列表不清空（审查 #3）→ `swift build`+`swift test` 170 通过 → build 0.1.20 + DMG。
+- **统一到 main**：`git branch -f main HEAD` → checkout main → `git worktree remove --force .worktrees/gemini` → 删 gemini/trae 分支 → push。现只剩 main 一个分支/worktree。
+- **只留最新版**：装 0.1.20 到 /Applications；删本地旧 DMG(0.1.19)；GitHub 建 Release v0.1.20、删 v0.1.19(含 tag)；注销所有非 /Applications 的 LaunchServices 残留登记（Trash/已删 worktree/dist）。现系统只认 /Applications/kongshan.app(0.1.20)。
+- 待用户：退出运行中的旧版、重开即 0.1.20。
