@@ -1055,3 +1055,27 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
   3. trust.json 缺失/损坏一律静默断连（不泄露任何信息），与 §1.2 一致。
 - 下一步：里程碑 3（PrivilegedHelperClient + AppState 接线 + 设置→隧道 安装/卸载 UI）。
 - 接手方式：在 `feat/tun-passwordless-helper` 分支继续，每个里程碑单独提交，别推 main，别碰侧栏文件。
+
+## 2026-07-22 — TUN 免密码助手里程碑 3（feat/tun-passwordless-helper 分支）
+
+- 已完成：App 客户端 + AppState 接线 + 设置→隧道 安装/卸载 UI。
+  - §3.1 `Sources/KongshanCore/PrivilegedHelperClient.swift`（新）：actor，符合 `PrivilegedLaunching`。
+    `start(config:)` 用 `pipe()` + `sendmsg`/`SCM_RIGHTS` 传只读 FD（§1.3）；`stop()`/`recoverIfNeeded()`
+    发 stopTun/status；`isReachable()` 非阻塞判定 socket 可连；SO_RCVTIMEO/SO_SNDTIMEO 防 helper 卡死。
+  - §3.1 `Sources/KongshanCore/PrivilegedHelperInstaller.swift`（新）：`install`/`uninstall` 各一条 osascript
+    提权（建 stateDirectory/trust.json/plist + bootstrap；bootout + 删文件）；plist 模板内联（KeepAlive+RunAtLoad，
+    ProgramArguments 指向 .app 内 KongshanHelper）；`currentStatus(isReachable:)` 三态（未装/已装/需重装）。
+  - §3.2 AppState 接线：加 `helperClient` + `helperInstallStatus` + `isHelperOperationInProgress`；
+    `tunLauncher` 计算属性（helper 可达则用 helper，否则回退 `privilegedLauncher`，§1.6 兜底保留）；
+    所有 TUN 启停/恢复调用点改走 `tunLauncher`；`installHelper()`/`uninstallHelper()`/`refreshHelperInstallStatus()`。
+  - §3.3 设置→隧道 加「免密码助手」Section：状态行 + 安装/卸载/重装按钮 + onAppear 刷新。
+  - `PrivilegedLauncher.swift`：`OSAScriptAuthorizer`/`OSAScriptRunner` 改 public 供 AppState 复用提权器。
+- 修改文件：新增 `PrivilegedHelperClient.swift`、`PrivilegedHelperInstaller.swift`；改 `AppState.swift`、
+  `MainWindowView.swift`、`PrivilegedLauncher.swift`。
+- 测试结果：`swift build` 通过；`swift test` 174 通过 1 跳过 0 失败。
+- 当前状态：里程碑 3 完成，4/5 待办。
+- 风险/注意事项：
+  1. `tunLauncher` 每次 TUN 操作前判 `helperClient.isReachable()`（同步 connect 本地 socket，ms 级）。
+  2. 助手安装需 .app 内有 KongshanHelper 可执行（里程碑 4 打包）；未打包时安装按钮会报"找不到 helper"。
+  3. `recoverIfNeeded` 在 helper 模式下：status 显示在跑则 stop（清理上次崩溃残留），与 PrivilegedLauncher 语义对齐。
+- 下一步：里程碑 4（build_app.sh 打包 helper + plist 模板到 .app）。
