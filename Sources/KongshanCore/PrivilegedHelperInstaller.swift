@@ -99,14 +99,20 @@ public enum PrivilegedHelperInstaller {
         // base64 传输：二进制安全、无 shell 转义/注入风险。
         let trustBase64 = trustJSONData.base64EncodedString()
 
-        // plist：模板替换（D1 改 PropertyListSerialization）。指向 root-only helper 拷贝。
-        let plistXML: String
-        if let templateURL = Bundle.main.url(forResource: HelperConstants.daemonLabel, withExtension: "plist"),
-           let template = try? String(contentsOf: templateURL, encoding: .utf8) {
-            plistXML = template.replacingOccurrences(of: "__HELPER_PATH__", with: installedHelperPath)
-        } else {
-            plistXML = plistTemplate(helperPath: installedHelperPath)
-        }
+        // 修复 D1：plist 用 PropertyListSerialization 结构化生成，别字符串插值——
+        // 避免 helper 路径含 XML 元字符时注入 launchd 键。base64 传输（与 trust.json 同）。
+        let plistDict: [String: Any] = [
+            "Label": HelperConstants.daemonLabel,
+            "ProgramArguments": [installedHelperPath],
+            "KeepAlive": true,
+            "RunAtLoad": true
+        ]
+        let plistData = try PropertyListSerialization.data(
+            fromPropertyList: plistDict,
+            format: .xml,
+            options: 0
+        )
+        let plistBase64 = plistData.base64EncodedString()
 
         // 一条 shell 命令完成全部 root 操作。先 bootout 旧实例（若有）再 bootstrap，幂等。
         // 权限（修复 A）：目录 0711（others 可穿越、不可列），socket 0666（others 可连）。
@@ -131,8 +137,8 @@ public enum PrivilegedHelperInstaller {
             "/usr/bin/printf '%s' \(shellQuote(trustBase64)) | /usr/bin/base64 -D > \(shellQuote(HelperConstants.trustConfigPath))",
             "/usr/sbin/chown root:wheel \(shellQuote(HelperConstants.trustConfigPath))",
             "/bin/chmod 600 \(shellQuote(HelperConstants.trustConfigPath))",
-            // plist：root 0644（launchd 需可读）。
-            "/usr/bin/printf '%s' \(shellQuote(plistXML)) > \(shellQuote(plistPath))",
+            // plist：base64 解码写入，root 0644（launchd 需可读）。
+            "/usr/bin/printf '%s' \(shellQuote(plistBase64)) | /usr/bin/base64 -D > \(shellQuote(plistPath))",
             "/usr/sbin/chown root:wheel \(shellQuote(plistPath))",
             "/bin/chmod 644 \(shellQuote(plistPath))",
             // socket 由 helper 自己建（chmod 0666），这里不预建。
@@ -176,29 +182,6 @@ public enum PrivilegedHelperInstaller {
     }
 
     // MARK: - 内部
-
-    /// LaunchDaemon plist 模板。KeepAlive 让 launchd 在 helper 退出/崩溃时重启；
-    /// RunAtLoad 启动时即跑（开机后 helper 自动起，无需 App 先开）。
-    private static func plistTemplate(helperPath: String) -> String {
-        """
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-            <key>Label</key>
-            <string>\(HelperConstants.daemonLabel)</string>
-            <key>ProgramArguments</key>
-            <array>
-                <string>\(helperPath)</string>
-            </array>
-            <key>KeepAlive</key>
-            <true/>
-            <key>RunAtLoad</key>
-            <true/>
-        </dict>
-        </plist>
-        """
-    }
 
     private static func shellQuote(_ value: String) -> String {
         "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
