@@ -69,3 +69,38 @@
 - 继续在 `feat/tun-passwordless-helper` 分支提交，每条修复单独 commit。
 - 别碰侧栏相关文件（另一分支在改）。
 - 拿不准的安全取舍宁可更严（拒绝），并在交接里标出来。
+
+---
+
+# 第三轮（独立安全复审后 · 必修才可合并）
+
+复审裁决：A/B/D1/D2/D3 已正确闭合；C 未完全达成目标——留有真实（竞态门槛）root 提权面。修下面 3 条后即可合并。
+
+## C① [阻断·root 提权] sing-box verify→exec 的 TOCTOU
+
+- **问题**：helper 已迁 root-only，但 sing-box 没迁。`trust.singBoxExecutablePath` 仍指 bundle 内 `Contents/Resources/sing-box`（管理员组对 /Applications 可写）。`startSingBox`（`main.swift`）先 `verifySingBoxSignature(at: url)` 按路径校验 cdhash，之后 `posix_spawn(&pid, url.path, …)` 按**同一路径重新打开执行**。攻击者在校验后、exec 前原子替换该文件（rename 交换）→ root 执行任意二进制。cdhash 钉死只挡静态替换，挡不住 TOCTOU。
+- **修法（与 helper 同构，最干净）**：安装时把 sing-box 也拷到 root-only 位置。
+  - `PrivilegedHelperInstaller`：新增 `installedSingBoxURL = stateDirectory + "/sing-box"`；安装脚本里 `rm -f` + `cp bundledSingBox → installedSingBox` + `chown root:wheel` + `chmod 755`（与 helper 拷贝完全同构，落在 0711 root 目录内）。
+  - `trustConfig.singBoxExecutablePath` 改为 `installedSingBoxURL.path`（root-only 拷贝），不再指 bundle。
+  - cdhash 仍按 bundle 内 sing-box 算并钉死；拷贝是同字节 → cdhash 一致，钉死变冗余但保留无妨。
+  - 说明：sing-box ~20MB，安装时拷一次；sing-box 版本更新后需重装（needsReinstall 已覆盖）。卸载已 `rm -rf stateDirectory`，会一并删掉。
+
+## C② [低危] computeCDHashHex 失败应 fail-closed
+
+- **问题**：`computeCDHashHex` 返回 nil 时无 `guard`，静默写 null → `isCDHashMatched` 对 nil 放行 → 无 pin。出厂 `codesign --deep` 已签名故正常不触发，但签名回归/损坏会静默降级。
+- **修法**：`PrivilegedHelperInstaller.install`：`guard let singBoxCDHashHex = computeCDHashHex(at: bundledSingBoxURL) else { throw …("无法计算 sing-box cdhash，拒绝安装") }`。
+
+## N1 [可靠性] startSingBox 早失败泄漏 configFD + 卡死 App 写线程
+
+- **问题**：`close(configFD)` 只在 `posix_spawn` 之后。若 `verifySingBoxSignature`（cdhash 不匹配）或 `logOpenFailed` 在其之前抛出，configFD 不关 → helper 泄漏 pipe 读端；App 后台写线程（修复 B）填满缓冲后永久阻塞（pipe 无 SO_SNDTIMEO），每次大配置失败累积泄漏。
+- **修法**：`startSingBox` 顶部用 `defer { close(configFD) }`（logFD 打开后 `defer { close(logFD) }`），删掉 spawn 后的显式 close。保证任何抛出路径都关闭；App 侧则得 EPIPE 正常结束。
+
+## N2 [可选·非安全] client start() 早抛泄漏 pipe
+
+- `PrivilegedHelperClient.start`：`pipe()` 后若 `sendFrame` 抛错，readEnd/writeEnd 无人关。加错误路径清理（defer/catch）。App 进程内泄漏，非提权。
+
+## 验收（复审要点）
+- [ ] C①：`singBoxExecutablePath` 指向 root-only 拷贝；bundle 内 sing-box 被换/被 TOCTOU 交换都无法以 root 执行（root-only 路径不可写）。
+- [ ] C②：算不出 cdhash 拒绝安装。
+- [ ] N1：startSingBox 各抛出路径均关 configFD（可加一个"失败不泄漏 fd"的思路说明/测试）。
+- [ ] swift build + test 全绿。维护者重跑安全审查过了才合并 main。
