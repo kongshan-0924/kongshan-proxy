@@ -1,14 +1,14 @@
 # 项目交接
 
-## 2026-07-22 侧边栏按钮固定位置（0.1.22 设计待复核）
+## 2026-07-22 侧边栏按钮固定位置（0.1.22 待用户验收）
 
-- 已完成：0.1.21 解决重复按钮后，人工验收发现系统按钮在折叠时迁到最右侧；用户选择并批准“唯一按钮固定左上角”的纯 SwiftUI 受控分栏方案，书面设计已完成自查。
-- 修改文件：新增 `2026-07-22-fixed-sidebar-toggle-position-design.md`，旧设计标记已被补充修订，并更新项目记录；产品代码尚未修改。
-- 测试结果：可视化选择事件与对话均确认 B；设计无 TBD/TODO，目标、状态、测试和回退完整。
-- 当前状态：`fix/sidebar-toggle` 未合并 main，等待用户复核书面设计后进入实施计划。
-- 风险/注意事项：默认按钮必须在侧栏视图作用域移除；不能恢复 AppKit 延时清理。CLI XCTest 不能替代打包 App 的标题栏人工验收。
-- 下一步：用户确认设计文档后制定计划，按 RED→GREEN 实施并发布 0.1.22。
-- 接手方式：只改 `MainWindowView.swift`、对应回归测试、版本与发布记录；不要动代理/TUN 路径。
+- 已完成：使用受控 `NavigationSplitViewVisibility`，在侧栏作用域移除系统默认按钮，并以唯一 `.navigation` 按钮固定左上角；0.1.22 已完成构建、DMG、单副本安装和真实展开/折叠/恢复检查。
+- 修改文件：`Sources/kongshan/MainWindowView.swift`、`Tests/KongshanAppTests/MainWindowToolbarTests.swift`、`VERSION`、固定位置设计/计划及全部项目记录。
+- 测试结果：回归先 RED 4 处、后 GREEN 1/1；App 48 项和全量 171 项（1 项既有快照跳过）0 失败；M4 平均 CPU 0.000%、最大 RSS 111,280 KB；签名与 DMG 校验通过。
+- 当前状态：`fix/sidebar-toggle` 保持独立，main 仍为 `ec29ab1`；0.1.22/build 122 正从 `/Applications/kongshan.app` 运行，系统只索引这一份 App，唯一 DMG 为主工作区 `dist/kongshan-0.1.22.dmg`。
+- 风险/注意事项：CLI XCTest 不能直接读取真实标题栏；Computer Use 已确认展开/折叠均只有一个左侧按钮并恢复侧栏，最终仍由用户验收。旧 App/DMG 在废纸篓中可恢复。
+- 下一步：用户检查仪表盘、设置及其他页面；明确验收通过后才合并 main。
+- 接手方式：保持分支/worktree，不要在验收前合并或清理；如有视觉问题继续在本分支修。
 
 ## 2026-07-22 双侧栏按钮修复（0.1.21）
 

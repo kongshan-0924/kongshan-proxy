@@ -1128,3 +1128,13 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 - 风险/注意事项：Computer Use 在完成展开/折叠/恢复核心验证后连接中止，未继续逐页自动点击；toolbar 位于 `MainWindowView` 根层，各页面共用，仍由用户作最终验收。
 - 下一步：完成单 App/单 DMG/分支与 main 边界核验，更新四份交接记录；用户通过前不合并 main。
 - 下一位 Agent 如何接手：0.1.22 已安装；先听取用户验收，不通过继续在 `fix/sidebar-toggle` 修，通过后才合并 main。
+
+## 2026-07-22 0.1.22 最终交接核验
+
+- 已完成：按用户指定的 finishing 选择保留 `fix/sidebar-toggle` 及 worktree，完成安装态、单副本、挂载卷、恢复文件和 main 边界的最终核验。
+- 修改文件：更新 `docs/HANDOFF.md`、`docs/PROGRESS.md`、`docs/NEXT_STEPS.md` 与本记录。
+- 测试结果：安装版本 0.1.22/build 122、codesign strict 有效、PID 62714 从 `/Applications/kongshan.app` 运行；Spotlight 仅返回该 App；工作区无其他 `.app`、无 kongshan DMG 挂载，只保留 `dist/kongshan-0.1.22.dmg`；无 sing-box 和三类 recovery 文件。
+- 当前状态：main 保持 `ec29ab1` 未合并；功能分支最新产品提交为 `8baabac`，等待用户验收成品。
+- 风险/注意事项：废纸篓中的旧版本未永久删除，可恢复；用户验收前不要清理 worktree 或合并 main。
+- 下一步：用户验收；通过后执行本地合并、合并后全量测试与 worktree 清理。
+- 下一位 Agent 如何接手：先读取本节和 HANDOFF 顶部；只有收到“验收通过”才进入 main 合并流程。

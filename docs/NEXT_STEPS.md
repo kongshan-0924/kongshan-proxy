@@ -2,9 +2,9 @@
 
 ## 当前最高优先级：0.1.22 固定侧边栏按钮
 
-1. 用户复核 `docs/superpowers/specs/2026-07-22-fixed-sidebar-toggle-position-design.md`。
-2. 按 RED→GREEN 实施唯一固定左上角按钮，构建并安装 0.1.22。
-3. 人工确认各页面按钮唯一、展开/折叠不移动；通过后再把 `fix/sidebar-toggle` 合并到 main。
+1. 用户在已运行的 0.1.22 检查仪表盘、设置及其他页面，确认标题栏始终只有一个左上角按钮。
+2. 连续点击展开/折叠，确认按钮不再迁到最右侧。
+3. 用户明确验收通过后，再把 `fix/sidebar-toggle` 合并到 main；此前保留分支和 worktree。
 
 ## 🔴🔴 真凶已修（0.1.18）：SS 缺 obfs 插件 → 能测速却打不开网站
 - 机场 342 节点全是 `ss + plugin:obfs`，旧转换器没解析 plugin → 生成裸 SS → 服务器要 obfs 混淆 → 裸连 TCP 通(测速有值)但传不了数据 → 全部国外站不可达。0.1.18 已解析 obfs→sing-box `obfs-local`。
