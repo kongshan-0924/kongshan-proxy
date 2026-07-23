@@ -1,6 +1,6 @@
 # 下一步
 
-## ✅ 真机 TUN 浏览器断网已修复：0.1.30 待用户验收
+## ✅ 真机 TUN 已修复 + 已合并 main + 发布 GitHub release v0.1.30（2026-07-23）
 
 ### 已完成
 - 根因定案：系统 DNS 错指 `172.19.0.2`，该地址从 `en0` 去物理网关而非进入 TUN；正确地址是有 `utun LOCAL` 路由的接口自身 `172.19.0.1`。
@@ -9,11 +9,21 @@
 - 两轮真机内核 PID 36946 → 37470，Google Fake-IP 均为 `240.0.0.4`；Google 204、百度 200、GitHub 200，出口 IP `69.63.217.24`。
 - Chrome 与 Safari 两轮均正常打开 Google/百度；系统 DNS 两轮都由应用自动设为 `172.19.0.1`。0.1.30 已安装，TUN 当前开启。
 
-### 下一步
-1. 用户直接验收当前已开启的 `/Applications/kongshan.app` 0.1.30。
-2. 有条件时回原企业多默认网关再开一次 TUN，确认国内外网页与出口仍正确。
-3. 用户明确验收通过后，由维护者复审本分支并决定合并；**当前不合 main**。
-4. 可选：在“设置 → 隧道”安装免密码助手，避免 osascript 每次开关 TUN 都要求密码；这不影响本次网络修复。
+### 已发布（维护者本会话完成）
+- 审核 Codex 修复（正确）→ **squash 合并 main**（安全捕获：含节点真实密码的中间提交未推 origin，squash 丢弃、确认主历史 0 密码）→ 构建 DMG → **GitHub release v0.1.30（Latest）** 含 DMG（SHA-256 `86ad8e0009c811ecd4e447b852bb5c601927fdee4269352c634e42d487c8c353`）。**仅剩 main 一条分支。**
+
+### ⚠️ 唯一待办：一次 force-push（清远程的密码片段）
+- 我的 docs 记录里误留了密码前 8 位片段（**非可用完整密码**），已在**本地 amend 干净**（`3beda05`），但 **origin 上那个提交（`42a9d3c`）还含片段** → 本地与 origin 分叉（领先1/落后1）。
+- **运行这条完成收尾**（force-push 被自动分类器拦、需用户手动执行）：
+  ```
+  cd /Users/kaysen/workspace/mac/代理软件 && git push --force-with-lease origin main
+  ```
+- 跑完 origin 全历史 0 密码片段、本地与 origin 一致。**在此之前别在 main 上新提交后普通 push**（会因分叉失败）。
+
+### 可选 / 后续
+1. 有条件回企业**双默认网关**网络再开一次 TUN 复验（本次修复在 en0 单网关下验证通过）。
+2. 「设置 → 隧道」安装免密码助手，TUN 启停免密（不影响连通）。
+3. UI 小项：设置里「TUN 协议栈」下拉已失效（生成配置强制 gvisor），可从 UI 移除或改只读说明。
 
 ### 接手
 读 `docs/design/tun-real-machine-debug.md` §19-20 + `docs/HANDOFF.md` 顶部最新段。不要再从节点、QUIC、DoH 或 Fake-IP 缓存开始；先核对系统 DNS 是否为 TUN 接口自身地址及其路由是否 `LOCAL`。
