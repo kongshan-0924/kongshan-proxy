@@ -336,6 +336,20 @@ public enum ConfigGenerator {
         }
         servers.append(remote)
 
+        // fakeip：TUN 下给非国内域名立刻返回假 IP（198.18.x），不等上游解析。
+        // "DNS 走 TUN 去上游解析再回来"在部分网络（多默认网关/企业网）会超时或丢失，导致域名
+        // 全解析不了、网页全打不开；fakeip 绕开这一步，真实解析交给代理出口那端完成
+        // （mihomo/其它客户端在 TUN 下默认即用 fakeip）。仅 IPv4 段，避免与 fc00::/7 排除冲突。
+        // 系统代理模式不需要（走 socket、DNS 不经 TUN），保持原 real-ip 行为不变。
+        let useFakeIP = input.usesTun && input.outboundMode != .direct
+        if useFakeIP {
+            servers.append([
+                "type": "fakeip",
+                "tag": "dns-fakeip",
+                "inet4_range": "198.18.0.0/15"
+            ])
+        }
+
         var rules: [[String: Any]] = []
         if input.routing != nil, input.outboundMode == .rule {
             rules.append([
@@ -344,12 +358,26 @@ public enum ConfigGenerator {
                 "server": "dns-cn"
             ])
         }
-        return [
+        if useFakeIP {
+            // 国内域名上面已走 dns-cn 拿真实 IP 直连；其余 A/AAAA 查询走 fakeip。
+            rules.append([
+                "query_type": ["A", "AAAA"],
+                "action": "route",
+                "server": "dns-fakeip"
+            ])
+        }
+
+        var result: [String: Any] = [
             "servers": servers,
             "rules": rules,
             // 直连模式不应把解析绕到代理出口
             "final": input.outboundMode == .direct ? "dns-cn" : "dns-remote"
         ]
+        if useFakeIP {
+            // fakeip 需要独立缓存，避免与普通 DNS 缓存互相污染。
+            result["independent_cache"] = true
+        }
+        return result
     }
 
     private static func dohServer(
@@ -397,7 +425,10 @@ public enum ConfigGenerator {
                 "mtu": input.tunSettings.mtu,
                 "auto_route": true,
                 "strict_route": input.tunSettings.strictRoute,
-                "stack": input.tunSettings.stack.rawValue
+                // 强制 gvisor 用户态栈：system/mixed 栈的 TCP 转发在部分网络（多默认网关/企业网等）
+                // 会失效——只有 UDP/ICMP 通、网页(TCP)全打不开。gvisor 用户态栈普遍兼容
+                // （mihomo/其它客户端默认即此），实测能修好这类"TUN 开了网页全挂"。
+                "stack": "gvisor"
             ]
             if let routing = input.routing {
                 inbound["route_exclude_address"] = try routing.settings.validated().tunExcludeCIDRs

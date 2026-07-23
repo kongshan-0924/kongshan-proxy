@@ -38,9 +38,10 @@ final class TunConfigTests: XCTestCase {
         XCTAssertEqual(tun["mtu"] as? Int, 9_000)
         XCTAssertEqual(tun["auto_route"] as? Bool, true)
         XCTAssertEqual(tun["strict_route"] as? Bool, true)
-        // 默认 mixed：system 栈在部分 macOS 版本有已知问题（sing-box#2500/#3529）
-        XCTAssertEqual(tun["stack"] as? String, TunSettings.defaults.stack.rawValue)
-        XCTAssertEqual(TunSettings.defaults.stack, .mixed)
+        // 强制 gvisor：system/mixed 栈的 TCP 转发在部分网络（多默认网关/企业网）会失效——
+        // 只有 UDP/ICMP 通、网页(TCP)全挂。gvisor 用户态栈普遍兼容（mihomo 默认即此），
+        // 无论用户 tunSettings.stack 设成什么，TUN 一律用 gvisor。
+        XCTAssertEqual(tun["stack"] as? String, "gvisor")
         // 跳过 TUN 与跳过代理是两份独立列表，不得互相串用
         XCTAssertEqual(tun["route_exclude_address"] as? [String], settings.tunExcludeCIDRs)
         XCTAssertFalse((tun["route_exclude_address"] as? [String] ?? []).contains("10.0.0.0/8"))
@@ -120,6 +121,27 @@ final class TunConfigTests: XCTestCase {
         ))
         let result = try await SingBoxProcess(binaryURL: singBoxURL).check(config: config)
         XCTAssertEqual(result.exitCode, 0, result.stderr)
+    }
+
+    func testTunRuleModeDNSUsesFakeIPButSystemProxyDoesNot() throws {
+        // TUN + 规则模式：DNS 应含 fakeip 服务器 + independent_cache（修 DNS-over-TUN 在多网关网络失效）
+        let tunRoot = try json(try ConfigGenerator.generate(input(strictRoute: true, routingSettings: .defaults)))
+        let tunDNS = try XCTUnwrap(tunRoot["dns"] as? [String: Any])
+        let tunServers = try XCTUnwrap(tunDNS["servers"] as? [[String: Any]])
+        XCTAssertTrue(tunServers.contains { $0["type"] as? String == "fakeip" }, "TUN 规则模式应有 fakeip 服务器")
+        XCTAssertEqual(tunDNS["independent_cache"] as? Bool, true)
+
+        // 系统代理模式：走 socket、DNS 不经 TUN，保持 real-ip，不应有 fakeip
+        let sysRoot = try json(try ConfigGenerator.generate(ConfigInput(
+            nodes: [node],
+            selectedNodeID: node.id,
+            runtime: runtime,
+            routing: nil,
+            enabledModes: [.systemProxy]
+        )))
+        let sysDNS = try XCTUnwrap(sysRoot["dns"] as? [String: Any])
+        let sysServers = try XCTUnwrap(sysDNS["servers"] as? [[String: Any]])
+        XCTAssertFalse(sysServers.contains { $0["type"] as? String == "fakeip" }, "系统代理模式不应有 fakeip")
     }
 
     func testStrictOffAndOnTunConfigsPassBundledCoreCheck() async throws {
