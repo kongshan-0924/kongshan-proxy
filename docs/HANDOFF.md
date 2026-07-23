@@ -1,6 +1,15 @@
 # 项目交接
 
-## 2026-07-23 真机 TUN 浏览器断网已修复（fix/tun-real-machine-browsing，0.1.30 待用户验收）
+## 2026-07-23 已发布 0.1.30（真机 TUN 修复合并 main + GitHub release）
+
+- 已完成：审核 Codex 的 TUN 修复 → 合并 main → DMG → GitHub release **v0.1.30（Latest）** → 推送。**仅剩 main 一条分支**（`afd539e`，与 origin 同步）。
+- 审核：修复正确（真凶＝系统 DNS 172.19.0.2→172.19.0.1，macOS p2p utun 只为接口自身建本地路由；配套 gvisor + fakeip 240/4 + cache_file 持久化；移除有问题的 QUIC reject）。swift test 259 通过 0 失败、sing-box check 过、hardened runtime 保留。
+- **安全捕获**：含节点真实密码的中间提交（Codex 的 HY2 测试 + 早前文档）未推 origin，用 `git merge --squash` 丢弃、确认 main 历史 0 密码后才推。教训：测试/文档严禁写真实密码。
+- 交付：`dist/kongshan-0.1.30.dmg`（SHA-256 `86ad8e00…`）+ GitHub release 含该 DMG。
+- 下一步/风险：本次在 en0 单网关下真机验证通过；建议回企业双默认网关网络复验。免密码 TUN 仍需用户「设置→隧道→安装免密码助手」授权一次。
+- 接手方式：读本节 + SESSION_LOG 2026-07-23 末段 + `docs/design/tun-real-machine-debug.md`（完整排查）。
+
+## 2026-07-23 真机 TUN 浏览器断网已修复（历史·排查记录）
 
 - **最终根因**：TUN 接口是 `172.19.0.1/30`，但应用把系统 DNS 指向“下一跳”`172.19.0.2`。macOS 原生 point-to-point TUN 只为接口自身地址建立本地路由；`.2` 又命中 `route_exclude_address` 的 `172.16.0.0/12`，因此 DNS 实际从 `en0` 发给物理网关，企业网下超时，当前家庭网则被网关 Fake-IP 污染为 `198.18.x`。
 - **决定性证据**：`route get 172.19.0.2` → `en0/192.168.2.101`，`dig @172.19.0.2` → 网关的 `198.18.x`；`route get 172.19.0.1` → `utun7 LOCAL`，`dig @172.19.0.1` → kongshan 的 `240.x`，日志同步出现 `inbound/tun ... 172.19.0.1:53`。

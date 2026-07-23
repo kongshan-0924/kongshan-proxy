@@ -1603,3 +1603,12 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 - 风险/注意：本轮为 en0 单默认网关，不是最初企业双默认网关；根因能直接解释企业网 DNS 超时，但仍建议回原网络复验一次。开关 TUN 仍走 osascript 兜底并要求管理员密码，免密码助手可另行安装，不影响网络修复。
 - 下一步：用户验收；通过后交维护者复审并决定是否合 main。当前不要合并。
 - 接手方式：留在 `fix/tun-real-machine-browsing`，先读 HANDOFF 顶部与设计 §19-20；不要重复 DoH/QUIC/节点/Fake-IP 猜测。
+
+## 2026-07-23（维护者）审核 + 合并 + 发布 0.1.30
+
+- 已完成：审核 Codex 的 TUN 修复（`fix/tun-real-machine-browsing`）→ 合并 main → 构建 DMG → GitHub 发 release v0.1.30 → 推送。
+- 审核结论：**修复正确**。核心 `dnsServerAddress` 172.19.0.2→172.19.0.1 是真凶（macOS point-to-point utun 只为接口自身地址建本地路由，下一跳绕物理网关、进不了 TUN → hijack-dns 截不到 → 域名解析不到 fakeip → 国外流量从不工作）；配套 gvisor 栈、fakeip 段 198.18/15→240.0.0.0/4（避冲突）、fakeip 段固定路由到节点、`experimental.cache_file` 持久化映射跨内核重启。移除了上一轮有问题的 QUIC reject（block 出站 UDP 在 macOS 报 operation not permitted）。240/4 未被 route_exclude 排除、fakeip 常量在 dns() 与路由规则一致。swift test 259 通过 0 失败、sing-box check 过、hardened runtime 保留。
+- **安全捕获**：节点真实密码（36 位 UUID）曾出现在**含密码的中间提交历史**里（Codex 加的 HY2 check 测试 + 早前文档），虽最终工作树已清（`test-password` 占位符），但这些提交**未推过 origin**。故用 `git merge --squash` 合并（只落最终干净树、丢弃含密码中间提交）+ 删分支 + `git gc`，确认 main 全历史 0 处含密码后才推送。**教训：测试/文档严禁写真实节点密码。**
+- 修改文件（净）：`ConfigGenerator.swift`、`ProxyMode.swift` + 排查文档。发布：`dist/kongshan-0.1.30.dmg`（SHA-256 `86ad8e0009c811ecd4e447b852bb5c601927fdee4269352c634e42d487c8c353`）。
+- 当前状态：**仅剩 main 一条分支**（`afd539e`，已推 origin）；GitHub release **v0.1.30（Latest）** 含 DMG；`/Applications` 与 `dist` 各一个 0.1.30；工作区干净。
+- 风险/注意：本次修复在 en0 单默认网关下真机验证通过（Chrome/Safari 开 Google/百度/GitHub、出口 IP 正确）；建议回企业双默认网关网络再复验一次。免密码助手仍需用户「设置→隧道→安装」授权一次才免密（不影响连通）。
