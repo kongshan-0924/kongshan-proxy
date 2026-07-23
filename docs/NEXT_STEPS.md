@@ -1,5 +1,25 @@
 # 下一步
 
+## ✅ 真机 TUN 浏览器断网已修复：0.1.30 待用户验收
+
+### 已完成
+- 根因定案：系统 DNS 错指 `172.19.0.2`，该地址从 `en0` 去物理网关而非进入 TUN；正确地址是有 `utun LOCAL` 路由的接口自身 `172.19.0.1`。
+- `TunSettings.dnsServerAddress` 已改为接口 IPv4；TUN Fake-IP 改为 `240/4` 并持久化到 `fakeip-cache-v2.db`，避开订阅/物理网关的 `198.18` 冲突。
+- 全量 `swift test`：259 通过、1 跳过、0 失败；HY2+TUN 配置通过 sing-box check；0.1.30 构建、深度签名和 hardened runtime 均通过。
+- 两轮真机内核 PID 36946 → 37470，Google Fake-IP 均为 `240.0.0.4`；Google 204、百度 200、GitHub 200，出口 IP `69.63.217.24`。
+- Chrome 与 Safari 两轮均正常打开 Google/百度；系统 DNS 两轮都由应用自动设为 `172.19.0.1`。0.1.30 已安装，TUN 当前开启。
+
+### 下一步
+1. 用户直接验收当前已开启的 `/Applications/kongshan.app` 0.1.30。
+2. 有条件时回原企业多默认网关再开一次 TUN，确认国内外网页与出口仍正确。
+3. 用户明确验收通过后，由维护者复审本分支并决定合并；**当前不合 main**。
+4. 可选：在“设置 → 隧道”安装免密码助手，避免 osascript 每次开关 TUN 都要求密码；这不影响本次网络修复。
+
+### 接手
+读 `docs/design/tun-real-machine-debug.md` §19-20 + `docs/HANDOFF.md` 顶部最新段。不要再从节点、QUIC、DoH 或 Fake-IP 缓存开始；先核对系统 DNS 是否为 TUN 接口自身地址及其路由是否 `LOCAL`。
+
+---
+
 ## ✅ 免密码 TUN 助手已加固 + 合并 + 交付 0.1.24（2026-07-23）
 
 免密码 TUN 特权助手（`feat/tun-passwordless-helper`）经两轮独立对抗式安全审查 + 加固后**已合并进 main**（merge `64c2b00`）。代码三方自动合并（AppState/MainWindowView 无冲突），合并后 `swift test` **257 通过**。已构建交付 **0.1.24**，装到 /Applications、打了 DMG、清理到只剩一个最新版。

@@ -91,10 +91,14 @@ final class DNSConfigTests: XCTestCase {
         XCTAssertEqual(tunRules[0]["action"] as? String, "sniff")
         XCTAssertEqual(tunRules[1]["protocol"] as? String, "dns")
         XCTAssertEqual(tunRules[1]["action"] as? String, "hijack-dns")
-        XCTAssertEqual(tunRules[2]["domain_suffix"] as? [String], ["custom.example"])
-        XCTAssertEqual(tunRules[3]["domain"] as? [String], ["localhost"])
-        XCTAssertEqual(tunRules[4]["ip_is_private"] as? Bool, true)
-        XCTAssertEqual(tunRules[5]["rule_set"] as? [String], ["geosite-cn", "geoip-cn"])
+        // 240/4 与物理网关/订阅的 198.18 Fake-IP 隔离，且必须优先固定走代理。
+        XCTAssertEqual(tunRules[2]["ip_cidr"] as? [String], ["240.0.0.0/4"])
+        XCTAssertEqual(tunRules[2]["outbound"] as? String, "手动选择")
+        // 业务规则相对顺序不变，只整体后移一位。
+        XCTAssertEqual(tunRules[3]["domain_suffix"] as? [String], ["custom.example"])
+        XCTAssertEqual(tunRules[4]["domain"] as? [String], ["localhost"])
+        XCTAssertEqual(tunRules[5]["ip_is_private"] as? Bool, true)
+        XCTAssertEqual(tunRules[6]["rule_set"] as? [String], ["geosite-cn", "geoip-cn"])
     }
 
     func testSystemAndTUNDefaultAndCustomDNSPassBundledCoreCheck() async throws {

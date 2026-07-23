@@ -1,5 +1,20 @@
 # 项目交接
 
+## 2026-07-23 真机 TUN 浏览器断网已修复（fix/tun-real-machine-browsing，0.1.30 待用户验收）
+
+- **最终根因**：TUN 接口是 `172.19.0.1/30`，但应用把系统 DNS 指向“下一跳”`172.19.0.2`。macOS 原生 point-to-point TUN 只为接口自身地址建立本地路由；`.2` 又命中 `route_exclude_address` 的 `172.16.0.0/12`，因此 DNS 实际从 `en0` 发给物理网关，企业网下超时，当前家庭网则被网关 Fake-IP 污染为 `198.18.x`。
+- **决定性证据**：`route get 172.19.0.2` → `en0/192.168.2.101`，`dig @172.19.0.2` → 网关的 `198.18.x`；`route get 172.19.0.1` → `utun7 LOCAL`，`dig @172.19.0.1` → kongshan 的 `240.x`，日志同步出现 `inbound/tun ... 172.19.0.1:53`。
+- **最小修复**：`TunSettings.dnsServerAddress` 直接返回 TUN 接口 IPv4，不再 `+1`；同时保留此前已验证的 gvisor、Fake-IP 优先路由、QUIC reject 回退、Fake-IP 持久化，并将 TUN Fake-IP 段改为 `240.0.0.0/4`、缓存隔离为 `fakeip-cache-v2.db`，避免与物理网关和订阅 `198.18/16 → DIRECT` 冲突。
+- **自动验证**：定向 DNS 地址测试通过；全量 `swift test` 259 通过、1 跳过、0 失败；测试生成的 HY2+TUN 配置通过内置 sing-box check；0.1.30 深度签名与 hardened runtime 验证通过。
+- **两轮真机结果**：
+  - 首轮 PID 36946，二轮 PID 37470；两轮系统 DNS 都自动为 `172.19.0.1`。
+  - Google Fake-IP 跨内核保持 `240.0.0.4`；Google 204、百度 200、GitHub 200；日志确认 Google/GitHub 经 HY2，百度走直连。
+  - 隔离 TUN 源地址出口 IP 为 `69.63.217.24`；Chrome 与 Safari 两轮都能打开 Google 和百度。
+- **修改文件**：`Sources/KongshanCore/ConfigGenerator.swift`、`Sources/KongshanCore/ProxyMode.swift`、`Tests/KongshanCoreTests/{DNSConfigTests,SystemDNSManagerTests,TunConfigTests}.swift`、`VERSION`、调试设计与项目记录。
+- **当前状态（20:31）**：`/Applications/kongshan.app` 和 `dist/kongshan.app` 均为 0.1.30/build 130，安装版哈希与 dist 一致；TUN 保持开启供用户验收。分支未合 main。
+- **风险/注意**：本轮网络已变为单默认网关，代码根因与企业网现象直接吻合，但仍建议回企业多默认网关做一次最终复验。`240/4` 是仅用于 macOS CLI TUN 的保留地址兼容方案，不要无条件推广到其它平台。旧 `fakeip-cache.db` 可留存，不再被 0.1.30 使用。
+- **接手方式**：留在 `fix/tun-real-machine-browsing`，先读 `docs/design/tun-real-machine-debug.md` §19-20 与 SESSION_LOG 最新段；用户验收通过后再由维护者复审/决定合并，当前不要合 main。
+
 ## 2026-07-23 免密码 TUN 助手 加固+合并+交付 0.1.24（本会话完成）
 
 - 已完成：审核（两轮独立对抗式）+ 加固 + 合并 `feat/tun-passwordless-helper` → main（merge `64c2b00`）+ 构建交付 0.1.24。

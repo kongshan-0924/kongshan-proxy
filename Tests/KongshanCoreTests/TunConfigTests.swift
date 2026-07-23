@@ -129,7 +129,25 @@ final class TunConfigTests: XCTestCase {
         let tunDNS = try XCTUnwrap(tunRoot["dns"] as? [String: Any])
         let tunServers = try XCTUnwrap(tunDNS["servers"] as? [[String: Any]])
         XCTAssertTrue(tunServers.contains { $0["type"] as? String == "fakeip" }, "TUN 规则模式应有 fakeip 服务器")
+        XCTAssertEqual(tunServers.first { $0["type"] as? String == "fakeip" }?["inet4_range"] as? String, "240.0.0.0/4")
         XCTAssertEqual(tunDNS["independent_cache"] as? Bool, true)
+        let tunExperimental = try XCTUnwrap(tunRoot["experimental"] as? [String: Any])
+        let fakeIPCache = try XCTUnwrap(tunExperimental["cache_file"] as? [String: Any])
+        XCTAssertEqual(fakeIPCache["enabled"] as? Bool, true)
+        XCTAssertEqual(fakeIPCache["store_fakeip"] as? Bool, true)
+        XCTAssertEqual(
+            fakeIPCache["path"] as? String,
+            AppIdentity.supportDirectory.appending(path: "fakeip-cache-v2.db").path
+        )
+
+        let diagnostic = try json(try ConfigGenerator.diagnosticSnapshot(from: try ConfigGenerator.generate(
+            input(strictRoute: true, routingSettings: .defaults)
+        )))
+        let diagnosticCache = try XCTUnwrap(
+            (diagnostic["experimental"] as? [String: Any])?["cache_file"] as? [String: Any]
+        )
+        XCTAssertNil(diagnosticCache["path"], "诊断快照不应泄露本机用户目录")
+        XCTAssertEqual(diagnosticCache["store_fakeip"] as? Bool, true)
 
         // 系统代理模式：走 socket、DNS 不经 TUN，保持 real-ip，不应有 fakeip
         let sysRoot = try json(try ConfigGenerator.generate(ConfigInput(
@@ -142,6 +160,60 @@ final class TunConfigTests: XCTestCase {
         let sysDNS = try XCTUnwrap(sysRoot["dns"] as? [String: Any])
         let sysServers = try XCTUnwrap(sysDNS["servers"] as? [[String: Any]])
         XCTAssertFalse(sysServers.contains { $0["type"] as? String == "fakeip" }, "系统代理模式不应有 fakeip")
+        XCTAssertNil((sysRoot["experimental"] as? [String: Any])?["cache_file"])
+    }
+
+    /// 物理网关与订阅规则也可能占用 198.18/15；改用独立的保留 240/4，
+    /// 并确保本内核 Fake-IP 在订阅规则之前固定走代理。
+    func testTunPinsFakeIPBeforeConflictingSubscriptionCIDRAndPassesCoreCheck() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let ruleSets = try await compileRuleSets(in: directory)
+
+        let hy2 = ProxyNode(
+            id: UUID(uuidString: "00000000-0000-0000-0000-0000000000aa")!,
+            name: "Dmit-H2",
+            protocolType: .hysteria2,
+            server: "69.63.217.24",
+            port: 45724,
+            password: "test-password",
+            sni: "69.63.217.24",
+            skipCertificateVerification: true
+        )
+        let config = try ConfigGenerator.generate(ConfigInput(
+            nodes: [hy2],
+            selectedNodeID: hy2.id,
+            runtime: RuntimeParameters(mixedPort: 51080, clashPort: 51909, secret: "verify-secret"),
+            routing: RoutingConfiguration(
+                settings: .defaults,
+                ruleSets: ruleSets,
+                subscriptionRules: [
+                    SubscriptionRule(type: .ipCIDR, value: "240.0.0.0/5", target: "DIRECT")
+                ]
+            ),
+            enabledModes: [.tun],
+            outboundMode: .rule,
+            tunSettings: .defaults,
+            dnsSettings: .defaults
+        ))
+
+        let root = try XCTUnwrap(try JSONSerialization.jsonObject(with: config) as? [String: Any])
+        let rules = try XCTUnwrap((root["route"] as? [String: Any])?["rules"] as? [[String: Any]])
+        let fakeIPIndex = try XCTUnwrap(rules.firstIndex {
+            ($0["ip_cidr"] as? [String])?.contains("240.0.0.0/4") == true
+        })
+        let conflictingSubscriptionIndex = try XCTUnwrap(rules.firstIndex {
+            ($0["ip_cidr"] as? [String])?.contains("240.0.0.0/5") == true
+        })
+        XCTAssertLessThan(fakeIPIndex, conflictingSubscriptionIndex)
+        XCTAssertEqual(rules[fakeIPIndex]["outbound"] as? String, "手动选择")
+        XCTAssertFalse(rules.contains {
+            $0["network"] as? String == "udp" && $0["port_range"] as? String == "443:443"
+        }, "QUIC 全局拒绝没有解决根因且会产生 operation not permitted，不应保留")
+
+        let result = try await SingBoxProcess(binaryURL: singBoxURL).check(config: config)
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
     }
 
     func testStrictOffAndOnTunConfigsPassBundledCoreCheck() async throws {

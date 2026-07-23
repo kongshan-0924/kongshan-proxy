@@ -23,12 +23,12 @@ final class SystemDNSManagerTests: XCTestCase {
     }
 
     func testTunSettingsDeriveDNSServerAddressInsideTunSubnet() {
-        XCTAssertEqual(TunSettings.defaults.dnsServerAddress, "172.19.0.2")
+        XCTAssertEqual(TunSettings.defaults.dnsServerAddress, "172.19.0.1")
         var custom = TunSettings.defaults
         custom.addresses = ["10.66.0.1/24", "fdfe::1/126"]
-        XCTAssertEqual(custom.dnsServerAddress, "10.66.0.2")
+        XCTAssertEqual(custom.dnsServerAddress, "10.66.0.1")
         custom.addresses = ["not-an-address"]
-        XCTAssertEqual(custom.dnsServerAddress, "172.19.0.2")
+        XCTAssertEqual(custom.dnsServerAddress, "172.19.0.1")
     }
 
     func testEnableSnapshotsBeforeMutatingThenRestoreWritesBackAndDeletesSnapshot() async throws {

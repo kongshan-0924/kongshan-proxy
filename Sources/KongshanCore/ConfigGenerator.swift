@@ -127,6 +127,8 @@ public struct ConfigGenerationResult: Sendable {
 }
 
 public enum ConfigGenerator {
+    private static let tunFakeIPv4Range = "240.0.0.0/4"
+
     public static func outboundTag(for node: ProxyNode) -> String {
         "node-\(node.id.uuidString.lowercased())"
     }
@@ -279,11 +281,36 @@ public enum ConfigGenerator {
         if input.usesTun {
             route["auto_detect_interface"] = true
             prefixRules.append(["protocol": "dns", "action": "hijack-dns"])
+            if input.outboundMode != .direct {
+                // 物理网关与部分订阅规则也会占用 198.18/15；改用独立的保留 Class E 段，
+                // 并在订阅规则前固定还原到代理路径，避免外部 Fake-IP 与本内核映射混淆。
+                prefixRules.append([
+                    "ip_cidr": [Self.tunFakeIPv4Range],
+                    "action": "route",
+                    "outbound": primaryOutbound
+                ])
+            }
         }
         if !prefixRules.isEmpty {
             var rules = route["rules"] as? [[String: Any]] ?? []
             rules.insert(contentsOf: prefixRules, at: 0)
             route["rules"] = rules
+        }
+
+        var experimental: [String: Any] = [
+            "clash_api": [
+                "external_controller": "127.0.0.1:\(input.runtime.clashPort)",
+                "secret": input.runtime.secret
+            ]
+        ]
+        if input.usesTun && input.outboundMode != .direct {
+            // macOS 和浏览器可能继续缓存上一次内核分配的 Fake-IP。内核重启后若映射丢失，
+            // 旧地址会直接 connection refused；官方 cache_file 持久化映射即可跨重启复用。
+            experimental["cache_file"] = [
+                "enabled": true,
+                "path": AppIdentity.supportDirectory.appending(path: "fakeip-cache-v2.db").path,
+                "store_fakeip": true
+            ]
         }
 
         let root: [String: Any] = [
@@ -292,12 +319,7 @@ public enum ConfigGenerator {
             "inbounds": try inbounds(for: input),
             "outbounds": outbounds,
             "route": route,
-            "experimental": [
-                "clash_api": [
-                    "external_controller": "127.0.0.1:\(input.runtime.clashPort)",
-                    "secret": input.runtime.secret
-                ]
-            ]
+            "experimental": experimental
         ]
         let config = try encode(root)
         return ConfigGenerationResult(config: config, warnings: warnings)
@@ -336,7 +358,7 @@ public enum ConfigGenerator {
         }
         servers.append(remote)
 
-        // fakeip：TUN 下给非国内域名立刻返回假 IP（198.18.x），不等上游解析。
+        // fakeip：TUN 下给非国内域名立刻返回假 IP，不等上游解析。
         // "DNS 走 TUN 去上游解析再回来"在部分网络（多默认网关/企业网）会超时或丢失，导致域名
         // 全解析不了、网页全打不开；fakeip 绕开这一步，真实解析交给代理出口那端完成
         // （mihomo/其它客户端在 TUN 下默认即用 fakeip）。仅 IPv4 段，避免与 fc00::/7 排除冲突。
@@ -346,7 +368,7 @@ public enum ConfigGenerator {
             servers.append([
                 "type": "fakeip",
                 "tag": "dns-fakeip",
-                "inet4_range": "198.18.0.0/15"
+                "inet4_range": Self.tunFakeIPv4Range
             ])
         }
 
@@ -615,6 +637,11 @@ public enum ConfigGenerator {
         }
         if var experimental = root["experimental"] as? [String: Any] {
             experimental.removeValue(forKey: "clash_api")
+            if var cacheFile = experimental["cache_file"] as? [String: Any] {
+                // 诊断快照可对外分享，不泄露本机用户名所在的绝对路径。
+                cacheFile.removeValue(forKey: "path")
+                experimental["cache_file"] = cacheFile
+            }
             if experimental.isEmpty {
                 root.removeValue(forKey: "experimental")
             } else {

@@ -87,18 +87,20 @@ public struct TunSettings: Codable, Equatable, Sendable {
         mtu: 9_000
     )
 
-    /// TUN 模式下系统 DNS 要指向的地址：取第一个 IPv4 网段里接口地址的下一跳
-    /// （172.19.0.1/30 → 172.19.0.2）。它不是接口自身地址——发往接口地址的包
-    /// 走本机回环，进不了 TUN；下一跳地址才会被路由进 TUN 并被 hijack-dns 截获。
+    /// TUN 模式下系统 DNS 要指向接口自身的 IPv4 地址。
+    /// macOS 原生 TUN 只为该地址建立本地路由；指向同网段的下一跳会绕到物理网关，
+    /// 无法被 sing-box 的 hijack-dns 接管。
     public var dnsServerAddress: String {
         for address in addresses {
             let host = address.split(separator: "/").first.map(String.init) ?? address
-            var parts = host.split(separator: ".").map(String.init)
-            guard parts.count == 4, let last = Int(parts[3]), last < 254 else { continue }
-            parts[3] = String(last + 1)
-            return parts.joined(separator: ".")
+            let parts = host.split(separator: ".")
+            guard parts.count == 4, parts.allSatisfy({
+                guard let octet = Int($0) else { return false }
+                return (0...255).contains(octet)
+            }) else { continue }
+            return host
         }
-        return "172.19.0.2"
+        return "172.19.0.1"
     }
 
     /// 返回去掉 IPv6 地址后的副本。物理网络没有全局 IPv6 时，

@@ -1446,3 +1446,160 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 - 风险/注意：免密码 TUN **需用户真机点「设置→隧道→安装免密码助手」授权一次**才生效（首次端到端）；`SecCodeCopyPath` 路径匹配需真机确认（不匹配则回退 osascript 兜底，功能正常无免密）。绝不在自动化真装 daemon（§1.5）。
 - 下一步：推 main + 删 `feat/tun-passwordless-helper`；用户真机验收零弹窗 TUN。
 - 接手方式：读本段 + NEXT_STEPS/HANDOFF 顶部。助手设计/威胁模型/审查文档在 `docs/design/tun-passwordless-helper*.md`（已随合并进 main）。
+
+## 2026-07-23 — 真机 TUN 浏览器打不开：定位 + 修复（fix/tun-real-machine-browsing）
+
+- **根因定位（代码层推演，未做真机断网测试）**：
+  - 现象：TUN 模式下浏览器打不开任何网页，但 App 自己 URLSession 出口检测通、飞书通、系统代理模式通。
+  - 关键差异：浏览器（Chrome/Edge 默认）开「安全 DNS」自起 DoH（dns.google:443）→ **绕过 sing-box 的 DNS 劫持** → fakeip 对浏览器无效 → 浏览器拿到真实 IP。然后浏览器首选 QUIC（HTTP/3, UDP/443）→ QUIC 经 TUN→代理出站在多网关/企业网下普遍超时；浏览器要么不回退 TCP、要么回退太慢（30s+）→ 表现为「网页打不开」。
+  - 反证：App/飞书用系统解析器（被 TUN 劫持到 sing-box）→ 走 fakeip → TCP 路径（gvisor+fakeip+TCP 隔离已证通）→ 通。
+  - 现有配置缺什么：route 规则里没有任何针对 UDP/443 的拦截；DoH 端点也未劫持。
+- **修复**（`Sources/KongshanCore/ConfigGenerator.swift`，TUN 模式 prefixRules 里加一条）：
+  ```swift
+  prefixRules.append([
+      "port_range": "443:443",
+      "network": "udp",
+      "action": "route",
+      "outbound": "reject"
+  ])
+  ```
+  位置：sniff → hijack-dns → **QUIC reject** → customRules → ...。仅 TUN 模式（系统代理模式浏览器走 SOCKS、QUIC 本就转 TCP，不需要）。
+  - 为什么这样足够：reject UDP/443 后浏览器会回退 TCP/HTTP2，fakeip+gvisor 的 TCP 路径已隔离验证通；不需要逐个劫持 DoH 端点（Chrome 的 DoH 是 TCP/443，不会被 reject，但 DoH 拿到真实 IP 后浏览器连接时若走 QUIC 会被 reject 回退 TCP，链路自洽）。Hysteria2 节点用 UDP/45724 不受影响。
+- **测试**（`Tests/KongshanCoreTests/TunConfigTests.swift`，+2 测试）：
+  - `testTunRejectsQuicButSystemProxyDoesNot`：TUN 模式生成 QUIC reject 规则、位置在 hijack-dns 之后；系统代理模式不生成。
+  - `testRealHY2TunConfigPassesCoreCheckWithQuicReject`：真实 HY2 节点（69.63.217.24:45724）+ 完整 TUN 配置（gvisor+fakeip+DoH+QUIC reject+HY2）过 `sing-box check`，端到端合法性验证。
+- **验证结果**：
+  - `swift build` 通过；`swift test` 260 通过 / 1 跳过 / 4 失败。
+  - **4 个失败是基线问题**（git stash 后基线仍 4 失败，与本次修复无关，未修未要求修）。
+  - `sing-box check` 1.13.14 接受 `port_range:"443:443"` + `network:"udp"` route rule（最小配置 + 真实 HY2 配置均过）。
+- **修改文件**：
+  - `Sources/KongshanCore/ConfigGenerator.swift`：TUN 分支 prefixRules 加 QUIC reject 规则（含中文注释说明根因）。
+  - `Tests/KongshanCoreTests/TunConfigTests.swift`：+2 测试。
+- **当前状态**：代码修复 + 单测 + sing-box check 全绿（除基线 4 失败）；留在 `fix/tun-real-machine-browsing` 分支待真机验收 + 维护者复审。**未合 main、未碰侧栏**。
+- **风险/注意事项**：
+  - **未做真机断网验证**（用户要求不打断他太久，且代码层推演已足够定位）：理论上 reject UDP/443 后浏览器回退 TCP 应当通；若真机仍不通，回退到第二优先（dump 真实不脱敏配置到 /tmp，进隔离台二分：删 process_name 规则 → DoH 换明文 UDP → 简化 route）。
+  - reject UDP/443 会影响所有走 QUIC 的应用（不只浏览器）——但它们都应回退 TCP，且只影响 TUN 模式（系统代理模式不受影响）。如发现某 App 必须用 QUIC 不能回退，需细化为只 reject 浏览器进程。
+  - 测试中的 4 个基线失败：与 RoutingConfigTests 中 system proxy 模式下规则索引断言相关，独立问题，不属本任务。
+- **下一步**：
+  - 用户真机验收：开 TUN 模式，打开 Chrome/Safari 访问 baidu/google/国内外站点，确认能打开 + 出口 IP 正确。无需用户手动关 Chrome 安全 DNS 或 QUIC——本修复即等价于在内核层做这件事。
+  - 验收通过后维护者复审合并本分支到 main。
+- **接手方式**：读 `docs/design/tun-real-machine-debug.md` §5-7 + 本段。改动只在 ConfigGenerator.swift L279-294 的 TUN 分支 + TunConfigTests.swift 新增 2 个测试。若真机不通，按「下一步」回退到二分排查。
+
+## 2026-07-23 — 真机 TUN 第三轮：完整配置根因收敛（进行中）
+
+- 已完成：复读调试设计与当前分支；采集本机双默认路由、Stash 4.2.1 运行配置和 kongshan 真实订阅/设置；从真实订阅生成两份仅存 `/tmp` 的完整 TUN 配置并通过 sing-box check，未提交密码或未脱敏配置。
+- 根因：kongshan 的 Fake-IP 使用 `198.18.0.0/15`，真实订阅首条 IP 规则又将 `198.18.0.0/16` 指向 DIRECT。完整配置中该订阅规则会截获一半 Fake-IP，使国外网页连接被送往保留测试网段而不进代理；最小隔离配置没有订阅规则，所以此前可用。
+- Stash 参照：Core 磁盘配置不含运行时注入的 TUN/DNS；API 在未启用 TUN 时返回 `tun:null`、`dns:null`，未冒险代用户开启其 TUN。二进制默认 Fake-IP 段为 `198.18.16.0/20`，说明 mihomo 对 Fake-IP 有独立优先处理，不能照搬普通 CIDR 规则顺序。
+- 测试结果：真实完整配置原样版与移除冲突 CIDR 版均通过 `sing-box check`；尚未做需要 root 的隔离运行和真机浏览器验收。
+- 当前状态：准备先写失败回归测试，再在 TUN+Fake-IP 下前置一条 `198.18.0.0/15 -> 主代理出站` 规则；同时删除已证实无效且会触发 `operation not permitted` 的 QUIC reject。
+- 风险/注意：此前启动 Stash 后它留下 7890 系统代理；已清除 LAN/USB/Wi-Fi 的 HTTP/HTTPS/SOCKS 代理。kongshan 当前已退出，主路由服务缺全局 DNS，任务结束前必须恢复可用网络状态。
+- 下一步：完成 RED/GREEN 测试、全量 Swift 测试、生成配置检查，再用自恢复方式做真机 TUN 验收。
+- 接手方式：留在 `fix/tun-real-machine-browsing`，先看本段与 `/tmp/kongshan-full-tun-{conflict,filtered}.json`；临时文件含真实凭据，严禁提交或输出。
+
+### 阶段：Fake-IP 优先路由回归测试与最小修复
+
+- 已完成：先将完整订阅冲突写成回归测试，确认旧代码因找不到 `198.18.0.0/15` 优先规则而失败；随后在 TUN+非直连模式下于 `hijack-dns` 后前置 Fake-IP → 当前主代理规则，并删除 QUIC UDP/443 全局拒绝。
+- 修改文件：`Sources/KongshanCore/ConfigGenerator.swift`、`Tests/KongshanCoreTests/TunConfigTests.swift`、`Tests/KongshanCoreTests/DNSConfigTests.swift`。
+- 测试结果：`testTunPinsFakeIPBeforeConflictingSubscriptionCIDRAndPassesCoreCheck` RED 后 GREEN；`testTUNPrependsDNSHijackWithoutChangingBusinessRuleOrder` RED 后 GREEN；新测试内的 HY2+TUN 配置已通过内置 sing-box check。
+- 当前状态：最小修复完成，准备跑全量测试和真实完整配置校验。
+- 风险/注意：尚未真机启动 TUN；工作区原有 `VERSION` 0.1.26 修改继续保留，不纳入本修复判断。
+- 下一步：运行全量 `swift test`、重新生成真实配置并检查规则优先级和 sing-box check，最后做自恢复真机验证。
+- 接手方式：重点检查 ConfigGenerator 的 TUN prefixRules；期望顺序为 sniff → hijack-dns → Fake-IP 代理 → 用户/订阅/内置规则。
+
+### 阶段：全量验证、release 构建与真机授权前暂停
+
+- 已完成：`swift test` 全绿；测试配置与真实完整配置均过 sing-box check；真实配置规则顺序确认；构建 `dist/kongshan.app` 0.1.26 并验证深度签名/hardened runtime；文档已更新为第三轮确诊结论。
+- 修改文件：代码与测试同上一阶段；补充 `docs/design/tun-real-machine-debug.md`、`docs/HANDOFF.md`、`docs/PROGRESS.md`、`docs/NEXT_STEPS.md`、本日志。
+- 测试结果：259 通过、1 跳过、0 失败；真实配置 139 条规则，Fake-IP 索引 2、冲突 DIRECT 索引 5、QUIC 拒绝 0；release 签名有效。
+- 当前状态：Stash 已重新启动，127.0.0.1:7890 监听并经隔离代理确认出口可用；等待用户在动作时确认真机切换网络并亲自输入管理员密码。
+- 风险/注意：真机 TUN 测试会短暂改变系统网络；必须测试前关闭 Stash 系统代理、测试后恢复。`/tmp` 真实配置含凭据，勿提交。
+- 下一步：用户确认后运行 dist 版本，完成 TUN 浏览器/出口/日志/恢复验收；通过才提交本分支，仍不合 main。
+- 接手方式：继续本会话时不要重做排查，直接从真机授权验收开始。
+
+### 2026-07-23 19:31 — 最新状态只读复核
+
+- 已完成：重新核对分支、工作区、项目记录、release 签名、运行进程、系统代理/DNS/默认路由，并重新运行全量测试。
+- 修改文件：仅同步 `docs/HANDOFF.md`、`docs/NEXT_STEPS.md` 与本日志；未改业务代码。
+- 测试结果：`swift test` 259 通过、1 跳过、0 失败；`dist/kongshan.app` 0.1.26 深度签名与 hardened runtime 仍有效；`git diff --check` 通过。
+- 当前状态：`fix/tun-real-machine-browsing` 仍有 9 个未提交文件，未合 main；没有 kongshan/sing-box/Stash 进程，系统代理全关。网络已变为 en0 单默认网关 `192.168.2.101`，DNS 同地址，不是原企业双默认网关复现环境。
+- 风险/注意：先前 `/tmp` 真实完整配置已被系统清理；当前无法重新做那份临时文件的 check，但回归测试会生成 HY2+冲突订阅配置并调用内置 sing-box check，仍为绿色。
+- 下一步：获用户确认后可在当前网络做一般 TUN 烟测；目标多网关终验须回原企业网络。通过后提交本分支，仍不合 main。
+- 接手方式：不要再排查已排除方向；从真机 TUN 授权/烟测开始。
+
+### 2026-07-23 19:42 — TUN 仍断网：发现验收版本不一致
+
+- 已完成：采集用户再次报告后的进程、路由、DNS、代理、安装包哈希、配置和日志。
+- 修改文件：仅本日志。
+- 测试结果：当前无 kongshan/sing-box 进程、无 TUN IPv4 路由；系统网络已恢复。`/Applications/kongshan.app` 与 `dist/kongshan.app` 都标 0.1.26，但主可执行 SHA-256 不同；安装版日志仍是 11:49 的旧 QUIC reject 配置，未产生本轮新修复日志。
+- 当前状态：用户实际测试的是旧 0.1.26，Fake-IP 优先规则只存在于尚未安装的 dist 构建；当前“仍断网”不能否定新修复。
+- 风险/注意：同版本号不同二进制会继续误导验收，必须升新版本号后替换 `/Applications`。
+- 下一步：构建 0.1.27、备份并替换安装版、启动后核对真实 TUN 配置与新日志，再做连通性验收。
+- 接手方式：不要再从旧 `sing-box-tun.log` 推断新修复；先确保运行二进制哈希等于新构建产物。
+
+### 阶段：构建并安装唯一可辨识的 0.1.27
+
+- 已完成：构建 0.1.27，停止状态下将旧 `/Applications/kongshan.app` 移到 `/tmp/kongshan-install-backup.kpuUmj/kongshan.app`，安装 dist 新版并启动。
+- 修改文件：`VERSION` 自增到 0.1.27；业务代码未新增改动。
+- 测试结果：安装版与 dist 主程序 SHA-256 一致；`codesign --verify --deep --strict` 通过；界面已确认运行 0.1.27 且代理关闭。
+- 当前状态：新修复版本已在前台，下一动作是点击 TUN；此动作会改变系统网络并弹管理员授权，必须由用户在动作时确认并亲自输入密码。
+- 风险/注意：旧安装版可从上述 `/tmp` 备份恢复；尚未触发 TUN，当前网络未变化。
+- 下一步：用户确认后点击 TUN，立即采集新配置/新日志/路由并做国内外连通测试。
+- 接手方式：不要再构建；直接操作已打开的 0.1.27。
+
+### 2026-07-23 19:53 — 真机根因二次收敛：Fake-IP 映射未跨内核重启
+
+- 已完成：在 0.1.27 真机 TUN 中对比旧、新 Fake-IP；`198.18.0.2` 经 TUN/HY2 访问 Google 返回 204，而系统与浏览器仍缓存的 `198.18.0.28` 立即 `connection refused`。日志确认成功地址进入 `inbound/tun` 并还原为 `google.com`，失败地址没有可用映射。
+- 修改文件：`Sources/KongshanCore/ConfigGenerator.swift` 为 TUN+非直连启用 sing-box 官方 `cache_file.store_fakeip`，路径固定到应用支持目录；诊断快照移除绝对路径。`Tests/KongshanCoreTests/TunConfigTests.swift` 增加持久化配置、非 TUN 不生成及路径脱敏断言；`VERSION` 升至 0.1.28。
+- 测试结果：官方 1.13.14 文档确认 `store_fakeip` 用于将 Fake-IP 存入缓存文件；代码修改后的全量测试与真机跨重启验证尚待执行。
+- 当前状态：0.1.27 TUN 仍在运行；已证实 Fake-IP 优先路由本身可用，当前断网来自浏览器/系统持有旧映射而新内核不认识。
+- 风险/注意：首次升级到持久化版本时旧浏览器缓存仍可能存在，需要本轮验收时清一次系统/浏览器 DNS；缓存建立后再重启内核应保持映射不变。
+- 下一步：运行定向与全量测试、构建 0.1.28；经用户动作时确认后替换安装版并做“解析地址 → 重启 TUN → 地址保持 → Safari/Chrome 国内外网页 → 出口 IP”验收。
+- 接手方式：不要回到 DoH、QUIC 或节点排查；先验证 `fakeip-cache.db` 是否创建且同一域名在两次内核进程间保持同一 Fake-IP。
+
+### 阶段：0.1.28 自动验证与真机替换前断点
+
+- 已完成：Fake-IP 持久化定向测试、全量测试、release 构建、深度签名与 hardened runtime 校验；同步设计与项目交接记录。
+- 修改文件：同上一阶段，另更新 `docs/HANDOFF.md`、`docs/PROGRESS.md`、`docs/NEXT_STEPS.md`、`docs/design/tun-real-machine-debug.md` 与本日志。
+- 测试结果：定向 2/2 通过；全量 259 通过、1 跳过、0 失败；测试内 HY2+TUN 配置通过 sing-box check；`dist/kongshan.app` 版本 0.1.28，`codesign --verify --deep --strict` 通过。
+- 当前状态：0.1.27 仍在 `/Applications` 运行且 TUN 开启；0.1.28 成品只在 dist。未提交、未合 main。
+- 风险/注意：替换运行中的 App 前必须先停当前 TUN；首次进入 0.1.28 需清一次旧 DNS/浏览器缓存，之后用第二次内核重启验证持久化是否真正闭环。
+- 下一步：取得一次动作时确认，批量完成停旧 TUN、替换 App、清旧缓存、开 TUN 两轮真机验收。
+- 接手方式：动作前先采样 PID/路由；验收指标是同一域名 Fake-IP 在两个不同 sing-box PID 间保持一致，且 Safari/Chrome 国内外网页与出口 IP 均正确。
+
+### 2026-07-23 20:25 — 真机根因定案：macOS 原生 CLI TUN 拒绝 198.18/15
+
+- 已完成：安装并运行 0.1.28，确认 Fake-IP 持久化正常；随后对同一条 TUN 路径按目标网段逐个探测，区分“映射失效”和“数据包未进入 TUN”。
+- 根因：普通未绑定 socket 访问 `198.18.0.0/15` 时由 `172.19.0.1` 发起并在到达 sing-box 前立即 `connection refused`，日志没有 `inbound/tun` 连接；同一地址绑定 `en0` 后可以访问。对 `28/8`、三个 TEST-NET、`100.64/10` 和 `240/4` 的未绑定访问都能进入 TUN，说明这是 macOS 26.5 原生 CLI TUN 对 RFC 2544 测试网段的特定拒绝，而非节点、路由规则或 TUN 源地址普遍故障。
+- 修改文件：`ConfigGenerator.swift` 将 TUN Fake-IP 段集中为 `240.0.0.0/4`，DNS 与优先路由共用；持久化文件改为 `fakeip-cache-v2.db`，避免继承 198.18 旧映射。同步修改 DNS/TUN 回归测试，`VERSION` 升至 0.1.29。
+- 测试结果：定向 3/3 通过；全量 `swift test` 259 通过、1 跳过、0 失败；测试生成的 HY2+TUN 配置通过内置 sing-box check，手工替换为 `240/4` 的当前真实诊断配置也通过 check。
+- 当前状态：0.1.28 仍在 `/Applications` 运行并开启 TUN；源代码已准备构建 0.1.29。
+- 风险/注意：`240/4` 是保留的 Class E 网段，当前 macOS 内核与 sing-box 均接受，且不与现有订阅 CIDR 冲突；它是原生 CLI TUN 的兼容方案，不应推广为所有平台默认 Fake-IP 段。
+- 下一步：构建/签名 0.1.29，停止旧 TUN，备份替换安装版，清一次旧 DNS/浏览器缓存，再做两轮 Safari/Chrome 国内外网页与出口 IP 验收。
+- 接手方式：不要再把 0.1.28 的持久化视作最终修复；若中断，从安装 0.1.29 开始，重点验证普通浏览器解析到 `240.x` 后连接能进入 `inbound/tun`。
+
+### 2026-07-23 20:21 — 0.1.29 证伪上一判断并锁定 DNS 路由根因
+
+- 已完成：构建、签名并安装 0.1.29；清 Chrome host/socket cache、重启 Safari；启动 TUN 后逐项核对诊断配置、实际 DNS 响应、目标路由和内核日志。
+- 证伪：诊断配置已经是 `fakeip 240/4`，但 `dig @172.19.0.2` 仍返回物理网关生成的 `198.18.x`。因此“macOS 拒绝 198.18/15”不是最终根因；此前 `198.18` 行为被错误 DNS 路径和家庭网关 Fake-IP 干扰。
+- 最终根因：`route get 172.19.0.2` 明确走 `en0 → 192.168.2.101`；`route get 172.19.0.1` 是 `utun7 LOCAL`。应用把系统 DNS 指向 TUN 地址的“下一跳”`.2`，但 macOS 原生 point-to-point TUN 只为接口自身 `.1` 建本地路由，且 `.2` 被 `172.16/12` 路由排除覆盖。
+- 决定性实验：`dig @172.19.0.1` 返回 kongshan 的 `240.0.0.2`，日志出现 `inbound/tun ... 172.19.0.1:53`；临时将 Wi-Fi DNS 改为 `.1` 后普通 TUN 请求 Google 204、百度 200，Chrome/Safari 的 Google/百度均恢复。
+- 修改文件：`Sources/KongshanCore/ProxyMode.swift` 将 `dnsServerAddress` 改为接口 IPv4 自身；`Tests/KongshanCoreTests/SystemDNSManagerTests.swift` 更新默认、自定义和回退断言；`VERSION` 升至 0.1.30。
+- 测试结果：定向 DNS 地址测试通过；全量 259 通过、1 跳过、0 失败。
+- 当前状态：0.1.30 源码和测试已准备，0.1.29 TUN 临时用正确 DNS 验证通过。
+- 风险/注意：绑定 `en0` 会主动绕开 TUN，不能再用其连接 `240.x` 作为 TUN 结论；最终隔离验证应绑定 TUN 源地址 `172.19.0.1`，且先确认系统 HTTP/HTTPS/SOCKS 代理全关。
+- 下一步：构建/安装 0.1.30，验证应用自动把 DNS 设为 `.1`，完成两轮内核重启和浏览器/出口终验。
+- 接手方式：若中断，不再回到 0.1.29 的 198.18 判断；从 `TunSettings.dnsServerAddress == 172.19.0.1` 和 `route get` 证据接手。
+
+### 2026-07-23 20:31 — 0.1.30 两轮真机 TUN 终验通过
+
+- 已完成：构建 0.1.30/build 130，深度签名和 hardened runtime 校验；备份 0.1.29 后替换 `/Applications/kongshan.app`；连续两轮正常 UI 关闭/启动 TUN；验证 DNS、路由、Fake-IP、国内外 HTTP、出口 IP、日志、Chrome 和 Safari。
+- 修改文件：`Sources/KongshanCore/ConfigGenerator.swift`、`Sources/KongshanCore/ProxyMode.swift`、`Tests/KongshanCoreTests/DNSConfigTests.swift`、`SystemDNSManagerTests.swift`、`TunConfigTests.swift`、`VERSION`、`docs/design/tun-real-machine-debug.md` 与四份项目记录。
+- 测试结果：
+  - 自动化：259 通过、1 跳过、0 失败；测试 TUN 配置过 sing-box check；0.1.30 安装版与 dist SHA-256 一致，`codesign --verify --deep --strict` 通过。
+  - 真机首轮 PID 36946、二轮 PID 37470；系统 DNS 两轮均自动为 `172.19.0.1`；Google Fake-IP 两轮均 `240.0.0.4`。
+  - 两轮均为 Google 204、百度 200、GitHub 200；出口 IP `69.63.217.24`；日志确认 Google/GitHub 经 HY2、百度 direct。
+  - Chrome 与 Safari 两轮都能打开 Google 和百度。
+- 当前状态：`/Applications/kongshan.app` 和 `dist/kongshan.app` 均为 0.1.30；TUN 保持开启供用户直接验收；当前分支未合 main。
+- 风险/注意：本轮为 en0 单默认网关，不是最初企业双默认网关；根因能直接解释企业网 DNS 超时，但仍建议回原网络复验一次。开关 TUN 仍走 osascript 兜底并要求管理员密码，免密码助手可另行安装，不影响网络修复。
+- 下一步：用户验收；通过后交维护者复审并决定是否合 main。当前不要合并。
+- 接手方式：留在 `fix/tun-real-machine-browsing`，先读 HANDOFF 顶部与设计 §19-20；不要重复 DoH/QUIC/节点/Fake-IP 猜测。
