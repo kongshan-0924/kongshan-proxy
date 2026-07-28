@@ -65,7 +65,8 @@ private final class AppWarningRelay: @unchecked Sendable {
 @MainActor
 @Observable
 final class AppState {
-    typealias RuntimeFactory = @Sendable () throws -> RuntimeParameters
+    /// 入参是上次用过的 mixed 端口，可用就复用（见 `RuntimeSecrets.availableHighPort(preferred:)`）。
+    typealias RuntimeFactory = @Sendable (UInt16?) throws -> RuntimeParameters
     typealias HealthVerifier = @Sendable (ClashAPIClient) async throws -> Void
     typealias ClashClientFactory = @Sendable (URL, String) -> ClashAPIClient
     typealias NowProvider = @Sendable () -> Date
@@ -286,6 +287,9 @@ final class AppState {
     @ObservationIgnored private let loginItemManager: any LoginItemManaging
     @ObservationIgnored private var clashAPIClient: ClashAPIClient?
     @ObservationIgnored private var runtime: RuntimeParameters?
+    /// 上次实际用过的 mixed 端口，落盘复用。系统代理的地址会被 Chromium 系客户端缓存，
+    /// 每次启动换端口会让它们打死端口、反复「正在重新连接」。nil 表示还没分配过。
+    @ObservationIgnored private var preferredMixedPort: UInt16?
     @ObservationIgnored private var currentConfig: Data?
     @ObservationIgnored private var dashboardTasks: [Task<Void, Never>] = []
     @ObservationIgnored private var dashboardMonitorConsumers: Set<DashboardMonitorConsumer> = []
@@ -539,7 +543,12 @@ final class AppState {
         do {
             let prepared = try await ruleSetService.prepare(includeAds: routingSettings.blockAds, mirror: ruleSetSettings.mirror, allowsNetwork: ruleSetSettings.autoUpdate)
             appendWarnings(prepared.warnings)
-            let runtime = try runtimeFactory()
+            let runtime = try runtimeFactory(preferredMixedPort)
+            // 端口只在首次分配或旧端口被占时才变；变了立刻落盘，否则下次启动又是新端口。
+            if preferredMixedPort != runtime.mixedPort {
+                preferredMixedPort = runtime.mixedPort
+                try? await persistSettings()
+            }
             let (config, configWarnings) = try await generateConfiguration(
                 runtime: runtime,
                 ruleSets: prepared.ruleSets,
@@ -1988,7 +1997,9 @@ final class AppState {
                 outboundMode: settings.outboundMode,
                 groupSelections: settings.groupSelections,
                 activeConfigID: settings.activeConfigID,
-                speedTestMethod: settings.speedTestMethod
+                speedTestMethod: settings.speedTestMethod,
+                // 备份不含端口：那是本机运行时状态，导入别的机器的备份不该顶掉本机端口。
+                mixedPort: preferredMixedPort
             )
 
             var importedNodes = backup.manualNodes
@@ -2155,6 +2166,7 @@ final class AppState {
             outboundMode = settings.outboundMode ?? .rule
             groupSelections = settings.groupSelections ?? [:]
             activeConfigID = settings.activeConfigID
+            preferredMixedPort = settings.mixedPort
         }
         if let data = try await storage.readIfPresent(from: rulesURL) {
             routingSettings = try JSONDecoder().decode(RoutingSettings.self, from: data).validated()
@@ -2189,7 +2201,8 @@ final class AppState {
                 outboundMode: outboundMode,
                 groupSelections: groupSelections,
                 activeConfigID: activeConfigID,
-                speedTestMethod: speedTestMethod
+                speedTestMethod: speedTestMethod,
+                mixedPort: preferredMixedPort
             )),
             to: settingsURL
         )
@@ -2582,8 +2595,11 @@ final class AppState {
         }
     }
 
-    nonisolated private static func makeRuntimeParameters() throws -> RuntimeParameters {
-        let mixedPort = try RuntimeSecrets.availableHighPort()
+    /// mixed 端口跨启动保持稳定（缓存了代理地址的客户端不会被换端口甩掉）；
+    /// clash_api 端口与 secret 仍然每次随机——它们只在进程内使用，没有外部缓存问题，
+    /// 而 secret 随机是真正的安全边界。
+    nonisolated private static func makeRuntimeParameters(preferredMixedPort: UInt16?) throws -> RuntimeParameters {
+        let mixedPort = try RuntimeSecrets.availableHighPort(preferred: preferredMixedPort)
         var clashPort = try RuntimeSecrets.availableHighPort()
         while clashPort == mixedPort {
             clashPort = try RuntimeSecrets.availableHighPort()
@@ -3168,6 +3184,9 @@ private struct PersistedSettings: Codable {
     /// 当前生效配置 ID 与测速方式，旧版设置文件没有这些字段。
     var activeConfigID: UUID?
     var speedTestMethod: SpeedTestMethod?
+    /// 上次用过的本地 mixed 端口。旧版设置文件没有该字段（nil = 首次分配）。
+    /// 属于本机运行时状态，**不进备份**：换台机器该端口未必空闲。
+    var mixedPort: UInt16?
 }
 
 private struct FileSnapshot {

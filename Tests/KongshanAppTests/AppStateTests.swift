@@ -1403,7 +1403,7 @@ final class AppStateTests: XCTestCase {
             singBoxProcess: core,
             processExitMonitor: processExitMonitor,
             notificationSender: notificationSender,
-            runtimeFactory: { runtime },
+            runtimeFactory: { _ in runtime },
             healthVerifier: health.verify(client:),
             automaticallyInitialize: false
         )
@@ -1476,7 +1476,7 @@ final class AppStateTests: XCTestCase {
             processExitMonitor: processExitMonitor,
             notificationSender: notificationSender,
             privilegedLauncher: privileged,
-            runtimeFactory: { runtime },
+            runtimeFactory: { _ in runtime },
             healthVerifier: { _ in },
             clashClientFactory: clashClientFactory,
             automaticallyInitialize: false
@@ -1574,6 +1574,98 @@ final class AppStateTests: XCTestCase {
             return "https://\(host)\(port.map { ":\($0)" } ?? "")\(path)"
         }
         return try DNSSettings(domesticDoH: url(from: domestic), remoteDoH: url(from: remote))
+    }
+
+    /// mixed 端口必须跨启动稳定：系统代理的地址会被 Chromium 系客户端（ChatGPT.app 内嵌的
+    /// codex 服务、Chrome）缓存，每次启动换端口会让它们打死端口、反复「正在重新连接」。
+    /// 这里钉死两端——第一次分配后落盘，第二次启动把它原样喂回 runtimeFactory。
+    func testMixedPortPersistsAndIsFedBackOnNextLaunch() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        try await storage.prepare()
+
+        let runtime = try runtimeParameters()
+        let recorder = PreferredPortRecorder()
+        let privileged = FakePrivilegedLauncher(root: root)
+
+        func makeState() -> AppState {
+            AppState(
+                storage: storage,
+                systemProxyManager: SystemProxyManager(storage: storage) { _, _ in
+                    ProcessResult(exitCode: 0, stdout: "", stderr: "")
+                },
+                // 内核起不来无所谓：runtimeFactory 在配置校验之前就被调用过了。
+                singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+                privilegedLauncher: privileged,
+                runtimeFactory: { preferred in
+                    recorder.record(preferred)
+                    return runtime
+                },
+                automaticallyInitialize: false
+            )
+        }
+
+        func prepare(_ state: AppState) {
+            state.nodes = [ProxyNode(
+                name: "local-test",
+                protocolType: .shadowsocks,
+                server: "127.0.0.1",
+                port: 9,
+                password: "placeholder",
+                method: "aes-128-gcm"
+            )]
+            state.selectedNodeID = state.nodes[0].id
+            state.activeConfigID = AppState.localConfigID
+        }
+
+        let first = makeState()
+        await first.initialize()
+        prepare(first)
+        await first.startSystemProxy()
+
+        // 首次启动没有历史端口，必须传 nil 让它随机分配。
+        XCTAssertEqual(recorder.values.count, 1)
+        XCTAssertNil(recorder.values[0])
+
+        let persisted = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: root.appending(path: "settings.json")))
+                as? [String: Any]
+        )
+        XCTAssertEqual(persisted["mixedPort"] as? Int, Int(runtime.mixedPort))
+
+        let second = makeState()
+        await second.initialize()
+        prepare(second)
+        await second.startSystemProxy()
+
+        XCTAssertEqual(recorder.values.count, 2)
+        XCTAssertEqual(recorder.values[1], runtime.mixedPort)
+    }
+
+    func testOldSettingsWithoutMixedPortStillLoad() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        try await storage.prepare()
+        // 旧版设置文件没有 mixedPort 字段，解码不能失败（失败等于整份设置被丢弃）。
+        try await storage.writeAtomically(
+            Data(#"{"selectedNodeID":null,"testURL":"http://example.com/generate_204","preferredMode":"tun"}"#.utf8),
+            to: root.appending(path: "settings.json")
+        )
+        let state = AppState(
+            storage: storage,
+            systemProxyManager: SystemProxyManager(storage: storage) { _, _ in
+                ProcessResult(exitCode: 0, stdout: "", stderr: "")
+            },
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            privilegedLauncher: FakePrivilegedLauncher(root: root),
+            automaticallyInitialize: false
+        )
+
+        await state.initialize()
+
+        XCTAssertEqual(state.preferredMode, .tun)
     }
 
     private func compiledRuleSet(in directory: URL) async throws -> Data {
@@ -2084,5 +2176,19 @@ extension AppStateTests {
         for value in samples {
             XCTAssertFalse(MenuRateFormatter.compact(value).contains(" "), "菜单栏格式不能含空格")
         }
+    }
+}
+
+/// 记录 runtimeFactory 每次拿到的 preferred 端口。工厂闭包是 @Sendable，故自带锁。
+private final class PreferredPortRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [UInt16?] = []
+
+    var values: [UInt16?] {
+        lock.withLock { storage }
+    }
+
+    func record(_ port: UInt16?) {
+        lock.withLock { storage.append(port) }
     }
 }

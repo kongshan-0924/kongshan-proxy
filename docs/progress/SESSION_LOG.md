@@ -2052,3 +2052,94 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
   工作区干净、与 origin/main 同步。
 - 下一位接手：先读 `docs/HANDOFF.md` 顶部一节即可。无阻塞项；
   可选后续见 `docs/NEXT_STEPS.md`（热重载优化、睡眠唤醒真机验证）。
+
+## 2026-07-28 11:30 — 定位 codex/ChatGPT.app 系统代理模式反复重连
+
+- 现象：用户报告 codex 在系统代理模式下频繁「正在重新连接」，约 5 次后才成功开始对话。
+- 排除项（真机实测，均健康）：
+  - 代理链路：串行 6 次 + 并发 10 条全部成功，TLS 0.45~0.85s、首字节 0.60~1.0s，无失败。
+  - 节点：VLESS 出口 69.63.217.24 / LAX / US；`chatgpt.com/cdn-cgi/trace` 连打 12 次全 200，无限流。
+  - WebSocket：经代理对 `ws.chatgpt.com` 的 Upgrade 握手可通（404 = 路径不存在，隧道本身正常）。
+  - DNS：窗口内无解析失败；每条连接约 300ms 的间隔是 LA 节点 RTT，非 DNS 超时。
+- 根因（已坐实）：**mixed inbound 端口每次内核启动都重新随机**
+  （`AppState.start()` 内 `runtimeFactory()` → `RuntimeSecrets.availableHighPort()`）。
+  用户的 codex 实为 ChatGPT 桌面版内嵌服务（日志 `router: found process path` 显示
+  `/Applications/ChatGPT.app/.../Codex (Service)`，Chromium 内核），它缓存系统代理地址。
+  证据：ChatGPT.app 启动于 10:05:38，当前内核启动于 10:47:09（晚 42 分钟），
+  而 ChatGPT.app 现在连的是 `127.0.0.1:50403` —— 即内核本次随机到的新端口。
+  即：内核重启 → 端口变 → Chromium 仍打旧端口 → 连接被拒 → 「正在重新连接」→
+  Chromium 重新读取系统代理配置并退避重试 → 若干次后命中新端口 → 成功。
+  这解释了为何只在系统代理模式下出现（TUN 模式不涉及端口）。
+- 端口变化的触发点：App 启动、`setMode` 切换系统代理/TUN、`startCoreForTestingIfNeeded`（测速拉内核）。
+  崩溃自愈 `handleUnexpectedCoreExit` 复用 `currentConfig`，不换端口；
+  `applyRoutingSettings` 复用 `runtime`，也不换端口。
+- 结论：应把 mixed 端口持久化并复用（占用时才另选），clash_api 端口与 secret 保持随机。
+  随机端口在此不构成安全控制——inbound 只监听 127.0.0.1 且无鉴权，端口还会通过系统代理设置公开给所有 App。
+
+## 2026-07-28 11:45 — 固定本地 mixed 端口 → 0.1.44
+
+- 修复：mixed inbound 端口改为**跨启动复用**，根治上一条定位到的「codex 反复正在重新连接」。
+- 修改文件：
+  - `Sources/KongshanCore/RuntimeSecrets.swift`：`availableHighPort(preferred:)`；
+    绑定逻辑抽成 `bindLoopback(port:)`，并置 `SO_REUSEADDR`——sing-box 是 Go 写的，
+    `net.Listen` 默认带该选项；探测端不带会比真实监听端更悲观（内核刚停时旧连接
+    还在 TIME_WAIT，裸 bind 会 EADDRINUSE），于是每次重启仍被迫换端口，等于没修。
+  - `Sources/kongshan/AppState.swift`：`RuntimeFactory` 改为接收 preferred 端口；
+    新增 `preferredMixedPort` 属性；`PersistedSettings.mixedPort`（可选，旧文件兼容）；
+    `start()` 里端口变化即落盘；`importBackup` 显式保留本机端口（端口不进备份）。
+- 保持随机：clash_api 端口与 secret。secret 随机是真正的安全边界；
+  mixed 端口不是——它只监听 127.0.0.1、无鉴权，且必然通过系统代理设置公开给本机所有 App。
+- 新增回归测试 6 条：
+  - `Tests/KongshanCoreTests/RuntimeSecretsPortTests.swift`（4 条）：空闲时复用、
+    **端口仍挂 TIME_WAIT 时能复用**（真机主场景，用真 connect/accept/服务端先关构造）、
+    有活监听时让位、低位端口（helper 白名单外）不复用。
+  - `Tests/KongshanAppTests/AppStateTests.swift`（2 条）：首次传 nil→落盘→
+    第二次启动喂回同一端口的贯通验证；旧版 settings.json 缺字段仍能解码。
+- 测试结果：311 通过 / 1 跳过 / 0 失败，0 编译警告（较 0.1.43 的 305 增 6 条）。
+- 构建：0.1.44 / build 144，`dist/kongshan-0.1.44.dmg`，已装 `/Applications`，
+  签名 deep/strict 通过、arm64。
+- 注意：升级后**第一次启动仍会换一次端口**（旧版没落盘过），之后才稳定。
+
+## 2026-07-28 23:00 — 0.1.45 真机全流程验收 + 发布
+
+版本号 0.1.45 = 0.1.44 同一份代码（`verify_m4.sh` 会重新构建并递增补丁号）。
+
+### 验收结果（全部实测）
+
+- 端口稳定性：跨**完全退出重启**、跨**三轮关→开**、跨**重装 App** 均保持 49609；
+  clash_api 端口每次随机（57855→58023→58044→58105→58398→58713），符合设计。
+- 崩溃自愈：强杀内核 → 自动重启，复用同一 mixed 端口与同一份配置（走 `currentConfig`）。
+- 崩溃限流：连杀 4 次 → 停止接管并**自动还原系统代理**，不留指向死端口的设置。
+- 退出清理：1.16s 退出，无残留内核、代理已还原、无 recovery 文件。
+- bypass：`127.0.0.1` / `localhost` / `::1` 在列表最前。
+- 诊断快照：clash_api 已移除，password/uuid/reality 全为 `<redacted>`，无明文泄漏。
+- 资源：App CPU 0.3~0.5% / RSS 140MB；内核 CPU 0% / RSS 43~47MB；fd 92 / 36。
+- `verify_m4.sh` 通过：空闲 CPU 0%、最大 RSS 123MB。
+- `swift test` 311 通过 / 1 跳过 / 0 失败，`swift build` 0 警告。
+
+### 真机驱动经验（下次直接用）
+
+- **显示器休眠时 SwiftUI 不建可访问性树**：`entire contents of window 1` 返回 0 个按钮、
+  `screencapture` 全黑。此时 AX 定位必然失败，但**坐标点击照常生效**。
+  仪表盘「系统代理」胶囊在窗口位于 `(375,112) 960x724` 时为 `{1167, 294}`
+  （AX 报 @(1126,281) 83x27；TUN 胶囊从 x=1219 起，留有余量别点错）。
+- `osascript ... to quit` 可能挂满 2 分钟——那是 AppleScript 等事件回复的默认超时，
+  应用 1.16s 就退干净了。测退出耗时要**独立轮询进程**，别信 osascript 的返回时刻。
+- `tell app "System Events" to tell process "X"` 单行式后面不能跟多行块，
+  会静默走不到分支；要用 `tell ... \n tell ... \n end tell` 的块式。
+
+### 环境限制：本轮网络在做透明代理，节点连通性无法验证
+
+判据三条全中：直连国外出口 = `69.63.217.24`（订阅节点自身 IP）、直连国内出口 =
+`125.123.17.206`（嘉兴电信）两个出口；到洛杉矶 `69.63.217.24` 及 `1.1.1.1`、`8.8.8.8`
+的 TCP 握手**全部 4.5ms**（真跨太平洋 ≥130ms）；内核日志清一色
+`reality verification failed`。即路由器已把国外流量透传到同一个节点，
+所以用户"关掉代理也能上外网"。该环境下任何客户端的 Reality 节点都连不上，与应用无关。
+本地 mixed inbound 本身正常（经代理访问 baidu 200 / 0.12s）。
+
+### 成品
+
+- `dist/kongshan-0.1.45.dmg`，SHA-256
+  `5c109e0412bf8e3fbdbd665d06aa65523fe4cc673d925492a30c5940b51cfe6a`
+- 已装 `/Applications/kongshan.app` 0.1.45，deep/strict 签名通过、arm64。
+- dist 只保留当前版本（0.1.43 / 0.1.44 的 DMG 已删）。
