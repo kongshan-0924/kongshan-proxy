@@ -1,5 +1,44 @@
 # 项目交接
 
+## 2026-07-28 已发布 v0.1.43（当前状态）
+
+- **代码已提交、已 squash 合并 `main`、已推送、已发 GitHub Release**。
+  仓库只剩 `main` 一条分支（`fix/config-switch-ui-batch` 已删除）。
+- Release：<https://github.com/kongshan-0924/kongshan-proxy/releases/tag/v0.1.43>
+  DMG SHA-256 `3606670d0dc7749bf3600b70da04ee87091055c3ce488e49b03eb7aeeb79afe7`
+- 本机 `/Applications/kongshan.app` 已是 0.1.43；`dist/` 只保留当前版本 DMG。
+- 测试：`swift test` **305 通过 / 1 跳过 / 0 失败**，`swift build` 0 警告。
+
+### 这一轮解决了什么
+
+免密码 TUN 助手**此前从未真正生效**，四个缺陷串在一条链上（修好一个才暴露下一个），
+全部修复且每个都有能独立验证该环节的回归测试。完整机理与"别改回去"的理由见
+`docs/design/tun-authorization-approaches.md`：
+
+1. 身份校验比对错对象（`SecCodeCopyPath` 对 bundle 返回 `.app` 目录）→ 永远"需重装"
+2. launchd 装载竞态（bootout 异步 + helper 慢退）→ `Bootstrap failed: 5: EIO`
+3. 线缆层用普通 `read()` 读长度前缀 → SCM_RIGHTS 被内核丢弃 → `missing config fd`
+4. `posix_spawn` 继承管道写端 → 内核永远等不到 EOF，卡在读配置
+
+外加睡眠唤醒假死、信号升级、连接重置等生命周期加固（见 SESSION_LOG 2026-07-27/28 各条）。
+
+### 真机验证到什么程度
+
+- **TUN 数据面已完全打通**：352KB 内核日志逐条确认 tun-in 收包、DNS 劫持、规则分流、
+  国内直连、进程匹配、Fake-IP 全部正常。
+- **系统代理 + TUN 双开可用**，出口 IP 为节点所在地、DNS 无泄漏（用户截图佐证）。
+- 系统代理/DNS 的接管与还原在真机上逐字节核对通过；Clash API 三条实时流、退出监控、
+  规则集下载编译、日志存储均真跑通过。
+
+### 仍未验证 / 已知边界
+
+- **睡眠唤醒后的自动重建隧道**（0.1.40 新增）尚未经用户真机复现验证。
+- 用户家庭网络在做**透明代理 + SNI 分流**，该环境下任何代理客户端的节点都连不上
+  （判据见 `docs/design/tun-real-machine-debug.md`）。验证节点连通性须换网络。
+- ad-hoc 签名固有代价：**App 每次重新构建 cdhash 都会变，助手需重装一次**
+  （首次开 TUN 会自动弹一次密码完成），这不是 bug，不要为省这一次弹窗放宽 cdhash 校验。
+- 同时运行多个 TUN 客户端（本应用与 Stash/Surge）会互抢默认路由。
+
 ## 2026-07-28 0.1.43 复审第二轮修复（当前版本）
 
 - 专项复审本轮新代码，修 5 处：① 助手自愈停内核失败会弄丢 PID → 可能同时跑两个 root 内核

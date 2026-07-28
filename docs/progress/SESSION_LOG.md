@@ -2030,3 +2030,25 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
   否则会卡在 helper 关停与 bootstrap 的竞态边缘——这是我自己引入信号升级后带来的连锁风险。
 - 测试结果：`swift build` 0 警告；`swift test` 305 通过 / 1 跳过 / 0 失败。
 - 当前状态：0.1.43 / build 143 已装 `/Applications`；代码未提交。
+
+## 2026-07-28 10:40 — 提交 / 合并 / 发布 v0.1.43（收尾）
+
+- 已完成：
+  - 提交前核查：`swift build` 0 警告、`swift test` 305 通过 / 1 跳过 / 0 失败；
+    对 origin/main 的全量 diff 做凭据扫描（唯一命中是 YAML 键名 `"public-key"`，非凭据）；
+    确认无二进制/DMG/dist 入库。
+  - 在功能分支提交后 **squash 合并到 `main`**，删除 `fix/config-switch-ui-batch`，
+    仓库只剩 `main` 一条分支；已 push（`3acc8d8..ddde5a1`）。
+  - 发布 **GitHub Release v0.1.43**，附 `kongshan-0.1.43.dmg`
+    （SHA-256 `3606670d0dc7749bf3600b70da04ee87091055c3ce488e49b03eb7aeeb79afe7`）。
+  - **README 更新**：补 VLESS（Reality/uTLS/Vision）；新增「TUN 的工作方式」小节
+    （固定 gVisor、Fake-IP 240/4、系统 DNS 指向 TUN 接口自身地址，以及各自的真机理由）；
+    助手安全小节补 bundle 路径校验、配置白名单、信号升级与孤儿内核认领；
+    权限与恢复补睡眠唤醒与换网重连；**删掉已过时的"默认不启用 fake-ip"**；
+    已知限制新增"所在网络有透明代理则任何客户端都连不上"与"多个 TUN 客户端互抢路由"；
+    数据目录补助手侧 TUN 日志路径与 fakeip 缓存；新增「排障文档」索引。
+  - HANDOFF / PROGRESS / NEXT_STEPS 改写为"已发布 v0.1.43"的当前状态视角。
+- 当前状态：`/Applications/kongshan.app` = 0.1.43；`dist/` 只留当前版本 DMG；
+  工作区干净、与 origin/main 同步。
+- 下一位接手：先读 `docs/HANDOFF.md` 顶部一节即可。无阻塞项；
+  可选后续见 `docs/NEXT_STEPS.md`（热重载优化、睡眠唤醒真机验证）。
