@@ -26,7 +26,7 @@ let package = Package(
             dependencies: ["HelperProtocol"],
             linkerSettings: [.linkedFramework("Security")]
         ),
-        .testTarget(name: "KongshanCoreTests", dependencies: ["KongshanCore"]),
+        .testTarget(name: "KongshanCoreTests", dependencies: ["KongshanCore", "HelperProtocol"]),
         .testTarget(name: "KongshanAppTests", dependencies: ["kongshan", "KongshanCore"]),
         .testTarget(name: "HelperProtocolTests", dependencies: ["HelperProtocol"])
     ]

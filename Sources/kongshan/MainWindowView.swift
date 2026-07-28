@@ -1,3 +1,4 @@
+import AppKit
 import KongshanCore
 import SwiftUI
 import UniformTypeIdentifiers
@@ -19,6 +20,7 @@ struct MainWindowView: View {
                 Section("其他") {
                     sidebarRow(.connections)
                     sidebarRow(.logs)
+                    sidebarRow(.messages)
                     sidebarRow(.settings)
                 }
             }
@@ -30,7 +32,7 @@ struct MainWindowView: View {
             // 错误与警告在所有页面统一呈现；此前只有仪表盘显示，
             // 其余页面的失败（导入、应用分流、保存设置…）全是静默的。
             VStack(spacing: 0) {
-                GlobalNoticeBar()
+                GlobalNoticeBar(selection: $selection)
                 Group {
                     switch selection ?? .dashboard {
                     case .dashboard:
@@ -45,6 +47,8 @@ struct MainWindowView: View {
                         ConnectionsView()
                     case .logs:
                         LogsView()
+                    case .messages:
+                        MessagesView()
                     case .settings:
                         SettingsView()
                     }
@@ -96,55 +100,71 @@ struct MainWindowView: View {
     }
 }
 
-/// 全页面统一的错误 / 警告条。错误红色可忽略，警告橙色可清除。
+/// 全页面统一的提醒条：只显示最新一条（错误优先于警告），完整列表在「消息」页。
 private struct GlobalNoticeBar: View {
     @Environment(AppState.self) private var state
+    @Binding var selection: SidebarPage?
 
     var body: some View {
-        VStack(spacing: 0) {
-            if let error = state.errorMessage {
-                noticeRow(
-                    text: error,
-                    symbol: "exclamationmark.octagon.fill",
-                    tint: .red,
-                    dismissTitle: "忽略"
-                ) { state.dismissError() }
+        if let notice = latestNotice {
+            HStack(spacing: 8) {
+                Image(systemName: notice.symbol)
+                    .font(.system(size: 11))
+                    .foregroundStyle(notice.tint)
+                Text(notice.text)
+                    .font(.caption)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                if notice.count > 1 {
+                    Text("共 \(notice.count) 条")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                Button("查看") { selection = .messages }
+                    .controlSize(.small)
+                Button(notice.dismissTitle, action: notice.dismiss)
+                    .controlSize(.small)
             }
-            if let warning = state.warnings.last {
-                noticeRow(
-                    text: state.warnings.count > 1 ? "\(warning)（共 \(state.warnings.count) 条）" : warning,
-                    symbol: "exclamationmark.triangle.fill",
-                    tint: .orange,
-                    dismissTitle: "清除"
-                ) { state.clearWarnings() }
-            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 6)
+            .background(notice.tint.opacity(0.09))
+            .overlay(alignment: .bottom) { Divider() }
         }
     }
 
-    private func noticeRow(
-        text: String,
-        symbol: String,
-        tint: Color,
-        dismissTitle: String,
-        dismiss: @escaping () -> Void
-    ) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: symbol)
-                .font(.system(size: 11))
-                .foregroundStyle(tint)
-            Text(text)
-                .font(.caption)
-                .lineLimit(2)
-                .truncationMode(.middle)
-                .textSelection(.enabled)
-            Spacer(minLength: 8)
-            Button(dismissTitle, action: dismiss)
-                .controlSize(.small)
+    private var latestNotice: NoticeData? {
+        if let error = state.errorMessage {
+            return NoticeData(
+                text: error,
+                symbol: "exclamationmark.octagon.fill",
+                tint: .red,
+                dismissTitle: "忽略",
+                count: 1,
+                dismiss: { state.dismissError() }
+            )
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 7)
-        .background(tint.opacity(0.09))
-        .overlay(alignment: .bottom) { Divider() }
+        if let warning = state.warnings.last {
+            return NoticeData(
+                text: warning,
+                symbol: "exclamationmark.triangle.fill",
+                tint: .orange,
+                dismissTitle: "清除",
+                count: state.warnings.count,
+                dismiss: { state.clearWarnings() }
+            )
+        }
+        return nil
+    }
+
+    private struct NoticeData {
+        let text: String
+        let symbol: String
+        let tint: Color
+        let dismissTitle: String
+        let count: Int
+        let dismiss: () -> Void
     }
 }
 
@@ -155,6 +175,7 @@ private enum SidebarPage: String, CaseIterable, Identifiable {
     case routing
     case connections
     case logs
+    case messages
     case settings
 
     var id: Self { self }
@@ -166,7 +187,8 @@ private enum SidebarPage: String, CaseIterable, Identifiable {
         case .policyGroups: "代理"
         case .routing: "规则"
         case .connections: "连接"
-        case .logs: "日志"
+        case .logs: "内核日志"
+        case .messages: "消息"
         case .settings: "设置"
         }
     }
@@ -179,6 +201,7 @@ private enum SidebarPage: String, CaseIterable, Identifiable {
         case .routing: "arrow.triangle.branch"
         case .connections: "point.3.filled.connected.trianglepath.dotted"
         case .logs: "doc.text.magnifyingglass"
+        case .messages: "bell.badge"
         case .settings: "gearshape"
         }
     }
@@ -315,7 +338,9 @@ struct NodesView: View {
     private func rowSubtitle(_ item: AppState.ConfigItem) -> String {
         var parts = ["\(item.nodeCount) 个节点"]
         if let usage = item.usage, let used = usage.usedBytes, let total = usage.totalBytes, total > 0 {
-            parts.append("\(Theme.bytes(used)) / \(Theme.bytes(total))")
+            // used 可能是 0（刚订阅、还没跑流量）；Theme.bytes 对 0 返回空串，
+            // 直接插值会渲染成「 / 100 GB」。用带占位符的版本。
+            parts.append("\(Theme.bytesOrDash(used)) / \(Theme.bytes(total))")
         }
         if let expires = item.usage?.expiresAt {
             parts.append("\(expires.formatted(date: .abbreviated, time: .omitted)) 到期")
@@ -551,6 +576,9 @@ private struct SettingsView: View {
     @State private var showsBackupImporter = false
     @State private var isPreparingBackup = false
     @State private var backupNotice: String?
+    @State private var diagnosticDocument: TextExportDocument?
+    @State private var showsDiagnosticExporter = false
+    @State private var isPreparingDiagnostics = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -578,14 +606,7 @@ private struct SettingsView: View {
                     Toggle("严格路由（strict_route）", isOn: strictRouteBinding)
                         .disabled(state.isBusy || !state.isReady)
 
-                    Picker("TUN 协议栈", selection: tunStackBinding) {
-                        ForEach(TunStack.allCases, id: \.self) { stack in
-                            Text(stack.displayName).tag(stack)
-                        }
-                    }
-                    .disabled(state.isBusy || !state.isReady)
-
-                    Text("TUN 的启动与停止需要管理员授权。严格路由更彻底，但可能影响局域网、虚拟机或其他 VPN。system 栈在部分 macOS 版本上有已知问题，异常时可切换协议栈重试。")
+                    Text("TUN 的启动与停止需要管理员授权。严格路由更彻底，但可能影响局域网、虚拟机或其他 VPN。首次开启 TUN 会弹一次密码安装免密码助手，之后启停零弹窗。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Text("TUN 运行期间系统 DNS 会临时指向 \(state.tunSettings.dnsServerAddress) 以防解析绕过 TUN（macOS 特性），关闭或退出时自动还原。")
@@ -644,6 +665,20 @@ private struct SettingsView: View {
                     Text("免密码助手让 TUN 启停无需每次输入密码：安装需一次管理员授权，之后开机自动运行。未装时 TUN 仍可用（每次弹密码）。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    if state.helperInstallStatus == .needsReinstall {
+                        // 本项目是 ad-hoc 签名，助手只能靠钉死 App 的 cdhash 来认人，
+                        // 因此 App 一更新（cdhash 变）助手就必须重装一次。说清楚，别让用户以为坏了。
+                        Text("助手在，但不认识当前这个 App —— 通常是 App 更新过（签名变了），或 App 被移动过位置。点「重新安装」授权一次即可，之后继续零弹窗。")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                    // 安装/卸载都要 bootout helper：TUN 正在跑时做这件事会把 root 内核变成
+                    // 孤儿（继续持有 utun/路由/DNS，App 停不掉）。TUN 运行期间一律禁用。
+                    if tunActive {
+                        Text("TUN 正在运行，安装/卸载助手已暂时禁用——请先关闭 TUN，避免残留无法清理的 root 内核。")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
                     HStack {
                         if state.isHelperOperationInProgress {
                             ProgressView().controlSize(.small)
@@ -655,22 +690,22 @@ private struct SettingsView: View {
                                 Task { await state.installHelper() }
                             }
                             .buttonStyle(.borderedProminent)
-                            .disabled(state.isHelperOperationInProgress)
+                            .disabled(state.isHelperOperationInProgress || tunActive)
                         case .installed:
                             Button("卸载") {
                                 Task { await state.uninstallHelper() }
                             }
-                            .disabled(state.isHelperOperationInProgress)
+                            .disabled(state.isHelperOperationInProgress || tunActive)
                         case .needsReinstall:
-                            Button("重新安装（应用位置已变）") {
+                            Button("重新安装") {
                                 Task { await state.installHelper() }
                             }
                             .buttonStyle(.borderedProminent)
-                            .disabled(state.isHelperOperationInProgress)
+                            .disabled(state.isHelperOperationInProgress || tunActive)
                         }
                     }
                 }
-                .onAppear { state.refreshHelperInstallStatus() }
+                .task { await state.refreshHelperInstallStatus() }
 
                 }
                 if tab == .network {
@@ -836,11 +871,19 @@ private struct SettingsView: View {
 
                 Section("关于") {
                     LabeledContent("应用版本", value: Self.appVersion)
+                    LabeledContent("应用更新") {
+                        Button("查看最新版本") {
+                            if let url = URL(string: "https://github.com/kongshan-0924/kongshan-proxy/releases/latest") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                        .controlSize(.small)
+                    }
                     LabeledContent("内核") {
                         HStack(spacing: 8) {
                             Text("sing-box \(state.coreVersion)")
                                 .foregroundStyle(.secondary)
-                            Button(state.isCheckingKernelUpdate ? "检查中…" : "更新内核") {
+                            Button(state.isCheckingKernelUpdate ? "检查中…" : "检查内核更新") {
                                 Task { await state.updateKernel() }
                             }
                             .controlSize(.small)
@@ -878,6 +921,14 @@ private struct SettingsView: View {
                 }
 
                 Section("数据与日志") {
+                    LabeledContent("故障诊断") {
+                        Button {
+                            prepareDiagnosticExport()
+                        } label: {
+                            Label("导出脱敏诊断", systemImage: "stethoscope")
+                        }
+                        .disabled(isPreparingDiagnostics)
+                    }
                     LabeledContent("数据目录") {
                         Button("在 Finder 中显示") {
                             NSWorkspace.shared.activateFileViewerSelecting([state.supportDirectory])
@@ -896,19 +947,22 @@ private struct SettingsView: View {
                         .textSelection(.enabled)
                         .lineLimit(1)
                         .truncationMode(.middle)
+                    Text("脱敏诊断不包含订阅原文、节点凭据或运行时密钥；日志仍可能包含访问域名和服务器地址，请仅发给可信维护者。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section("清理") {
-                    LabeledContent("清理缓存") {
-                        Button("执行") {
-                            Task { await state.clearRegenerableCaches() }
-                        }
-                        .disabled(state.isOn || state.isBusy)
+                    LabeledContent("清理缓存", value: state.cacheSizeBytes > 0 ? AppState.formatBytes(state.cacheSizeBytes) : "—")
+                    Button("执行清理") {
+                        Task { await state.clearRegenerableCaches() }
                     }
+                    .disabled(state.isOn || state.isBusy || state.cacheSizeBytes == 0)
                     Text("删除内核日志与规则集缓存，两者都会自动重新生成。设置、订阅缓存和节点不受影响。需先停止内核。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                .task { await state.refreshCacheSize() }
                 }
             }
             .formStyle(.grouped)
@@ -937,6 +991,17 @@ private struct SettingsView: View {
                 state.errorMessage = "导出备份失败：\(error.localizedDescription)"
             }
             backupDocument = nil
+        }
+        .fileExporter(
+            isPresented: $showsDiagnosticExporter,
+            document: diagnosticDocument,
+            contentType: .plainText,
+            defaultFilename: "kongshan-diagnostics"
+        ) { result in
+            if case let .failure(error) = result {
+                state.errorMessage = "导出诊断失败：\(error.localizedDescription)"
+            }
+            diagnosticDocument = nil
         }
         .fileImporter(isPresented: $showsBackupImporter, allowedContentTypes: [.json]) { result in
             switch result {
@@ -978,6 +1043,19 @@ private struct SettingsView: View {
         }
     }
 
+    private func prepareDiagnosticExport() {
+        isPreparingDiagnostics = true
+        Task {
+            defer { isPreparingDiagnostics = false }
+            do {
+                diagnosticDocument = TextExportDocument(text: try await state.exportDiagnostics())
+                showsDiagnosticExporter = true
+            } catch {
+                state.errorMessage = "准备诊断失败：\(error.localizedDescription)"
+            }
+        }
+    }
+
     /// 从打包进 App 的 Info.plist 读取版本，展示当前运行的是哪个构建。
     static var appVersion: String {
         let short = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
@@ -1013,23 +1091,17 @@ private struct SettingsView: View {
         }
     }
 
+    /// TUN 是否正在接管。安装/卸载助手会 bootout helper，此时做会留下孤儿 root 内核。
+    private var tunActive: Bool {
+        state.activeModes.contains(.tun)
+    }
+
     private var strictRouteBinding: Binding<Bool> {
         Binding(
             get: { state.tunSettings.strictRoute },
             set: { enabled in
                 var settings = state.tunSettings
                 settings.strictRoute = enabled
-                Task { await state.applyTunSettings(settings) }
-            }
-        )
-    }
-
-    private var tunStackBinding: Binding<TunStack> {
-        Binding(
-            get: { state.tunSettings.stack },
-            set: { stack in
-                var settings = state.tunSettings
-                settings.stack = stack
                 Task { await state.applyTunSettings(settings) }
             }
         )

@@ -1612,3 +1612,421 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
 - 修改文件（净）：`ConfigGenerator.swift`、`ProxyMode.swift` + 排查文档。发布：`dist/kongshan-0.1.30.dmg`（SHA-256 `86ad8e0009c811ecd4e447b852bb5c601927fdee4269352c634e42d487c8c353`）。
 - 当前状态：**仅剩 main 一条分支**（`afd539e`，已推 origin）；GitHub release **v0.1.30（Latest）** 含 DMG；`/Applications` 与 `dist` 各一个 0.1.30；工作区干净。
 - 风险/注意：本次修复在 en0 单默认网关下真机验证通过（Chrome/Safari 开 Google/百度/GitHub、出口 IP 正确）；建议回企业双默认网关网络再复验一次。免密码助手仍需用户「设置→隧道→安装」授权一次才免密（不影响连通）。
+
+## 2026-07-23 23:50 — 配置切换+UI 批量修复 + helper 纵深防御（fix/config-switch-ui-batch）
+
+- 已完成：用户 6 个问题 + 4 个非阻塞待办全部落地，3 个独立提交在 `fix/config-switch-ui-batch` 分支。
+  - 问题1（配置切换代理恢复失败）：`SystemProxyManager.restoreFromDisk` / `SystemDNSManager.restoreFromDisk` 改为单条命令失败不阻塞（收集 failures、最后汇总抛错），recovery 文件始终删除；`AppState.initialize` 用 `try?` 启动恢复，不阻塞配置加载。
+  - 问题2（菜单栏闪烁）：移除菜单内动态警告段；速率 0 用「—」占位避免高度跳动。
+  - 问题3+4（顶部提醒换布局+消息模块+日志改内核日志+优化内核日志+速率统一）：新建 `MessagesView`；`GlobalNoticeBar` 改为单条最新+「查看」跳消息页；`LogsView` 改名「内核日志」+加调试等级+右键复制+回到底部按钮；Dashboard/Connections/Logs 速率与字节 0 值统一「—」占位，`AppState.formatBytes/formatRate` 统一（KB/MB）。
+  - 问题5（首次开 TUN 自动装助手）：`AppState.start` 开 TUN 前若 `helperClient.isReachable()` false 则自动 `installHelper()`（弹一次密码持久化安装），失败回退 privilegedLauncher 不阻塞。
+  - 问题6（缓存大小显示）：设置-清理 Section 显示 `state.cacheSizeBytes`（`AppState.formatBytes` 格式化），`refreshCacheSize()` 在 `.task` 拉取，清理按钮按缓存/运行态禁用。
+  - 待办2（helper 配置内容白名单）：`HelperConfigWhitelist.validate` 纯函数——outbounds/inbounds 类型白名单 + 拒绝 clash_api（防 App 被攻破后塞 external_controller 远控 root sing-box）。helper 改为先 `readAllConfig` 读出 FD → 校验 → 本地新建 pipe 投递 sing-box，不再把 App 的 FD 直喂 sing-box。11 个单测。
+  - 待办3（trust.json 版本号）：`HelperTrustConfig.version: Int?`（当前=2，含 sing-box+客户端 cdhash 钉死）；旧 trust.json 无此字段解码为 nil（向后兼容）。
+  - 待办4（清理 NEXT_STEPS）：删除过时的 force-push 待办段（main 已与 origin 同步）。
+- 修改文件：`Sources/KongshanCore/SystemProxyManager.swift`、`SystemDNSManager.swift`、`PrivilegedHelperInstaller.swift`、`Sources/kongshan/AppState.swift`、`MenuBarView.swift`、`MainWindowView.swift`、`DashboardView.swift`、`ConnectionsView.swift`、`LogsView.swift`、`Sources/kongshan/MessagesView.swift`(新)、`Sources/HelperProtocol/HelperProtocol.swift`、`Sources/KongshanHelper/main.swift`、`Tests/KongshanCoreTests/SystemProxyManagerTests.swift`、`Tests/HelperProtocolTests/HelperConfigWhitelistTests.swift`(新)、`docs/NEXT_STEPS.md`。
+- 测试结果：`swift build` 通过（2 个既有非相关 warning）；`swift test` **270 通过、1 跳过、0 失败**（+11 白名单新测、+修改的代理恢复测试）。
+- 当前状态：3 个提交在 `fix/config-switch-ui-batch`（`ad2404c` 问题1+2+5+6、`7151f58` 问题3+4、`dd79e09` 待办2+3+4），未推、未合 main。
+- 风险/注意事项：
+  1. helper 读配置引入额外内存拷贝（配置可达数百 KB），但只在 startTun 时一次，可接受。
+  2. trust.json 版本号当前仅写入，helper 未强制校验版本（向后兼容旧安装）；未来可据 version < 2 强制重装。
+  3. 问题5 自动装助手会弹一次密码——用户首次开 TUN 即触发，符合用户要求「后续不要弹了」。
+- 下一步：用户真机验收 6 个修复；通过后维护者复审合 main。
+- 接手方式：在 `fix/config-switch-ui-batch`，读 3 个 commit + 本段。动 helper 白名单前理解 `readAllConfig` → `HelperConfigWhitelist.validate` → 本地 pipe 投递链路。
+
+## 2026-07-25 15:05 — 审计修复阶段 1：helper 与 TUN 生命周期
+
+- 已完成：删除会卡死单线程 helper 的 connect-only 探测，统一改为带超时的鉴权 `status`；TUN 一次运行周期固定 helper/osascript 后端；旧或缺钉死值的 trust.json 强制判定需重装；白名单对齐真实配置，支持 AnyTLS、安全 loopback Clash API，并把 root cache_file 强制改写到 helper 自有目录。
+- 修改文件：`HelperProtocol.swift`、`PrivilegedHelperClient.swift`、`KongshanHelper/main.swift`、`AppState.swift`、`MainWindowView.swift` 及 helper/AppState 测试。
+- 测试结果：Helper 白名单 13 项、trust 6 项、AppState 48 项均 0 失败。
+- 当前状态：核心 helper/TUN 生命周期缺陷已修，尚未打包或真机启用 TUN。
+- 风险/注意事项：旧 helper 安装会在下一次自检时要求重装一次；未改动当前系统网络。
+- 下一步：修复代理/DNS 恢复快照的失败保留逻辑并跑全量验证。
+- 接手方式：继续在 `fix/config-switch-ui-batch`；TUN 启停只经 `startTUN/stopTUN/recoverTUNIfNeeded`，不要恢复动态 computed launcher。
+
+## 2026-07-25 15:05 — 审计修复阶段 2：恢复快照数据安全与清理
+
+- 已完成：代理/DNS 恢复改为成功服务清除、失败服务保留快照重试；已消失服务安全丢弃；已禁用但仍存在的服务也会恢复；启动恢复失败会提示但不阻塞配置加载；字节格式改用 Foundation 原生格式化并删除死包装函数与无效错误盒。
+- 修改文件：`SystemProxyManager.swift`、`SystemDNSManager.swift`、`AppState.swift`、`ConnectionsView.swift` 及对应测试。
+- 测试结果：SystemProxy 10 项、SystemDNS 9 项、AppState 48 项均 0 失败；`git diff --check` 通过。
+- 当前状态：已确认的审计缺陷均已落地修复，准备全量测试、内核配置校验和 release 构建。
+- 风险/注意事项：尚未安装 App、未触发管理员授权、未改系统代理/DNS/TUN。
+- 下一步：全量 `swift test`、构建验收、签名与产物检查。
+- 接手方式：失败恢复文件现在是可重试状态，不得重新改成失败也删除。
+
+## 2026-07-25 15:10 — 全量验证与 0.1.31 成品
+
+- 已完成：全量回归、release arm64 构建、应用/助手签名与 hardened runtime 校验、DMG 打包和校验；旧 0.1.30 DMG 已移到废纸篓，dist 只保留 0.1.31。
+- 修改文件：上述业务代码与测试、`VERSION` 0.1.31、`docs/HANDOFF.md`、`docs/PROGRESS.md`、`docs/NEXT_STEPS.md` 和本日志；成品为 `dist/kongshan.app` 与 `dist/kongshan-0.1.31.dmg`。
+- 测试结果：`swift test` 280 通过、1 跳过、0 失败；新增真实 ConfigGenerator TUN 产物→helper 边界集成测试；TUN 测试配置过 sing-box check；arm64、deep/strict 签名、hardened runtime、KongshanHelper 签名、sing-box 1.13.14、`hdiutil verify` 全通过；DMG SHA-256 `40b56fde5bac9ce207ea6c3dd72df34f6cb56a1b36e3f3f2aa4ea1e368b4efc6`。
+- 当前状态：`fix/config-switch-ui-batch` 待提交，未推、未合 main；未安装或启动成品，未修改真机网络。
+- 风险/注意事项：旧 helper 首次验收需重新安装授权一次；TUN 与恢复链路最终仍需用户真机验收。
+- 下一步：提交当前分支，交用户安装 0.1.31 验收；通过后再复审并合 main。
+- 接手方式：从 HANDOFF 顶部 2026-07-25 段接手，先核对分支与 0.1.31 哈希。
+
+## 2026-07-25 16:14 — 0.1.32 阶段 1：TUN 设置收口
+
+- 已完成：删除不会进入生成配置的 `TunStack`、`interfaceName` 与死 UI binding；旧设置中的多余字段仍可被 Codable 忽略；IPv6-only TUN 设置在剥离 IPv6 后回退到默认 IPv4，避免生成空地址。
+- 修改文件：`ProxyMode.swift`、`MainWindowView.swift`、`TunConfigTests.swift`。
+- 测试结果：`TunConfigTests` 14 项、0 失败；生成的 TUN 配置继续固定 gVisor 并通过内置 sing-box check。
+- 当前状态：0.1.32 第一阶段完成，尚未构建成品。
+- 风险/注意事项：未修改当前系统网络；旧 JSON 的 `stack/interfaceName` 字段升级后被安全忽略。
+- 下一步：新增 VLESS 转换/配置生成和订阅兼容性报告。
+- 接手方式：继续在 `fix/config-switch-ui-batch`；不要重新引入可配置 TUN 栈，macOS 真机基线固定 gVisor。
+
+## 2026-07-25 20:51 — 0.1.32 阶段 2：VLESS 与兼容性报告
+
+- 已完成：订阅转换新增 VLESS（TCP/WS/gRPC、TLS、flow、uTLS fingerprint、Reality public-key/short-id）；配置生成新增 vless outbound；节点标签主题同步；订阅刷新在有跳过项时汇总节点/策略组/规则导入统计。
+- 修改文件：`Models.swift`、`ClashSubscriptionConverter.swift`、`ConfigGenerator.swift`、`Theme.swift`、转换器与生成器测试。
+- 测试结果：VLESS 转换、字段生成与兼容性统计用例通过；基础 VLESS 配置通过内置 sing-box 1.13.14 `check`。
+- 当前状态：协议与报告阶段完成，尚未构建 0.1.32。
+- 风险/注意事项：只新增已明确需要的 VLESS；未扩张到未出现的 TUIC/WireGuard。Reality 测试锁定配置结构，真节点仍需用户刷新订阅后验证。
+- 下一步：完成脱敏诊断导出、已安装 App 选择、应用版本入口。
+- 接手方式：VLESS 继续复用 `ProxyNode`，不要另建平行协议模型；helper 白名单已允许 vless。
+
+## 2026-07-25 20:52 — 0.1.32 阶段 3：诊断、App 选择与更新入口
+
+- 已完成：设置页新增一键导出脱敏诊断文本（版本/状态/恢复标记/消息/脱敏配置/内核日志）；规则页可从 `/Applications` 选择未运行的 App 并读取 `CFBundleExecutable`；关于页新增应用 release 入口，内核按钮改为准确的“检查内核更新”。
+- 修改文件：`AppState.swift`、`MainWindowView.swift`、`RoutingView.swift`、`LogsView.swift`、`AppStateTests.swift`。
+- 测试结果：诊断导出确认删除节点密码和 Clash runtime secret；VLESS、备份兼容与侧栏回归合计 16 项、0 失败。
+- 当前状态：功能清单全部落地，准备文档收口、全量测试和 0.1.32 构建。
+- 风险/注意事项：仓库是 private，App 不内置 GitHub Token；“查看最新版本”安全地打开 releases/latest，由已登录浏览器处理权限。诊断日志可能含访问域名/服务器地址，UI 已提醒只发可信维护者。
+- 下一步：清理过时交接内容，跑全量测试、离屏 UI、release/签名/DMG 验证。
+- 接手方式：诊断导出不得读取 `subscriptions/*.yaml` 或备份；应用更新不得内置私有仓库凭据。
+
+## 2026-07-25 20:56 — 0.1.32 阶段 4：全量验证与成品
+
+- 已完成：清理交接文档；运行全量测试、离屏界面渲染、release 构建、签名/架构/内核/DMG/M4 验证；旧 0.1.31 DMG 移入废纸篓，dist 只保留 0.1.32。
+- 修改文件：前三阶段业务代码和测试、`VERSION`、`docs/HANDOFF.md`、`docs/PROGRESS.md`、`docs/NEXT_STEPS.md` 与本日志；成品为 `dist/kongshan.app` 和 `dist/kongshan-0.1.32.dmg`。
+- 测试结果：`swift test` 282 通过、1 跳过、0 失败；10 张离屏快照生成成功；VLESS 配置通过 sing-box 1.13.14 check；arm64、deep/strict 签名、hardened runtime、DMG 和 M4 自动验证通过；空闲 CPU 平均 0%，最大 RSS 124032 KB；DMG SHA-256 `ec255233febb71d6152719d592bcef970084dca6018069a587b72cce3180f00c`。
+- 当前状态：0.1.32/build 132 成品已生成，仍在 `fix/config-switch-ui-batch`，未推、未合 main、未安装，未修改系统代理/DNS/TUN。
+- 风险/注意事项：旧 helper 首次验收需重新安装一次；private GitHub 更新入口依赖已登录浏览器；诊断日志可能包含域名或服务器地址。
+- 下一步：用户按 `NEXT_STEPS.md` 安装并真机验收；明确通过后再复审、合并 main 和发布。
+- 接手方式：先核对分支与 DMG 哈希；真机验收前不要再构建、不要合 main。
+
+## 2026-07-25 21:10 — 0.1.32 维护者代码复审（合并前把关）
+
+- 已完成：对 `origin/main...fix/config-switch-ui-batch`（9 提交、1594+/775-）逐文件复审；独立复跑 `swift build`（0 警告）与 `swift test`（282 通过 / 1 跳过 / 0 失败）；扫描分支 diff 无真实凭据（仅 `0123456789abcdef`、`node-secret`、全零 UUID 等测试占位符）；确认无二进制/DMG 入库。
+- 复审确认正确的设计：helper 白名单「先读入内存 → 校验 → 重新序列化 → 用 helper 本地新建 pipe 投递」，校验字节即投递字节，JSON 往返顺带消掉重复键攻击，无 TOCTOU；`HelperTrustConfig.isCurrent` fail-closed 配合开 TUN 自动装助手，v1→v2 迁移路径干净（status ok:false → needsReinstall → 一次密码）；`activeTUNBackend` 钉死一次 TUN 生命周期的后端，修掉 stop/reload 打错进程；`TunStack`/`interfaceName` 删除对 Codable 向后兼容安全（合成解码器忽略多余键）；`case "tcp": return nil` 是 VLESS 节点被跳过的真因修复；`testGeneratedTUNConfigPassesHelperTrustBoundary` 是防生成器/白名单漂移的关键回归。
+- 复审发现（按优先级，均未修）：
+  1. P1 卸载/重装免密码助手不会先停内核。`PrivilegedHelperInstaller.uninstall` 只做 bootout + 删 plist/socket/stateDirectory；install 走 bootout+bootstrap；helper 的 `kernelPID` 只在内存（`main.swift:55`），且 helper 路径不写 `tun-recovery.json`（只有 `PrivilegedLauncher` 写）。设置页 卸载/重装 按钮只按 `isHelperOperationInProgress` 禁用，没按 TUN 是否在跑禁用 → TUN 开着点卸载会留下 root sing-box 持有 utun/auto_route/劫持的 DNS，App 侧 `stopTUN()` 抛 helperNotReachable，socket 与 state 目录已删，只能 `sudo pkill sing-box` + 手工恢复 DNS。属既有缺口，但本分支新增「开 TUN 自动装助手」让 bootout-while-running 更容易触发。
+  2. P2 `stop()` 把 DNS/代理还原失败降级为「可忽略，下次启动自动清理」警告后照常停内核：系统 DNS 仍指向已消失的 172.19.0.1 → 到下次启动前全局解析瘫痪，文案却说可忽略。不阻塞退出是对的，但应升为 errorMessage + 手工恢复指引。
+  3. P3 空串占位符改造漏两处：`MainWindowView.swift:341`（used=0 时渲染成「 / 100 GB」）、`DashboardView.swift:343`（图表 0 刻度标签空白）。
+  4. P4 菜单栏 `MenuRateFormatter.compact` 从手写 1 字母格式改成 `ByteCountFormatter(.binary)` 去空格，<1KB 变「900字节」、单位变 KB/MB/GB，比原来更宽更跳——正是用户抱过怨的位置。
+  5. P5 白名单只封写入面（log.output、cache_file.path）与远控面（clash_api）；`dns`/`route`/`outbounds[*]` 非 type 字段/`tun` 非 auto_route 字段未校验，root 任意文件读仍可（`route.rule_set[].path`、`tls.certificate_path`）。回归测试只覆盖 `[.tun]`，最常见的 `[.tun,.systemProxy]` 和 TUN+直连（无 cache_file）没过白名单。
+  6. P6 高位端口范围 49152–65535 在 `HelperConfigWhitelist` 与 `RuntimeSecrets.availableHighPort()` 两处硬编码，建议收进 `HelperConstants` 单一来源。
+- 测试结果：`swift build` 0 警告；`swift test` 282 通过 / 1 跳过 / 0 失败（本次独立复跑，与 0.1.32 构建记录一致）。
+- 当前状态：仍在 `fix/config-switch-ui-batch`，未推未合；复审结论 = P3/P4 与 P1 的按钮禁用属分钟级修复，建议修完再 squash 合 main。
+- 风险/注意事项：P1 会让用户机器留下无法从 App 清理的 root 内核，验收脚本第 2、3 条正好覆盖，真机验收时务必实测「TUN 开着卸载助手」。
+- 下一步：等用户决定「先修 P1/P3/P4 再合」还是「先合再在 0.1.33 修」。
+- 接手方式：读本条 6 项发现；改 helper 生命周期时同时补 `stateDirectory/kernel.pid` 持久化 + helper 启动 reconcile，别只加 UI 禁用。
+
+## 2026-07-25 21:40 — 修复复审 P1~P6 + 构建安装 0.1.33
+
+- 已完成（六项全修）：
+  1. **P1 残留 root 内核**（三层）：helper 启动新增 `adoptOrphanKernel()`——按「可执行路径 == trust 钉死的 root-only sing-box」扫现存进程认领上一实例遗留的内核；App 还在（重装/重载场景）就记回 clientPID 交回 App 正常 stop，App 不在（崩溃残留）就当场 SIGINT 停掉。新增 `executablePath(ofPID:)`/`firstPID(withExecutablePath:)`，`stopSingBox` 改用同一路径校验（§1.4 未放宽：仍只对路径匹配的 PID 发信号，不接受外部 PID）。App 侧 `uninstallHelper()` 先 `helperClient.recoverIfNeeded()` 停内核再卸载；开 TUN 自动装助手后补一次 `recoverIfNeeded()`，避免新 helper 认领旧内核导致 "kernel already running"。卸载脚本加 `pkill -f '<root-only sing-box> run -c /dev/stdin'` 兜底（helper 已死时唯一出路）。设置页安装/卸载/重装按钮在 TUN 运行时禁用并给出橙字说明。
+  2. **P2**：`stop()` 里代理/DNS 还原失败改为收集到 `restoreFailures`，停完内核统一升为 `errorMessage` + 「系统设置 → 网络 → 详细信息 → 代理/DNS」手工恢复指引，删掉误导性的「可忽略」。不阻塞退出的行为保持不变。
+  3. **P3**：`MainWindowView` 订阅用量改 `Theme.bytesOrDash(used)`（修 used=0 渲染成「 / 100 GB」）；`DashboardView` 图表 0 刻度显示「0」而不是空标签。
+  4. **P4**：`MenuRateFormatter.compact` 恢复手写单字母格式（900B/1.5K/5.0M/2.0G，0 → 空串），注释写明不要再换成 ByteCountFormatter。
+  5. **P5**：白名单注释明确列出「不覆盖 dns/route/outbound 非 type 字段 → root 仍可读任意文件」的有意边界；新增 `testEveryGeneratedTUNModeCombinationPassesHelperTrustBoundary` 覆盖 TUN / TUN+系统代理 / TUN+全局 / TUN+直连四种组合。
+  6. **P6**：`HelperConstants.loopbackAddress` + `loopbackHighPorts` 单一来源，白名单与 `RuntimeSecrets.availableHighPort()` 都读它；新增 `testRuntimeHighPortsStayInsideHelperWhitelistRange`。
+- 修改文件：`HelperProtocol.swift`、`KongshanHelper/main.swift`、`PrivilegedHelperInstaller.swift`、`RuntimeSecrets.swift`、`AppState.swift`、`MainWindowView.swift`、`DashboardView.swift`、`MenuBarView.swift`、`TunConfigTests.swift`、`AppStateTests.swift`、`VERSION`。
+- 测试结果：`swift build` 0 警告；`swift test` **285 通过 / 1 跳过 / 0 失败**（新增 3 项）；release 构建 arm64、deep/strict 签名通过、flags `0x10002(adhoc,runtime)` 保留、sing-box 1.13.14；DMG `dist/kongshan-0.1.33.dmg`（24M），旧 0.1.32 DMG 移入废纸篓。
+- 当前状态：0.1.33/build 133 已 `ditto` 安装到 `/Applications/kongshan.app`（此前 /Applications 无安装），已启动自检：PID 存活、无崩溃报告、空闲 CPU 0.4%、RSS≈116MB。代码改动**尚未提交**，仍在 `fix/config-switch-ui-batch`。
+- 风险/注意事项：App 重新构建 → cdhash 变 → 已装的旧 helper 会拒新 App，首次开 TUN 会弹一次密码自动重装助手（预期行为）。`adoptOrphanKernel` 只能在真机装了 helper 后验证，helper stderr 进统一日志：`log show --predicate 'process == "KongshanHelper"' --last 10m`。
+- 下一步：用户真机验收 0.1.33（重点：TUN 开着时安装/卸载按钮应禁用；杀掉 helper 后新 helper 应认领或清掉残留内核）；通过后再提交 + squash 合 main + 发布。
+- 接手方式：先读本条 6 项修复；改 helper 生命周期务必保持「只对路径匹配 PID 发信号」这条不放宽。
+
+## 2026-07-27 00:30 — 全面审计 + 真机全流程测试 → 0.1.34
+
+- 已完成（审计出 10 项并全部修复）：
+  1. **ProcessRunner continuation 数据竞争**（最严重）：`self.continuation = continuation` 在锁外写，而 terminationHandler（子进程线程）与超时（全局队列）在锁内读写同一字段。networksetup / sing-box check / sing-box version 都是毫秒级退出，正好落进竞争窗口。加锁修复。
+  2. **Reality 凭据未脱敏**：0.1.32 加 VLESS 时 `redactOutbound` 仍是浅层（只 password/uuid/obfs.password），`tls.reality.public_key` 在真机 `config.json` 里明文可见。改成真·递归脱敏（按字段名匹配任意层级），字段表加 private_key/public_key/short_id/secret/auth/token/psk。
+  3. **SIGPIPE 未忽略**：App 往内核 stdin 写几百 KB 配置，内核若在读完前退出，写端收到 SIGPIPE 会**直接杀掉整个 App**。启动时全局 `signal(SIGPIPE, SIG_IGN)`。
+  4. **日志页「调试」是死控件**：Picker 有这一档但 `setLogLevel` 只放行 info/warning/error，点了没反应。该选择器只是过滤内核推流、不改内核 log.level，因此直接移掉这一档。
+  5. **`warnings = result.warnings` 三处整体覆盖**：订阅导入/刷新会把其它模块刚产生的消息一起抹掉。统一收口到 `appendWarning/appendWarnings`（去重 + 封顶 200 条），消息页不再无限增长。
+  6. **系统代理绕过表可被用户删掉回环项**：删掉后 App 自己访问 `127.0.0.1:<clashPort>` 会绕回代理，仪表盘/日志/测速全废。`systemProxyBypassEntries` 无条件补 `127.0.0.1/localhost/::1`。
+  7. **连接监控任务在 self 释放后空转**：`guard let self` 失败分支只 sleep+continue，永不退出。改 `guard let self else { return }`。
+  8. **节点连不上时 App 只显示「已开启」**：新增启动后出口自检，接管生效却探测不到出口时提示「请到节点页测速或换一个节点」。
+  9. **debug 构建下 async 默认参数闭包必崩**：`SystemProxyManager/SystemDNSManager` 的 `runner` 默认参数是 async 闭包，debug 下调用即 `EXC_BAD_ACCESS @ swift_task_dealloc`（release 正常）。提成命名静态属性 `defaultRunner`，debug 也能跑真实路径 → 单测才能覆盖真机行为。
+  10. 上一轮 P1~P6 的收尾（见 21:40 条）。
+- 修改文件：`ProcessRunner.swift`、`ConfigGenerator.swift`、`RoutingModels.swift`、`SystemProxyManager.swift`、`SystemDNSManager.swift`、`KongshanHelper/main.swift`、`AppState.swift`、`KongshanApp.swift`、`LogsView.swift`、`MainWindowView.swift`、`MenuBarView.swift`、`DashboardView.swift` + 5 个测试文件 + `VERSION`。
+- 测试结果（**真机实跑，非模拟**）：
+  - `swift build` 0 警告；`swift test` **285 通过 / 1 跳过 / 0 失败**。
+  - 真订阅走网络刷新：2 节点 / 11 策略组 / 3479 规则，`usedCache=false`，兼容性告警数字正确（0 跳过、49 条规则由内置接管）。
+  - 配置生成 118 KB → `sing-box check` 退出码 0 → 真起内核 → mixed 入站 + Clash API 就绪 + 版本 1.13.14 + PID 生命周期正确。
+  - 路由链路验证：`api.ipify.org:443` → 命中规则 → `found process path: /usr/bin/curl` → 走代理出站（日志逐条确认）。
+  - **direct 模式真流量取到出口 IP 209.9.203.34**，证明入站/路由/直连出站全通。
+  - 系统代理：开启写入 65432 + `Enabled: Yes`，绕过表含 `127.0.0.1 localhost ::1`，还原后与开启前**逐字节相同**，恢复快照文件创建/删除正确。
+  - 系统 DNS：`192.168.2.101 → 172.19.0.1 → 192.168.2.101`，快照生命周期正确。
+  - 诊断配置脱敏复查：除已修的 Reality public_key 外全部 `<redacted>`；数据文件权限均 0600。
+- 当前状态：0.1.34 / build 134 已安装到 `/Applications` 并运行（0% CPU、RSS≈132MB、无崩溃报告）；`dist/kongshan-0.1.34.dmg`，SHA-256 `2d58a2e6f2d66783f8d673328c1203144ec0fed733c5597017a84a3554c6bffe`；旧 0.1.33 DMG 移入废纸篓。代码**未提交**，仍在 `fix/config-switch-ui-batch`。
+- 风险/注意事项：**用户当前网络把两个节点都拦了**——TCP 握手 3ms（美国 IP 物理不可能）但发 TLS ClientHello 零响应，是中间盒假答 SYN-ACK，不是 App 问题。因此「经代理取出口 IP」这一项在本网络无法验证通过。测试期间临时改过系统代理/DNS，均已还原并逐项核对。TUN 需要 root 密码，无法自动化验证。
+- 下一步：用户在能连通的网络下验收 TUN + 代理出口；通过后提交、squash 合 main、发 v0.1.34。
+- 接手方式：临时端到端测试文件（`Tests/KongshanCoreTests/LiveEndToEndTests.swift`）已删除——它会真改系统代理/DNS，留在默认 `swift test` 里有风险；需要时按本条记录重建。
+
+## 2026-07-27 01:40 — 免密码助手硬伤修复 + 模块巡检 → 0.1.35
+
+- 已完成：
+  1. **找到并修复"装完立刻显示需重装"的根因**（助手实际从未生效过）：
+     `SecCodeCopyPath` 对 bundle 型代码返回的是 `/Applications/kongshan.app`（.app 目录），
+     而安装器钉进 trust.json 的是主可执行文件 `.../Contents/MacOS/kongshan`，两者恒不相等
+     → `isTrusted` 永远 false → 助手静默拒绝每个连接 → `status()` 无响应 → 界面永远"需重装"。
+     用真机探针对着**正在运行的 App** 复刻 helper 的身份提取逻辑逐字段打印，坐实了这一点
+     （identifier 匹配、签名校验通过、cdhash 完全一致，只有路径对不上）。
+     修法：trust.json 新增 `clientBundlePath`（schema 升到 **v3**），身份校验比对它；
+     主可执行路径只保留用于算 cdhash。`isCurrent` 要求 v3 且 bundle 路径非空，
+     旧 v2 配置一律判过期 → 触发重装。
+  2. 安装后自检从"固定等 500ms"改为**最多轮询 5 秒**，慢机器不再误判成"装了没生效"。
+  3. 设置页文案：`needsReinstall` 时明确说明"助手在但不认识当前 App —— 通常是 App 更新过
+     （签名变了）"，按钮从"重新安装（应用位置已变）"改为"重新安装"。
+  4. 新增 `docs/design/tun-authorization-approaches.md`：对比 NetworkExtension（Surge/Stash/
+     官方 SFM）、SMJobBless 特权助手（ClashX 用签名 requirement 认人，App 升级免重装）、
+     每次 osascript、setuid 四种做法，说明 ad-hoc 签名下只能钉 cdhash、
+     因此"App 更新 = 重装一次助手"是固有代价，并明确禁止为省这次弹窗而放宽 cdhash 校验。
+- 新增测试：
+  - `HelperTrustEvaluationTests.testBundlePathIdentityIsTrustedAndExecutablePathPinIsNotEnough`
+    （钉主可执行路径必须判不可信，钉 bundle 路径才放行）；
+  - `...testTrustConfigIsCurrentRequiresBundlePath`；
+  - `Tests/KongshanCoreTests/HelperClientIdentityLiveTests.swift`（真机只读回归：对已安装且
+    在跑的 App 复算身份，断言 `isTrusted == true`；App 没装/没跑自动跳过）。
+- 模块巡检（真机实跑，测完删除临时文件）：
+  - Clash API 三条实时流：traffic=3、connections=3、logs=2 —— 仪表盘/连接页/日志页命脉全通；
+  - 退出监控：`kill -9` 内核后 `ProcessExitMonitor` 准确捕获到该 PID（崩溃自愈链前半段可用）；
+  - 规则集强制刷新：geosite-cn 53989 / geoip-cn 33920 / ads 8176 字节，下载+编译+校验全过、0 告警；
+  - 内核日志存储：500 行写入→导出，首尾行齐全。
+- 测试结果：`swift build` 0 警告；`swift test` **288 通过 / 1 跳过 / 0 失败**。
+- 当前状态：0.1.35 / build 135 已装 `/Applications` 并运行；`dist/kongshan-0.1.35.dmg`；
+  已确认安装包与当前源码一致（构建后无源码改动）。代码未提交。
+- 风险/注意事项：**助手需要用户手动点一次「重新安装」并输密码**才能验证端到端零弹窗——
+  这一步无法自动化。机器上现存的是用户手动装的旧助手（v2 trust），必然显示"需重装"，属预期。
+- 下一步：用户点一次重装 → 确认状态变「已安装」→ 连续开关 TUN 两次验证零弹窗。
+- 接手方式：改助手身份校验前先读 `docs/design/tun-authorization-approaches.md` 末节，
+  别把 bundle 路径改回主可执行路径。
+
+## 2026-07-27 02:10 — 助手装不上的真因：launchd 装载竞态 → 0.1.36
+
+- 已完成：
+  1. **坐实并修复 `Bootstrap failed: 5: Input/output error`**（用户输了密码仍显示"需重装"、且开 TUN 要输两次密码的直接原因）。
+     根因：`launchctl bootout` 对 launchd 是**异步**的；helper 的 accept 循环用 `poll(..., 1000)`，
+     收到 SIGTERM 后要一两秒才真正退出，而安装脚本紧接着就 `bootstrap`，撞上仍在卸载的 label → EIO。
+     **实证**：在用户域用一个"收到 SIGTERM 后延迟退出"的 LaunchAgent 复现——
+     旧写法 `exit=5 Bootstrap failed: 5: Input/output error`（与用户截图一字不差）；
+     新写法「bootout → 轮询等 label 消失（实测 18 轮 ≈1.8s）→ enable → bootstrap」`exit=0` 装载成功。
+     （先用 `/bin/sleep` 那种秒退任务试过，复现不出来，正好反证了"慢退"才是触发条件。）
+  2. 安装脚本改为：`bootout` → 轮询最多 5 秒等 label 真正消失 → `launchctl enable`（解除可能的 disable，
+     这是 EIO 的另一诱因）→ `bootstrap`，失败再完整重来一轮 → 最后 `launchctl print` 确认服务真在。
+  3. 把安装脚本从 `install()` 里抽成纯函数 `makeInstallScript(...)`：这段以 root 跑的脚本历史上反复出问题，
+     却因为埋在函数体里完全没被测到。新增 3 条测试：真 `/bin/sh -n` 语法校验、装载序列顺序断言、
+     带空格路径必须加引号。
+- 测试结果：`swift test` **291 通过 / 2 跳过 / 0 失败**；0 编译警告。
+- 当前状态：0.1.36 / build 136 已装 `/Applications`；`dist/kongshan-0.1.36.dmg`，
+  SHA-256 `6ed44ebd7212e0c0662c4e75a7b58c5719c3a87a1fc42527cef454630ea47549`。代码未提交。
+- 用户环境的两个观察（非 App 问题，但影响验收）：
+  - **Stash 正在运行且开着 TUN**（utun4 = 198.18.0.1）、并占着系统代理 127.0.0.1:7890。
+    两个 TUN 会抢默认路由，验收 kongshan 的 TUN 前必须先关 Stash 的 TUN。
+  - 换到新网络后**节点已完全可用**：用户截图显示系统代理+TUN 双开、出口 IP 69.63.217.24
+    （Los Angeles / DMIT）、DNS 无泄漏、19 条活跃连接。之前"节点连不上"确系上一个网络在拦。
+  - 另：本轮 kill App 后核对，kongshan 自己的系统代理/DNS 已干净还原、无残留恢复文件——
+    还原逻辑在真机上再次得到验证。
+- 下一步：用户在**关掉 Stash 的 TUN** 后，点一次 TUN → 应只弹一次密码装助手 → 之后启停零弹窗。
+- 接手方式：改安装脚本务必保留"等 label 消失"这一步，并跑 `PrivilegedHelperInstallScriptTests`。
+
+## 2026-07-27 02:40 — 助手链路第三个坑：SCM_RIGHTS 被普通 read 丢弃 → 0.1.37
+
+- 背景：0.1.36 装上后助手状态终于变「已安装」（身份校验 + launchd 竞态两处修复生效），
+  但开 TUN 报 **`助手拒绝：missing config fd`**。这条链路此前从未真正执行过
+  （身份校验恒失败挡在最前面），所以线缆层的 bug 一直藏着。
+- 根因：**两端协议不对称**。App 用一次 `sendmsg` 发出「4 字节长度前缀 + JSON body」，
+  FD 挂在这次发送上；helper 却先用普通 `read()` 读长度前缀、再 `recvmsg` 读 body。
+  SOCK_STREAM 上 SCM_RIGHTS 跟随**本次发送的首字节**投递，普通 `read()` 会让内核
+  **丢弃辅助数据并关闭其中的 FD** → helper 永远拿不到配置 FD。
+- 修法：把线缆层收拢成 `HelperProtocol.HelperWire`（send/receive），**两端共用同一份**；
+  接收端改用 `recvmsg`（带控制缓冲）读长度前缀，FD 就在那里取。
+  顺带修掉两个隐患：helper 的 `sendResponse` 原来是单次 `write`（大响应会截断）、
+  发送端 `sendmsg` 部分发送未补齐；现在都在共享实现里循环补齐。
+  删掉 helper 里已无人使用的 `recvBodyAndFD`。
+- 新增 `Tests/HelperProtocolTests/HelperWireTests.swift`（6 条，真 socketpair 回环）：
+  - 带 FD 的请求往返，并**验证收到的 FD 与发出的是同一个 pipe**（写端写入的字节能从收到的 FD 读出）；
+  - **反向证明**：先用普通 `read()` 读长度前缀后，`recvmsg` 确实拿不到 SCM_RIGHTS——
+    把"为什么不能那样写"钉进测试，防止后人改回去；
+  - 无 FD 请求、响应方向、>64KB 大帧不截断、对端关闭不返回野 FD。
+- 测试结果：`swift test` **297 通过 / 1 跳过 / 0 失败**，0 编译警告。
+- 当前状态：0.1.37 / build 137 已装 `/Applications`；`dist/kongshan-0.1.37.dmg`。代码未提交。
+- 助手三连坑（至此全部修完，均已有回归测试）：
+  1. 身份校验比对错对象（`SecCodeCopyPath` 返回 .app 目录 vs 钉主可执行路径）→ 恒不可信；
+  2. launchd 装载竞态（bootout 异步 + helper 慢退）→ `Bootstrap failed: 5: EIO`；
+  3. 线缆层 SCM_RIGHTS 被普通 read 丢弃 → `missing config fd`。
+- 下一步：用户开 TUN 验证——预期只弹一次密码（若助手已装则零弹窗）、TUN 正常启动。
+
+## 2026-07-27 16:00 — 助手链路第四个坑：spawn 继承管道写端 → 0.1.38
+
+- 背景：0.1.37 修好线缆层后 `missing config fd` 消失，改报
+  **`sing-box 控制接口未就绪：Could not connect to the server.`**。
+  现场证据：root sing-box **在跑**（7 分钟）、`STAT=S`、**日志文件 0 字节、没有任何监听端口**，
+  且 sing-box 的 PID 小于当前 helper 的 PID。典型的"卡在读配置"。
+- 根因：**`posix_spawn` 会把所有未标记 `FD_CLOEXEC` 的 fd 原样继承给子进程**。
+  helper 用 `pipe()` 建管道喂配置，两端都没置 CLOEXEC，于是 **sing-box 继承了自己 stdin 管道的写端**——
+  helper 写完关掉自己那份也永远等不到 EOF，sing-box 就一直阻塞在读配置：
+  进程活着、不启动、不打日志、控制接口自然连不上。
+  （这个缺陷随"helper 自建 pipe 投递已校验配置"一起引入，但因为前三个坑挡在前面，从未被执行到。）
+- 修法：`pipe()` 后对两端 `fcntl(F_SETFD, FD_CLOEXEC)`；日志 fd 改用 `O_CLOEXEC` 打开。
+  真正给 sing-box 的 stdin/stdout/stderr 是 `posix_spawn_file_actions_adddup2` 出来的副本，
+  dup2 会清掉 CLOEXEC，不受影响。
+- 顺带同类修复：helper 的**监听 socket**与**每条 accept 出来的连接**也置 CLOEXEC——
+  否则 root 内核会继承 helper 的控制面 socket（helper 退出后仍被内核进程握着）。
+- 新增 `Tests/KongshanCoreTests/SpawnStdinPipeTests.swift`（2 条，用 `/bin/cat` 当替身真 spawn）：
+  置 CLOEXEC → 子进程 0.06 秒读到 EOF 正常退出；**不置 → 3 秒超时永远等不到 EOF**（只能 SIGKILL）。
+  把机制钉死，防止后人去掉 CLOEXEC。
+- 测试结果：`swift test` **299 通过 / 2 跳过 / 0 失败**，0 编译警告。
+- 当前状态：0.1.38 / build 138 已装 `/Applications`；`dist/kongshan-0.1.38.dmg`。代码未提交。
+- 遗留：用户机上那个卡住的 root sing-box（PID 14194）仍在。它会在下次开 TUN 时被清掉——
+  App 重装助手后紧跟 `recoverIfNeeded()`，或 App 重启时 `recoverTUNIfNeeded()` 发 stopTun。
+  实在要手动清：`sudo pkill -f '/Library/Application Support/kongshan/helper/sing-box'`。
+- 助手四连坑（全部修完，均有回归测试）：身份校验对象错 → launchd 装载竞态 →
+  SCM_RIGHTS 被普通 read 丢弃 → spawn 继承管道写端。四个串在一条链上，修好一个才暴露下一个。
+
+## 2026-07-27 23:00 — 0.1.38 真机验证：TUN 通了；节点失败系网络环境所致
+
+- **CLOEXEC 修复验证通过**：0.1.38 起的内核产出了 352KB 日志（此前恒为 0 字节），
+  日志显示 `inbound/tun[tun-in]` 正常收包、`dns: exchanged` DNS 劫持生效、
+  国内流量走 `outbound/direct`、`router: found process path` 进程匹配正常、Fake-IP 240.x 生效。
+  **TUN 数据面已完全打通。**
+- 唯一失败项是"连节点"：`outbound/vless[...]: reality verification failed`（VLESS）与
+  `outbound/hysteria2[...]: timeout: no recent network activity`（HY2）。
+- 排查结论：**用户家庭网络的路由器在做透明代理 + SNI 分流**，与 App 无关。铁证三条：
+  1. 国内 IP 服务报出口 `125.123.17.206`（浙江嘉兴电信），国外 IP 服务报 `69.63.217.24`
+     （节点所在的 DMIT 洛杉矶）——**同一台机器两个出口，典型的路由器分流**；
+  2. 用无关 SNI（example.com）连节点服务器，**返回的是 CN=example.com 的证书**——
+     真 Reality 服务器只会回退到它配置的 dest（dash.cloudflare.com），
+     绝不会给出匹配任意 SNI 的证书 → 连接根本没到节点服务器，被按 SNI 转发到了真实目标；
+  3. 到该美国 IP 的 TCP 握手 **3~4ms**（浙江↔洛杉矶物理下限约 150ms）→ 连接在本地被终结。
+  因此 Reality 的 ClientHello 从未抵达节点，认证必然失败；HY2 的 QUIC/UDP 同样被透明代理破坏。
+- 同类现象在上一个网络也出现过（当时判为"中间盒假答 TCP 握手"，方向正确，这次拿到铁证）。
+  **判据固化**：TCP 握手 RTT 远低于物理下限 + 任意 SNI 都能拿到对应证书 ⇒ 所在网络有透明代理，
+  此环境下无法验证任何代理客户端的节点连通性。
+- 排除项：订阅缓存与线上一致（public-key 指纹相同）；配置映射正确
+  （手写最小标准 Reality 配置、去掉 `insecure` 后同样失败）；节点服务器本身健康
+  （正确 SNI 下返回真实 dash.cloudflare.com 证书链）。
+- 遗留：PID 14194 是 15:45 留下的卡死旧内核（0.1.37 之前的版本，从未拿到配置、日志 0 字节），
+  与新版无关。清理：`sudo pkill -f '/Library/Application Support/kongshan/helper/sing-box'`。
+- 当前状态：0.1.38 已装并运行；`swift test` 299 通过 / 0 失败；代码仍未提交。
+- 下一步：在**没有透明代理**的网络（如手机热点）或让路由器把节点 IP 加入直连列表后，
+  验一次完整代理出口；通过即可提交 → squash 合 main → 发布。
+
+## 2026-07-27 23:15 — `kernel already running` 死胡同自愈 → 0.1.39
+
+- 现象：助手已装、TUN 数据面已通，但点 TUN 报 **`助手拒绝：kernel already running`**，
+  界面上没有任何出路——用户只能去终端 `sudo pkill` 杀掉残留内核。
+- 成因：助手手里还握着上一次遗留的内核（App 崩溃残留、助手重启时 `adoptOrphanKernel` 认领回来的、
+  或旧版本留下的僵尸）。`start()` 只在**助手不健康 → 装完助手之后**才调用 `recoverIfNeeded()`；
+  助手本来就健康时这一步被跳过，于是直接撞上助手的双起保护。
+- 修法：`startTUN` 的 helper 分支里**无条件先 `recoverIfNeeded()`** 再 start。
+  没有残留时它只是一次 status 往返的空操作，代价可忽略；有残留时自动停掉再起，
+  把死胡同变成自愈。助手侧的双起拒绝保持不变（那是正确的防御）。
+- 测试结果：`swift test` 299 通过 / 1 跳过 / 0 失败，0 编译警告。
+- 当前状态：0.1.39 / build 139 已装 `/Applications` 并运行；`dist/kongshan-0.1.39.dmg`；代码未提交。
+- 说明：App 重建后 cdhash 变，助手暂时不认新 App（`status()` 无响应），
+  因此启动时的 `recoverTUNIfNeeded` 清不掉僵尸内核——这属预期，
+  下次点 TUN 会走「重装助手 → recoverIfNeeded 清理 → 起新内核」把它一并解决。
+
+## 2026-07-27 23:55 — 睡眠唤醒后内核假死 + 生命周期场景排查 → 0.1.40
+
+- **用户现象**：TUN 用得好好的，休眠后"内核崩溃、再也起不来"。
+- **现场取证**（这次证据非常干净）：kongshan 的 TUN 网卡已消失、系统 DNS 已还原（说明 App 确实
+  执行了停止流程），但 **root sing-box 进程仍然活着**（8 小时、0% CPU、RSS 只剩 8MB、
+  日志在 23:27:27 后再无一条）。即：**App 让助手停内核了，内核没死。**
+- **根因**：助手的 `stopSingBox` **只发一个 SIGINT，既不确认死没死、也不升级信号**。
+  内核在睡眠中丢失 utun 设备后进入假死态，SIGINT 杀不掉；进程赖着 →
+  助手仍认为内核在跑 → 下次开 TUN 被 `kernel already running` 顶回来 → "再也起不来"。
+  对比：非助手路径 `SingBoxProcess.stop()` 本来就有 SIGINT→SIGTERM→SIGKILL 升级，**助手路径漏了**。
+- 修复 1：新增 `HelperKernelTermination.terminate`（纯逻辑 + 注入系统调用），
+  SIGINT → SIGTERM → SIGKILL 逐级升级，每级轮询等待进程真正消失，**确认不了退出就如实返回失败**
+  （不能误报"已停止"）。helper 的 `stopSingBox` 改用它。
+  - 踩到并修掉一个连带问题：sing-box 是 helper 的子进程，被杀后变**僵尸**，
+    此时 `kill(pid,0)` 仍返回 0。只看它会把"已杀掉"误判成"还活着" → 助手回报停止失败。
+    新增 `kernelIsAlive`：**先 `waitpid(WNOHANG)` 收尸**，收到了就是真死；
+    认领来的孤儿不是子进程（waitpid 返回 -1），回退到 `kill(pid,0)`。这个回归是被测试抓出来的。
+- 修复 2：唤醒自检此前**只查 Clash API 健康**——而内核假死时 API 照样应答，
+  TUN 网卡已经没了却察觉不到，用户看到的是"显示已开启却完全没网"。
+  现在按「TUN 地址是否还挂在某块网卡上」(`getifaddrs`) 直接判定隧道存活，
+  没了就走崩溃自愈路径重建（先停残留内核——信号会升级到 SIGKILL——再用同一份配置重起）。
+- 修复 3：`rotateLogIfNeeded` 原来用**原子写替换**日志文件，换的是 inode；
+  helper 重启时若有认领回来的内核仍在运行，它持有旧 inode 的 O_APPEND fd，
+  之后所有日志都写进已被 unlink 的文件 → **"内核在跑但日志文件一直不增长"**，
+  排查时极具误导性（本次排查就被坑过一次）。改为**原地 `ftruncate` + `pwrite` 覆写**，inode 不变。
+- 新增测试 6 条：`HelperKernelTerminationTests`（5 条纯逻辑：SIGINT 即走不再升级 /
+  忽略 SIGINT 升级到 TERM / 都忽略升级到 KILL / 连 KILL 都不死要如实报失败 / 已退出不发信号）
+  + `KernelTerminationLiveTests`（真起一个 `trap '' INT` 的子进程，先证明单发 SIGINT 杀不掉，
+  再验证升级策略能杀掉）。
+- 其余生命周期场景复查（均已有覆盖，未发现新问题）：App 被强杀 → 助手 30s clientPID 自愈；
+  助手崩溃/重启 → `adoptOrphanKernel`；内核真退出 → `ProcessExitMonitor` → 崩溃自愈（10s 内 3 次上限）；
+  网络切换 → `NWPathMonitor` 2s 防抖后补挂代理/DNS；WebSocket 断流 → 指数退避重连；
+  用户退出 → `prepareForTermination`；启动残留 → `recoverTUNIfNeeded` + 三处恢复快照。
+- 测试结果：`swift build` 0 警告；`swift test` **305 通过 / 1 跳过 / 0 失败**。
+- 当前状态：0.1.40 / build 140 已装 `/Applications` 并运行；`dist/kongshan-0.1.40.dmg`；代码未提交。
+- 遗留：那个假死的旧内核（PID 14194，0.1.39 及以前留下）仍在，新版首次开 TUN 时会被
+  升级信号杀掉；也可手动 `sudo pkill -f '/Library/Application Support/kongshan/helper/sing-box'`。
+
+## 2026-07-28 00:10 — 换网/唤醒后主动重置连接 → 0.1.41
+
+- 用户反馈：换网络或代理断过之后，网络明明恢复了，某些客户端（如 Claude 客户端）仍一直重试，
+  只能退出重开。
+- 机制（与本 App 无关，但代理侧可以缓解）：换网后内核里的旧连接全部作废，
+  **但本地客户端并不知道**——它们的 socket 仍是 ESTABLISHED，写进去石沉大海，
+  要等 TCP 重传耗尽（可长达十几分钟）才报错；很多客户端还用长连接池反复复用这些死连接，
+  于是表现为"一直转圈，只能重启 App"。Fake-IP 场景更明显：内核重启后映射重建，
+  客户端缓存的 240.x 地址已失效。
+- 修复：`reassertTakeoversAfterNetworkChange`（网络路径变化 + 睡眠唤醒都会走到）
+  在补挂代理/DNS 之后**主动 `DELETE /connections` 关掉全部连接**，
+  客户端会立刻收到 RST 并重新拨号。Surge/Clash 等客户端在换网时同样这么做。
+- 测试结果：`swift build` 0 警告；`swift test` 305 通过 / 1 跳过 / 0 失败。
+- 当前状态：0.1.41 / build 141 已装 `/Applications`；`dist/kongshan-0.1.41.dmg`；代码未提交。
+
+## 2026-07-28 09:45 — 断流排查 + 连接重置收紧 → 0.1.42
+
+- 用户反馈：系统代理（未开 TUN）+ VLESS 节点，与 Claude 对话时中途断流。
+- **日志证据**（`~/Library/Application Support/kongshan/logs/sing-box.log`）：
+  - vless 出站**只有 2 条错误，且都是 `context canceled`**（关闭代理时的正常收尾），
+    没有任何"中途被对端断开"的痕迹 → 代理侧没有记录到链路失败；
+  - 同一份日志里有 **7 次 `sing-box started`**，其中 13:39:02 与 13:39:18 相隔 16 秒。
+    **内核每重启一次，所有连接立刻全断** —— 这是最可能的断流机制。
+  - 订阅自动更新对该订阅是**关闭**的（且间隔 24h），规则集自动更新只刷缓存不重启内核，
+    因此这些重启应来自用户操作（启停 / 应用设置）而非后台任务。
+- **收紧了一个我自己刚引入的风险**（0.1.41 加的"换网后重置全部连接"）：
+  原实现挂在 `NWPathMonitor` 上，而它对 Wi-Fi 信号变化、IPv6 地址续租、DNS 服务器更新
+  这类无关抖动同样回调 → 会在用户正常使用中途反复掐断长连接（流式对话、下载、SSH 全遭殃），
+  恰好会制造用户描述的这种断流。
+  改为**只在物理网络身份真的变化时**才重置：取所有非回环、非隧道接口的 IPv4 集合做指纹
+  （换 Wi-Fi / 插拔网线 / 切热点会变；信号强弱、IPv6 续租不会变）。
+  睡眠唤醒路径仍**无条件重置**（睡眠期间连接必然已死，只是客户端不知道）。
+- 测试结果：`swift build` 0 警告；`swift test` 305 通过 / 2 跳过 / 0 失败。
+- 当前状态：0.1.42 / build 142 已装 `/Applications`；代码未提交。
+- 待用户复现时补充的证据：断流发生时看「连接」页该连接是否消失、以及内核日志同一时刻是否有
+  `sing-box started`（内核重启）或该连接的错误行。目前的日志不足以断定断流发生在代理侧。
+
+## 2026-07-28 10:20 — 复审第二轮：5 处隐藏问题 → 0.1.43
+
+针对本轮新写的代码（助手生命周期、线缆层、唤醒自检、连接重置）做专项复审，发现并修复：
+
+1. **助手自愈会弄丢内核 PID（最严重）**：`checkClientLiveness` 先 `clearKernelPID()` 再停内核，
+   **停失败时 PID 已被清掉** → 助手从此不认识那个仍在运行的内核 → `status` 报告"没有内核在跑"
+   → App 下次启动再起一个 → **两个 root 内核同时接管网络**，比残留一个更糟。
+   相邻的 `stopKernel` 分支本来就是对的（失败把 PID 记回），自愈路径漏了。已对齐，
+   并在成功停止后一并清掉 clientPID。
+2. **网络指纹会被 `awdl0`/`llw0`/`bridge0` 带偏**：这些是 AirDrop / 隔空播放 / 雷雳网桥接口，
+   会频繁上下线，用"排除法"筛不干净，任何一个进指纹都会被误判成"换网"从而白白掐断长连接。
+   改为**只认 `en*`**（Wi-Fi / 以太网 / USB 网卡 / 网络共享）。
+3. **指纹更新被短路跳过**：`resetConnections || networkIdentityChanged()` 在唤醒（true）时
+   根本不会调用后者 → 指纹不刷新 → 下一次路径事件拿睡前的旧指纹比，又多重置一次。
+   改为无条件先求值。另外 `getifaddrs` 偶发失败返回空指纹时，既不判定变化也不覆盖上次有效值
+   （否则一次瞬时失败会误判两次）。
+4. **`stop()` 早退路径丢失还原失败信息**：`stopTUN` 失败时直接 return，
+   把已收集的"系统 DNS 未还原"一起丢了——而这恰恰是最需要同时告知的场景。已并入错误文案。
+5. **`start()` 失败时的还原是静默 `try?`**：启动失败 + 还原也失败时，系统代理被留在指向
+   已关闭端口的状态，用户只看到"启动失败"，完全不知道网为什么全废。改为收集并附到错误里。
+   （同类的 `reloadTUNConfiguration` 回滚路径错误文案本就很长，暂未改动。）
+- 连带调整：停内核最坏要走三级信号（每级 2 秒），安装脚本"等 label 消失"的预算从 5 秒提到 10 秒，
+  否则会卡在 helper 关停与 bootstrap 的竞态边缘——这是我自己引入信号升级后带来的连锁风险。
+- 测试结果：`swift build` 0 警告；`swift test` 305 通过 / 1 跳过 / 0 失败。
+- 当前状态：0.1.43 / build 143 已装 `/Applications`；代码未提交。

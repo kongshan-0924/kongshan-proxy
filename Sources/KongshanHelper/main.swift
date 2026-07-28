@@ -163,7 +163,7 @@ func singBoxURL(from trust: HelperTrustConfig) -> URL? {
 
 /// §1.1 exec 前校验内置 sing-box：签名有效 + cdhash 钉死（修复 C）。
 /// ad-hoc 签名零成本可伪造，光验"签名有效"挡不住替换；必须钉 cdhash。
-/// cdhash 未钉（旧 trust.json）时只验签名有效（向后兼容）；新装必钉。
+/// 调用前的 trust 加载已要求 cdhash 完整；这里仍按纯函数结果拒绝不匹配。
 func verifySingBoxSignature(at url: URL, pinnedCDHashHex: String?) throws {
     var staticCode: SecStaticCode?
     guard SecStaticCodeCreateWithPath(url as CFURL, [], &staticCode) == errSecSuccess, let staticCode else {
@@ -194,29 +194,43 @@ func verifySingBoxSignature(at url: URL, pinnedCDHashHex: String?) throws {
     }
 }
 
-/// §2b.3 起内核：configFD 经 `-c /dev/stdin` 喂给 sing-box，stdout/stderr 重定向到日志文件。
-/// 返回 sing-box PID。configFD 由调用方（handleConnection）持有并在处理结束时关闭
-/// （子进程经 dup2 持有 stdin 副本，父进程关自己的读端不影响子进程）；logFD 由本函数 defer 关。
+/// §2b.3 起内核：configData 经新建只读 pipe FD 喂给 sing-box（`-c /dev/stdin`），
+/// stdout/stderr 重定向到日志文件。返回 sing-box PID。
+///
+/// 纵深防御：调用方已用 `HelperConfigWhitelist.validate` 校验过 configData，
+/// helper 不再把 App 传来的 FD 直喂 sing-box——先读入内存做 schema 白名单校验，
+/// 通过后用本地新建 pipe 投递，杜绝 App 被攻破后塞武器化配置（如 clash_api 远控）。
 ///
 /// 加固（BLOCKER②）：argv 必须带 `-c /dev/stdin`。stock sing-box 的 `run` 不带 -c 时只从 CWD
 /// 找 config.json、完全无视 stdin（实测 1.13.14：`run` 报 open config.json，`run -c /dev/stdin`
-/// 才读管道）；原实现只 dup 到 stdin 而无 -c → 配置从未送达，launchd CWD=/ 下秒退。配置仍走
-/// 只读管道 fd：内容不落盘、不进 argv/环境变量（§1.3 保持，argv 里只有路径字符串 /dev/stdin）。
+/// 才读管道）。配置内容只存在于 helper 进程内存 + pipe，不落盘、不进 argv/环境变量（§1.3 保持）。
 /// spawn 后短暂确认子进程未立即退出（配置错误会毫秒级 FATAL），否则会向 App 误报 started。
-func startSingBox(at url: URL, configFD: Int32, pinnedCDHashHex: String?) throws -> Int32 {
+func startSingBox(at url: URL, configData: Data, pinnedCDHashHex: String?) throws -> Int32 {
     try verifySingBoxSignature(at: url, pinnedCDHashHex: pinnedCDHashHex)
 
     // 日志文件：O_CREAT|O_APPEND，0644 让 App 可读（日志不含凭据）。
-    let logFD = open(logURL.path, O_WRONLY | O_CREAT | O_APPEND, mode_t(0o644))
+    let logFD = open(logURL.path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, mode_t(0o644))
     guard logFD >= 0 else { throw HelperError.logOpenFailed }
-    // logFD 打开成功后登记 defer 关闭（打开失败时 logFD=-1，不进此分支）。configFD 归调用方，不在此关。
     defer { close(logFD) }
+
+    // 新建 pipe：读端给 sing-box stdin，写端后台灌入已校验的 configData。
+    var pipeFDs: [Int32] = [0, 0]
+    guard pipe(&pipeFDs) == 0 else { throw HelperError.spawnFailed(errno) }
+    let readEnd = pipeFDs[0]
+    let writeEnd = pipeFDs[1]
+    // **两端都必须置 FD_CLOEXEC**：`posix_spawn` 会把所有未标记 CLOEXEC 的 fd 原样继承给子进程。
+    // 写端一旦被 sing-box 继承，它就自己握着自己 stdin 管道的写端——helper 这边写完关掉也
+    // **永远等不到 EOF**，于是 sing-box 一直阻塞在读配置：进程活着、不监听任何端口、日志 0 字节，
+    // App 侧表现为 "sing-box 控制接口未就绪：Could not connect to the server."。
+    // 读端同理（真正给 stdin 的是 dup2 出来的副本，dup2 会清掉 CLOEXEC，不受影响）。
+    _ = fcntl(readEnd, F_SETFD, FD_CLOEXEC)
+    _ = fcntl(writeEnd, F_SETFD, FD_CLOEXEC)
 
     var actions: posix_spawn_file_actions_t? = nil
     posix_spawn_file_actions_init(&actions)
     defer { posix_spawn_file_actions_destroy(&actions) }
-    // §1.3 configFD → sing-box stdin（配合 `-c /dev/stdin` 读取）。配置不落盘、不进命令行/环境变量。
-    posix_spawn_file_actions_adddup2(&actions, configFD, STDIN_FILENO)
+    // §1.3 readEnd → sing-box stdin（配合 `-c /dev/stdin` 读取）。
+    posix_spawn_file_actions_adddup2(&actions, readEnd, STDIN_FILENO)
     // 日志重定向。
     posix_spawn_file_actions_adddup2(&actions, logFD, STDOUT_FILENO)
     posix_spawn_file_actions_adddup2(&actions, logFD, STDERR_FILENO)
@@ -225,7 +239,7 @@ func startSingBox(at url: URL, configFD: Int32, pinnedCDHashHex: String?) throws
     posix_spawnattr_init(&attrs)
     defer { posix_spawnattr_destroy(&attrs) }
 
-    // §1.1 参数固定 `run -c /dev/stdin`（配置从只读管道 fd 读，路径固定、内容不落盘）。
+    // §1.1 参数固定 `run -c /dev/stdin`。
     var pid: pid_t = 0
     let argv: [UnsafeMutablePointer<CChar>?] = [
         strdup(url.path), strdup("run"), strdup("-c"), strdup("/dev/stdin"), nil
@@ -234,7 +248,33 @@ func startSingBox(at url: URL, configFD: Int32, pinnedCDHashHex: String?) throws
     let spawnResult = argv.withUnsafeBufferPointer { argvBuf in
         posix_spawn(&pid, url.path, &actions, &attrs, argvBuf.baseAddress, nil)
     }
-    guard spawnResult == 0, pid > 0 else { throw HelperError.spawnFailed(spawnResult) }
+    // spawn 后立即关读端（sing-box 经 dup2 持有副本，父进程关自己的不影响子进程）。
+    close(readEnd)
+    guard spawnResult == 0, pid > 0 else {
+        close(writeEnd)
+        throw HelperError.spawnFailed(spawnResult)
+    }
+
+    // 后台线程把已校验的 configData 灌进 writeEnd。sing-box 边读边排空 pipe。
+    // 配置可达数百 KB，超 pipe 缓冲(~64KB)，必须并发写否则死锁。
+    let configCopy = configData
+    Thread.detachNewThread {
+        signal(SIGPIPE, SIG_IGN)  // sing-box 早退关读端时写端收 EPIPE，别杀 helper
+        _ = configCopy.withUnsafeBytes { ptr -> Int in
+            guard let base = ptr.baseAddress else { return 0 }
+            var offset = 0
+            while offset < ptr.count {
+                let n = write(writeEnd, base.advanced(by: offset), ptr.count - offset)
+                if n < 0 {
+                    if errno == EINTR { continue }
+                    break  // EPIPE 或其它，sing-box 已退/拒读，放弃
+                }
+                offset += n
+            }
+            return offset
+        }
+        close(writeEnd)
+    }
 
     // 配置无效时 sing-box 毫秒级 FATAL 退出；短暂确认存活再回 started，否则误报成功。
     usleep(150_000)
@@ -245,20 +285,91 @@ func startSingBox(at url: URL, configFD: Int32, pinnedCDHashHex: String?) throws
     return pid
 }
 
-/// §1.4 停内核：只对 helper 自己起的 PID 发 SIGINT，且先验证其命令行确为内置 sing-box。
+/// 取某 PID 的可执行路径（已解 symlink）。取不到返回 nil。
+func executablePath(ofPID pid: Int32) -> String? {
+    guard pid > 1 else { return nil }
+    var pathBuf = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+    guard proc_pidpath(pid, &pathBuf, UInt32(MAXPATHLEN)) > 0 else { return nil }
+    let nullIndex = pathBuf.firstIndex(of: 0) ?? pathBuf.count
+    let path = String(decoding: pathBuf[0..<nullIndex].map { UInt8(bitPattern: $0) }, as: UTF8.self)
+    return URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+}
+
+/// 扫现存进程，返回第一个可执行路径 == expected 的 PID。用于 helper 重启后认领残留内核
+/// 与判断调用方 App 是否还在。expected 须是已解 symlink 的绝对路径。
+func firstPID(withExecutablePath expected: String) -> Int32? {
+    // ⚠️ proc_listallpids 的两个返回值都是**进程个数**，不是字节数（实测：返回 795 时
+    // 缓冲区里正好 794 个非零 pid，与 ps 一致）。只有第二个入参是字节数，所以要乘 size。
+    // 误当字节数去除以 4，会只扫到 1/4 的进程 —— 残留内核大概率漏掉，认领逻辑静默失效。
+    let processCount = proc_listallpids(nil, 0)
+    guard processCount > 0 else { return nil }
+    var pids = [pid_t](repeating: 0, count: Int(processCount) + 64)  // 多留槽位应对扫描期间新起的进程
+    let written = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size))
+    guard written > 0 else { return nil }
+    for pid in pids.prefix(Int(written)) where pid > 1 {
+        if executablePath(ofPID: pid) == expected { return pid }
+    }
+    return nil
+}
+
+/// 内核是否还活着。**必须先收尸**：sing-box 是 helper 的子进程，被信号杀死后会变成僵尸，
+/// 此时 `kill(pid, 0)` 仍然返回 0——只看它会把"已经杀掉"误判成"还在跑"，
+/// 于是助手回报停止失败、App 下次开 TUN 又撞 `kernel already running`。
+/// 认领来的孤儿内核不是本进程的子进程，waitpid 返回 -1，回退到 kill(pid, 0) 判定。
+func kernelIsAlive(_ pid: Int32) -> Bool {
+    var status: Int32 = 0
+    if waitpid(pid, &status, WNOHANG) == pid { return false }
+    return kill(pid, 0) == 0
+}
+
+/// §1.4 停内核：只对 helper 自己起的 PID 动手，且先验证其命令行确为内置 sing-box。
+///
+/// 信号必须升级：睡眠唤醒后内核可能丢了 utun 设备进入假死态，SIGINT 杀不掉。
+/// 只发 SIGINT 就返回成功的话，进程赖着不走 → 助手仍认为内核在跑 →
+/// 下次开 TUN 被 `kernel already running` 顶回来，用户就是"休眠后再也起不来"。
+/// 先 SIGINT 给它优雅释放 utun/路由的机会，不走再 SIGTERM，最后 SIGKILL 兜底。
 func stopSingBox(pid: Int32, expectedURL: URL) throws {
     guard pid > 1 else { throw HelperError.invalidPID }
     // §1.4 验证进程的可执行路径 == 内置 sing-box 路径，绝不按外部 PID 盲杀。
     let expected = expectedURL.resolvingSymlinksInPath().path
-    var pathBuf = [CChar](repeating: 0, count: Int(MAXPATHLEN))
-    let len = proc_pidpath(pid, &pathBuf, UInt32(MAXPATHLEN))
-    guard len > 0 else { throw HelperError.processMismatch(pid) }
-    let nullIndex = pathBuf.firstIndex(of: 0) ?? pathBuf.count
-    let actualPath = String(decoding: pathBuf[0..<nullIndex].map { UInt8(bitPattern: $0) }, as: UTF8.self)
-    let actual = URL(fileURLWithPath: actualPath).resolvingSymlinksInPath().path
+    guard let actual = executablePath(ofPID: pid) else { throw HelperError.processMismatch(pid) }
     guard actual == expected else { throw HelperError.processMismatch(pid) }
-    // SIGINT 让 sing-box 优雅退出（释放 utun/路由），与现有兜底行为一致。
-    kill(pid, SIGINT)
+
+    let stopped = HelperKernelTermination.terminate(
+        pid: pid,
+        isAlive: kernelIsAlive,
+        send: { target, signalNumber in kill(target, signalNumber) },
+        waitStep: { usleep(100_000) }   // 每级最多等 2 秒（20 × 100ms）
+    )
+    guard stopped else { throw HelperError.processMismatch(pid) }
+}
+
+/// helper 重启（launchd 重装/重载、崩溃、被 bootout）后，上一实例 spawn 的 root sing-box
+/// 会被重新挂到 launchd 下继续跑，而 kernelPID 只存在内存 → 新实例既不知道它、也停不掉它，
+/// 用户网络被一个 App 再也清理不掉的 root 进程接管（持有 utun/auto_route/被劫持的 DNS）。
+///
+/// 启动时按"可执行路径 == trust 里钉死的 root-only sing-box"扫一遍现存进程认领回来。
+/// §1.4 仍成立：只有 helper 会 exec 这个 root-only 路径，且认领后所有停止仍走
+/// `stopSingBox` 的同一路径校验，不接受任何外部传入 PID。
+///
+/// 认领后再看调用方 App 是否还在：
+/// - 还在（重装/重载场景）→ 记回 clientPID，交回 App 的 stop/recover 正常收尾；
+/// - 不在（崩溃后残留）→ 立即停掉，不留无人管的 root 内核。
+func adoptOrphanKernel() {
+    guard let trust = HelperSecurity.loadTrustConfig(),
+          let singBox = singBoxURL(from: trust) else { return }
+    let singBoxPath = singBox.resolvingSymlinksInPath().path
+    guard let orphan = firstPID(withExecutablePath: singBoxPath) else { return }
+
+    let clientPath = URL(fileURLWithPath: trust.clientExecutablePath).resolvingSymlinksInPath().path
+    if let clientPID = firstPID(withExecutablePath: clientPath) {
+        state.setKernelPID(orphan)
+        state.setClientPID(clientPID)
+        FileHandle.standardError.write(Data("kongshan-helper: 认领残留内核 PID \(orphan)（App PID \(clientPID) 仍在）\n".utf8))
+    } else {
+        try? stopSingBox(pid: orphan, expectedURL: singBox)
+        FileHandle.standardError.write(Data("kongshan-helper: App 不在，已停掉残留内核 PID \(orphan)\n".utf8))
+    }
 }
 
 // MARK: - 连接处理（收请求帧 + SCM_RIGHTS FD + 决策 + 执行）
@@ -278,83 +389,44 @@ func readFully(_ fd: Int32, _ buffer: UnsafeMutableRawPointer, _ count: Int) -> 
     return offset
 }
 
-/// recvmsg 收 body 同时取 SCM_RIGHTS 里的只读 FD（§1.3）。无 FD 时 receivedFD 保持 -1。
-/// 注意：CMSG_FIRSTHDR / CMSG_DATA / CMSG_NXTHDR 是 C 宏，Swift 不可用，这里手写对等逻辑。
-/// 单 FD 场景只需首个 cmsg，不做 NXTHDR 遍历。
-///
-/// 修复 D3：控制缓冲清零 + 校验长度 + MSG_CTRUNC，防读到未初始化内存当 fd。
-func recvBodyAndFD(_ fd: Int32, body: UnsafeMutableRawPointer, length: Int) -> (received: Int, configFD: Int32) {
-    var configFD: Int32 = -1
-    var iov = iovec(iov_base: body, iov_len: length)
-    // CMSG_SPACE(sizeof(Int32)) = __DARWIN_ALIGN32(sizeof(cmsghdr) + 4)。手算对齐到 4 字节。
-    let cmsgSpace = (MemoryLayout<cmsghdr>.size + MemoryLayout<Int32>.size + 3) & ~3
-    let cmsgBuf = UnsafeMutableRawBufferPointer.allocate(byteCount: cmsgSpace, alignment: MemoryLayout<Int>.alignment)
-    // 修复 D3：缓冲清零，防 recvmsg 未填满时读到未初始化内存当 fd。
-    memset(cmsgBuf.baseAddress, 0, cmsgSpace)
-    defer { cmsgBuf.deallocate() }
-
-    var msg = msghdr()
-    msg.msg_iov = withUnsafeMutablePointer(to: &iov) { $0 }
-    msg.msg_iovlen = 1
-    msg.msg_control = cmsgBuf.baseAddress
-    msg.msg_controllen = socklen_t(cmsgSpace)
-
-    let n = recvmsg(fd, &msg, 0)
-    guard n >= 0 else { return (-1, -1) }
-
-    // 先从 cmsg 取出内核已装入的 fd（若有完整 SCM_RIGHTS 头）。
-    // CMSG_DATA(cmsg) = (char*)cmsg + __DARWIN_ALIGN32(sizeof(cmsghdr))。
-    let dataOffset = (MemoryLayout<cmsghdr>.size + 3) & ~3
-    // 修复 D3：校验 msg_controllen >= dataOffset + sizeof(Int32)，确保有完整 cmsghdr + Int32，不越界读。
-    let minNeeded = dataOffset + MemoryLayout<Int32>.size
-    if msg.msg_controllen >= socklen_t(minNeeded), let control = msg.msg_control {
-        let cmsg = control.assumingMemoryBound(to: cmsghdr.self)
-        if cmsg.pointee.cmsg_level == SOL_SOCKET && cmsg.pointee.cmsg_type == SCM_RIGHTS {
-            configFD = UnsafeMutableRawPointer(cmsg).advanced(by: dataOffset)
-                .assumingMemoryBound(to: Int32.self).pointee
+/// 纵深防御：读出 configFD 全部内容（直到 EOF）。调用方读完即可关 FD。
+/// 配置可达数百 KB；helper 读完后做白名单校验，再用本地 pipe 喂 sing-box。
+/// 返回 nil 表示读失败（FD 异常）。空 Data 视为有效但后续白名单会拒（非 JSON 对象）。
+func readAllConfig(fd: Int32) -> Data? {
+    var data = Data()
+    var buf = [UInt8](repeating: 0, count: 16_384)
+    while true {
+        let n = buf.withUnsafeMutableBufferPointer { ptr -> Int in
+            read(fd, ptr.baseAddress!, ptr.count)
         }
+        if n == 0 { break }       // EOF（App 写完关了写端）
+        if n < 0 {
+            if errno == EINTR { continue }
+            return nil
+        }
+        data.append(contentsOf: buf[0..<n])
+        // 上限 2 MiB（maxFrameBytes 1 MiB 的 2 倍），防异常大配置耗尽内存。
+        if data.count > 2 * 1_048_576 { return nil }
     }
-    // 修复 D3 + 加固 finding4：控制数据被截断（攻击者塞了超过单 fd 缓冲的多个 fd）→ cmsg 不可信。
-    // 内核可能已装入能塞下的那个 fd；必须关掉再拒绝，否则每条这类消息泄漏 1 个 fd（鉴权后 DoS）。
-    if (msg.msg_flags & Int32(MSG_CTRUNC)) != 0 {
-        if configFD >= 0 { close(configFD) }
-        return (Int(n), -1)
-    }
-    return (Int(n), configFD)
+    return data
 }
 
-/// 收一帧请求（4 字节大端长度 + JSON body），并尝试取 SCM_RIGHTS FD。
+/// 收一帧请求（含随帧到达的 SCM_RIGHTS FD）。线缆层与 App 共用 `HelperWire`——
+/// 两端各写一份的后果见 HelperWire 的注释（FD 被内核丢弃 → "missing config fd"）。
 func recvRequest(connfd: Int32) -> (request: HelperRequest?, configFD: Int32?) {
-    var lengthBytes = [UInt8](repeating: 0, count: 4)
-    let readLen = lengthBytes.withUnsafeMutableBufferPointer { buf in
-        readFully(connfd, buf.baseAddress!, 4)
-    }
-    guard readLen == 4 else { return (nil, nil) }
-    let length = (Int(lengthBytes[0]) << 24) | (Int(lengthBytes[1]) << 16)
-        | (Int(lengthBytes[2]) << 8) | Int(lengthBytes[3])
-    guard length > 0, length <= HelperFraming.maxFrameBytes else { return (nil, nil) }
-
-    var body = Data(count: length)
-    let (received, fd): (Int, Int32) = body.withUnsafeMutableBytes { (ptr: UnsafeMutableRawBufferPointer) -> (Int, Int32) in
-        guard let base = ptr.baseAddress else { return (-1, -1) }
-        return recvBodyAndFD(connfd, body: base, length: length)
-    }
-    guard received == length else {
-        if fd >= 0 { close(fd) }  // 加固：body 短读但已收到 config fd → 关掉防泄漏（补齐 fd 卫生最后一处）
+    let (body, fd) = HelperWire.receive(on: connfd)
+    guard let body else { return (nil, nil) }
+    guard let request = try? HelperFraming.decode(HelperRequest.self, from: body) else {
+        if let fd { close(fd) }   // 解不出请求也要关掉已收到的 fd
         return (nil, nil)
     }
-
-    let request = try? HelperFraming.decode(HelperRequest.self, from: body)
-    let configFD: Int32? = fd >= 0 ? fd : nil
-    return (request, configFD)
+    return (request, fd)
 }
 
 /// 发一帧响应。
 func sendResponse(_ response: HelperResponse, connfd: Int32) {
     guard let frame = try? HelperFraming.encode(response) else { return }
-    _ = frame.withUnsafeBytes { ptr in
-        write(connfd, ptr.baseAddress, ptr.count)
-    }
+    try? HelperWire.send(frame: frame, fd: nil, on: connfd)
 }
 
 /// 处理一个连接：鉴权 → 收请求 → 决策 → 执行 → 回响应 → 关连接。
@@ -409,8 +481,19 @@ func handleConnection(connfd: Int32) {
             sendResponse(HelperResponse(ok: false, message: "missing config fd"), connfd: connfd)
             return
         }
+        // 纵深防御：先读出配置做白名单校验，再喂 sing-box。防 App 被攻破后塞武器化配置
+        // （如 clash_api 远控 root sing-box）。configFD 由外层 defer 关闭，这里只读。
+        guard let configData = readAllConfig(fd: fd) else {
+            sendResponse(HelperResponse(ok: false, message: "config read failed", helperVersion: helperVersion), connfd: connfd)
+            return
+        }
+        let validation = HelperConfigWhitelist.validate(configData)
+        guard validation.ok, let sanitizedConfig = validation.sanitizedData else {
+            sendResponse(HelperResponse(ok: false, message: "config rejected: \(validation.reason ?? "unknown")", helperVersion: helperVersion), connfd: connfd)
+            return
+        }
         do {
-            let pid = try startSingBox(at: singBox, configFD: fd, pinnedCDHashHex: trust.singBoxCDHashHex)
+            let pid = try startSingBox(at: singBox, configData: sanitizedConfig, pinnedCDHashHex: trust.singBoxCDHashHex)
             state.setKernelPID(pid)
             // §2b.4 记录调用方 PID，供自愈检查。
             state.setClientPID(peerPID(connfd: connfd))
@@ -451,7 +534,16 @@ func checkClientLiveness() {
         guard let trust = HelperSecurity.loadTrustConfig(),
               let singBox = singBoxURL(from: trust) else { return }
         let pid = state.clearKernelPID()
-        try? stopSingBox(pid: pid, expectedURL: singBox)
+        do {
+            try stopSingBox(pid: pid, expectedURL: singBox)
+            state.setClientPID(0)   // 内核已停，调用方记录一并作废
+        } catch {
+            // **停失败必须把 PID 记回**（与 stopKernel 分支一致）。
+            // 清掉了就等于助手从此不认识这个仍在运行的内核：status 会报告"没有内核在跑"，
+            // App 下次启动便会再起一个 → 两个 root 内核同时接管网络，比残留一个更糟。
+            state.setKernelPID(pid)
+            FileHandle.standardError.write(Data("kongshan-helper: 自愈停内核失败，保留 PID \(pid) 下轮重试\n".utf8))
+        }
     }
 }
 
@@ -461,7 +553,29 @@ func rotateLogIfNeeded() {
           let size = attrs[.size] as? NSNumber, size.intValue > logByteLimit else { return }
     guard let data = try? Data(contentsOf: logURL) else { return }
     let tail = data.suffix(logByteLimit / 5)  // 保留约 1MB 尾部
-    try? tail.write(to: logURL, options: .atomic)
+
+    // **必须原地截断，不能用原子写替换**。原子写换的是 inode：helper 重启时若有
+    // 认领回来的内核仍在运行，它持有旧 inode 的 O_APPEND fd，之后所有日志都会写进
+    // 那个已被 unlink 的文件——表现为"内核明明在跑，日志文件却一直是空的/不增长"，
+    // 排查时极具误导性（本项目就被这个坑过一次）。
+    // 原地 ftruncate + 覆写让 inode 保持不变，运行中内核的 fd 继续有效。
+    let fd = open(logURL.path, O_WRONLY | O_CLOEXEC)
+    guard fd >= 0 else { return }
+    defer { close(fd) }
+    guard ftruncate(fd, 0) == 0 else { return }
+    _ = tail.withUnsafeBytes { ptr -> Int in
+        guard let base = ptr.baseAddress else { return 0 }
+        var offset = 0
+        while offset < ptr.count {
+            let n = pwrite(fd, base.advanced(by: offset), ptr.count - offset, off_t(offset))
+            if n <= 0 {
+                if n < 0 && errno == EINTR { continue }
+                break
+            }
+            offset += n
+        }
+        return offset
+    }
     try? FileManager.default.setAttributes([.posixPermissions: NSNumber(value: Int16(0o644))], ofItemAtPath: logURL.path)
 }
 
@@ -488,6 +602,9 @@ func setupSocket() -> Int32 {
 
     let fd = socket(AF_UNIX, SOCK_STREAM, 0)
     guard fd >= 0 else { return -1 }
+    // CLOEXEC：否则 posix_spawn 起的 root sing-box 会继承 helper 的监听 socket，
+    // helper 退出后这个 socket 仍被内核进程握着。控制面 fd 绝不该流进被管理的进程。
+    _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
 
     var addr = sockaddr_un()
     addr.sun_family = sa_family_t(AF_UNIX)
@@ -526,13 +643,17 @@ func shutdownHelper(listenFD: Int32) {
 
 // MARK: - 入口
 
-// 信任配置加载（沿用骨架实现：读 trust.json，缺失/损坏返回 nil → 一律拒绝）。
+// 信任配置加载：缺失、损坏或旧 schema 一律拒绝，App 的 status 自检会触发重装提示。
 enum HelperSecurity {
     static func loadTrustConfig() -> HelperTrustConfig? {
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: HelperConstants.trustConfigPath)) else {
             return nil
         }
-        return try? JSONDecoder().decode(HelperTrustConfig.self, from: data)
+        guard let trust = try? JSONDecoder().decode(HelperTrustConfig.self, from: data),
+              trust.isCurrent else {
+            return nil
+        }
+        return trust
     }
 }
 
@@ -541,6 +662,8 @@ enum HelperSecurity {
 // 这样 helper 被拷到 root-only 位置后不依赖相对路径；trust 缺 singBoxExecutablePath 时
 // startTun/stopTun 会回报错误（拒绝优先），status 仍需通过身份校验——trust 缺失则全部拒绝。
 rotateLogIfNeeded()
+// 重启/重装/崩溃后先认领或清掉上一实例遗留的 root 内核，再开始服务。
+adoptOrphanKernel()
 
 let listenFD = setupSocket()
 guard listenFD >= 0 else {
@@ -579,6 +702,8 @@ while !state.shouldExitValue() {
     if n > 0 && (pfd.revents & Int16(POLLIN)) != 0 {
         let connfd = accept(listenFD, nil, nil)
         if connfd >= 0 {
+            // 同上：与 App 的这条连接也不能被 sing-box 继承。
+            _ = fcntl(connfd, F_SETFD, FD_CLOEXEC)
             handleConnection(connfd: connfd)
         }
     } else if n < 0 && errno != EINTR {

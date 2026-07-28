@@ -1,137 +1,34 @@
 # 项目进度
 
-- [x] **发布 0.1.30：真机 TUN 修复已合并 main + GitHub release v0.1.30（afd539e，2026-07-23）**：审核 Codex 修复正确 → squash 合并（安全捕获：含节点真实密码的中间提交未推 origin，squash 丢弃 + 确认 main 历史 0 密码）→ 构建 DMG（SHA-256 86ad8e00…）→ gh release v0.1.30（Latest）→ 推送。仅剩 main 一条分支
-- [x] **真机 TUN 浏览器断网修复（2026-07-23，已合并 main 发布 0.1.30）**：根因是系统 DNS 错指无 TUN 本地路由的 `172.19.0.2`，流量实际从 en0 发往物理网关；改为 TUN 接口自身 `172.19.0.1`，并保留 gvisor、Fake-IP 优先路由/持久化及 `240/4` 隔离。swift test 259 通过/1 跳过/0 失败；两轮不同内核 PID 下 Google/百度/GitHub、Safari/Chrome、出口 IP 全部通过；0.1.30 已安装且 TUN 保持开启
-- [x] **免密码 TUN 助手 加固+合并+交付 0.1.24（merge 64c2b00，2026-07-23）**：两轮独立对抗式安全审查——首轮实证 2 个 BLOCKER（配置缺 `-c /dev/stdin` 令 TUN 从未真起、§5.1 客户端可被同用户伪造→root），加固闭合（钉客户端 cdhash fail-closed + `--options runtime` hardened runtime 实测挡 DYLD 注入 + `-c /dev/stdin` + fd 卫生）；二轮 re-audit 无同用户→root 提权链、铁律保持。合并后 swift test 257 通过；构建 0.1.24（硬化签名验证 + 启动测试通过）、装 /Applications、单 DMG，旧版清理。真机待用户点「安装免密码助手」验收零弹窗 TUN
-- [ ] 用户真机验收：设置→隧道→安装免密码助手（授权一次）→ 开 TUN 应零弹窗（免密码 TUN 首次端到端）
-- [x] **审核并合并 0.1.23 → main 并推 origin（14ee357，2026-07-22）**：fix/tun-ipv6-no-route 超集 ff-only 合并；对抗式 subagent 复审整份 diff 无阻塞，合并前修 2 个 medium（出口诊断代理关时不自动直连 Mullvad；节点倍率正则改 static 缓存）；删除 sidebar/network-obs/ipv6 三条被包含分支 + 移除 worktree，现仅剩 `main` + `feat/tun-passwordless-helper`
-- [x] 修复 0.1.23 TUN 开启无效果：物理网络无全局 IPv6 时不给 TUN 配 IPv6 地址（fix/tun-ipv6-no-route，a6bb609）
-- [x] 真实出口 IP、地区/运营商与 DNS 一键自测（0.1.23）
-- [x] 节点名地区旗帜与倍率解析/高亮（0.1.23）
-- [x] 连接页每条实时速率、顶部总速率与速率排序（0.1.23）
-- [x] “测速并选最快”一键选当前策略最低成功延迟节点（0.1.23）
-- [x] 分应用代理 UI：直连/默认代理/指定节点（0.1.23）
-- [x] 托盘实时上下行与 dashboard/menu 唯一共享订阅（0.1.23）
-- [x] 版本化配置/设置 JSON 导出导入，导入校验与失败回滚（0.1.23）
-- [x] 0.1.23 全量 199 项测试、M4 验证、单 App/单 DMG 安装交付
-- [x] 合并 `codex/network-observability-batch`（0.1.23 全部功能）到 main（经 fix/tun-ipv6-no-route 超集，2026-07-22）；真机验收改在重打包后进行
+## 当前版本
 
-- [x] TUN 助手第三轮安全修复（feat/tun-passwordless-helper）：C① sing-box 拷 root-only 消除 verify→exec TOCTOU + C② cdhash fail-closed + N1 defer close FD + N2 client pipe 清理（4 提交，225 测试全绿，待维护者复审）（2026-07-22）
-- [x] TUN 免密码特权助手里程碑 2b（feat/tun-passwordless-helper 分支）：helper 安全核心——socket 服务 + audit_token 身份校验纯函数 + startTun 收 SCM_RIGHTS FD 固定 exec 内置 sing-box + stopTun 只杀自起 PID + 30s 自愈（2026-07-22）
-- [x] TUN 免密码特权助手里程碑 3：PrivilegedHelperClient（actor，pipe+sendmsg 传 FD）+ PrivilegedHelperInstaller（一条 osascript 装/卸）+ AppState tunLauncher（helper 可达用 helper 否则回退）+ 设置→隧道「免密码助手」Section（2026-07-22）
-- [x] TUN 免密码特权助手里程碑 4：build_app.sh 打包 KongshanHelper + plist 模板到 .app；Installer 优先读 .app 内模板（占位符替换）（2026-07-22）
-- [x] TUN 免密码特权助手里程碑 5：25 个纯逻辑单测（isTrusted 各拒绝分支/decide 各分发/trust 解码缺失损坏）；swift test 199 通过 1 跳过 0 失败（2026-07-22）
-- [ ] 维护者安全审查（重点 §5.1 身份校验 / §1.3 FD 不落盘 / §1.4 只杀自起）后合并 main
-- [ ] 用户真机点一次「安装免密码助手」按钮授权验收
-- [x] 读取任务文档（2026-07-20）
-- [x] 初始化持久化记录（2026-07-20）
-- [x] 应用名称确定为 `kongshan`（2026-07-20）
-- [x] Bundle Identifier 暂定为 `com.kaysen.kongshan`（2026-07-20）
-- [x] 完成需求边界确认
-- [x] 完成设计稿并自审
-- [x] 完成设计文档并获用户确认
-- [x] 完成 M1 实施计划
-- [x] M1.1 原生工程骨架
-- [x] M1.2 节点模型与手动 Hysteria2 校验
-- [x] M1.3 Clash YAML 五协议转换
-- [x] M1.4 纯配置生成器与运行时参数
-- [x] M1.5 官方内核与进程生命周期
-- [x] M1.6 原子存储与订阅缓存兜底
-- [x] M1.7 Clash API 节点选择与限流测速
-- [x] M1.8 系统代理快照、失败回滚与启动恢复
-- [x] M1.9 AppState 与原生菜单栏/主窗口
-- [x] M1.10 arm64 App 组装、ad-hoc 签名与自动验证
-- [x] M1.11 阶段验收记录与人工验收边界
-- [x] M1 可用代理（自动验收通过，真实网络项待人工验收）
-- [x] M2 实施计划
-- [x] M2.1 分流数据模型、默认值与校验
-- [x] M2.2 六级 route 与本地 rule-set 配置生成
-- [x] M2.3 官方 rule-set 验证、缓存替换与兜底
-- [x] M2.4 运行中 system bypass 更新与回滚
-- [x] M2.5 rules.json、快速重启与双重回滚
-- [x] M2.6 原生规则编辑器与 bypass 界面
-- [x] M2.7 自动验收与人工边界记录
-- [x] M2 分流（自动验收通过，真实网络项待人工验收）
-- [x] M3 实施计划
-- [x] M3.1 模式模型与纯 TUN 配置生成
-- [x] M3.2 安全提权命令与 0600 FIFO 传输
-- [x] M3.3 特权 TUN 生命周期与崩溃恢复记录
-- [x] M3.4 AppState 模式持久化与互斥切换
-- [x] M3.5 TUN 在线分流更新与失败回滚
-- [x] M3.6 原生模式与 strict_route 界面
-- [x] M3.7 自动验收与人工边界记录
-- [x] M3 TUN（自动验收通过，真实授权/TUN 项待人工验收）
-- [x] M4 实施计划
-- [x] M4.1 DNS 值类型与纯配置生成
-- [x] M4.2 DNS 持久化、在线事务与原生设置
-- [x] M4.3 Clash API WebSocket 流模型
-- [x] M4.4 Dashboard 实时指标与 60 秒曲线
-- [x] M4.5 有界内核日志、实时页与导出
-- [x] M4.6 订阅定时更新与非阻塞通知
-- [x] M4.7 SMAppService 开机自启
-- [x] M4.8 普通/TUN 内核崩溃自愈
-- [x] M4.9 性能、一键自动验收与人工边界
-- [x] M4 打磨（自动验收通过，真实网络/长时项待人工）
-- [x] 双击无主窗口与 Bartender 状态项位置根因诊断
-- [x] 修复人工启动/重新打开主窗口（登录项启动保持静默）
-- [x] 菜单栏托盘按 Stash 改为原生菜单（快捷键 / 子菜单 / 勾选项）
-- [x] Dashboard / 节点 / 规则 / 日志页视觉重做与共享样式层
-- [x] 修复绕过域名与绕过 CIDR 列表内容串行的既有 bug
-- [x] 引入离屏渲染自查（`RenderSnapshotTests`）
-- [x] 按 Stash 截图二次调整卡片层次、侧栏分组与页头胶囊开关
-- [x] 修复速率显示 “Zero KB”
-- [x] 生成并接入应用图标
-- [x] 系统代理与 TUN 支持同时开启（原为互斥）
-- [x] 拆出独立的「跳过 TUN」网段列表
-- [x] GeoIP/规则集下载源、自动更新与立即更新
-- [x] 修复真实 TUN 无法启动（osascript 后台描述符导致配置从未送达）
-- [x] 修复测速崩溃（观察风暴 + 方法引用）
-- [x] 仪表盘改为出口连通性实测（Google / GitHub）
-- [x] 节点页：订阅分组折叠、导入前改名、按组自动更新、套餐信息识别
-- [x] 内核与接管解耦（未接管也能测速）
-- [x] 出站模式：直连 / 全局 / 规则
-- [x] 自定义策略组 + 订阅 proxy-groups 自动发现导入
-- [x] 策略组独立成页，「规则」改名「分流」
-- [x] 代理页重做为 Stash 布局（左策略组 / 右节点卡片）
-- [x] 设置页分区（通用/隧道/网络/资源/更多）与维护操作
-- [x] 订阅自带分流规则解析与应用
-- [ ] 人工确认侧栏视觉、托盘菜单交互与 Bartender 可见性
-- [ ] 人工验证双模式同开、跳过 TUN 命中与规则集更新
-- [ ] 原始验收清单全部通过（真实环境人工项待完成）
-- [x] 订阅 UA（clash.meta）+ subscription-userinfo 配额显示 + 响应头默认命名
-- [x] 节点 ID 确定性（刷新不再重置选中/延迟/组选择）
-- [x] 策略组选择持久化并写入配置 default
-- [x] 节点变化（刷新/增删）运行中热重载
-- [x] TUN 下接管系统 DNS（快照/回滚/自愈，防 mDNSResponder 绕过）
-- [x] 切网补挂系统代理与 DNS（NWPathMonitor）+ 唤醒健康检查
-- [x] TUN stack 可选（默认 mixed）+ 规则模式全局 sniff
-- [x] 推流断线指数退避自动重连
-- [x] UI 审计 P1 全清（全局错误条/删除确认/双模式开关/停止内核/自建删除/导入 sheet/测速 URL 草稿）
-- [ ] 真机回归：TUN 的 DNS 接管与还原、mixed 栈、切网补挂
-- [x] 修复真机 TUN 起不动（interface_name=kongshan-tun 被 macOS 拒绝，改为自动分配 utunN）
-- [x] 测速加 TCP 握手方式（默认，不需内核）+ 设置可选 TCP/URL
-- [x] 配置为中心重构：节点页→配置页、单一生效配置、规则页只读、绕过列表移入设置-隧道
-- [x] 策略组带真实成员，代理页/托盘按配置策略选节点或子组
-- [ ] 真机验证 TUN 接管成功、TCP 测速有结果、切换配置整套替换
-- [x] 配置为中心重构：节点页→配置页、单一生效配置、规则页只读、绕过列表移入设置-隧道
-- [x] 修复 TUN 自杀式 pkill（改 pgrep -x sing-box）→ 真机 TUN 可正常开启且快
-- [x] 修「打不开/启动没反应」：关窗口状态还原、居中到主屏、最小化 deminiaturize
-- [x] 系统代理/TUN 卡：订阅规则合并(4780→166)、生成移出主线程、规则集缓存优先
-- [x] **修托盘菜单 O(n²) 死循环渲染 → 持续 100% CPU（真凶）**：CPU 100%→0%，RSS 271MB→141MB
-- [x] 版本自增发布到 dist + 装 /Applications（当前 0.1.16）
-- [x] **修「开代理没效果 / 手动选择选节点不生效」根因**：机场主组(TAGSS)首选直连+我方手动选择是孤儿组。改为识别主组→默认接到手动选择、final→手动选择、DNS detour→手动选择；微软/苹果/Steam 直连意图保留（0.1.16）
-- [x] **顺带修「开 TUN 后出站 IP 一直跳」**：final 从 自动选择(urltest) 改为 手动选择（固定节点，不再自动切换）
-- [x] ~~查明「0.1.16 仍不可达」实为误报~~ **← 此结论后被推翻(见 0.1.18)**：我当时的主机 curl 其实经用户的工作代理，不是 kongshan；连通卡走 kongshan 内核，一直是对的。真因是 SS 缺 obfs 插件
-- [x] **按用户意愿重构：去掉内置手动/自动选择，只用机场自带策略组**（主组默认指向真实节点、final/DNS 走主组；无机场组时才回退内置选择器）（0.1.17）
-- [x] 连通性探测改测「主组(真实路径)」+ 换稳定端点 gstatic/generate_204，修误报
-- [ ] 真机确认：0.1.17 代理页只剩机场组→在 TAGSS 挑节点→系统代理→出口可达
-- [ ] **TUN「一直弹密码框/起不来」待用户用新版复现取证**（运行态干净、无法从产物复现，需当次错误+tun 日志尾部）
-- [x] **★真凶★ SS 节点缺 obfs(simple-obfs)插件支持**：机场 342 节点全是 ss+plugin:obfs，转换器没解析→生成裸SS→服务器要obfs→能TCP握手(测速有值)但传不了数据→国外站全不可达。已解析 obfs→sing-box obfs-local（0.1.18）
-- [x] 双侧栏按钮根因定位与修复设计（0.1.20）
-- [x] 只保留 macOS 原生侧栏按钮并回归验证（0.1.21）
-- [x] 安装 0.1.21 并清理为单一可发现 App/单一最新版 DMG
-- [x] 人工发现 0.1.21 折叠后按钮迁到最右侧，并确认固定左上角设计
-- [x] 实施、验证并单副本安装 0.1.22 固定左上角按钮
-- [x] 合并 `fix/sidebar-toggle`（0.1.22 侧栏固定按钮）到 main（经 fix/tun-ipv6-no-route 超集，2026-07-22）
-- [x] 诊断教训记录：国内用户测 kongshan 时，主机 curl 会经其"工作代理"污染，不可信；App 连通卡走 kongshan 内核才可信
-- [ ] 用户真机确认：0.1.18 刷新订阅→TAGSS挑节点→关工作代理只开kongshan→能打开国外网站
+- [x] **0.1.32 统一功能版**：TUN 设置收口、IPv6-only 保护、VLESS、订阅兼容性统计、脱敏诊断、选择已安装 App、应用更新入口均已完成并构建。
+- [x] 维护者代码复审（2026-07-25）：构建 0 警告、282 测试通过；核心设计判定可合，另列 6 项待修（P1~P6）。
+- [x] **0.1.33 修复版**：P1~P6 全修，285 测试通过。
+- [x] **0.1.34 全面审计版**（当前）：全量源码审计再修 10 项（含 ProcessRunner 数据竞争、Reality 凭据未脱敏、SIGPIPE 杀进程）；285 单测 + 真机端到端全跑通；已装 `/Applications`。
+- [x] **0.1.35**：修复免密码助手身份校验硬伤（助手此前从未生效）；模块巡检（实时流/退出监控/规则集/日志）全通过。
+- [x] **0.1.36**：修复 launchd 装载竞态（`Bootstrap failed: 5: EIO`）——助手装不上、开 TUN 要输两次密码的直接原因。
+- [x] 新网络下代理功能验收通过：系统代理 + TUN 双开，出口 IP 为节点所在地，DNS 无泄漏。
+- [ ] 用户实测：关掉 Stash 的 TUN → 点一次 kongshan TUN → 只弹一次密码 → 之后启停零弹窗。
+- [ ] 验收通过后提交、squash 合并 `main`、推送并发布 v0.1.36。
+
+成品：`dist/kongshan-0.1.36.dmg`（已装 `/Applications`）。全量测试 291 通过、2 跳过、0 失败；0 编译警告；arm64、deep/strict 签名、hardened runtime 通过。
+
+## 已完成能力
+
+- [x] macOS 原生菜单栏与主窗口，单一固定侧栏按钮，多显示器窗口恢复。
+- [x] Clash YAML 订阅、自动更新、用量/到期信息、配置切换与缓存兜底。
+- [x] SS、Trojan、VMess、Hysteria2、AnyTLS、VLESS 节点转换与 sing-box 配置生成。
+- [x] 机场策略组、订阅规则、自定义规则、分应用代理、直连/规则/全局模式。
+- [x] 系统代理与 TUN 可独立/同时启用；gVisor、Fake-IP、IPv4/IPv6 网络适配。
+- [x] 免密码 TUN helper、代码签名/CDHash 钉死、配置白名单、崩溃自愈。
+- [x] 系统代理/DNS 快照、失败回滚、启动恢复与网络变化补挂。
+- [x] 出口 IP/地区/运营商、DNS 泄漏检测、实时连接速率、托盘速率。
+- [x] 节点旗帜/倍率、搜索排序、测速并自动选最快。
+- [x] 消息中心、实时内核日志、脱敏配置与诊断导出。
+- [x] 配置/设置备份恢复、缓存管理、登录启动、规则集与内核更新检查。
+- [x] arm64 App/DMG 自动构建、版本递增、hardened runtime 与签名验证。
+
+## 历史
+
+完整逐阶段记录保留在 `docs/progress/SESSION_LOG.md`；TUN 真机根因与证据保留在 `docs/design/tun-real-machine-debug.md`。

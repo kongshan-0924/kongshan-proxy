@@ -86,16 +86,22 @@ public actor SystemDNSManager {
     private let timeout: TimeInterval
     private var transactionInProgress = false
 
+    /// 真实 networksetup 执行器。**刻意放成命名静态属性，不要内联回默认参数**：
+    /// Swift 6 的 debug 构建下，把 async 闭包写成默认参数会在调用它时崩在
+    /// `swift_task_dealloc`（EXC_BAD_ACCESS），release 正常。放成静态属性后
+    /// debug 也能跑真实路径，单测才能覆盖到真机行为。
+    public static let defaultRunner: NetworkSetupRunner = { arguments, timeout in
+        try await ProcessRunner.run(
+            executable: URL(fileURLWithPath: "/usr/sbin/networksetup"),
+            arguments: arguments,
+            timeout: timeout
+        )
+    }
+
     public init(
         storage: Storage = Storage(),
         timeout: TimeInterval = 5,
-        runner: @escaping NetworkSetupRunner = { arguments, timeout in
-            try await ProcessRunner.run(
-                executable: URL(fileURLWithPath: "/usr/sbin/networksetup"),
-                arguments: arguments,
-                timeout: timeout
-            )
-        }
+        runner: @escaping NetworkSetupRunner = defaultRunner
     ) {
         self.storage = storage
         self.timeout = timeout
@@ -257,10 +263,35 @@ public actor SystemDNSManager {
     private func restoreFromDisk() async throws {
         guard let data = try await storage.readIfPresent(from: recoveryURL) else { return }
         let snapshot = try decode(data)
-        for service in snapshot.services {
-            _ = try await execute(SystemDNSCommands.set(service: service.name, servers: service.servers))
+        // 切网络配置后快照里的服务可能已改名/消失；已禁用的服务仍必须恢复。
+        let currentServices = Set(
+            SystemProxyCommands.allServices(
+                from: try await execute(["-listallnetworkservices"]).stdout
+            )
+        )
+        var failures: [String] = []
+        var failedServices: [DNSServiceSnapshot] = []
+        for service in snapshot.services where currentServices.contains(service.name) {
+            do {
+                _ = try await execute(SystemDNSCommands.set(service: service.name, servers: service.servers))
+            } catch {
+                failures.append("\(service.name)：\(error.localizedDescription)")
+                failedServices.append(service)
+            }
         }
-        try FileManager.default.removeItem(at: recoveryURL)
+
+        if failedServices.isEmpty {
+            try FileManager.default.removeItem(at: recoveryURL)
+            return
+        }
+        try await persist(DNSRecoverySnapshot(
+            capturedAt: snapshot.capturedAt,
+            services: failedServices
+        ))
+        throw SystemDNSError.commandFailed(
+            exitCode: -1,
+            message: "部分网络服务 DNS 恢复失败，已保留快照重试：\(failures.joined(separator: "；"))"
+        )
     }
 
     private func execute(_ arguments: [String]) async throws -> ProcessResult {

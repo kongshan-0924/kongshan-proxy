@@ -4,10 +4,13 @@ import XCTest
 final class ClashSubscriptionConverterTests: XCTestCase {
     private let sourceID = UUID(uuidString: "10000000-0000-0000-0000-000000000001")!
 
-    func testConvertsFiveSupportedProtocols() throws {
+    func testConvertsSixSupportedProtocols() throws {
         let result = try ClashSubscriptionConverter.convert(yaml: Self.allProtocolsYAML, sourceID: sourceID)
 
-        XCTAssertEqual(result.nodes.map(\.protocolType), [.shadowsocks, .trojan, .vmess, .hysteria2, .anytls])
+        XCTAssertEqual(
+            result.nodes.map(\.protocolType),
+            [.shadowsocks, .trojan, .vmess, .vless, .hysteria2, .anytls]
+        )
         XCTAssertTrue(result.warnings.isEmpty)
         XCTAssertTrue(result.nodes.allSatisfy { $0.sourceID == sourceID })
 
@@ -27,12 +30,18 @@ final class ClashSubscriptionConverterTests: XCTestCase {
         XCTAssertEqual(vmess.security, "auto")
         XCTAssertEqual(vmess.alterID, 0)
 
-        let hysteria2 = result.nodes[3]
+        let vless = result.nodes[3]
+        XCTAssertEqual(vless.flow, "xtls-rprx-vision")
+        XCTAssertEqual(vless.utlsFingerprint, "chrome")
+        XCTAssertEqual(vless.realityPublicKey, "public-key-placeholder")
+        XCTAssertEqual(vless.realityShortID, "0123456789abcdef")
+
+        let hysteria2 = result.nodes[4]
         XCTAssertEqual(hysteria2.obfsPassword, "mask")
         XCTAssertEqual(hysteria2.uploadMbps, 20)
         XCTAssertEqual(hysteria2.downloadMbps, 100)
 
-        let anyTLS = result.nodes[4]
+        let anyTLS = result.nodes[5]
         XCTAssertEqual(anyTLS.password, "p")
         XCTAssertEqual(anyTLS.sni, "any.example.com")
     }
@@ -83,10 +92,11 @@ final class ClashSubscriptionConverterTests: XCTestCase {
 
         let result = try ClashSubscriptionConverter.convert(yaml: yaml, sourceID: sourceID)
 
-        XCTAssertEqual(result.nodes.count, 5)
-        XCTAssertEqual(result.warnings.count, 2)
+        XCTAssertEqual(result.nodes.count, 6)
+        XCTAssertEqual(result.warnings.count, 3)
         XCTAssertTrue(result.warnings.contains { $0.contains("skip") && $0.contains("tuic") })
         XCTAssertTrue(result.warnings.contains { $0.contains("broken") && $0.contains("password") })
+        XCTAssertTrue(result.warnings.contains { $0.contains("订阅兼容性") && $0.contains("2 个跳过") })
     }
 
     func testRejectsDocumentWithoutUsableNodes() {
@@ -112,6 +122,17 @@ final class ClashSubscriptionConverterTests: XCTestCase {
           path: /ws
           headers: {Host: edge.example.com}
       - {name: vm, type: vmess, server: vm.example.com, port: 443, uuid: 00000000-0000-0000-0000-000000000001, cipher: auto, alterId: 0}
+      - name: vl
+        type: vless
+        server: vl.example.com
+        port: 443
+        uuid: 00000000-0000-0000-0000-000000000002
+        network: tcp
+        tls: true
+        servername: edge.example.com
+        flow: xtls-rprx-vision
+        client-fingerprint: chrome
+        reality-opts: {public-key: public-key-placeholder, short-id: 0123456789abcdef}
       - {name: hy, type: hysteria2, server: hy.example.com, port: 443, password: p, obfs: salamander, obfs-password: mask, up: 20, down: 100}
       - {name: any, type: anytls, server: any.example.com, port: 443, password: p, sni: any.example.com}
     """

@@ -183,7 +183,7 @@ struct DashboardView: View {
             }
 
             MetricCard(symbol: "memorychip", tint: .pink, caption: "内核内存") {
-                Text(Theme.bytes(Int64(clamping: state.coreMemory)))
+                Text(Theme.bytesOrDash(Int64(clamping: state.coreMemory)))
             } corner: {
                 if state.coreVersion != "—" {
                     Text(state.coreVersion)
@@ -340,7 +340,9 @@ struct DashboardView: View {
                     AxisGridLine().foregroundStyle(.quaternary)
                     AxisValueLabel {
                         if let bytes = value.as(Int64.self) {
-                            Text(Theme.bytes(bytes))
+                            // 坐标轴的 0 刻度要显示「0」；Theme.bytes 对 0 返回空串（UI 占位用），
+                            // 直接用会让 0 刻度变成空标签。
+                            Text(bytes == 0 ? "0" : Theme.bytes(bytes))
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
@@ -389,7 +391,7 @@ struct DashboardView: View {
                 )
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 1) {
-                Text(Theme.rate(value))
+                Text(Theme.rateOrDash(value))
                     .font(.system(size: 13, weight: .semibold).monospacedDigit())
                 Text(title)
                     .font(.caption2)

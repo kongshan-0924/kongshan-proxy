@@ -4,6 +4,7 @@ public enum ProxyProtocol: String, Codable, CaseIterable, Sendable {
     case shadowsocks
     case trojan
     case vmess
+    case vless
     case hysteria2
     case anytls
 }
@@ -51,6 +52,10 @@ public struct ProxyNode: Identifiable, Codable, Hashable, Sendable {
     public var uploadMbps: Int?
     public var downloadMbps: Int?
     public var transport: TransportOptions?
+    public var flow: String?
+    public var utlsFingerprint: String?
+    public var realityPublicKey: String?
+    public var realityShortID: String?
     /// SS 的 SIP003 插件（如 Clash 的 `plugin: obfs`）。直接存 sing-box 用的值：
     /// pluginName="obfs-local"、pluginOptions="obfs=http;obfs-host=…"。缺省＝无插件。
     public var pluginName: String?
@@ -75,6 +80,10 @@ public struct ProxyNode: Identifiable, Codable, Hashable, Sendable {
         uploadMbps: Int? = nil,
         downloadMbps: Int? = nil,
         transport: TransportOptions? = nil,
+        flow: String? = nil,
+        utlsFingerprint: String? = nil,
+        realityPublicKey: String? = nil,
+        realityShortID: String? = nil,
         pluginName: String? = nil,
         pluginOptions: String? = nil
     ) {
@@ -96,6 +105,10 @@ public struct ProxyNode: Identifiable, Codable, Hashable, Sendable {
         self.uploadMbps = uploadMbps
         self.downloadMbps = downloadMbps
         self.transport = transport
+        self.flow = flow
+        self.utlsFingerprint = utlsFingerprint
+        self.realityPublicKey = realityPublicKey
+        self.realityShortID = realityShortID
         self.pluginName = pluginName
         self.pluginOptions = pluginOptions
     }

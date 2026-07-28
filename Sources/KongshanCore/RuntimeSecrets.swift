@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import HelperProtocol
 import Security
 
 public struct RuntimeParameters: Equatable, Sendable {
@@ -48,7 +49,7 @@ public enum RuntimeSecrets {
             address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
             address.sin_family = sa_family_t(AF_INET)
             address.sin_port = in_port_t(0)
-            address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+            address.sin_addr = in_addr(s_addr: inet_addr(HelperConstants.loopbackAddress))
 
             let bindResult = withUnsafePointer(to: &address) { pointer in
                 pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
@@ -65,8 +66,10 @@ public enum RuntimeSecrets {
             }
             guard nameResult == 0 else { continue }
 
+            // 范围与 helper 白名单同源（HelperConstants）：helper 只放行这个区间的
+            // mixed/clash_api 端口，两处各自硬编码会漂移成"测试全绿、真机被拒"。
             let port = UInt16(bigEndian: address.sin_port)
-            if (49_152...65_535).contains(port) { return port }
+            if HelperConstants.loopbackHighPorts.contains(Int(port)) { return port }
         }
         throw RuntimeSecretsError.noHighPortAvailable
     }

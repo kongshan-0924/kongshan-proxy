@@ -152,6 +152,94 @@ final class SystemDNSManagerTests: XCTestCase {
         XCTAssertTrue(arguments.isEmpty, "没有活动快照时不得执行任何 networksetup 命令")
     }
 
+    /// 切网络配置后快照里的服务可能已消失；跳过后应完成其余恢复并清理快照。
+    func testRecoverSkipsStaleServicesNoLongerPresent() async throws {
+        let root = temporaryDNSDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recorder = DNSSetupRecorder(
+            recoveryURL: root.appending(path: "dns-recovery.json"),
+            services: ["Wi-Fi", "Thunderbolt Bridge"],
+            dnsByService: ["Wi-Fi": ["8.8.8.8"], "Thunderbolt Bridge": ["1.1.1.1"]]
+        )
+        let manager = SystemDNSManager(
+            storage: Storage(rootDirectory: root),
+            runner: recorder.run(arguments:timeout:)
+        )
+        try await manager.enable(server: "172.19.0.2")
+
+        // 模拟切网络配置：Thunderbolt Bridge 消失，只剩 Wi-Fi。
+        await recorder.setServices(["Wi-Fi"])
+        let mutationCountBeforeRestore = await recorder.mutationArguments.count
+
+        try await manager.restore()
+        let recoveryURL = root.appending(path: "dns-recovery.json")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: recoveryURL.path))
+        // 只检查 restore 阶段的命令，不应对 stale 服务发 setdnsservers
+        let allMutations = await recorder.mutationArguments
+        let restoreMutations = Array(allMutations.dropFirst(mutationCountBeforeRestore))
+        XCTAssertFalse(restoreMutations.contains { $0.contains("Thunderbolt Bridge") },
+                       "不应向已消失的服务发命令")
+    }
+
+    func testRecoverKeepsFailedDNSServiceThenRetries() async throws {
+        let root = temporaryDNSDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        let recoveryURL = root.appending(path: "dns-recovery.json")
+        let snapshot = DNSRecoverySnapshot(services: [
+            DNSServiceSnapshot(name: "Wi-Fi", servers: ["8.8.8.8"])
+        ])
+        try await storage.writeAtomically(try JSONEncoder().encode(snapshot), to: recoveryURL)
+        let recorder = DNSSetupRecorder(
+            recoveryURL: recoveryURL,
+            services: ["Wi-Fi"],
+            failOnceFor: ["-setdnsservers", "Wi-Fi", "8.8.8.8"]
+        )
+        let manager = SystemDNSManager(storage: storage, runner: recorder.run(arguments:timeout:))
+
+        do {
+            try await manager.recoverIfNeeded()
+            XCTFail("Expected partial restore failure")
+        } catch let error as SystemDNSError {
+            guard case .commandFailed(let code, _) = error else {
+                return XCTFail("Expected .commandFailed, got \(error)")
+            }
+            XCTAssertEqual(code, -1)
+        }
+        let retry = try JSONDecoder().decode(
+            DNSRecoverySnapshot.self,
+            from: Data(contentsOf: recoveryURL)
+        )
+        XCTAssertEqual(retry.services, snapshot.services)
+
+        try await manager.recoverIfNeeded()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: recoveryURL.path))
+    }
+
+    func testRecoverRestoresDisabledButExistingDNSService() async throws {
+        let root = temporaryDNSDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        let recoveryURL = root.appending(path: "dns-recovery.json")
+        try await storage.writeAtomically(
+            try JSONEncoder().encode(DNSRecoverySnapshot(services: [
+                DNSServiceSnapshot(name: "Disabled LAN", servers: ["1.1.1.1"])
+            ])),
+            to: recoveryURL
+        )
+        let recorder = DNSSetupRecorder(
+            recoveryURL: recoveryURL,
+            services: ["*Disabled LAN"]
+        )
+        let manager = SystemDNSManager(storage: storage, runner: recorder.run(arguments:timeout:))
+
+        try await manager.recoverIfNeeded()
+
+        let mutations = await recorder.mutationArguments
+        XCTAssertEqual(mutations, [["-setdnsservers", "Disabled LAN", "1.1.1.1"]])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: recoveryURL.path))
+    }
+
     private func temporaryDNSDirectory() -> URL {
         let url = FileManager.default.temporaryDirectory
             .appending(path: "kongshan-dns-tests-\(UUID().uuidString)", directoryHint: .isDirectory)

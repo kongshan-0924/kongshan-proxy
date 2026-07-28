@@ -253,8 +253,15 @@ public struct RoutingSettings: Codable, Equatable, Sendable {
         blockAds: false
     )
 
+    /// 回环必须始终在系统代理绕过表里：App 自己要用 `127.0.0.1:<clashPort>` 访问内核控制接口，
+    /// 用户若把默认的 localhost/127.0.0.0/8 从绕过列表里删掉，这些请求会绕回内核形成自指，
+    /// 仪表盘/日志/测速全部异常。这里无条件补上，用户的自定义项照常保留。
+    public static let mandatoryProxyBypass = ["127.0.0.1", "localhost", "::1"]
+
     public var systemProxyBypassEntries: [String] {
-        bypassDomains + bypassCIDRs
+        var seen = Set<String>()
+        return (Self.mandatoryProxyBypass + bypassDomains + bypassCIDRs)
+            .filter { seen.insert($0).inserted }
     }
 
     public func validated() throws -> RoutingSettings {

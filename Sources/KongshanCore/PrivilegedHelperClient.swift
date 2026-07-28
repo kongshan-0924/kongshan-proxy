@@ -48,11 +48,6 @@ public actor PrivilegedHelperClient: PrivilegedLaunching {
         self.ioTimeout = ioTimeout
     }
 
-    /// socket 文件存在且可连。nonisolated 让调用方无需 await 即可判定是否回退兜底。
-    public nonisolated func isReachable() -> Bool {
-        connectSocket() != nil
-    }
-
     /// 发 status 请求。不可达或无响应返回 nil。
     public func status() -> HelperResponse? {
         guard let fd = connectSocket() else { return nil }
@@ -98,17 +93,12 @@ public actor PrivilegedHelperClient: PrivilegedLaunching {
 
         // 2) 后台线程并发写配置到 writeEnd，sing-box 边读边排空 pipe。
         //    helper 若拒绝且关掉读端，写端会得 EPIPE/SIGPIPE——后台线程容错退出，不卡死。
-        //    actor 上下文不能阻塞等它，写入结果通过 Data 捕获到错误变量，receiveFrame 后检查。
-        let writeErrorBox = WriteErrorBox()
+        //    actor 上下文不能阻塞等它；helper 的响应是这次启动的权威结果。
         let configCopy = config
         Thread.detachNewThread {
             // SIGPIPE 默认会终止进程，写端收到时需忽略（write 返回 -1/EPIPE）。
             signal(SIGPIPE, SIG_IGN)
-            do {
-                try self.writeAllSync(configCopy, to: writeEnd)
-            } catch {
-                writeErrorBox.error = error
-            }
+            try? self.writeAllSync(configCopy, to: writeEnd)
             close(writeEnd)
         }
 
@@ -125,16 +115,6 @@ public actor PrivilegedHelperClient: PrivilegedLaunching {
         // binaryPath 仅用于 AppState 的进程监控/记录对齐；helper 模式下 App 不做 processMatches 校验
         //（helper 已用 proc_pidpath 验证）。填内置 sing-box 路径保持记录结构一致。
         return PrivilegedProcessRecord(pid: pid, binaryPath: binaryURL.path, launchedAt: now())
-    }
-
-    /// 后台线程用的写错误盒子（线程安全）。
-    private final class WriteErrorBox: @unchecked Sendable {
-        private let lock = NSLock()
-        private var _error: Error?
-        var error: Error? {
-            get { lock.lock(); defer { lock.unlock() }; return _error }
-            set { lock.lock(); _error = newValue; lock.unlock() }
-        }
     }
 
     /// 同步写全部数据到 FD（后台线程用）。EPIPE 容错转 pipeFailed。
@@ -212,82 +192,18 @@ public actor PrivilegedHelperClient: PrivilegedLaunching {
 
     private nonisolated func sendFrame(_ request: HelperRequest, configFD: Int32?, on fd: Int32) throws {
         let frame = try HelperFraming.encode(request)
-        if let configFD {
-            try frame.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) in
-                guard let base = ptr.baseAddress else { return }
-                try sendmsgWithFD(fd, body: base, length: ptr.count, fdToSend: configFD)
-            }
-        } else {
-            try frame.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) in
-                guard let base = ptr.baseAddress else { return }
-                try sendAll(fd, body: base, count: ptr.count)
-            }
-        }
-    }
-
-    /// sendmsg 同时传 SCM_RIGHTS FD（§1.3）。CMSG_FIRSTHDR/DATA 宏 Swift 不可用，手写。
-    /// 单 FD 场景只需一个 cmsg，与 helper 端 recvBodyAndFD 对称。
-    private nonisolated func sendmsgWithFD(_ fd: Int32, body: UnsafeRawPointer, length: Int, fdToSend: Int32) throws {
-        var iov = iovec(iov_base: UnsafeMutableRawPointer(mutating: body), iov_len: length)
-        // CMSG_SPACE(sizeof(Int32)) = __DARWIN_ALIGN32(sizeof(cmsghdr) + sizeof(Int32))。
-        let cmsgSpace = (MemoryLayout<cmsghdr>.size + MemoryLayout<Int32>.size + 3) & ~3
-        let cmsgBuf = UnsafeMutableRawBufferPointer.allocate(byteCount: cmsgSpace, alignment: MemoryLayout<Int>.alignment)
-        defer { cmsgBuf.deallocate() }
-
-        var msg = msghdr()
-        msg.msg_iov = withUnsafeMutablePointer(to: &iov) { $0 }
-        msg.msg_iovlen = 1
-        msg.msg_control = cmsgBuf.baseAddress
-        msg.msg_controllen = socklen_t(cmsgSpace)
-
-        // 填 cmsg 头 + 数据。
-        let cmsg = cmsgBuf.baseAddress!.assumingMemoryBound(to: cmsghdr.self)
-        cmsg.pointee.cmsg_level = SOL_SOCKET
-        cmsg.pointee.cmsg_type = SCM_RIGHTS
-        cmsg.pointee.cmsg_len = socklen_t(cmsgSpace)
-        // CMSG_DATA(cmsg) = (char*)cmsg + __DARWIN_ALIGN32(sizeof(cmsghdr))。
-        let dataOffset = (MemoryLayout<cmsghdr>.size + 3) & ~3
-        var fdVal = fdToSend
-        withUnsafePointer(to: &fdVal) { fdPtr in
-            UnsafeMutableRawPointer(cmsg)
-                .advanced(by: dataOffset)
-                .assumingMemoryBound(to: Int32.self)
-                .pointee = fdPtr.pointee
-        }
-
-        let n = sendmsg(fd, &msg, 0)
-        guard n >= 0 else {
-            throw PrivilegedHelperClientError.sendFailed(String(cString: strerror(errno)))
-        }
-    }
-
-    private nonisolated func sendAll(_ fd: Int32, body: UnsafeRawPointer, count: Int) throws {
-        var offset = 0
-        while offset < count {
-            let n = Darwin.write(fd, body.advanced(by: offset), count - offset)
-            if n < 0 {
-                if errno == EINTR { continue }
-                throw PrivilegedHelperClientError.sendFailed(String(cString: strerror(errno)))
-            }
-            offset += n
+        do {
+            try HelperWire.send(frame: frame, fd: configFD, on: fd)
+        } catch {
+            throw PrivilegedHelperClientError.sendFailed(error.localizedDescription)
         }
     }
 
     private nonisolated func receiveFrame(on fd: Int32) -> HelperResponse? {
-        var lengthBytes = [UInt8](repeating: 0, count: 4)
-        let readLen = lengthBytes.withUnsafeMutableBufferPointer { buf in
-            readFully(fd, buf.baseAddress!, 4)
-        }
-        guard readLen == 4 else { return nil }
-        let length = (Int(lengthBytes[0]) << 24) | (Int(lengthBytes[1]) << 16)
-            | (Int(lengthBytes[2]) << 8) | Int(lengthBytes[3])
-        guard length > 0, length <= HelperFraming.maxFrameBytes else { return nil }
-
-        var body = Data(count: length)
-        let received = body.withUnsafeMutableBytes { (ptr: UnsafeMutableRawBufferPointer) in
-            readFully(fd, ptr.baseAddress!, length)
-        }
-        guard received == length else { return nil }
+        let (body, extraFD) = HelperWire.receive(on: fd)
+        // helper 不该回传 fd；真回了就关掉，别泄漏。
+        if let extraFD { close(extraFD) }
+        guard let body else { return nil }
         return try? HelperFraming.decode(HelperResponse.self, from: body)
     }
 

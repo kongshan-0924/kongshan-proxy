@@ -85,6 +85,11 @@ final class AppState {
         case menuBar
     }
 
+    private enum TUNBackend {
+        case helper
+        case fallback
+    }
+
     var status: Status = .off
     var nodes: [ProxyNode] = []
     var subscriptions: [SubscriptionSource] = []
@@ -260,6 +265,8 @@ final class AppState {
     /// 网络路径监听（切 Wi-Fi / 插网线 / 新服务出现时补挂代理与 DNS）。事件驱动，非轮询。
     @ObservationIgnored private var pathMonitor: NWPathMonitor?
     @ObservationIgnored private var pathChangeTask: Task<Void, Never>?
+    /// 上一次记录的物理网络指纹，用于判断"网络是否真的换了"（而不是信号抖动）。
+    @ObservationIgnored private var lastNetworkSignature: String?
     @ObservationIgnored private var wakeObserver: NSObjectProtocol?
     /// 是否监听系统事件（网络路径、睡眠唤醒）。测试夹具以 automaticallyInitialize=false
     /// 构建，不该有后台监听扰动断言的命令序列，因此跟随该标志。
@@ -301,6 +308,8 @@ final class AppState {
 
     /// 特权助手客户端（零弹窗 TUN）。助手不可达时回退 `privilegedLauncher`（osascript）。
     @ObservationIgnored private let helperClient: PrivilegedHelperClient
+    /// 一次 TUN 生命周期固定使用同一后端，避免 helper 状态变化后 stop/reload 操作错进程。
+    @ObservationIgnored private var activeTUNBackend: TUNBackend?
     /// 助手安装状态（UI 展示 + 决定是否走 helper 路径）。
     private(set) var helperInstallStatus: HelperInstallStatus = .notInstalled
     /// 助手安装/卸载进行中（UI 禁用按钮）。
@@ -370,7 +379,7 @@ final class AppState {
         monitorsSystemEvents = automaticallyInitialize
         logWarningRelay.install { [weak self] message in
             Task { @MainActor [weak self] in
-                self?.warnings.append("内核日志写入失败：\(message)")
+                self?.appendWarning("内核日志写入失败：\(message)")
             }
         }
         if monitorsSystemEvents {
@@ -411,6 +420,15 @@ final class AppState {
         status == .on
     }
 
+    /// 启动后的一次出口自检。内核起得来、控制接口健康，不代表**节点**通——
+    /// 节点被墙/服务器挂了时，App 会显示"已开启"而用户什么网页都打不开，且毫无线索。
+    /// 接管已生效却探测不到出口时给一条明确提示，指向真正该做的事（测速/换节点）。
+    private func verifyExitAfterStart() async {
+        await refreshExitDiagnostics()
+        guard status == .on, !activeModes.isEmpty, exitDiagnosticsError != nil else { return }
+        appendWarning("已接管但探测不到出口，当前节点可能连不上——请到节点页测速或换一个节点")
+    }
+
     var selectedNode: ProxyNode? {
         nodes.first { $0.id == selectedNodeID }
     }
@@ -449,9 +467,18 @@ final class AppState {
         do {
             // 清理上次遗留的接管。常见情况（无残留记录）都是秒回的空操作；
             // 只有真有残留 root TUN 内核时才会走授权，那正是我们要清掉的僵尸隧道。
-            try await tunLauncher.recoverIfNeeded()
-            try await systemProxyManager.recoverIfNeeded()
-            try await systemDNSManager.recoverIfNeeded()
+            try await recoverTUNIfNeeded()
+            // 配置仍要加载，但恢复失败必须保留快照并提示，不能静默丢掉再次恢复的机会。
+            do {
+                try await systemProxyManager.recoverIfNeeded()
+            } catch {
+                appendWarning("启动时恢复系统代理失败：\(error.localizedDescription)")
+            }
+            do {
+                try await systemDNSManager.recoverIfNeeded()
+            } catch {
+                appendWarning("启动时恢复系统 DNS 失败：\(error.localizedDescription)")
+            }
             try await storage.prepare()
             // 大订阅 YAML 的解析已挪到后台线程（见 loadPersistedState），不再卡住启动。
             try await loadPersistedState()
@@ -509,12 +536,9 @@ final class AppState {
         let usesSystemProxy = modes.contains(.systemProxy)
         var tunStarted = false
         var startedPID: Int32?
-        // 启动耗时提示已移除；保留空桩避免改动各步骤调用点。
-        func mark(_ name: String) {}
         do {
             let prepared = try await ruleSetService.prepare(includeAds: routingSettings.blockAds, mirror: ruleSetSettings.mirror, allowsNetwork: ruleSetSettings.autoUpdate)
-            warnings.append(contentsOf: prepared.warnings)
-            mark("规则集")
+            appendWarnings(prepared.warnings)
             let runtime = try runtimeFactory()
             let (config, configWarnings) = try await generateConfiguration(
                 runtime: runtime,
@@ -525,31 +549,34 @@ final class AppState {
                 tunSettings: tunSettings,
                 dnsSettings: dnsSettings
             )
-            warnings.append(contentsOf: configWarnings)
-            mark("生成")
+            appendWarnings(configWarnings)
             try await writeDiagnosticConfig(config)
-            mark("落盘")
 
             let check = try await singBoxProcess.check(config: config)
             guard check.exitCode == 0 else {
                 throw AppStateError.coreCheckFailed(check.stderr)
             }
-            mark("校验")
             let client = clashClientFactory(
                 URL(string: "http://127.0.0.1:\(runtime.clashPort)")!,
                 runtime.secret
             )
             if usesTun {
-                let record = try await tunLauncher.start(config: config)
+                // 首次开 TUN 没装助手时，弹一次密码持久化安装助手；后续零弹窗。
+                // 失败/取消不阻塞：回退 privilegedLauncher（每次弹密码），功能正常。
+                if !(await helperIsHealthy()) {
+                    await installHelper()
+                    // 新装/重装后的 helper 会认领上一实例遗留的 root 内核（adoptOrphanKernel）；
+                    // 先清掉再起，否则 helper 会以 "kernel already running" 拒绝这次启动。
+                    try? await helperClient.recoverIfNeeded()
+                }
+                let record = try await startTUN(config: config)
                 tunStarted = true
                 startedPID = record.pid
             } else {
                 try await singBoxProcess.start(config: config)
                 startedPID = await singBoxProcess.currentPID
             }
-            mark("内核")
             try await healthVerifier(client)
-            mark("健康")
             if usesSystemProxy {
                 try await systemProxyManager.enable(
                     port: Int(runtime.mixedPort),
@@ -561,7 +588,6 @@ final class AppState {
                 // 把系统 DNS 指进 TUN 网段（hijack-dns 会截获），关闭时还原。
                 try await systemDNSManager.enable(server: tunSettings.dnsServerAddress)
             }
-            mark("接管")
 
             self.runtime = runtime
             clashAPIClient = client
@@ -574,28 +600,42 @@ final class AppState {
             if let startedPID {
                 await armCoreExitMonitoring(pid: startedPID)
             } else {
-                warnings.append("无法监控内核退出：启动后没有可用 PID")
+                appendWarning("无法监控内核退出：启动后没有可用 PID")
             }
             resumeDashboardMonitoringIfNeeded()
             resumeLogMonitoringIfNeeded()
-            Task { await refreshExitDiagnostics() }
+            Task { await verifyExitAfterStart() }
             // 规则集用缓存优先保证启动快；开了自动更新就在启动后台悄悄刷新缓存，供下次用，不阻塞。
             refreshRuleSetCacheInBackgroundIfDue()
         } catch {
             // 无论走到哪一步，先无条件尝试还原系统代理与 DNS（无快照时是空操作）。
-            try? await systemProxyManager.restore()
-            try? await systemDNSManager.restore()
+            // 还原失败**不能静默吞掉**：启动失败 + 还原也失败时，系统代理会留在指向已关闭端口的
+            // 状态，用户只看到"启动失败"却完全不知道网为什么全废。收集起来附到最终错误里。
+            var restoreFailures: [String] = []
+            do {
+                try await systemProxyManager.restore()
+            } catch {
+                restoreFailures.append("系统代理（系统设置 → 网络 → 详细信息 → 代理）")
+            }
+            do {
+                try await systemDNSManager.restore()
+            } catch {
+                restoreFailures.append("系统 DNS（系统设置 → 网络 → 详细信息 → DNS）")
+            }
+            let restoreNote = restoreFailures.isEmpty
+                ? ""
+                : "；另外这些系统设置未能还原，请手工清空或重开 kongshan 自动重试：" + restoreFailures.joined(separator: "、")
             if usesTun {
                 if tunStarted {
                     do {
-                        try await tunLauncher.stop()
+                        try await stopTUN()
                     } catch let stopError {
                         activeModes = modes
                         currentConfig = nil
                         mixedPort = nil
                         if let startedPID { await armCoreExitMonitoring(pid: startedPID) }
                         setFailure(
-                            "TUN 启动失败且无法停止：\(error.localizedDescription)；\(stopError.localizedDescription)"
+                            "TUN 启动失败且无法停止：\(error.localizedDescription)；\(stopError.localizedDescription)\(restoreNote)"
                         )
                         return
                     }
@@ -604,7 +644,7 @@ final class AppState {
                 await singBoxProcess.stop()
             }
             clearRuntimeState()
-            setFailure(error.localizedDescription)
+            setFailure(error.localizedDescription + restoreNote)
         }
     }
 
@@ -632,15 +672,16 @@ final class AppState {
         errorMessage = nil
 
         // 先还原系统代理再停内核，避免中间态把流量指向已消失的端口。
+        // 代理/DNS 还原失败不应阻塞停内核——否则用户「无法退出」被卡死。
+        // 但也绝不能说成「可忽略」：残留的系统代理指向已关闭的端口、残留的 DNS 指向已消失的
+        // TUN 地址，到下次启动 recoverIfNeeded 重试之前，用户是实打实的断网/解析瘫痪。
+        // 这里只收集失败项，停完内核后统一升成 errorMessage + 手工恢复指引。
+        var restoreFailures: [String] = []
         if stoppingModes.contains(.systemProxy) {
             do {
                 try await systemProxyManager.restore()
             } catch {
-                setFailure("恢复系统代理失败：\(error.localizedDescription)")
-                if let previousPID { await armCoreExitMonitoring(pid: previousPID) }
-                resumeDashboardMonitoringIfNeeded()
-                resumeLogMonitoringIfNeeded()
-                return
+                restoreFailures.append("系统代理（系统设置 → 网络 → 详细信息 → 代理）：\(error.localizedDescription)")
             }
         }
 
@@ -649,16 +690,17 @@ final class AppState {
             do {
                 try await systemDNSManager.restore()
             } catch {
-                setFailure("恢复系统 DNS 失败：\(error.localizedDescription)")
-                if let previousPID { await armCoreExitMonitoring(pid: previousPID) }
-                resumeDashboardMonitoringIfNeeded()
-                resumeLogMonitoringIfNeeded()
-                return
+                restoreFailures.append("系统 DNS（系统设置 → 网络 → 详细信息 → DNS）：\(error.localizedDescription)")
             }
             do {
-                try await tunLauncher.stop()
+                try await stopTUN()
             } catch {
-                setFailure("停止 TUN 失败：\(error.localizedDescription)")
+                // 这条早退路径原来会把已收集的还原失败一起丢掉——而"TUN 停不掉"恰恰是
+                // 最需要同时告知"系统 DNS 也没还原"的场景（否则用户完全不知道网为什么全废）。
+                let restoreNote = restoreFailures.isEmpty
+                    ? ""
+                    : "；另外这些系统设置未能还原，请手工清空：" + restoreFailures.joined(separator: "；")
+                setFailure("停止 TUN 失败：\(error.localizedDescription)\(restoreNote)")
                 if let previousPID { await armCoreExitMonitoring(pid: previousPID) }
                 resumeDashboardMonitoringIfNeeded()
                 resumeLogMonitoringIfNeeded()
@@ -669,6 +711,11 @@ final class AppState {
         }
         clearRuntimeState()
         status = .off
+        if !restoreFailures.isEmpty {
+            // 快照已保留，重开 App 会自动重试；但在那之前网络是坏的，必须明确告知怎么手工恢复。
+            errorMessage = "以下系统设置未能还原，网络可能不通，请手工清空或重开 kongshan 自动重试——"
+                + restoreFailures.joined(separator: "；")
+        }
     }
 
     func switchMode(to mode: ProxyMode) async {
@@ -712,7 +759,7 @@ final class AppState {
         } else {
             do {
                 await cancelCoreExitMonitoring()
-                try await tunLauncher.recoverIfNeeded()
+                try await recoverTUNIfNeeded()
                 try await systemProxyManager.recoverIfNeeded()
                 try await systemDNSManager.recoverIfNeeded()
                 clearRuntimeState()
@@ -746,7 +793,7 @@ final class AppState {
             replaceNodes(result.nodes, for: source.id)
             discoveredPolicyGroups[source.id] = result.policyGroups
             discoveredRules[source.id] = result.subscriptionRules
-            warnings = result.warnings
+            appendWarnings(result.warnings)
             // 第一个配置自动生效；已有生效配置则保持不变（不打断用户）。
             ensureActiveConfig()
             try await persistSubscriptions()
@@ -845,7 +892,7 @@ final class AppState {
             replaceNodes(result.nodes, for: id)
             discoveredPolicyGroups[id] = result.policyGroups
             discoveredRules[id] = result.subscriptionRules
-            warnings = result.warnings
+            appendWarnings(result.warnings)
             ensureActiveConfig()
             try await persistSubscriptions()
             try await persistSettings()
@@ -886,7 +933,7 @@ final class AppState {
                 failedSubscriptions.append(source.name)
             }
         }
-        warnings = collectedWarnings
+        appendWarnings(collectedWarnings)
         selectFirstNodeIfNeeded()
         try? await persistSubscriptions()
         try? await persistSettings()
@@ -901,7 +948,7 @@ final class AppState {
                     body: failedSubscriptions.joined(separator: "、")
                 )
             } catch {
-                warnings.append("通知未发送：\(error.localizedDescription)")
+                appendWarning("通知未发送：\(error.localizedDescription)")
             }
         }
         return !failedSubscriptions.isEmpty
@@ -932,20 +979,65 @@ final class AppState {
         }
         let manager = FileManager.default
         var removed = 0
+        var totalBytes: Int64 = 0
         for directory in ["logs", "rule-sets"] {
             let url = storage.rootDirectory.appending(path: directory, directoryHint: .isDirectory)
-            guard let entries = try? manager.contentsOfDirectory(at: url, includingPropertiesForKeys: nil) else {
+            guard let entries = try? manager.contentsOfDirectory(
+                at: url,
+                includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey]
+            ) else {
                 continue
             }
-            for entry in entries where (try? manager.removeItem(at: entry)) != nil {
-                removed += 1
+            for entry in entries {
+                if let attrs = try? manager.attributesOfItem(atPath: entry.path),
+                   let size = attrs[.size] as? Int64 {
+                    totalBytes += size
+                }
+                if (try? manager.removeItem(at: entry)) != nil {
+                    removed += 1
+                }
             }
         }
         liveLogs.removeAll(keepingCapacity: false)
         ruleSetSettings.lastUpdatedAt = nil
         try? await persistSettings()
         errorMessage = nil
-        warnings.append("已清理 \(removed) 个缓存文件（日志与规则集），下次启动会重新下载规则集")
+        await refreshCacheSize()
+        let sizeText = Self.formatBytes(totalBytes)
+        appendWarning("已清理 \(removed) 个缓存文件（\(sizeText)），下次启动会重新下载规则集")
+    }
+
+    /// 当前可再生缓存（日志 + 规则集）总字节，供设置页展示。
+    private(set) var cacheSizeBytes: Int64 = 0
+
+    func refreshCacheSize() async {
+        let manager = FileManager.default
+        var total: Int64 = 0
+        for directory in ["logs", "rule-sets"] {
+            let url = storage.rootDirectory.appending(path: directory, directoryHint: .isDirectory)
+            guard let entries = try? manager.contentsOfDirectory(at: url, includingPropertiesForKeys: [.fileSizeKey]) else {
+                continue
+            }
+            for entry in entries {
+                if let attrs = try? manager.attributesOfItem(atPath: entry.path),
+                   let size = attrs[.size] as? Int64 {
+                    total += size
+                }
+            }
+        }
+        cacheSizeBytes = total
+    }
+
+    /// 统一字节格式化；0 时返回空串，由 UI 统一显示占位符。
+    nonisolated static func formatBytes(_ bytes: Int64) -> String {
+        guard bytes > 0 else { return "" }
+        return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .binary)
+    }
+
+    /// 统一速率格式化：基于 formatBytes 加 /s；0 时空白。
+    nonisolated static func formatRate(_ bytes: Int64) -> String {
+        let s = formatBytes(bytes)
+        return s.isEmpty ? "" : "\(s)/s"
     }
 
     func setRuleSetSettings(_ settings: RuleSetSettings) async {
@@ -995,7 +1087,7 @@ final class AppState {
                 allowsNetwork: true,
                 forceRefresh: true
             )
-            warnings.append(contentsOf: prepared.warnings)
+            appendWarnings(prepared.warnings)
             guard prepared.warnings.isEmpty else {
                 errorMessage = "规则集更新未全部成功，已保留可用缓存"
                 return
@@ -1224,17 +1316,17 @@ final class AppState {
             let tag = (json?["tag_name"] as? String) ?? ""
             let latest = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
             if latest.isEmpty {
-                warnings.append("内核更新检查失败：未取到最新版本号")
+                appendWarning("内核更新检查失败：未取到最新版本号")
             } else if latest == coreVersion {
-                warnings.append("内核已是最新（\(latest)）")
+                appendWarning("内核已是最新（\(latest)）")
             } else {
-                warnings.append("内核有新版 \(latest)（当前 \(coreVersion)）；已打开发布页，更新 App 即随附新内核")
+                appendWarning("内核有新版 \(latest)（当前 \(coreVersion)）；已打开发布页，更新 App 即随附新内核")
                 if let page = URL(string: "https://github.com/SagerNet/sing-box/releases") {
                     NSWorkspace.shared.open(page)
                 }
             }
         } catch {
-            warnings.append("内核更新检查失败：\(error.localizedDescription)")
+            appendWarning("内核更新检查失败：\(error.localizedDescription)")
         }
     }
 
@@ -1247,8 +1339,10 @@ final class AppState {
         guard connectionsTask == nil else { return }
         connectionsTask = Task { [weak self] in
             while !Task.isCancelled {
-                guard let self, let client = self.clashAPIClient, self.status == .on else {
-                    self?.connections = []   // 未运行/已停止时清空，避免残留旧连接列表
+                // self 没了说明 App 已释放：直接结束循环。留着会变成没人能取消的空转任务。
+                guard let self else { return }
+                guard let client = self.clashAPIClient, self.status == .on else {
+                    self.connections = []   // 未运行/已停止时清空，避免残留旧连接列表
                     try? await Task.sleep(for: .seconds(1.5))
                     continue
                 }
@@ -1495,7 +1589,7 @@ final class AppState {
 
             let oldSettings = routingSettings
             let prepared = try await ruleSetService.prepare(includeAds: settings.blockAds, mirror: ruleSetSettings.mirror, allowsNetwork: ruleSetSettings.autoUpdate)
-            warnings.append(contentsOf: prepared.warnings)
+            appendWarnings(prepared.warnings)
             let (newConfig, configWarnings) = try await generateConfiguration(
                 runtime: runtime,
                 ruleSets: prepared.ruleSets,
@@ -1505,7 +1599,7 @@ final class AppState {
                 tunSettings: tunSettings,
                 dnsSettings: dnsSettings
             )
-            warnings.append(contentsOf: configWarnings)
+            appendWarnings(configWarnings)
             let check = try await singBoxProcess.check(config: newConfig)
             guard check.exitCode == 0 else {
                 throw AppStateError.coreCheckFailed(check.stderr)
@@ -1630,7 +1724,7 @@ final class AppState {
             }
 
             let prepared = try await ruleSetService.prepare(includeAds: routingSettings.blockAds, mirror: ruleSetSettings.mirror, allowsNetwork: ruleSetSettings.autoUpdate)
-            warnings.append(contentsOf: prepared.warnings)
+            appendWarnings(prepared.warnings)
             let (newConfig, configWarnings) = try await generateConfiguration(
                 runtime: runtime,
                 ruleSets: prepared.ruleSets,
@@ -1640,7 +1734,7 @@ final class AppState {
                 tunSettings: requestedSettings,
                 dnsSettings: dnsSettings
             )
-            warnings.append(contentsOf: configWarnings)
+            appendWarnings(configWarnings)
             let check = try await singBoxProcess.check(config: newConfig)
             guard check.exitCode == 0 else {
                 throw AppStateError.coreCheckFailed(check.stderr)
@@ -1692,7 +1786,7 @@ final class AppState {
             }
 
             let prepared = try await ruleSetService.prepare(includeAds: routingSettings.blockAds, mirror: ruleSetSettings.mirror, allowsNetwork: ruleSetSettings.autoUpdate)
-            warnings.append(contentsOf: prepared.warnings)
+            appendWarnings(prepared.warnings)
             let (newConfig, configWarnings) = try await generateConfiguration(
                 runtime: runtime,
                 ruleSets: prepared.ruleSets,
@@ -1702,7 +1796,7 @@ final class AppState {
                 tunSettings: tunSettings,
                 dnsSettings: settings
             )
-            warnings.append(contentsOf: configWarnings)
+            appendWarnings(configWarnings)
             let check = try await singBoxProcess.check(config: newConfig)
             guard check.exitCode == 0 else {
                 throw AppStateError.coreCheckFailed(check.stderr)
@@ -1797,6 +1891,51 @@ final class AppState {
 
     func exportLogs() async throws -> String {
         try await kernelLogStore.exportText()
+    }
+
+    /// 导出可直接发给维护者的脱敏诊断文本。只收集现有脱敏配置和日志，
+    /// 不读取订阅 YAML、备份、节点缓存或运行时 API secret。
+    func exportDiagnostics() async throws -> String {
+        let root = storage.rootDirectory
+        let configURL = root.appending(path: "config.json")
+        let configText: String
+        if let data = try await storage.readIfPresent(from: configURL) {
+            let sanitized = try ConfigGenerator.diagnosticSnapshot(from: data)
+            configText = String(decoding: sanitized, as: UTF8.self)
+        } else {
+            configText = "（尚未生成配置）"
+        }
+        let recoveryNames = ["proxy-recovery.json", "dns-recovery.json", "tun-recovery.json"]
+        let recoveryState = recoveryNames.map {
+            "\($0): \(FileManager.default.fileExists(atPath: root.appending(path: $0).path) ? "存在" : "无")"
+        }.joined(separator: "\n")
+        let modes = activeModes.map(\.displayName).sorted().joined(separator: " + ")
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "开发版"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "—"
+        let diagnostics = """
+        kongshan 脱敏诊断
+        导出时间：\(now().formatted(.iso8601))
+        应用版本：\(version) (\(build))
+        内核版本：\(coreVersion)
+        状态：\(statusText)
+        接管：\(modes.isEmpty ? "未开启" : modes)
+        出站模式：\(outboundMode.displayName)
+        当前配置：\(configItems.first { $0.id == activeConfigID }?.name ?? "无")
+
+        ===== 恢复状态 =====
+        \(recoveryState)
+
+        ===== 当前消息 =====
+        \(errorMessage ?? "无错误")
+        \(warnings.isEmpty ? "无警告" : warnings.joined(separator: "\n"))
+
+        ===== 脱敏配置 =====
+        \(configText)
+
+        ===== 内核日志 =====
+        \(try await kernelLogStore.exportText())
+        """
+        return diagnostics.replacingOccurrences(of: NSHomeDirectory(), with: "~")
     }
 
     func exportBackup() async throws -> Data {
@@ -1929,6 +2068,25 @@ final class AppState {
         warnings.removeAll(keepingCapacity: false)
     }
 
+    /// 消息条数上限。App 常驻运行，断流重连、订阅刷新等都会产生消息，
+    /// 不封顶的话消息页会无限增长（内存 + 列表渲染都吃亏）。
+    private static let warningLimit = 200
+
+    /// 唯一的告警写入口：**去重 + 封顶**。
+    /// 别再写 `warnings = xxx`——那会把其它模块刚产生的消息一起抹掉（订阅刷新曾这样吞掉内核告警）。
+    private func appendWarning(_ message: String) {
+        appendWarnings([message])
+    }
+
+    private func appendWarnings(_ messages: [String]) {
+        for message in messages where !warnings.contains(message) {
+            warnings.append(message)
+        }
+        if warnings.count > Self.warningLimit {
+            warnings.removeFirst(warnings.count - Self.warningLimit)
+        }
+    }
+
     func nodes(for source: SubscriptionSource) -> [ProxyNode] {
         nodes.filter { $0.sourceID == source.id }
     }
@@ -1979,7 +2137,7 @@ final class AppState {
             }.value
             guard let result = converted else { continue }
             nodes.append(contentsOf: result.nodes)
-            warnings.append(contentsOf: result.warnings)
+            appendWarnings(result.warnings)
             // 重启后配置自带的策略组与规则也要从缓存恢复，否则生效配置的策略/规则会是空的。
             discoveredPolicyGroups[source.id] = result.policyGroups
             discoveredRules[source.id] = result.subscriptionRules
@@ -2110,7 +2268,7 @@ final class AppState {
         suspendDashboardMonitoring()
         suspendLogMonitoring()
         do {
-            try await tunLauncher.stop()
+            try await stopTUN()
             activeModes = []
         } catch {
             status = .on
@@ -2123,7 +2281,7 @@ final class AppState {
 
         var newConfigurationRecord: PrivilegedProcessRecord?
         do {
-            let record = try await tunLauncher.start(config: newConfig)
+            let record = try await startTUN(config: newConfig)
             newConfigurationRecord = record
             activeModes = previousModes
             try await healthVerifier(client)
@@ -2134,7 +2292,7 @@ final class AppState {
             let updateError = error
             if let newConfigurationRecord {
                 do {
-                    try await tunLauncher.stop()
+                    try await stopTUN()
                     activeModes = []
                 } catch let stopError {
                     currentConfig = newConfig
@@ -2149,7 +2307,7 @@ final class AppState {
 
             var oldConfigurationRecord: PrivilegedProcessRecord?
             do {
-                let record = try await tunLauncher.start(config: oldConfig)
+                let record = try await startTUN(config: oldConfig)
                 oldConfigurationRecord = record
                 activeModes = previousModes
                 try await healthVerifier(client)
@@ -2163,10 +2321,10 @@ final class AppState {
                 return false
             } catch let rollbackError {
                 if oldConfigurationRecord != nil {
-                    try? await tunLauncher.stop()
+                    try? await stopTUN()
                 } else {
                     // start 失败时默认 launcher 也会清理临时记录；再次 stop 是幂等安全网。
-                    try? await tunLauncher.stop()
+                    try? await stopTUN()
                 }
                 // TUN 已经起不来了，接管的系统 DNS 不还原会导致全网解析瘫痪。
                 try? await systemDNSManager.restore()
@@ -2285,7 +2443,7 @@ final class AppState {
 
     private func logStreamEnded(_ message: String) {
         guard isLogsVisible, status == .on else { return }
-        if warnings.last != message { warnings.append(message) }
+        if warnings.last != message { appendWarning(message) }
         scheduleLogReconnect()
     }
 
@@ -2319,7 +2477,7 @@ final class AppState {
 
     private func dashboardStreamEnded(_ message: String) {
         guard !dashboardMonitorConsumers.isEmpty, status == .on else { return }
-        if warnings.last != message { warnings.append(message) }
+        if warnings.last != message { appendWarning(message) }
         scheduleDashboardReconnect()
     }
 
@@ -2464,13 +2622,13 @@ final class AppState {
             }
         } catch {
             if monitoredCorePID == pid { monitoredCorePID = nil }
-            warnings.append("无法监控内核退出：\(error.localizedDescription)")
+            appendWarning("无法监控内核退出：\(error.localizedDescription)")
         }
     }
 
     private func armRunningSystemCoreIfAvailable() async {
         guard let pid = await singBoxProcess.currentPID else {
-            warnings.append("无法监控内核退出：运行中的系统代理没有可用 PID")
+            appendWarning("无法监控内核退出：运行中的系统代理没有可用 PID")
             return
         }
         await armCoreExitMonitoring(pid: pid)
@@ -2510,23 +2668,23 @@ final class AppState {
             return
         }
 
-        warnings.append("检测到内核意外退出（PID \(pid)），正在自动重启")
+        appendWarning("检测到内核意外退出（PID \(pid)），正在自动重启")
         status = .starting
         errorMessage = nil
         do {
             let restartedPID: Int32
             if modes.contains(.tun) {
-                try await tunLauncher.recoverIfNeeded()
+                try await recoverTUNIfNeeded()
                 // 用户可能在此 await 期间点了 stop。
                 if stopRequestedDuringCrashHandling { return }
-                let record = try await tunLauncher.start(config: config)
+                let record = try await startTUN(config: config)
                 try await healthVerifier(client)
                 restartedPID = record.pid
             } else {
                 try await singBoxProcess.start(config: config)
                 if stopRequestedDuringCrashHandling {
                     // 已起内核但用户要停：把刚起的内核停掉，让 stop() 的清理路径接手。
-                    try? await singBoxProcess.stop()
+                    await singBoxProcess.stop()
                     return
                 }
                 try await healthVerifier(client)
@@ -2539,9 +2697,9 @@ final class AppState {
             // 二次检查：start/healthVerify 期间用户可能点了 stop。
             if stopRequestedDuringCrashHandling {
                 if modes.contains(.tun) {
-                    try? await tunLauncher.stop()
+                    try? await stopTUN()
                 } else {
-                    try? await singBoxProcess.stop()
+                    await singBoxProcess.stop()
                 }
                 return
             }
@@ -2572,7 +2730,7 @@ final class AppState {
         }
         if modes.contains(.tun) {
             do {
-                try await tunLauncher.recoverIfNeeded()
+                try await recoverTUNIfNeeded()
             } catch {
                 cleanupMessages.append("TUN 清理失败：\(error.localizedDescription)")
             }
@@ -2597,7 +2755,7 @@ final class AppState {
                 body: failureMessage
             )
         } catch {
-            warnings.append("通知未发送：\(error.localizedDescription)")
+            appendWarning("通知未发送：\(error.localizedDescription)")
         }
     }
 
@@ -2636,7 +2794,9 @@ final class AppState {
         }
     }
 
-    private func reassertTakeoversAfterNetworkChange() async {
+    /// 补挂系统代理/DNS。`resetConnections` 为 true 时无条件重置全部连接
+    /// （睡眠唤醒场景：连接必然已死，但客户端不知道）。
+    private func reassertTakeoversAfterNetworkChange(resetConnections: Bool = false) async {
         guard status == .on, !isBusy else { return }
         if activeModes.contains(.systemProxy), let runtime {
             do {
@@ -2645,16 +2805,70 @@ final class AppState {
                     bypassDomains: routingSettings.systemProxyBypassEntries
                 )
             } catch {
-                warnings.append("网络变化后补挂系统代理失败：\(error.localizedDescription)")
+                appendWarning("网络变化后补挂系统代理失败：\(error.localizedDescription)")
             }
         }
         if activeModes.contains(.tun) {
             do {
                 try await systemDNSManager.reassert(server: tunSettings.dnsServerAddress)
             } catch {
-                warnings.append("网络变化后补挂系统 DNS 失败：\(error.localizedDescription)")
+                appendWarning("网络变化后补挂系统 DNS 失败：\(error.localizedDescription)")
             }
         }
+        // 换网/唤醒后内核里的旧连接已经作废，但**本地客户端并不知道**：它们的 socket 仍是
+        // ESTABLISHED，写进去石沉大海，要等 TCP 重传耗尽（可长达十几分钟）才报错；很多客户端
+        // 还用长连接池反复复用这些死连接 → "网络明明恢复了，某个 App 却一直转圈，只能重启它"。
+        // 主动关掉，客户端会立刻收到 RST 并重新拨号。
+        //
+        // **但绝不能见到路径事件就关**：`NWPathMonitor` 对 Wi-Fi 信号变化、IPv6 地址续租、
+        // DNS 服务器更新这类无关抖动同样会回调，那样会在用户正常使用中途反复掐断长连接
+        // （聊天流式响应、下载、SSH 全部遭殃）。只在**网络身份真的变了**时才重置。
+        // 指纹**无条件**更新：写成 `resetConnections || networkIdentityChanged()` 会短路，
+        // 唤醒那次就不会刷新指纹，下一次路径事件拿睡前的旧指纹比对，又白白多重置一次。
+        let identityChanged = networkIdentityChanged()
+        if resetConnections || identityChanged, let clashAPIClient {
+            try? await clashAPIClient.closeAllConnections()
+        }
+    }
+
+    /// 物理网络身份是否变化：取 `en*` 接口的 IPv4 集合做指纹。
+    /// 换 Wi-Fi、插拔网线、切热点都会变；信号强弱、IPv6 续租不会变。
+    private func networkIdentityChanged() -> Bool {
+        let signature = Self.physicalNetworkSignature()
+        // 取不到（getifaddrs 偶发失败）时既不判定变化、也不覆盖上一次的有效指纹——
+        // 否则一次瞬时失败会先误判成"换网"重置一次，恢复后再误判一次。
+        guard !signature.isEmpty else { return false }
+        defer { lastNetworkSignature = signature }
+        guard let previous = lastNetworkSignature else { return false }  // 首次记录不算变化
+        return previous != signature
+    }
+
+    nonisolated private static func physicalNetworkSignature() -> String {
+        var head: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&head) == 0, let head else { return "" }
+        defer { freeifaddrs(head) }
+        var entries: [String] = []
+        var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        var cursor: UnsafeMutablePointer<ifaddrs>? = head
+        while let current = cursor {
+            defer { cursor = current.pointee.ifa_next }
+            let name = String(cString: current.pointee.ifa_name)
+            // **只认 en*（Wi-Fi / 以太网 / USB 网卡 / 网络共享）**。
+            // 用"排除法"不够：`awdl0`、`llw0`（AirDrop、隔空播放）会频繁上下线，
+            // `bridge0`（雷雳网桥）、`utun*`（隧道，含我们自己的）也会随代理启停变化，
+            // 任何一个进了指纹都会被误判成"换网了"，白白掐断正在进行的长连接。
+            guard name.hasPrefix("en") else { continue }
+            guard let address = current.pointee.ifa_addr,
+                  address.pointee.sa_family == UInt8(AF_INET) else { continue }
+            guard getnameinfo(
+                address, socklen_t(address.pointee.sa_len),
+                &buffer, socklen_t(buffer.count), nil, 0, NI_NUMERICHOST
+            ) == 0 else { continue }
+            let end = buffer.firstIndex(of: 0) ?? buffer.count
+            let text = String(decoding: buffer[0..<end].map { UInt8(bitPattern: $0) }, as: UTF8.self)
+            entries.append("\(name)=\(text)")
+        }
+        return entries.sorted().joined(separator: ",")
     }
 
     /// 睡眠唤醒后：网络多半已变、核心可能假死（进程还在但拒绝连接）。
@@ -2673,9 +2887,52 @@ final class AppState {
             try await clashAPIClient.health()
         } catch {
             let message = "睡眠唤醒后内核控制接口无响应：\(error.localizedDescription)。若持续异常，请关闭再开启接管。"
-            if warnings.last != message { warnings.append(message) }
+            if warnings.last != message { appendWarning(message) }
         }
-        await reassertTakeoversAfterNetworkChange()
+        // 控制接口健康 ≠ 隧道还在。macOS 睡眠会拆掉 utun 设备，内核进程仍活着、
+        // Clash API 照常应答，但 TUN 网卡已经消失——用户看到的是"显示已开启却完全没网"。
+        // 这里按"TUN 地址是否还挂在某块网卡上"直接判定，没了就当内核已死，走崩溃自愈重建隧道。
+        if activeModes.contains(.tun), !Self.tunInterfaceIsUp(address: tunSettings.dnsServerAddress) {
+            appendWarning("睡眠唤醒后 TUN 网卡已消失，正在重建隧道")
+            await handleTunnelLostAfterWake()
+            return
+        }
+        // 睡眠期间所有连接都已经死了，只是客户端不知道 → 无条件重置。
+        await reassertTakeoversAfterNetworkChange(resetConnections: true)
+    }
+
+    /// 某块网卡上是否还挂着给定的 IPv4 地址（即 TUN 是否仍然存在）。
+    nonisolated private static func tunInterfaceIsUp(address: String) -> Bool {
+        var head: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&head) == 0, let head else { return false }
+        defer { freeifaddrs(head) }
+        var cursor: UnsafeMutablePointer<ifaddrs>? = head
+        var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        while let current = cursor {
+            defer { cursor = current.pointee.ifa_next }
+            guard let sockaddrPointer = current.pointee.ifa_addr,
+                  sockaddrPointer.pointee.sa_family == UInt8(AF_INET) else { continue }
+            guard getnameinfo(
+                sockaddrPointer,
+                socklen_t(sockaddrPointer.pointee.sa_len),
+                &buffer,
+                socklen_t(buffer.count),
+                nil,
+                0,
+                NI_NUMERICHOST
+            ) == 0 else { continue }
+            let end = buffer.firstIndex(of: 0) ?? buffer.count
+            let text = String(decoding: buffer[0..<end].map { UInt8(bitPattern: $0) }, as: UTF8.self)
+            if text == address { return true }
+        }
+        return false
+    }
+
+    /// 唤醒后隧道没了：内核进程可能还活着但已经不工作。复用崩溃自愈路径重建，
+    /// 它会先 recoverTUNIfNeeded 停掉残留内核（信号会升级到 SIGKILL），再用同一份配置重起。
+    private func handleTunnelLostAfterWake() async {
+        guard let pid = monitoredCorePID else { return }
+        await handleUnexpectedCoreExit(pid: pid)
     }
 
     private func setFailure(_ message: String) {
@@ -2713,19 +2970,99 @@ final class AppState {
 
     // MARK: - 特权助手（零弹窗 TUN）
 
-    /// 当前 TUN 启停后端：助手可达则用 helper（零弹窗），否则回退 osascript 兜底。
-    /// 不改系统代理路径；未装助手时 TUN 仍走 `privilegedLauncher`（铁律 §1.6）。
-    private var tunLauncher: any PrivilegedLaunching {
-        helperClient.isReachable() ? helperClient : privilegedLauncher
+    private func helperIsHealthy() async -> Bool {
+        (await helperClient.status())?.ok == true
+    }
+
+    /// 轮询等待助手就绪。bootstrap 之后 helper 建 socket 有几十到几百毫秒的空档，
+    /// 慢机器上更久；固定 sleep 会误判。返回是否在超时前就绪。
+    private func waitForHelperHealthy(timeout: TimeInterval) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if await helperIsHealthy() { return true }
+            try? await Task.sleep(for: .milliseconds(200))
+        }
+        return false
+    }
+
+    private func startTUN(config: Data) async throws -> PrivilegedProcessRecord {
+        let backend: TUNBackend
+        if let activeTUNBackend {
+            backend = activeTUNBackend
+        } else {
+            backend = await helperIsHealthy() ? .helper : .fallback
+        }
+        let record: PrivilegedProcessRecord
+        switch backend {
+        case .helper:
+            // 助手可能还握着上一次遗留的内核：App 崩溃后残留、助手重启时认领回来的、
+            // 或旧版本留下的僵尸内核。不先清掉的话这次会被助手以 "kernel already running"
+            // 顶回来，用户在界面上就是个死胡同——只能去终端 sudo 杀进程。
+            // recoverIfNeeded 没有残留时是一次 status 往返的空操作，代价可以忽略。
+            try? await helperClient.recoverIfNeeded()
+            record = try await helperClient.start(config: config)
+        case .fallback:
+            record = try await privilegedLauncher.start(config: config)
+        }
+        activeTUNBackend = backend
+        return record
+    }
+
+    private func stopTUN() async throws {
+        let backend: TUNBackend
+        if let activeTUNBackend {
+            backend = activeTUNBackend
+        } else {
+            backend = await helperIsHealthy() ? .helper : .fallback
+        }
+        switch backend {
+        case .helper:
+            try await helperClient.stop()
+        case .fallback:
+            try await privilegedLauncher.stop()
+        }
+        activeTUNBackend = nil
+    }
+
+    private func recoverTUNIfNeeded() async throws {
+        if let backend = activeTUNBackend {
+            switch backend {
+            case .helper:
+                try await helperClient.recoverIfNeeded()
+            case .fallback:
+                try await privilegedLauncher.recoverIfNeeded()
+            }
+            activeTUNBackend = nil
+            return
+        }
+
+        var failures: [String] = []
+        if let status = await helperClient.status(), status.ok, status.kernelPID != nil {
+            do {
+                try await helperClient.stop()
+            } catch {
+                failures.append(error.localizedDescription)
+            }
+        }
+        do {
+            try await privilegedLauncher.recoverIfNeeded()
+        } catch {
+            failures.append(error.localizedDescription)
+        }
+        guard failures.isEmpty else {
+            throw AppStateError.tunCleanupFailed(failures.joined(separator: "；"))
+        }
     }
 
     /// 刷新助手安装状态（启动时、安装/卸载后、进入设置页时调用）。
-    func refreshHelperInstallStatus() {
-        let reachable = helperClient.isReachable()
-        helperInstallStatus = PrivilegedHelperInstaller.currentStatus(isReachable: reachable)
+    func refreshHelperInstallStatus() async {
+        helperInstallStatus = PrivilegedHelperInstaller.currentStatus(
+            isReachable: await helperIsHealthy()
+        )
     }
 
-    /// 安装免密码助手（一条 osascript 提权）。铁律 §1.5：仅在用户点按钮时触发。
+    /// 安装免密码助手（一条 osascript 提权）。开 TUN 时若助手未装会自动触发（首次弹一次密码，
+    /// 后续零弹窗）；也可由用户在设置页手动触发。
     func installHelper() async {
         guard !isHelperOperationInProgress else { return }
         isHelperOperationInProgress = true
@@ -2734,33 +3071,44 @@ final class AppState {
             try await PrivilegedHelperInstaller.install(authorizer: { script, timeout in
                 try await OSAScriptAuthorizer.run(script: script, timeout: timeout)
             })
-            // bootstrap 后 helper 需要一瞬启动，短等再自检。
-            try? await Task.sleep(nanoseconds: 500_000_000)
-            refreshHelperInstallStatus()
-            if helperInstallStatus != .installed {
-                warnings.append("助手已安装但未自检通过，请重开 App 或重装")
+            // launchctl bootstrap 之后 helper 才开始建 socket，快慢取决于机器负载。
+            // 只等固定 500ms 会在慢机器上误判成"装了但没生效"，让用户反复重装。
+            // 改成最多轮询 5 秒，healthy 即返回。
+            if await waitForHelperHealthy(timeout: 5) {
+                helperInstallStatus = .installed
+            } else {
+                await refreshHelperInstallStatus()
+                appendWarning(
+                    "助手已安装但自检未通过。请确认 kongshan.app 位于 /应用程序 下；"
+                        + "若刚更新过 App，请再点一次「重新安装」（App 签名变化后助手需要重新授权）"
+                )
             }
         } catch let error as PrivilegedLauncherError {
-            warnings.append("安装助手失败：\(error.localizedDescription)")
+            appendWarning("安装助手失败：\(error.localizedDescription)")
         } catch {
-            warnings.append("安装助手失败：\(error.localizedDescription)")
+            appendWarning("安装助手失败：\(error.localizedDescription)")
         }
     }
 
     /// 卸载免密码助手（一条 osascript 提权）。
+    ///
+    /// 卸载会 bootout helper 并删掉 socket 与整个 state 目录——内核不先停就成了 App 再也
+    /// 停不掉的残留 root 进程。UI 已在 TUN 运行时禁用本按钮，这里再兜一层：先让 helper
+    /// 停掉它起的内核（不可达时由卸载脚本里的 pkill 兜底）。
     func uninstallHelper() async {
         guard !isHelperOperationInProgress else { return }
         isHelperOperationInProgress = true
         defer { isHelperOperationInProgress = false }
+        try? await helperClient.recoverIfNeeded()
         do {
             try await PrivilegedHelperInstaller.uninstall(authorizer: { script, timeout in
                 try await OSAScriptAuthorizer.run(script: script, timeout: timeout)
             })
-            refreshHelperInstallStatus()
+            await refreshHelperInstallStatus()
         } catch let error as PrivilegedLauncherError {
-            warnings.append("卸载助手失败：\(error.localizedDescription)")
+            appendWarning("卸载助手失败：\(error.localizedDescription)")
         } catch {
-            warnings.append("卸载助手失败：\(error.localizedDescription)")
+            appendWarning("卸载助手失败：\(error.localizedDescription)")
         }
     }
 
@@ -2832,6 +3180,7 @@ private enum AppStateError: Error, LocalizedError {
     case coreHealthFailed(String)
     case invalidTestURL
     case missingRuntimeState
+    case tunCleanupFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -2843,6 +3192,8 @@ private enum AppStateError: Error, LocalizedError {
             "测速地址必须是 HTTP 或 HTTPS URL"
         case .missingRuntimeState:
             "运行时状态不完整，无法更新分流规则"
+        case let .tunCleanupFailed(message):
+            "清理旧 TUN 失败：\(message)"
         }
     }
 }

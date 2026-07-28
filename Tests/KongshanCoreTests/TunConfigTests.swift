@@ -1,4 +1,5 @@
 import Foundation
+import HelperProtocol
 import XCTest
 @testable import KongshanCore
 
@@ -8,7 +9,6 @@ final class TunConfigTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode([ProxyMode].self, from: JSONEncoder().encode(values)), values)
         XCTAssertEqual(TunSettings.defaults, TunSettings(
             strictRoute: false,
-            interfaceName: "kongshan-tun",
             addresses: ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
             mtu: 9_000
         ))
@@ -38,9 +38,7 @@ final class TunConfigTests: XCTestCase {
         XCTAssertEqual(tun["mtu"] as? Int, 9_000)
         XCTAssertEqual(tun["auto_route"] as? Bool, true)
         XCTAssertEqual(tun["strict_route"] as? Bool, true)
-        // 强制 gvisor：system/mixed 栈的 TCP 转发在部分网络（多默认网关/企业网）会失效——
-        // 只有 UDP/ICMP 通、网页(TCP)全挂。gvisor 用户态栈普遍兼容（mihomo 默认即此），
-        // 无论用户 tunSettings.stack 设成什么，TUN 一律用 gvisor。
+        // 强制 gvisor：system/mixed 栈的 TCP 转发在部分网络（多默认网关/企业网）会失效。
         XCTAssertEqual(tun["stack"] as? String, "gvisor")
         // 跳过 TUN 与跳过代理是两份独立列表，不得互相串用
         XCTAssertEqual(tun["route_exclude_address"] as? [String], settings.tunExcludeCIDRs)
@@ -121,6 +119,83 @@ final class TunConfigTests: XCTestCase {
         ))
         let result = try await SingBoxProcess(binaryURL: singBoxURL).check(config: config)
         XCTAssertEqual(result.exitCode, 0, result.stderr)
+    }
+
+    func testGeneratedTUNConfigPassesHelperTrustBoundary() throws {
+        let config = try ConfigGenerator.generate(ConfigInput(
+            nodes: [node],
+            selectedNodeID: node.id,
+            runtime: RuntimeParameters(
+                mixedPort: 51_080,
+                clashPort: 51_909,
+                secret: "0123456789abcdef"
+            ),
+            routing: nil,
+            enabledModes: [.tun]
+        ))
+
+        let validation = HelperConfigWhitelist.validate(config)
+        XCTAssertTrue(validation.ok, validation.reason ?? "helper rejected generated TUN config")
+        let sanitized = try XCTUnwrap(validation.sanitizedData)
+        let root = try json(sanitized)
+        let cache = try XCTUnwrap(
+            (root["experimental"] as? [String: Any])?["cache_file"] as? [String: Any]
+        )
+        XCTAssertEqual(
+            cache["path"] as? String,
+            HelperConstants.stateDirectory + "/fakeip-cache-v2.db"
+        )
+    }
+
+    /// 白名单回归必须覆盖真机会出现的每种组合，不能只测 TUN-only：
+    /// TUN+系统代理是最常见的（多一个 mixed 入站，走白名单的 loopback/高位端口分支），
+    /// TUN+直连不生成 cache_file（走 cache_file 缺省分支）。生成器一改监听地址、端口范围
+    /// 或 experimental 形状，这里立刻红——否则测试全绿而真机报 "config rejected"。
+    func testEveryGeneratedTUNModeCombinationPassesHelperTrustBoundary() throws {
+        // 白名单要求 clash_api secret ≥ 16 字符（真机是 32 字节随机 base64）。
+        let secureRuntime = RuntimeParameters(mixedPort: 51_080, clashPort: 51_909, secret: "0123456789abcdef")
+        let combinations: [(name: String, modes: Set<ProxyMode>, outbound: OutboundMode, expectsCache: Bool)] = [
+            ("TUN", [.tun], .rule, true),
+            ("TUN+系统代理", [.systemProxy, .tun], .rule, true),
+            ("TUN+全局", [.tun], .global, true),
+            ("TUN+直连", [.tun], .direct, false)
+        ]
+
+        for combination in combinations {
+            let config = try ConfigGenerator.generate(ConfigInput(
+                nodes: [node],
+                selectedNodeID: node.id,
+                runtime: secureRuntime,
+                enabledModes: combination.modes,
+                outboundMode: combination.outbound
+            ))
+            let validation = HelperConfigWhitelist.validate(config)
+            XCTAssertTrue(validation.ok, "\(combination.name)：\(validation.reason ?? "被 helper 拒绝")")
+            let root = try json(try XCTUnwrap(validation.sanitizedData))
+            let experimental = try XCTUnwrap(root["experimental"] as? [String: Any])
+            if combination.expectsCache {
+                let cache = try XCTUnwrap(
+                    experimental["cache_file"] as? [String: Any],
+                    "\(combination.name) 应带 fakeip 缓存"
+                )
+                XCTAssertEqual(
+                    cache["path"] as? String,
+                    HelperConstants.stateDirectory + "/fakeip-cache-v2.db",
+                    "\(combination.name) 的缓存路径必须被改写到 root 自有目录"
+                )
+            } else {
+                XCTAssertNil(experimental["cache_file"], "\(combination.name) 不该带 fakeip 缓存")
+            }
+        }
+    }
+
+    /// 生成器分配的端口必须落在 helper 白名单放行的区间里（两者同源于 HelperConstants）。
+    func testRuntimeHighPortsStayInsideHelperWhitelistRange() throws {
+        let port = try RuntimeSecrets.availableHighPort()
+        XCTAssertTrue(
+            HelperConstants.loopbackHighPorts.contains(Int(port)),
+            "分配到 \(port)，不在 helper 放行的 \(HelperConstants.loopbackHighPorts)"
+        )
     }
 
     func testTunRuleModeDNSUsesFakeIPButSystemProxyDoesNot() throws {
@@ -252,7 +327,6 @@ final class TunConfigTests: XCTestCase {
             proxyMode: .tun,
             tunSettings: TunSettings(
                 strictRoute: strictRoute,
-                interfaceName: "kongshan-tun",
                 addresses: ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
                 mtu: 9_000
             )
@@ -314,18 +388,13 @@ final class TunConfigTests: XCTestCase {
 }
 
 extension TunConfigTests {
-    func testLegacyTunSettingsJSONWithoutStackDecodesToMixed() throws {
+    func testLegacyTunSettingsIgnoresRemovedFields() throws {
         let legacy = """
-        {"strictRoute":true,"interfaceName":"kongshan-tun","addresses":["172.19.0.1/30"],"mtu":9000}
+        {"strictRoute":true,"interfaceName":"kongshan-tun","addresses":["172.19.0.1/30"],"mtu":9000,"stack":"mixed"}
         """
         let settings = try JSONDecoder().decode(TunSettings.self, from: Data(legacy.utf8))
-        XCTAssertEqual(settings.stack, .mixed)
         XCTAssertTrue(settings.strictRoute)
-
-        var custom = TunSettings.defaults
-        custom.stack = .gvisor
-        let decoded = try JSONDecoder().decode(TunSettings.self, from: JSONEncoder().encode(custom))
-        XCTAssertEqual(decoded.stack, .gvisor)
+        XCTAssertEqual(settings.addresses, ["172.19.0.1/30"])
     }
 
     func testStripIPv6RemovesIPv6AddressesKeepsIPv4() {
@@ -333,7 +402,6 @@ extension TunConfigTests {
         XCTAssertEqual(stripped.addresses, ["172.19.0.1/30"])
         // 其它字段不变
         XCTAssertEqual(stripped.mtu, TunSettings.defaults.mtu)
-        XCTAssertEqual(stripped.stack, TunSettings.defaults.stack)
         XCTAssertEqual(stripped.strictRoute, TunSettings.defaults.strictRoute)
         // dnsServerAddress 只看 IPv4，剥掉 IPv6 不影响
         XCTAssertEqual(stripped.dnsServerAddress, TunSettings.defaults.dnsServerAddress)
@@ -346,12 +414,10 @@ extension TunConfigTests {
         XCTAssertTrue(v4Only.stripIPv6() == v4Only)
     }
 
-    func testStripIPv6OnIPv6OnlySettingsYieldsEmptyAddresses() {
-        // 极端情况：只有 IPv6 地址（用户自定义）。剥掉后变空数组——
-        // 这种配置本就无法工作，但行为要可预测：不静默保留 IPv6。
+    func testStripIPv6OnIPv6OnlySettingsFallsBackToDefaultIPv4() {
         var v6Only = TunSettings.defaults
         v6Only.addresses = ["fd00::1/64"]
         let stripped = v6Only.stripIPv6()
-        XCTAssertEqual(stripped.addresses, [])
+        XCTAssertEqual(stripped.addresses, ["172.19.0.1/30"])
     }
 }

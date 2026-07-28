@@ -47,6 +47,13 @@ final class ConfigGeneratorTests: XCTestCase {
         let anyTLS = try XCTUnwrap(outbound(for: nodes[4], in: outbounds))
         XCTAssertEqual(anyTLS["type"] as? String, "anytls")
         XCTAssertEqual((anyTLS["tls"] as? [String: Any])?["server_name"] as? String, "any.example.com")
+
+        let vless = try XCTUnwrap(outbound(for: nodes[5], in: outbounds))
+        XCTAssertEqual(vless["uuid"] as? String, "00000000-0000-0000-0000-000000000006")
+        XCTAssertEqual(vless["flow"] as? String, "xtls-rprx-vision")
+        let tls = try XCTUnwrap(vless["tls"] as? [String: Any])
+        XCTAssertEqual((tls["utls"] as? [String: Any])?["fingerprint"] as? String, "chrome")
+        XCTAssertEqual((tls["reality"] as? [String: Any])?["public_key"] as? String, "public-key-placeholder")
     }
 
     func testDiagnosticSnapshotRemovesClashRuntimeValues() throws {
@@ -75,6 +82,17 @@ final class ConfigGeneratorTests: XCTestCase {
         let hy = try XCTUnwrap(outbounds.first { $0["tag"] as? String == "node-00000000-0000-0000-0000-000000000004" })
         let obfs = try XCTUnwrap(hy["obfs"] as? [String: Any])
         XCTAssertEqual(obfs["password"] as? String, "<redacted>")
+
+        // 嵌套凭据必须一并脱敏：VLESS 的 Reality 参数藏在 tls.reality 下，
+        // 0.1.32 加 VLESS 时旧的浅层脱敏漏掉了它（真机 config.json 里明文可见）。
+        let vless = try XCTUnwrap(outbounds.first { $0["tag"] as? String == "node-00000000-0000-0000-0000-000000000006" })
+        let reality = try XCTUnwrap((vless["tls"] as? [String: Any])?["reality"] as? [String: Any])
+        XCTAssertEqual(reality["public_key"] as? String, "<redacted>")
+        XCTAssertEqual(vless["uuid"] as? String, "<redacted>")
+        XCTAssertFalse(text.contains("public-key-placeholder"))
+        // 非凭据字段不能被误伤（否则诊断包失去价值）。
+        XCTAssertEqual((vless["tls"] as? [String: Any])?["server_name"] as? String, "edge.example.com")
+        XCTAssertEqual(vless["flow"] as? String, "xtls-rprx-vision")
     }
 
     func testRejectsEmptyNodeList() {
@@ -96,12 +114,40 @@ final class ConfigGeneratorTests: XCTestCase {
         }
     }
 
+    func testVLESSConfigPassesBundledCoreCheck() async throws {
+        let node = ProxyNode(
+            name: "vless",
+            protocolType: .vless,
+            server: "vless.example.com",
+            port: 443,
+            uuid: "00000000-0000-0000-0000-000000000006",
+            tlsEnabled: true,
+            sni: "edge.example.com",
+            transport: TransportOptions(kind: .websocket, path: "/ws")
+        )
+        let config = try ConfigGenerator.generate(ConfigInput(
+            nodes: [node],
+            selectedNodeID: node.id,
+            runtime: RuntimeParameters(mixedPort: 51_180, clashPort: 51_181, secret: "test-secret")
+        ))
+        let binary = packageRoot.appending(path: "Vendor/sing-box/sing-box")
+        let result = try await SingBoxProcess(binaryURL: binary).check(config: config)
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+    }
+
     private var input: ConfigInput {
         ConfigInput(nodes: nodes, selectedNodeID: nodes[0].id, runtime: runtime)
     }
 
     private var runtime: RuntimeParameters {
         RuntimeParameters(mixedPort: 51_080, clashPort: 51_909, secret: "runtime-secret")
+    }
+
+    private var packageRoot: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
     }
 
     private var nodes: [ProxyNode] {
@@ -136,6 +182,14 @@ final class ConfigGeneratorTests: XCTestCase {
                 sourceID: UUID(uuidString: "10000000-0000-0000-0000-000000000001")!,
                 name: "any", protocolType: .anytls, server: "any.example.com", port: 443,
                 password: "p", tlsEnabled: true, sni: "any.example.com"
+            ),
+            ProxyNode(
+                id: UUID(uuidString: "00000000-0000-0000-0000-000000000006")!,
+                sourceID: UUID(uuidString: "10000000-0000-0000-0000-000000000001")!,
+                name: "vl", protocolType: .vless, server: "vl.example.com", port: 443,
+                uuid: "00000000-0000-0000-0000-000000000006", tlsEnabled: true,
+                sni: "edge.example.com", flow: "xtls-rprx-vision", utlsFingerprint: "chrome",
+                realityPublicKey: "public-key-placeholder", realityShortID: "0123456789abcdef"
             )
         ]
     }

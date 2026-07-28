@@ -1,114 +1,140 @@
 # 下一步
 
-## ✅ 真机 TUN 已修复 + 已合并 main + 发布 GitHub release v0.1.30（2026-07-23）
+## 0.1.40 已装本机（当前版本）
 
-### 已完成
-- 根因定案：系统 DNS 错指 `172.19.0.2`，该地址从 `en0` 去物理网关而非进入 TUN；正确地址是有 `utun LOCAL` 路由的接口自身 `172.19.0.1`。
-- `TunSettings.dnsServerAddress` 已改为接口 IPv4；TUN Fake-IP 改为 `240/4` 并持久化到 `fakeip-cache-v2.db`，避开订阅/物理网关的 `198.18` 冲突。
-- 全量 `swift test`：259 通过、1 跳过、0 失败；HY2+TUN 配置通过 sing-box check；0.1.30 构建、深度签名和 hardened runtime 均通过。
-- 两轮真机内核 PID 36946 → 37470，Google Fake-IP 均为 `240.0.0.4`；Google 204、百度 200、GitHub 200，出口 IP `69.63.217.24`。
-- Chrome 与 Safari 两轮均正常打开 Google/百度；系统 DNS 两轮都由应用自动设为 `172.19.0.1`。0.1.30 已安装，TUN 当前开启。
+1. 点 TUN（App 重建过，会弹一次密码重装助手；上一个假死内核会被新的升级信号杀掉）。
+2. 起来后**合盖休眠再唤醒**，重点看：
+   - 唤醒后 TUN 是否自动恢复（网卡没了会提示"正在重建隧道"并自动重建）；
+   - 若没恢复，关掉再开应能**正常起来**，不再卡在 `kernel already running`。
+3. 顺带验：拔插网线/切 Wi-Fi 后代理仍在、退出 App 后无残留 root 内核
+   （`pgrep -lf sing-box` 为空）。
 
-### 已发布（维护者本会话完成）
-- 审核 Codex 修复（正确）→ **squash 合并 main**（安全捕获：含节点真实密码的中间提交未推 origin，squash 丢弃、确认主历史 0 密码）→ 构建 DMG → **GitHub release v0.1.30（Latest）** 含 DMG（SHA-256 `86ad8e0009c811ecd4e447b852bb5c601927fdee4269352c634e42d487c8c353`）。**仅剩 main 一条分支。**
+验证通过后：提交 → squash 合并 `main` → 推送 → 发布 v0.1.40。
 
-### ⚠️ 唯一待办：一次 force-push（清远程的密码片段）
-- 我的 docs 记录里误留了密码前 8 位片段（**非可用完整密码**），已在**本地 amend 干净**（`3beda05`），但 **origin 上那个提交（`42a9d3c`）还含片段** → 本地与 origin 分叉（领先1/落后1）。
-- **运行这条完成收尾**（force-push 被自动分类器拦、需用户手动执行）：
-  ```
-  cd /Users/kaysen/workspace/mac/代理软件 && git push --force-with-lease origin main
-  ```
-- 跑完 origin 全历史 0 密码片段、本地与 origin 一致。**在此之前别在 main 上新提交后普通 push**（会因分叉失败）。
+## 0.1.39 已装本机（当前版本）
 
-### 可选 / 后续
-1. 有条件回企业**双默认网关**网络再开一次 TUN 复验（本次修复在 en0 单网关下验证通过）。
-2. 「设置 → 隧道」安装免密码助手，TUN 启停免密（不影响连通）。
-3. UI 小项：设置里「TUN 协议栈」下拉已失效（生成配置强制 gvisor），可从 UI 移除或改只读说明。
+**点一次 TUN 即可**。App 重建过（cdhash 变），流程会是：
+弹一次密码重装助手 → 自动清掉上一次遗留的内核 → 起新内核 → TUN 上线。
+之后关掉再开应**零弹窗**。
 
-### 接手
-读 `docs/design/tun-real-machine-debug.md` §19-20 + `docs/HANDOFF.md` 顶部最新段。不要再从节点、QUIC、DoH 或 Fake-IP 缓存开始；先核对系统 DNS 是否为 TUN 接口自身地址及其路由是否 `LOCAL`。
+出口 IP 想验准，需要在**没有透明代理的网络**下测（手机热点最省事）——
+家里路由器在做 SNI 分流代理，会把发给节点的握手改写掉，判据见
+`docs/design/tun-real-machine-debug.md`。
 
----
+验证通过后：提交 → squash 合并 `main` → 推送 → 发布 v0.1.39。
 
-## ✅ 免密码 TUN 助手已加固 + 合并 + 交付 0.1.24（2026-07-23）
+## 0.1.38 已装本机（当前版本）
 
-免密码 TUN 特权助手（`feat/tun-passwordless-helper`）经两轮独立对抗式安全审查 + 加固后**已合并进 main**（merge `64c2b00`）。代码三方自动合并（AppState/MainWindowView 无冲突），合并后 `swift test` **257 通过**。已构建交付 **0.1.24**，装到 /Applications、打了 DMG、清理到只剩一个最新版。
+1. **先关掉 Stash 的 TUN**（它占着 utun4=198.18.0.1）。
+2. 打开 kongshan → 点 TUN。App 重建过所以 cdhash 变了，会**弹一次密码重装助手**，
+   之后这次启动就走助手；再关掉重开应**零弹窗**。
+3. 起来后确认：仪表盘出口 IP 是节点所在地、网页能打开。
+4. 若还失败，先看内核日志有没有内容：
+   `tail -40 "/Library/Application Support/kongshan/helper/sing-box-tun.log"`
+   —— 有内容说明配置已送达（问题在配置本身），0 字节说明还是卡在喂配置。
+5. 需要手动清残留内核：`sudo pkill -f '/Library/Application Support/kongshan/helper/sing-box'`
 
-**当前状态**：
-- `main` = 0.1.24（本地领先 origin 若干提交，**待推**）。仅剩一条待清理分支 `feat/tun-passwordless-helper`（已完全并入，可删）。
-- 成品：`/Applications/kongshan.app` 0.1.24（已装、启动测试通过）；`dist/kongshan-0.1.24.dmg`（SHA-256 `7fd707cc0a6e059d83add13bbb6622b40c291355c4b4aad81d5f8212acee5f4e`）。旧 0.1.23 产物已删。
-- 硬化签名已验证：主可执行 + KongshanHelper 均 `flags=0x10002(adhoc,runtime)`，`--deep --strict` 校验有效。
+## 0.1.37 已装本机（当前版本）
 
-**安全审查（我负责，两轮对抗式）结论**：第三轮（C①/C②/N1/N2）复核正确（C① 实测消除 TOCTOU）。首轮 re-audit 揪出并实证 2 个 BLOCKER → 加固闭合：
-1. **配置从没送达**：stock sing-box `run` 无视 stdin（缺 `-c /dev/stdin`）→ TUN 经助手从未真正起来过。改 argv `run -c /dev/stdin` + spawn 存活探测。
-2. **§5.1 客户端可被同用户伪造 → root**：identifier 可重签 + 客户端 cdhash 未钉 + ad-hoc 可写 + 无 hardened runtime。加固：安装钉客户端 cdhash（fail-closed）+ build `--options runtime`（实测 ad-hoc 也强制、挡 DYLD 注入）。二轮 re-audit：**无同用户→root 提权链**；逐向量（替换重签/DYLD/task/插件/配置武器化）均被挡，铁律 §1.1–1.6 保持。
+助手已经是「已安装」状态，这版修的是最后一环（配置 FD 传不过去 → `missing config fd`）。
 
-**⚠️ 用户真机唯一待办 —— 验证零弹窗 TUN**：
-1. 打开 0.1.24 → **设置 → 隧道 → 「安装免密码助手」**，授权**一次**（osascript 弹密码，仅这一次）。
-2. 开 TUN，应**零弹窗**接管；关掉再开也不再弹。日志 `~/Library/Application Support/kongshan/logs/sing-box-tun.log` 应有 `inbound/tun` 正常路由（这是免密码 TUN 第一次真机端到端跑通——此前因 BLOCKER① 从未成功过）。
-3. 若「安装免密码助手」后仍每次弹密码：多半是 helper 不可达（`isReachable()` false），回退了 osascript 兜底（§1.6，功能正常只是没免密）。查 `/Library/Application Support/kongshan/helper/` 下 helper/sing-box/trust.json 是否 root:wheel、socket 是否建起。
-4. 顺带验 TUN IPv6 修复：中国站 + 国外站都通、无 `no route to host`。
+1. **先关掉 Stash 的 TUN**（它占着 utun4=198.18.0.1，两个 TUN 会抢默认路由）。
+2. 点 kongshan 的 TUN：助手已装 → 预期**一次密码都不弹**直接起来；
+   若 App 又重建过（cdhash 变）则弹一次装助手，之后零弹窗。
+3. 起来后确认：仪表盘出口 IP 是节点所在地、能正常上网。
+4. 关掉再开一次，确认零弹窗且没有残留：`pgrep -lf sing-box` 应为空。
 
-**剩余非阻塞待办**（记入「可选」）：helper 侧配置内容白名单（纵深，当前生成 schema 已无 root 写/执行落点）；trust.json 加版本号（防旧配置无 pin 静默降级，新装必钉故仅迁移期）。
+仍有问题的话，把顶部提示条的完整文字发我。
 
-**收尾（我做）**：推 main + 删已并入的 `feat/tun-passwordless-helper` 分支。
+## 0.1.36 已装本机（当前版本）
 
----
+**验收前先关掉 Stash 的 TUN**（它现在占着 utun4=198.18.0.1；两个 TUN 会抢默认路由）。
 
-## 当前最高优先级：真机重打包验证 TUN IPv6 修复（fix/tun-ipv6-no-route）
+1. 点 kongshan 的 TUN → **应只弹一次密码**（装助手）→ 之后关掉再开，**零弹窗**。
+   如果仍弹两次，把顶部错误条的完整文字发我。
+2. 设置 → 隧道 → 免密码助手：状态应是「已安装」。
+3. TUN 开着时，那三个助手按钮应全灰 + 橙字提示。
+4. 残留内核清理：TUN 运行中执行
+   `sudo launchctl kickstart -k system/com.kaysen.kongshan.helper`，
+   再从 App 关 TUN，应能正常停掉且 `pgrep -lf sing-box` 为空。
 
-1. 在 `fix/tun-ipv6-no-route` 分支跑 `scripts/build_app.sh` 重打包，安装到 /Applications。
-2. 开 TUN，确认：
-   - `~/Library/Application Support/kongshan/logs/sing-box-tun.log` **不再有** `outbound/direct[direct]: ... no route to host` 针对 240e:... 的错误。
-   - 中国网站正常打开（不再因 IPv6 直连失败卡住）。
-   - 国外网站经代理正常（ChatGPT/Google 等）。
-   - `config.json` 的 TUN inbound `address` 只有 `172.19.0.1/30`，没有 `fdfe:dcba:9876::1/126`。
-3. 通过后合并 `fix/tun-ipv6-no-route` → main（或先合进 `codex/network-observability-batch` 再统一合 main，因为本分支就基于 codex）。
-4. 注意：切到有 IPv6 的网络时，探测会自动返回 true，TUN 自动恢复 IPv6 地址，无需手动改设置。
+全部通过后：提交 → squash 合并 `main` → 推送 → 发布 v0.1.36。
 
-## 验收 0.1.23 网络可观测与控制增强
+## 0.1.35 已装本机（当前版本）
 
-1. 打开已运行的 `/Applications/kongshan.app`（0.1.23/build 123），仪表盘点“检测”，确认出口 IP、地区/运营商和 DNS 三态结果符合当前节点。
-2. 在“代理”页检查旗帜/倍率，点“测速并选最快”；开启代理后到“连接”页确认每条速率、总速率和排序，并检查托盘速率。
-3. 在“规则”页小范围验收一条分应用规则；在“设置 → 更多”导出一份备份，仅在代理停止后测试导入。备份含凭据，不要上传或外传。
-4. 继续检查侧边栏展开/折叠时唯一按钮固定在左上角。
-5. 用户明确“验收通过”后，再把 `codex/network-observability-batch` 合并 main；此前保留分支和 worktree。
+**第一件事：点一次「重新安装」助手。** 设置 → 隧道 → 免密码助手 → 「重新安装」→ 输密码。
+机器上现存的是旧助手（trust v2，身份校验对不上），必然显示"需重装"，这是预期。
+装完状态应从「需重装」变成「已安装」；若仍是「需重装」，把设置页那条橙色提示发我。
 
-## 🔴🔴 真凶已修（0.1.18）：SS 缺 obfs 插件 → 能测速却打不开网站
-- 机场 342 节点全是 `ss + plugin:obfs`，旧转换器没解析 plugin → 生成裸 SS → 服务器要 obfs 混淆 → 裸连 TCP 通(测速有值)但传不了数据 → 全部国外站不可达。0.1.18 已解析 obfs→sing-box `obfs-local`。
-- **⚠️ 诊断教训**：用户在国内、跟 Claude 对话得开另一个工作代理；**用 Bash 实测连通性会经那个代理、不反映 kongshan**。App 连通卡走 kongshan 自己内核，才是可信信号（它一直报不可达＝对的）。以后测 kongshan 连通性别用主机 curl，除非确认已隔离。
-- **用户验证**：重开 0.1.18 → **刷新订阅一次** → TAGSS 挑节点 → 关掉工作代理只开 kongshan → 打开国外网站。应通。
+装好后依次验：
 
-## （历史）0.1.16/0.1.17 的连通性排查
+1. 连续开关 TUN 两次 → 除装助手那次外应**零弹窗**。
+2. TUN 开着时，设置 → 隧道的安装/卸载/重装按钮应全灰 + 橙字提示。
+3. 残留内核清理：TUN 运行中执行 `sudo launchctl kickstart -k system/com.kaysen.kongshan.helper`
+   杀并重启助手，再从 App 关 TUN，应能正常停掉且 `pgrep -lf sing-box` 为空。
+4. 换一个不拦节点的网络，开系统代理 → 仪表盘出口 IP 应变成节点所在地。
+   当前网络把订阅里两个节点都拦了（TCP 3ms 假握手、TLS 零响应），在这里测不出来。
 
-### A. 开代理是否生效（0.1.17：只用机场策略组，待确认）
-- **重要**：0.1.16 时用户报"不可达"实为**误报**——内核日志证明代理是通的(claude.ai/github 都经所选节点成功建连)。那张卡片测 `www.google.com/generate_204`(常被拦)且测的节点未必同步。0.1.17 已把探测改为测**主组**(真实路径) + 换稳定端点 `gstatic/generate_204`。
-- 0.1.17 按用户意愿**去掉了内置手动/自动选择，只显示机场自带策略组**；主组(TAGSS)默认指向真实节点、final/DNS 走主组。
-- **用户操作**：关掉旧实例 → 重开 0.1.17 → 代理页应只剩机场策略组(TAGSS/国外媒体/微软…) → 在 **TAGSS** 里挑节点 → 开系统代理 → 出口连通性应「可达」。
-- 注意：旧 groupSelections["🙂 TAGSS"]=台湾02 会成为主组默认；想换在 TAGSS 里重挑即可。
-- 若某端点仍不可达：多半是该出口节点确实到不了该站(换节点/测速)，不再是路由问题。
+全部通过后：提交 → squash 合并 `main` → 推送 → 发布 v0.1.35。
 
-### B. 🔴 TUN「一直弹密码框 / 起不来」——待用户用 0.1.16 复现取证
-- 现状：**无法从静态产物复现**。运行态干净（无残留 sing-box、无 tun-recovery.json、runtime 空）；日志证明 16:53 TUN 曾正常接管(utun4、路由 Chrome)。
-- 机制：`AppState.start(modes:)` 开 TUN 走 `privilegedLauncher.start`(弹 1 次密码)；若其后 `healthVerifier`(loopback ping Clash API, ~6s)或 `processMatches` 失败 → catch 里 `privilegedLauncher.stop()` 杀刚起的 root 内核**会再弹 1 次密码**（内核已自行退出时不弹）。故一次失败可能弹 2 次，用户重试就"一直弹"。
-- **要用户提供**：用 0.1.16 点一次 TUN，记下①App 顶部/提示条报的错，②`~/Library/Application Support/kongshan/logs/sing-box-tun.log` 新增尾部（找 FATAL/panic/EOF/permission/bad tun）。有这两样才能定位是提权失败、进程校验失败、还是内核起后即退。
-- 可选加固（待定位后）：失败 teardown 时若内核已退出就别再走提权 stop（已是现状）；可给 TUN 失败一个更明确的错误文案，减少用户盲目重试。
+## 0.1.34 已装本机（当前版本）
 
-## 真机回归（本会话大量改动，务必过一遍）
-1. **系统代理**：点一下应"又快又不卡"（之前是托盘菜单 100% CPU 拖累，已修）。开启后提示条会显示"启动耗时 → …"，正常零点几秒。
-2. **TUN**：点 TUN→输密码→秒级接管；`~/Library/Application Support/kongshan/logs/sing-box-tun.log` 应有 `inbound/tun` 正常路由，无 `EOF`/`bad tun name`。
-3. **配置切换 / 节点增删**：运行中热重载 <2s，不卡。
-4. **托盘菜单**：每个策略子菜单最多 40 项，超出显示"在代理页选择全部（N 个）…"。
-5. 空闲 CPU 应为 0%，RSS <150MB（实测 141MB）。
+已安装 `/Applications/kongshan.app` 0.1.34（build 134）。自动化能测的都测了（285 单测 + 真机端到端，见 SESSION_LOG 2026-07-27 00:30）。**剩下两项必须由用户实测**：
 
-## 环境备注
-- 早前有一次 `~/Library/Application Support/kongshan` 数据与 `.app` 丢失，**经用户确认是那次手动删除**，并非 CleanMyMac 后台反复清理（此前交接文档把一次性事件误判为"反复删除"，已更正）。2026-07-21 实测：数据目录自当天 11:28 导入订阅后稳定留存到 16:57，app 完整（54MB）。**无需特意在 CleanMyMac 排除**，除非日后真的再次自动消失。
-- 用户是**笔记本(主屏,菜单栏) + 上方大外接屏**的多显示器；窗口已强制居中到主屏。
+1. **换一个不拦节点的网络**再验收：开系统代理 → 仪表盘出口 IP 应变成节点所在地。当前网络把订阅里两个节点都拦了（TCP 3ms 假握手、TLS 零响应），在这里测不出来。
+2. **TUN 模式**（需要 root 密码，自动化测不了）：
+   - 首次开 TUN 弹一次密码装助手，之后连续开关两次应零弹窗；
+   - TUN 开着时 设置 → 隧道 的安装/卸载/重装助手按钮应全灰 + 橙字提示；
+   - 残留内核清理：TUN 运行中 `sudo launchctl kickstart -k system/com.kaysen.kongshan.helper` 杀并重启助手，再从 App 关 TUN，应能正常停掉、`pgrep -lf sing-box` 为空。
 
-## 可选（非阻塞）
-- 订阅级自定义 UA / base64 格式回退；`profile-update-interval` 头。
-- 一次性特权 helper（SMAppService+XPC）替代每次 TUN 提权弹窗。
-- 策略组还原订阅成员的嵌套引用；被丢弃订阅规则的可见提示。
-- 托盘实时速率、外部访问（需破红线，待用户拍板）。
-- 启动时那一次性 ~2s CPU 峰值（首建菜单+载配置）可再优化，但已可接受。
-- 清理 start() 里的临时计时提示（"启动耗时 → …"每次开代理都进 warnings，确认没问题后可去掉或只在慢时显示）。
+验收通过后：提交 → squash 合并 `main` → 推送 → 发布 v0.1.34（DMG 已在 `dist/`）。
+
+## 0.1.33 已装本机，等真机验收
+
+已安装 `/Applications/kongshan.app` 0.1.33（build 133）。下面这几条是这版**新改动**的针对性验收，通过后才提交合并：
+
+1. 首次开 TUN 会弹一次密码自动装/重装助手（App 重建后 cdhash 变，旧助手必然被拒）；之后连续开关 TUN 两次应零弹窗。
+2. **TUN 开着时**进 设置 → 隧道：安装/卸载/重装助手按钮应全部灰掉，并显示橙色说明；关掉 TUN 后恢复可点。
+3. 残留内核清理（P1 核心）：TUN 运行中在终端 `sudo launchctl kickstart -k system/com.kaysen.kongshan.helper` 杀掉并重启助手，helper 应认领原内核 —— 此时 App 里关 TUN 应能正常停掉、不留 root sing-box（`pgrep -lf sing-box` 为空）。日志：`log show --predicate 'process == "KongshanHelper"' --last 10m`。
+4. 关 TUN 时若代理/DNS 还原失败，顶部应显示红色错误 + 「系统设置 → 网络 → 详细信息 → DNS」指引，而不是「可忽略」。
+5. 菜单栏速率应是紧凑的 `900B` / `1.5K` / `5.0M` 形式、0 时显示 `—`，宽度不乱跳。
+6. 订阅列表里刚导入、还没跑流量的配置，用量应显示 `— / 100 GB` 而不是「 / 100 GB」。
+7. 其余照旧：TUN 下国内外网页 + 出口 IP、运行中切节点/配置/规则、VLESS 订阅、脱敏诊断导出。
+
+验收通过后：提交本次改动 → squash 合并 `main` → 推送 → 发布 v0.1.33（DMG 已在 `dist/kongshan-0.1.33.dmg`）。
+
+## 已修复（2026-07-25 复审 P1~P6，记录留档）
+
+按优先级；完整依据见 `docs/progress/SESSION_LOG.md` 2026-07-25 21:10 条。
+
+1. P1 `PrivilegedHelperInstaller.uninstall/install` 不先停内核，且设置页 卸载/重装 按钮没按 TUN 是否在跑禁用 → 可能留下 App 无法清理的 root sing-box。最小修：按钮加 `state.activeModes.contains(.tun)` 禁用；彻底修：helper 落 `stateDirectory/kernel.pid` + 启动时 reconcile，卸载脚本先停内核。
+2. P2 `AppState.stop()` 中 DNS/代理还原失败的「可忽略，下次启动自动清理」文案改成 errorMessage + 手工恢复指引（不阻塞退出这点保持）。
+3. P3 `MainWindowView.swift:341`、`DashboardView.swift:343` 改用 `Theme.bytesOrDash` 或 0 兜底。
+4. P4 菜单栏 `MenuRateFormatter.compact` 恢复手写 1 字母紧凑格式，只保留 0 → 空串行为。
+5. P5 白名单回归测试补 `[.tun,.systemProxy]` 与 TUN+直连两种组合；注释写清未覆盖 `dns`/`route`/outbound 非 type 字段。
+6. P6 高位端口范围收进 `HelperConstants` 单一来源。
+
+## 0.1.32 自动验证已完成
+
+- `swift test`：282 通过、1 跳过、0 失败；VLESS 配置通过内置 sing-box check。
+- 10 张离屏界面快照生成成功，规则页已人工检查。
+- 0.1.32/build 132 为 arm64；主 App、KongshanHelper 深度签名及 hardened runtime 通过。
+- sing-box 1.13.14、DMG 与 M4 自动验证通过；空闲 CPU 平均 0%，最大 RSS 124032 KB。
+- 成品：`dist/kongshan-0.1.32.dmg`；SHA-256 `ec255233febb71d6152719d592bcef970084dca6018069a587b72cce3180f00c`。
+- 旧 0.1.31 DMG 已移入废纸篓，dist 只保留当前版本。
+
+## 用户真机验收
+
+1. 安装 0.1.32；设置 → 隧道重新安装免密码助手一次，连续开关 TUN 两次应只首次授权。
+2. TUN 下打开国内外网页并检查出口 IP；运行中切节点、配置和规则后关闭，确认没有残留 root sing-box。
+3. 验证系统代理和 DNS 在网络服务/配置切换后恢复；失败应显示消息并保留 recovery 文件。
+4. 刷新含 VLESS 的订阅，确认 VLESS 节点不再被跳过，TLS/WS/gRPC/Reality 节点可连接。
+5. 检查订阅兼容性消息、规则页“选择已安装 App”、设置页“导出脱敏诊断”、应用更新入口、内核更新文案。
+6. 检查侧栏唯一按钮、消息/内核日志、托盘与连接速率、GB/TB 和缓存大小。
+7. 用户明确验收通过后，维护者复审并决定 squash 合并 `main`、推送和发布 v0.1.32。
+
+## 暂不扩张
+
+- 不加入 TUIC/WireGuard，除非真实订阅出现需求。
+- 不引入 Sparkle；private 仓库没有可安全匿名访问的更新源。
+- 不为拆文件而重写 `AppState`；后续只随真实功能按领域拆 extension。

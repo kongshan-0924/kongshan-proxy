@@ -14,12 +14,22 @@ enum Theme {
     }
 
     static func bytes(_ value: Int64) -> String {
-        // spellsOutZero 关掉，否则 0 会被本地化成 “Zero KB”。
-        max(0, value).formatted(.byteCount(style: .memory, spellsOutZero: false))
+        AppState.formatBytes(value)
     }
 
     static func rate(_ value: Int64) -> String {
-        "\(bytes(value))/s"
+        AppState.formatRate(value)
+    }
+
+    /// 字节/速率为 0 时用「—」占位，避免空串导致布局跳动。
+    static func bytesOrDash(_ value: Int64) -> String {
+        let s = bytes(value)
+        return s.isEmpty ? "—" : s
+    }
+
+    static func rateOrDash(_ value: Int64) -> String {
+        let s = rate(value)
+        return s.isEmpty ? "—" : s
     }
 
     static func protocolTint(_ value: ProxyProtocol) -> Color {
@@ -27,6 +37,7 @@ enum Theme {
         case .shadowsocks: .blue
         case .trojan: .purple
         case .vmess: .teal
+        case .vless: .mint
         case .hysteria2: .orange
         case .anytls: .indigo
         }
@@ -44,6 +55,7 @@ extension ProxyProtocol {
         case .shadowsocks: "SS"
         case .trojan: "TROJAN"
         case .vmess: "VMESS"
+        case .vless: "VLESS"
         case .hysteria2: "HY2"
         case .anytls: "ANYTLS"
         }
@@ -270,5 +282,4 @@ struct SearchField: View {
         )
     }
 }
-
 

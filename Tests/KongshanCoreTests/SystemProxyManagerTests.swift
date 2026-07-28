@@ -15,6 +15,10 @@ final class SystemProxyManagerTests: XCTestCase {
             SystemProxyCommands.enabledServices(from: output),
             ["Wi-Fi", "Thunderbolt Bridge"]
         )
+        XCTAssertEqual(
+            SystemProxyCommands.allServices(from: output),
+            ["Wi-Fi", "USB 10/100/1000 LAN", "Thunderbolt Bridge"]
+        )
     }
 
     func testParsesProxyStateAndBuildsExactRestoreCommands() throws {
@@ -127,7 +131,45 @@ final class SystemProxyManagerTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: recoveryURL.path))
     }
 
-    func testRecoverKeepsSnapshotUntilEveryRestoreCommandSucceeds() async throws {
+    /// 切网络配置后快照里的服务可能已消失（如 Thunderbolt Bridge 拔了）。
+    /// 恢复时只处理仍存在的服务；已消失服务无需反复阻塞恢复。
+    func testRecoverSkipsStaleServicesNoLongerPresent() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        try await storage.prepare()
+        // 快照含 Wi-Fi + Thunderbolt Bridge，但 recorder 的 -listallnetworkservices 只返回 Wi-Fi。
+        let snapshot = ProxyRecoverySnapshot(services: [
+            NetworkServiceProxySnapshot(
+                name: "Wi-Fi",
+                http: .init(enabled: true, server: "old.local", port: 8080),
+                https: .init(enabled: false, server: "", port: 0),
+                socks: .init(enabled: false, server: "", port: 0),
+                bypassDomains: []
+            ),
+            NetworkServiceProxySnapshot(
+                name: "Thunderbolt Bridge",
+                http: .init(enabled: false, server: "", port: 0),
+                https: .init(enabled: false, server: "", port: 0),
+                socks: .init(enabled: false, server: "", port: 0),
+                bypassDomains: []
+            )
+        ])
+        let recoveryURL = root.appending(path: "proxy-recovery.json")
+        try await storage.writeAtomically(JSONEncoder().encode(snapshot), to: recoveryURL)
+        let runner = NetworkSetupRecorder(recoveryURL: recoveryURL)
+        let manager = SystemProxyManager(storage: storage, runner: runner.run(arguments:timeout:))
+
+        try await manager.recoverIfNeeded()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: recoveryURL.path))
+        // 不应对 stale 服务执行任何 networksetup 命令
+        let arguments = await runner.arguments
+        XCTAssertFalse(arguments.contains { $0.contains("Thunderbolt Bridge") },
+                       "不应向已消失的服务发命令")
+    }
+
+    /// 单条命令失败不阻塞其它命令，但失败服务必须留在快照里供下次重试。
+    func testRecoverKeepsOnlyFailedServiceForRetry() async throws {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let storage = Storage(rootDirectory: root)
@@ -151,13 +193,51 @@ final class SystemProxyManagerTests: XCTestCase {
 
         do {
             try await manager.recoverIfNeeded()
-            XCTFail("Expected restore failure")
-        } catch {
-            XCTAssertEqual(error as? SystemProxyError, .commandFailed(exitCode: 7, message: "simulated"))
+            XCTFail("Expected partial restore failure")
+        } catch let error as SystemProxyError {
+            // 合并错误：exitCode=-1，message 含「部分网络服务代理恢复失败」
+            if case .commandFailed(let code, _) = error {
+                XCTAssertEqual(code, -1)
+            } else {
+                XCTFail("Expected .commandFailed, got \(error)")
+            }
         }
         XCTAssertTrue(FileManager.default.fileExists(atPath: recoveryURL.path))
+        let retry = try JSONDecoder().decode(
+            ProxyRecoverySnapshot.self,
+            from: Data(contentsOf: recoveryURL)
+        )
+        XCTAssertEqual(retry.services.map(\.name), ["Wi-Fi"])
+
+        // 失败条件只触发一次；第二次必须真正恢复并删除快照。
+        try await manager.recoverIfNeeded()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: recoveryURL.path))
+    }
+
+    func testRecoverRestoresDisabledButExistingService() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        try await storage.prepare()
+        let disabled = NetworkServiceProxySnapshot(
+            name: "Disabled LAN",
+            http: .init(enabled: false, server: "", port: 0),
+            https: .init(enabled: false, server: "", port: 0),
+            socks: .init(enabled: false, server: "", port: 0),
+            bypassDomains: []
+        )
+        let recoveryURL = root.appending(path: "proxy-recovery.json")
+        try await storage.writeAtomically(
+            try JSONEncoder().encode(ProxyRecoverySnapshot(services: [disabled])),
+            to: recoveryURL
+        )
+        let runner = NetworkSetupRecorder(recoveryURL: recoveryURL)
+        let manager = SystemProxyManager(storage: storage, runner: runner.run(arguments:timeout:))
 
         try await manager.recoverIfNeeded()
+
+        let arguments = await runner.arguments
+        XCTAssertTrue(arguments.contains(["-setwebproxystate", "Disabled LAN", "off"]))
         XCTAssertFalse(FileManager.default.fileExists(atPath: recoveryURL.path))
     }
 

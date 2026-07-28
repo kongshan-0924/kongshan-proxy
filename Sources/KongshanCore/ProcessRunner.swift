@@ -73,7 +73,13 @@ private final class ProcessExecution: @unchecked Sendable {
 
     func run() async throws -> ProcessResult {
         try await withCheckedThrowingContinuation { continuation in
+            // continuation 必须在锁内写：terminationHandler（子进程线程）与超时（全局队列）
+            // 都在锁内读写同一个字段，这里不加锁就是数据竞争。短命令（networksetup、
+            // sing-box check/version）常在几毫秒内退出，正好落进这个窗口——实测会
+            // EXC_BAD_ACCESS 崩在 swift_task_dealloc。
+            lock.lock()
             self.continuation = continuation
+            lock.unlock()
             process.terminationHandler = { [weak self] process in
                 self?.processTerminated(exitCode: process.terminationStatus)
             }

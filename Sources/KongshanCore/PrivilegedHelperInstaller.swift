@@ -104,8 +104,13 @@ public enum PrivilegedHelperInstaller {
 
         // trust.json：JSONEncoder 结构化生成（修复 C 加 singBox 字段；D1 trust.json 部分在此完成）。
         // 别字符串插值——clientPath/singBoxPath 可能含 JSON 元字符。
+        // helper 比对的是 bundle 路径（SecCodeCopyPath 对 bundle 返回 .app 目录），
+        // 主可执行路径只用来算 cdhash。两者都写进 trust.json。
+        let clientBundlePath = Bundle.main.bundleURL
+            .standardizedFileURL.resolvingSymlinksInPath().path
         let trustConfig = makeTrustConfig(
             clientExecutablePath: clientPath,
+            clientBundlePath: clientBundlePath,
             clientCDHashHex: clientCDHashHex,
             singBoxInstalledPath: installedSingBoxPath,
             singBoxCDHashHex: singBoxCDHashHex
@@ -131,47 +136,15 @@ public enum PrivilegedHelperInstaller {
         )
         let plistBase64 = plistData.base64EncodedString()
 
-        // 一条 shell 命令完成全部 root 操作。先 bootout 旧实例（若有）再 bootstrap，幂等。
-        // 权限（修复 A）：目录 0711（others 可穿越、不可列），socket 0666（others 可连）。
-        // trust.json 0600 root（含 cdhash 等钉死值，用户不可读改）。plist 0644。
-        // helper 拷贝 0755 root:wheel（用户不可改）。
-        let stateDir = HelperConstants.stateDirectory
-        let parentDir = (stateDir as NSString).deletingLastPathComponent
-        // 修复 A：目录权限用共享常量，与 helper setupSocket 同步（别一处改了另一处漂移）。
-        let dirModeOctal = String(HelperConstants.socketDirectoryMode, radix: 8)  // "711"
-        let command = [
-            "set -e",
-            "umask 077",
-            "export PATH=/usr/bin:/bin:/usr/sbin:/sbin",
-            // stateDirectory 及其父 .../kongshan 都建出并显式 chmod 0711（修复 A）。
-            "/bin/mkdir -p \(shellQuote(stateDir))",
-            "/bin/chmod \(dirModeOctal) \(shellQuote(parentDir))",
-            "/bin/chmod \(dirModeOctal) \(shellQuote(stateDir))",
-            // 修复 C.1：拷 bundle helper → root-only 位置（先 rm 防旧残留，再 cp + chown + chmod）。
-            "/bin/rm -f \(shellQuote(installedHelperPath))",
-            "/bin/cp \(shellQuote(bundledHelperPath)) \(shellQuote(installedHelperPath))",
-            "/usr/sbin/chown root:wheel \(shellQuote(installedHelperPath))",
-            "/bin/chmod 755 \(shellQuote(installedHelperPath))",
-            // 修复 C①：sing-box 也拷到 root-only 位置（与 helper 同构）。
-            // trust.singBoxExecutablePath 指向此拷贝，verify→exec 都在同一路径上，
-            // 但路径在 0711 root 目录内、文件 root:wheel 755，攻击者无法原子替换 → 无 TOCTOU。
-            "/bin/rm -f \(shellQuote(installedSingBoxPath))",
-            "/bin/cp \(shellQuote(singBoxPath)) \(shellQuote(installedSingBoxPath))",
-            "/usr/sbin/chown root:wheel \(shellQuote(installedSingBoxPath))",
-            "/bin/chmod 755 \(shellQuote(installedSingBoxPath))",
-            // trust.json：base64 解码写入，root 0600（含钉死的 sing-box cdhash，用户不可读改）。
-            "/usr/bin/printf '%s' \(shellQuote(trustBase64)) | /usr/bin/base64 -D > \(shellQuote(HelperConstants.trustConfigPath))",
-            "/usr/sbin/chown root:wheel \(shellQuote(HelperConstants.trustConfigPath))",
-            "/bin/chmod 600 \(shellQuote(HelperConstants.trustConfigPath))",
-            // plist：base64 解码写入，root 0644（launchd 需可读）。
-            "/usr/bin/printf '%s' \(shellQuote(plistBase64)) | /usr/bin/base64 -D > \(shellQuote(plistPath))",
-            "/usr/sbin/chown root:wheel \(shellQuote(plistPath))",
-            "/bin/chmod 644 \(shellQuote(plistPath))",
-            // socket 由 helper 自己建（chmod 0666），这里不预建。
-            // 先 bootout 旧实例（失败无害），再 bootstrap。
-            "/bin/launchctl bootout system/\(HelperConstants.daemonLabel) 2>/dev/null || true",
-            "/bin/launchctl bootstrap system \(shellQuote(plistPath))"
-        ].joined(separator: "; ")
+        let command = makeInstallScript(
+            installedHelperPath: installedHelperPath,
+            bundledHelperPath: bundledHelperPath,
+            installedSingBoxPath: installedSingBoxPath,
+            singBoxPath: singBoxPath,
+            trustBase64: trustBase64,
+            plistBase64: plistBase64,
+            plistPath: plistPath
+        )
 
         _ = try await authorizer(appleScript(command: command), timeout)
     }
@@ -210,20 +183,89 @@ public enum PrivilegedHelperInstaller {
     }
 
     /// 修复 C①：构造 trustConfig，singBoxExecutablePath 指向 root-only 拷贝（不是 bundle）。
+    /// 安装脚本（一条 root shell）。抽成纯函数是为了能单测——这段脚本历史上
+    /// 反复出问题（launchctl 装载序列），却因为埋在 install() 里而完全没被测到。
+    static func makeInstallScript(
+        installedHelperPath: String,
+        bundledHelperPath: String,
+        installedSingBoxPath: String,
+        singBoxPath: String,
+        trustBase64: String,
+        plistBase64: String,
+        plistPath: String
+    ) -> String {
+        let stateDir = HelperConstants.stateDirectory
+        let parentDir = (stateDir as NSString).deletingLastPathComponent
+        // 修复 A：目录权限用共享常量，与 helper setupSocket 同步（别一处改了另一处漂移）。
+        let dirModeOctal = String(HelperConstants.socketDirectoryMode, radix: 8)  // "711"
+        return [
+                "set -e",
+                "umask 077",
+                "export PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+                // stateDirectory 及其父 .../kongshan 都建出并显式 chmod 0711（修复 A）。
+                "/bin/mkdir -p \(shellQuote(stateDir))",
+                "/bin/chmod \(dirModeOctal) \(shellQuote(parentDir))",
+                "/bin/chmod \(dirModeOctal) \(shellQuote(stateDir))",
+                // 修复 C.1：拷 bundle helper → root-only 位置（先 rm 防旧残留，再 cp + chown + chmod）。
+                "/bin/rm -f \(shellQuote(installedHelperPath))",
+                "/bin/cp \(shellQuote(bundledHelperPath)) \(shellQuote(installedHelperPath))",
+                "/usr/sbin/chown root:wheel \(shellQuote(installedHelperPath))",
+                "/bin/chmod 755 \(shellQuote(installedHelperPath))",
+                // 修复 C①：sing-box 也拷到 root-only 位置（与 helper 同构）。
+                // trust.singBoxExecutablePath 指向此拷贝，verify→exec 都在同一路径上，
+                // 但路径在 0711 root 目录内、文件 root:wheel 755，攻击者无法原子替换 → 无 TOCTOU。
+                "/bin/rm -f \(shellQuote(installedSingBoxPath))",
+                "/bin/cp \(shellQuote(singBoxPath)) \(shellQuote(installedSingBoxPath))",
+                "/usr/sbin/chown root:wheel \(shellQuote(installedSingBoxPath))",
+                "/bin/chmod 755 \(shellQuote(installedSingBoxPath))",
+                // trust.json：base64 解码写入，root 0600（含钉死的 sing-box cdhash，用户不可读改）。
+                "/usr/bin/printf '%s' \(shellQuote(trustBase64)) | /usr/bin/base64 -D > \(shellQuote(HelperConstants.trustConfigPath))",
+                "/usr/sbin/chown root:wheel \(shellQuote(HelperConstants.trustConfigPath))",
+                "/bin/chmod 600 \(shellQuote(HelperConstants.trustConfigPath))",
+                // plist：base64 解码写入，root 0644（launchd 需可读）。
+                "/usr/bin/printf '%s' \(shellQuote(plistBase64)) | /usr/bin/base64 -D > \(shellQuote(plistPath))",
+                "/usr/sbin/chown root:wheel \(shellQuote(plistPath))",
+                "/bin/chmod 644 \(shellQuote(plistPath))",
+                // socket 由 helper 自己建（chmod 0666），这里不预建。
+                //
+                // 装载序列必须是"卸干净 → 确认真的没了 → 解除 disable → 再装"。
+            // 等待预算 10 秒：helper 退出前要停内核，而停内核最坏要走
+            // SIGINT→SIGTERM→SIGKILL 三级（每级 2 秒），5 秒不够、会卡在竞态边缘。
+                // 直接 bootout 后立刻 bootstrap 会失败：`bootout` 对 launchd 是**异步**的，
+                // 旧 label 还挂在那儿时 bootstrap 报 `Bootstrap failed: 5: Input/output error`；
+                // 被 `launchctl disable` 过的 label 同样报这个错。两者都会让安装静默失败，
+                // 用户表现为"输了密码却还是需重装，而且开 TUN 要输两次密码"。
+                "/bin/launchctl bootout system/\(HelperConstants.daemonLabel) 2>/dev/null || true",
+                "n=0; while /bin/launchctl print system/\(HelperConstants.daemonLabel) >/dev/null 2>&1 && [ $n -lt 100 ]; do /bin/sleep 0.1; n=$((n+1)); done",
+                "/bin/launchctl enable system/\(HelperConstants.daemonLabel) 2>/dev/null || true",
+                // 仍失败就再来一轮完整的卸载→装载，把偶发的竞态兜住；两轮都失败才算真失败。
+                "/bin/launchctl bootstrap system \(shellQuote(plistPath)) 2>/dev/null || { "
+                + "/bin/launchctl bootout system/\(HelperConstants.daemonLabel) 2>/dev/null || true; "
+                + "/bin/sleep 1; "
+                + "/bin/launchctl bootstrap system \(shellQuote(plistPath)); }",
+                // 装载后确认服务真的在（KeepAlive=true，launchd 会立刻拉起）。
+                "/bin/launchctl print system/\(HelperConstants.daemonLabel) >/dev/null"
+                ].joined(separator: "; ")
+    }
+
     /// 加固（堵 §5.1）：pinnedCDHashHex 钉客户端 App 主可执行的 cdhash——ad-hoc 下光验
     /// identifier 可被"覆盖主可执行 + 同 identifier 重签"绕过，钉 cdhash 让重签因 hash 变化被拒。
     /// 纯函数便于单测。clientCDHashHex 传 nil 表示不钉（旧行为）。
+    /// 版本号写当前 `HelperConstants.trustConfigVersion`，helper 据此识别迁移期旧配置。
     static func makeTrustConfig(
         clientExecutablePath: String,
+        clientBundlePath: String,
         clientCDHashHex: String?,
         singBoxInstalledPath: String,
         singBoxCDHashHex: String?
     ) -> HelperTrustConfig {
         HelperTrustConfig(
             clientExecutablePath: clientExecutablePath,
+            clientBundlePath: clientBundlePath,
             pinnedCDHashHex: clientCDHashHex,
             singBoxExecutablePath: singBoxInstalledPath,
-            singBoxCDHashHex: singBoxCDHashHex
+            singBoxCDHashHex: singBoxCDHashHex,
+            version: HelperConstants.trustConfigVersion
         )
     }
 
@@ -234,6 +276,11 @@ public enum PrivilegedHelperInstaller {
     ) async throws {
         let command = [
             "export PATH=/usr/bin:/bin:/usr/sbin:/sbin",
+            // 卸载会删掉 socket 与整个 state 目录：内核不先停就变成 App 再也停不掉的
+            // 残留 root 进程（持有 utun/auto_route/被劫持的 DNS）。App 侧已先发 stopTun，
+            // 但 helper 已死/不可达时那条走不通，这里按「完整命令行 == root-only sing-box +
+            // 固定 argv」兜底停一次（§1.4：只匹配 helper 自己 exec 的那条命令行）。
+            "/usr/bin/pkill -f \(shellQuote(installedSingBoxURL.path + " run -c /dev/stdin")) 2>/dev/null || true",
             "/bin/launchctl bootout system/\(HelperConstants.daemonLabel) 2>/dev/null || true",
             "/bin/rm -f \(shellQuote(plistPath))",
             "/bin/rm -f \(shellQuote(HelperConstants.socketPath))",

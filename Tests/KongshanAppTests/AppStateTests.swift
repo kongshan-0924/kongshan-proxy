@@ -30,6 +30,12 @@ private func manualNode(name: String, server: String) -> ManualHysteria2 {
 
 @MainActor
 final class AppStateTests: XCTestCase {
+    func testTrafficFormattingUsesNativeUnitsAndHandlesLargeValues() {
+        XCTAssertEqual(AppState.formatBytes(0), "")
+        XCTAssertTrue(AppState.formatBytes(5 * 1_024 * 1_024 * 1_024).contains("GB"))
+        XCTAssertTrue(AppState.formatRate(1_024).hasSuffix("/s"))
+    }
+
     func testPerAppRuleUpsertReplacesExistingProcessAndCanRemove() async {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -282,13 +288,16 @@ final class AppStateTests: XCTestCase {
             secret: fixture.runtime.secret
         ).health()
         let commands = await fixture.network.arguments
-        XCTAssertFalse(commands.contains(["-setproxybypassdomains", "Wi-Fi", "new.local"]))
+        XCTAssertFalse(commands.contains(
+            ["-setproxybypassdomains", "Wi-Fi"] + RoutingSettings.mandatoryProxyBypass + ["new.local"]
+        ))
         await fixture.state.stop()
     }
 
     func testBypassFailureRestartsOldCoreAndKeepsOldRules() async throws {
         let fixture = try await makeRunningFixture(
-            failOnceFor: ["-setproxybypassdomains", "Wi-Fi", "new.local"]
+            failOnceFor: ["-setproxybypassdomains", "Wi-Fi"]
+                + RoutingSettings.mandatoryProxyBypass + ["new.local"]
         )
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let original = fixture.state.routingSettings
@@ -302,7 +311,9 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(fixture.state.routingSettings, original)
         XCTAssertTrue(fixture.state.errorMessage?.contains("已恢复旧配置") == true)
         let commands = await fixture.network.arguments
-        XCTAssertTrue(commands.contains(["-setproxybypassdomains", "Wi-Fi", "new.local"]))
+        XCTAssertTrue(commands.contains(
+            ["-setproxybypassdomains", "Wi-Fi"] + RoutingSettings.mandatoryProxyBypass + ["new.local"]
+        ))
         XCTAssertTrue(commands.contains(
             ["-setproxybypassdomains", "Wi-Fi"] + original.systemProxyBypassEntries
         ))
@@ -2025,5 +2036,53 @@ private actor FakeLoginItemManager: LoginItemManaging {
 
     func openSystemSettings() {
         openSettingsCount += 1
+    }
+}
+
+@MainActor
+extension AppStateTests {
+    func testDiagnosticExportRedactsConfigCredentialsAndRuntimeSecret() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "kongshan-diagnostics-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        try await storage.prepare()
+        let node = ProxyNode(
+            name: "test",
+            protocolType: .shadowsocks,
+            server: "example.com",
+            port: 443,
+            password: "node-secret",
+            method: "aes-128-gcm"
+        )
+        let fullConfig = try ConfigGenerator.generate(ConfigInput(
+            nodes: [node],
+            selectedNodeID: node.id,
+            runtime: RuntimeParameters(mixedPort: 51_080, clashPort: 51_909, secret: "runtime-secret")
+        ))
+        try await storage.writeAtomically(fullConfig, to: root.appending(path: "config.json"))
+
+        let state = AppState(storage: storage, automaticallyInitialize: false)
+        let text = try await state.exportDiagnostics()
+
+        XCTAssertTrue(text.contains("kongshan 脱敏诊断"))
+        XCTAssertTrue(text.contains("<redacted>"))
+        XCTAssertFalse(text.contains("node-secret"))
+        XCTAssertFalse(text.contains("runtime-secret"))
+    }
+
+    /// 菜单栏图标宽度直接跟着这串字符走：必须是单字母单位、不带空格、0 时空串（调用方填「—」）。
+    /// 锁住格式，防再次被换成 ByteCountFormatter 的「900 字节」「1.5 MB」（更宽且字符数跳动）。
+    func testMenuBarRateFormatterStaysCompactAndBlankAtZero() {
+        XCTAssertEqual(MenuRateFormatter.compact(0), "")
+        XCTAssertEqual(MenuRateFormatter.compact(-1), "")
+        XCTAssertEqual(MenuRateFormatter.compact(900), "900B")
+        XCTAssertEqual(MenuRateFormatter.compact(1_536), "1.5K")
+        XCTAssertEqual(MenuRateFormatter.compact(5 * 1_048_576), "5.0M")
+        XCTAssertEqual(MenuRateFormatter.compact(2 * 1_073_741_824), "2.0G")
+        let samples: [Int64] = [1, 900, 1_536, 5 * 1_048_576, 2 * 1_073_741_824]
+        for value in samples {
+            XCTAssertFalse(MenuRateFormatter.compact(value).contains(" "), "菜单栏格式不能含空格")
+        }
     }
 }

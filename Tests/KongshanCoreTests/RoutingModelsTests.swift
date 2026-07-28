@@ -17,7 +17,18 @@ final class RoutingModelsTests: XCTestCase {
             "fe80::/10"
         ])
         XCTAssertFalse(settings.blockAds)
-        XCTAssertEqual(settings.systemProxyBypassEntries, settings.bypassDomains + settings.bypassCIDRs)
+        // 回环三项无条件在前（用户从绕过列表里删掉也要补回来，否则 App 访问内核控制接口会绕回代理），
+        // 其余按用户配置顺序，且不重复。
+        let entries = settings.systemProxyBypassEntries
+        XCTAssertEqual(Array(entries.prefix(3)), RoutingSettings.mandatoryProxyBypass)
+        XCTAssertEqual(Set(entries).count, entries.count, "绕过列表不该有重复项")
+        for entry in settings.bypassDomains + settings.bypassCIDRs {
+            XCTAssertTrue(entries.contains(entry), "用户配置的 \(entry) 丢失了")
+        }
+        var stripped = settings
+        stripped.bypassDomains = []
+        stripped.bypassCIDRs = []
+        XCTAssertEqual(stripped.systemProxyBypassEntries, RoutingSettings.mandatoryProxyBypass)
     }
 
     func testFiveRuleTypesAndThreeActionsRoundTripThroughJSON() throws {

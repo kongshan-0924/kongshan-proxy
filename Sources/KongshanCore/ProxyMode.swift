@@ -32,57 +32,23 @@ public enum OutboundMode: String, Codable, CaseIterable, Sendable {
     }
 }
 
-/// TUN 协议栈。官方 darwin-arm64 二进制带 gVisor，三种都可用。
-/// system 栈在 macOS 15.2 / 26.x 上有多起翻车记录（sing-box#2500/#3529），
-/// 默认用 mixed：TCP 走 gVisor、UDP 走 system，兼容性最好。
-public enum TunStack: String, Codable, CaseIterable, Sendable {
-    case mixed
-    case system
-    case gvisor
-
-    public var displayName: String {
-        switch self {
-        case .mixed: "mixed（推荐）"
-        case .system: "system"
-        case .gvisor: "gVisor"
-        }
-    }
-}
-
 public struct TunSettings: Codable, Equatable, Sendable {
     public var strictRoute: Bool
-    public var interfaceName: String
     public var addresses: [String]
     public var mtu: Int
-    public var stack: TunStack
 
     public init(
         strictRoute: Bool,
-        interfaceName: String,
         addresses: [String],
-        mtu: Int,
-        stack: TunStack = .mixed
+        mtu: Int
     ) {
         self.strictRoute = strictRoute
-        self.interfaceName = interfaceName
         self.addresses = addresses
         self.mtu = mtu
-        self.stack = stack
-    }
-
-    /// 旧版设置文件没有 stack 字段，按默认 mixed 补齐。
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        strictRoute = try container.decode(Bool.self, forKey: .strictRoute)
-        interfaceName = try container.decode(String.self, forKey: .interfaceName)
-        addresses = try container.decode([String].self, forKey: .addresses)
-        mtu = try container.decode(Int.self, forKey: .mtu)
-        stack = try container.decodeIfPresent(TunStack.self, forKey: .stack) ?? .mixed
     }
 
     public static let defaults = TunSettings(
         strictRoute: false,
-        interfaceName: "kongshan-tun",
         addresses: ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
         mtu: 9_000
     )
@@ -112,7 +78,7 @@ public struct TunSettings: Codable, Equatable, Sendable {
         let onlyIPv4 = addresses.filter { !$0.contains(":") }
         guard onlyIPv4.count != addresses.count else { return self }
         var copy = self
-        copy.addresses = onlyIPv4
+        copy.addresses = onlyIPv4.isEmpty ? ["172.19.0.1/30"] : onlyIPv4
         return copy
     }
 }

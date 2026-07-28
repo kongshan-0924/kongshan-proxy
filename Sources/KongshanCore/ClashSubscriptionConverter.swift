@@ -96,11 +96,23 @@ public enum ClashSubscriptionConverter {
         }
 
         guard !nodes.isEmpty else { throw SubscriptionConversionError.noSupportedNodes }
+        let groups = policyGroups(from: root)
+        let rules = subscriptionRules(from: root)
+        let skippedNodes = proxies.count - nodes.count
+        let skippedGroups = (root["proxy-groups"] as? [[String: Any]]).map { $0.count - groups.count } ?? 0
+        let skippedRules = (root["rules"] as? [String]).map { $0.count - rules.count } ?? 0
+        if skippedNodes > 0 || skippedGroups > 0 || skippedRules > 0 {
+            warnings.append(
+                "订阅兼容性：节点 \(nodes.count) 个已导入/\(skippedNodes) 个跳过，"
+                    + "策略组 \(groups.count) 个已导入/\(skippedGroups) 个跳过，"
+                    + "规则 \(rules.count) 条已导入/\(skippedRules) 条由内置规则接管或不支持"
+            )
+        }
         return SubscriptionConversionResult(
             nodes: nodes,
             warnings: warnings,
-            policyGroups: policyGroups(from: root),
-            subscriptionRules: subscriptionRules(from: root)
+            policyGroups: groups,
+            subscriptionRules: rules
         )
     }
 
@@ -179,6 +191,26 @@ public enum ClashSubscriptionConverter {
                 transport: transport
             )
 
+        case "vless":
+            let reality = raw["reality-opts"] as? [String: Any]
+            return ProxyNode(
+                sourceID: sourceID,
+                name: name,
+                protocolType: .vless,
+                server: server,
+                port: port,
+                uuid: try requiredString(raw, "uuid"),
+                tlsEnabled: bool(raw, "tls") || reality != nil,
+                sni: sni,
+                skipCertificateVerification: skipCertificateVerification,
+                transport: transport,
+                flow: optionalString(raw, "flow"),
+                utlsFingerprint: optionalString(raw, "client-fingerprint")
+                    ?? optionalString(raw, "fingerprint"),
+                realityPublicKey: optionalString(reality ?? [:], "public-key"),
+                realityShortID: optionalString(reality ?? [:], "short-id")
+            )
+
         case "hysteria2", "hy2":
             if let obfs = optionalString(raw, "obfs"), obfs.lowercased() != "salamander" {
                 throw NodeMappingError.unsupportedObfs(obfs)
@@ -219,6 +251,8 @@ public enum ClashSubscriptionConverter {
     private static func transport(_ raw: [String: Any]) throws -> TransportOptions? {
         guard let network = optionalString(raw, "network")?.lowercased() else { return nil }
         switch network {
+        case "tcp":
+            return nil
         case "ws":
             let options = raw["ws-opts"] as? [String: Any]
             let rawHeaders = options?["headers"] as? [String: Any] ?? [:]

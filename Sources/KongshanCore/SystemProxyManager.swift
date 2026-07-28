@@ -90,6 +90,19 @@ public enum SystemProxyError: Error, Equatable, LocalizedError {
 }
 
 public enum SystemProxyCommands {
+    /// 恢复时要包含已禁用服务；networksetup 用前导 `*` 标记禁用，但服务仍存在且可能残留设置。
+    public static func allServices(from output: String) -> [String] {
+        output.components(separatedBy: .newlines).compactMap { rawLine in
+            var line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty, !line.hasPrefix("An asterisk (*)") else { return nil }
+            if line.hasPrefix("*") {
+                line.removeFirst()
+                line = line.trimmingCharacters(in: .whitespaces)
+            }
+            return line.isEmpty ? nil : line
+        }
+    }
+
     public static func enabledServices(from output: String) -> [String] {
         output.components(separatedBy: .newlines).compactMap { rawLine in
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -234,16 +247,22 @@ public actor SystemProxyManager {
     private let timeout: TimeInterval
     private var transactionInProgress = false
 
+    /// 真实 networksetup 执行器。**刻意放成命名静态属性，不要内联回默认参数**：
+    /// Swift 6 的 debug 构建下，把 async 闭包写成默认参数会在调用它时崩在
+    /// `swift_task_dealloc`（EXC_BAD_ACCESS），release 正常。放成静态属性后
+    /// debug 也能跑真实路径，单测才能覆盖到真机行为。
+    public static let defaultRunner: NetworkSetupRunner = { arguments, timeout in
+        try await ProcessRunner.run(
+            executable: URL(fileURLWithPath: "/usr/sbin/networksetup"),
+            arguments: arguments,
+            timeout: timeout
+        )
+    }
+
     public init(
         storage: Storage = Storage(),
         timeout: TimeInterval = 5,
-        runner: @escaping NetworkSetupRunner = { arguments, timeout in
-            try await ProcessRunner.run(
-                executable: URL(fileURLWithPath: "/usr/sbin/networksetup"),
-                arguments: arguments,
-                timeout: timeout
-            )
-        }
+        runner: @escaping NetworkSetupRunner = defaultRunner
     ) {
         self.storage = storage
         self.timeout = timeout
@@ -422,10 +441,44 @@ public actor SystemProxyManager {
         guard snapshot.version == 1 else {
             throw SystemProxyError.unsupportedSnapshotVersion(snapshot.version)
         }
-        for command in SystemProxyCommands.restore(snapshot: snapshot) {
-            _ = try await execute(command.arguments)
+        // 切网络配置后快照里的服务可能已改名/消失；已禁用的服务仍必须恢复。
+        let currentServices = Set(
+            SystemProxyCommands.allServices(
+                from: try await execute(["-listallnetworkservices"]).stdout
+            )
+        )
+        var failures: [String] = []
+        var failedServices: [NetworkServiceProxySnapshot] = []
+        for service in snapshot.services where currentServices.contains(service.name) {
+            var serviceFailed = false
+            for command in SystemProxyCommands.restore(
+                snapshot: ProxyRecoverySnapshot(services: [service])
+            ) {
+                do {
+                    _ = try await execute(command.arguments)
+                } catch {
+                    serviceFailed = true
+                    failures.append("\(service.name)：\(error.localizedDescription)")
+                }
+            }
+            if serviceFailed { failedServices.append(service) }
         }
-        try FileManager.default.removeItem(at: recoveryURL)
+
+        if failedServices.isEmpty {
+            try FileManager.default.removeItem(at: recoveryURL)
+            return
+        }
+        let retrySnapshot = ProxyRecoverySnapshot(
+            capturedAt: snapshot.capturedAt,
+            services: failedServices
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try await storage.writeAtomically(try encoder.encode(retrySnapshot), to: recoveryURL)
+        throw SystemProxyError.commandFailed(
+            exitCode: -1,
+            message: "部分网络服务代理恢复失败，已保留快照重试：\(failures.joined(separator: "；"))"
+        )
     }
 
     private func execute(_ arguments: [String]) async throws -> ProcessResult {

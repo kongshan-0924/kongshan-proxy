@@ -281,3 +281,23 @@ dig @172.19.0.1 fresh.example A  -> 240.0.0.2（kongshan 生成）
 隔离命令绑定 TUN 源地址 `172.19.0.1`，避免系统代理污染；不能绑定 `en0` 后再用 Fake-IP 判断 TUN，因为绑定物理网卡会主动绕开 TUN。日志确认 Google/GitHub 的 `240.x` 被还原成域名并经当前 HY2 节点出站，百度真实 IP 走 direct。
 
 0.1.30 已安装到 `/Applications/kongshan.app`，TUN 保持开启供用户验收。当前网络是单默认网关；代码根因能解释企业网现象，但回原企业多默认网关后仍建议做一次最终复验。分支继续保留 `fix/tun-real-machine-browsing`，不合 main。
+
+## 判据：所在网络是否有"透明代理"（会让任何代理客户端的节点连不上）
+
+排查节点连不通时，先排除环境。满足任一条即可判定当前网络在本地终结/改写出境连接，
+**此环境下无法验证任何代理客户端的节点连通性**，继续调 App 是浪费时间：
+
+1. **TCP 握手 RTT 远低于物理下限**：到美国 IP 若只有 3~5ms（正常 150ms+），
+   说明连接被本地设备终结。用 `python3 -c "import socket,time;..."` 测三次取最小值。
+2. **任意 SNI 都能拿到匹配的证书**：
+   `openssl s_client -connect <节点IP>:443 -servername example.com`
+   若返回 `CN=example.com`，说明有设备在按 SNI 把你转发到真实目标——
+   真 Reality 服务器对未认证握手只会回退到它配置的 dest，证书永远是那个 dest 的。
+3. **国内/国外 IP 查询给出不同出口**：`myip.ipip.net` 与 `api.ipify.org` 结果不一致，
+   说明路由器在做分流代理。
+
+典型症状：VLESS/Reality 报 `reality verification failed`（ClientHello 没到节点），
+Hysteria2 报 `timeout: no recent network activity`（QUIC/UDP 被透明代理破坏）。
+
+解法：把节点服务器 IP 加进路由器代理的**直连/绕过**列表，或换一个没有透明代理的网络
+（手机热点最省事）再验。

@@ -67,9 +67,9 @@ struct ConnectionsView: View {
         PageHeader(title: "连接", subtitle: "实时活跃连接；显示出站链路与命中的规则") {
             HStack(spacing: 10) {
                 HStack(spacing: 8) {
-                    Label("↑ \(Self.rate(state.connections.totalUploadRate))", systemImage: "arrow.up.circle.fill")
+                    Label("↑ \(Self.rateOrDash(state.connections.totalUploadRate))", systemImage: "arrow.up.circle.fill")
                         .foregroundStyle(.blue)
-                    Label("↓ \(Self.rate(state.connections.totalDownloadRate))", systemImage: "arrow.down.circle.fill")
+                    Label("↓ \(Self.rateOrDash(state.connections.totalDownloadRate))", systemImage: "arrow.down.circle.fill")
                         .foregroundStyle(.green)
                 }
                 .font(.caption.monospacedDigit())
@@ -156,10 +156,10 @@ struct ConnectionsView: View {
             }
             Spacer(minLength: 8)
             VStack(alignment: .trailing, spacing: 2) {
-                Text("↑ \(Self.rate(conn.uploadRate))   ↓ \(Self.rate(conn.downloadRate))")
+                Text("↑ \(Self.rateOrDash(conn.uploadRate))   ↓ \(Self.rateOrDash(conn.downloadRate))")
                     .font(.caption2.weight(.semibold).monospacedDigit())
                     .foregroundStyle(conn.totalRate > 0 ? .primary : .secondary)
-                Text("累计 ↑ \(Self.bytes(conn.upload))   ↓ \(Self.bytes(conn.download))")
+                Text("累计 ↑ \(Self.bytesOrDash(conn.upload))   ↓ \(Self.bytesOrDash(conn.download))")
                     .font(.system(size: 9).monospacedDigit())
                     .foregroundStyle(.tertiary)
             }
@@ -183,12 +183,13 @@ struct ConnectionsView: View {
         return chain.isEmpty ? conn.rule : "\(conn.rule)   ·   \(chain)"
     }
 
-    static func bytes(_ value: Int64) -> String {
-        ByteCountFormatter.string(fromByteCount: value, countStyle: .binary)
+    /// 0 时用固定占位符，避免空串导致布局跳动。
+    static func rateOrDash(_ value: Int64) -> String {
+        Theme.rateOrDash(value)
     }
 
-    static func rate(_ value: Int64) -> String {
-        "\(bytes(value))/s"
+    static func bytesOrDash(_ value: Int64) -> String {
+        Theme.bytesOrDash(value)
     }
 }
 

@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import KongshanCore
 import SwiftUI
@@ -6,7 +7,7 @@ import UniformTypeIdentifiers
 struct LogsView: View {
     @Environment(AppState.self) private var state
     @State private var pausesAutomaticScroll = false
-    @State private var exportDocument: LogExportDocument?
+    @State private var exportDocument: TextExportDocument?
     @State private var showsExporter = false
     @State private var isPreparingExport = false
     @State private var filterText = ""
@@ -19,7 +20,7 @@ struct LogsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            PageHeader(title: "日志", subtitle: "仅在本页可见且代理运行时订阅内核推送") {
+            PageHeader(title: "内核日志", subtitle: "代理运行时实时订阅内核推送") {
                 HStack(spacing: 8) {
                     Button("清空显示") { state.clearLiveLogs() }
                         .disabled(state.liveLogs.isEmpty)
@@ -36,7 +37,7 @@ struct LogsView: View {
             logList
         }
         .pageBackground()
-        .navigationTitle("日志")
+        .navigationTitle("内核日志")
         .onAppear { state.startLogMonitoring() }
         .onDisappear { state.stopLogMonitoring() }
         .fileExporter(
@@ -54,6 +55,8 @@ struct LogsView: View {
 
     private var toolbar: some View {
         HStack(spacing: 12) {
+            // 这个选择器只是"过滤内核推来的日志"，不改内核自己的 log.level（那要重启内核）。
+            // 内核按 info 输出，因此没有「调试」这一档可选——放上去只会是个点了没反应的死控件。
             Picker("日志等级", selection: logLevelBinding) {
                 Text("信息").tag(CoreLogLevel.info)
                 Text("警告").tag(CoreLogLevel.warning)
@@ -90,6 +93,12 @@ struct LogsView: View {
                     ForEach(logs) { item in
                         LogEntryRow(item: item)
                             .id(item.id)
+                            .contextMenu {
+                                Button("复制消息") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(item.entry.message, forType: .string)
+                                }
+                            }
                         Divider().opacity(0.4)
                     }
                 }
@@ -108,6 +117,29 @@ struct LogsView: View {
                                 : "请尝试搜索其他关键字。"
                         )
                     )
+                }
+                if pausesAutomaticScroll {
+                    VStack {
+                        Spacer()
+                        HStack {
+                            Spacer()
+                            Button {
+                                pausesAutomaticScroll = false
+                                if let lastID = filteredLogs.last?.id {
+                                    withAnimation { proxy.scrollTo(lastID, anchor: .bottom) }
+                                }
+                            } label: {
+                                Label("回到底部", systemImage: "arrow.down.circle.fill")
+                                    .font(.caption)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .background(.ultraThinMaterial, in: Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .padding(.trailing, 24)
+                            .padding(.bottom, 12)
+                        }
+                    }
                 }
             }
             .onChange(of: state.liveLogs.count) {
@@ -129,7 +161,7 @@ struct LogsView: View {
         Task {
             defer { isPreparingExport = false }
             do {
-                exportDocument = LogExportDocument(text: try await state.exportLogs())
+                exportDocument = TextExportDocument(text: try await state.exportLogs())
                 showsExporter = true
             } catch {
                 state.errorMessage = "准备日志导出失败：\(error.localizedDescription)"
@@ -179,7 +211,7 @@ private struct LogEntryRow: View {
     }
 }
 
-private struct LogExportDocument: FileDocument {
+struct TextExportDocument: FileDocument {
     static var readableContentTypes: [UTType] { [.plainText] }
 
     var text: String

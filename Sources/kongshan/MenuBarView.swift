@@ -11,7 +11,10 @@ struct MenuBarView: View {
     var body: some View {
         Text(state.statusText)
         if state.isOn {
-            Text("下载 \(MenuRateFormatter.full(state.downloadRate))   上传 \(MenuRateFormatter.full(state.uploadRate))")
+            // 速率 0 时用占位符避免内容闪烁导致菜单高度跳动。
+            let dl = MenuRateFormatter.full(state.downloadRate)
+            let ul = MenuRateFormatter.full(state.uploadRate)
+            Text("下载 \(dl.isEmpty ? "—" : dl)   上传 \(ul.isEmpty ? "—" : ul)")
         }
 
         Button("打开仪表盘") { openMainWindow() }
@@ -71,12 +74,8 @@ struct MenuBarView: View {
         .keyboardShortcut("r")
         .disabled(state.subscriptions.isEmpty || state.isBusy)
 
-        if let message = state.errorMessage ?? state.warnings.last {
-            Divider()
-            Button(message.count > 48 ? String(message.prefix(48)) + "…" : message) {
-                openMainWindow()
-            }
-        }
+        // 菜单内不再重复显示 warnings/errorMessage：主窗口已有全局提示条，
+        // 这里增删会造成菜单高度跳动（用户反馈的「一跳一跳有空白」）。状态异常时 statusText 已体现。
 
         Divider()
 
@@ -180,9 +179,14 @@ struct MenuBarView: View {
 }
 
 enum MenuRateFormatter {
+    /// 菜单栏图标宽度直接跟着这里的字符数变，必须最紧凑且长度稳定：单字母单位、不带空格。
+    /// 不要换成 ByteCountFormatter——它会给出「900 字节」「1.5 MB」这类本地化 2 字母单位，
+    /// 比手写格式更宽、且在 B↔KB 之间跳字符数（用户反馈过菜单栏一跳一跳）。
+    /// 0 时返回空串，由调用方统一填「—」。
     static func compact(_ bytes: Int64) -> String {
         let value = max(0, bytes)
         switch value {
+        case 0: return ""
         case 0..<1_024: return "\(value)B"
         case 1_024..<1_048_576: return String(format: "%.1fK", Double(value) / 1_024)
         case 1_048_576..<1_073_741_824: return String(format: "%.1fM", Double(value) / 1_048_576)
@@ -191,6 +195,6 @@ enum MenuRateFormatter {
     }
 
     static func full(_ bytes: Int64) -> String {
-        "\(ByteCountFormatter.string(fromByteCount: max(0, bytes), countStyle: .binary))/s"
+        AppState.formatRate(bytes)
     }
 }

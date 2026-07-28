@@ -1,5 +1,7 @@
+import AppKit
 import KongshanCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// 规则页。只读展示当前生效配置带出的分流规则；顶部开关控制是否套用这些规则、是否拦广告。
 /// 手动绕过域名/IP 与跳过 TUN 的列表挪到「设置 → 隧道」。
@@ -123,12 +125,18 @@ struct RoutingView: View {
                     Label("刷新 App", systemImage: "arrow.clockwise")
                 }
                 .controlSize(.small)
+                Button {
+                    chooseInstalledApp()
+                } label: {
+                    Label("选择已安装 App", systemImage: "folder")
+                }
+                .controlSize(.small)
             }
 
             HStack(spacing: 10) {
                 Picker("App", selection: $selectedProcess) {
                     if runningApps.isEmpty {
-                        Text("没有可选的运行中 App").tag("")
+                        Text("没有可选 App").tag("")
                     } else {
                         ForEach(runningApps) { app in
                             Text("\(app.name)（\(app.processName)）").tag(app.processName)
@@ -204,6 +212,33 @@ struct RoutingView: View {
         if !runningApps.contains(where: { $0.processName == selectedProcess }) {
             selectedProcess = runningApps.first?.processName ?? ""
         }
+    }
+
+    private func chooseInstalledApp() {
+        let panel = NSOpenPanel()
+        panel.title = "选择要分流的 App"
+        panel.prompt = "选择"
+        panel.directoryURL = URL(fileURLWithPath: "/Applications", isDirectory: true)
+        panel.allowedContentTypes = [.applicationBundle]
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url, let bundle = Bundle(url: url),
+              let processName = bundle.object(forInfoDictionaryKey: "CFBundleExecutable") as? String,
+              !processName.isEmpty else {
+            return
+        }
+        let app = AppState.RunningApp(
+            name: (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+                ?? (bundle.object(forInfoDictionaryKey: "CFBundleName") as? String)
+                ?? url.deletingPathExtension().lastPathComponent,
+            processName: processName
+        )
+        if !runningApps.contains(where: { $0.processName == processName }) {
+            runningApps.append(app)
+            runningApps.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        }
+        selectedProcess = processName
     }
 
     private func addPerAppRule() {

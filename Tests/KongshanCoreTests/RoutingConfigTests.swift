@@ -61,7 +61,11 @@ final class RoutingConfigTests: XCTestCase {
         XCTAssertEqual(ruleSets[2]["path"] as? String, "/tmp/geosite-category-ads-all.srs")
 
         XCTAssertEqual(settings.bypassDomains, ["localhost", "*.local", ".internal"])
-        XCTAssertEqual(settings.systemProxyBypassEntries, ["localhost", "*.local", ".internal", "192.168.0.0/16"])
+        // 回环项由 systemProxyBypassEntries 无条件补齐（用户删不掉），用户自定义项排在后面。
+        XCTAssertEqual(
+            settings.systemProxyBypassEntries,
+            ["127.0.0.1", "localhost", "::1", "*.local", ".internal", "192.168.0.0/16"]
+        )
     }
 
     func testOmitsAdsRuleAndRuleSetWhenBlockingIsDisabled() throws {

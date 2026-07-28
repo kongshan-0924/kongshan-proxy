@@ -660,17 +660,34 @@ public enum ConfigGenerator {
         return try encode(root)
     }
 
-    /// 递归脱敏单个 outbound 的所有凭据字段，保留结构（type/tag/server/port 等非敏感项不变）。
-    /// obfs.password 嵌套在 dict 里，单独处理；其它字段都是顶层 String。
+    /// 需要脱敏的字段名（与嵌套层级无关）。加协议时若引入新凭据字段，往这里加一条即可。
+    static let redactedFieldNames: Set<String> = [
+        "password", "uuid", "secret", "auth", "auth_str", "token", "psk",
+        // Reality/uTLS：public_key 虽名为"公钥"，但它和 short_id 唯一标识机场的服务端配置，
+        // 诊断包是对外分享的，一并脱敏。
+        "private_key", "public_key", "short_id"
+    ]
+
+    /// 真·递归脱敏：outbound 的凭据可能嵌在任意层级（`obfs.password`、
+    /// `tls.reality.public_key`、`transport.headers.*`…）。只按字段名匹配、
+    /// 保留整体结构，新增协议不会因为忘了加分支而漏脱敏。
     private static func redactOutbound(_ outbound: [String: Any]) -> [String: Any] {
-        var value = outbound
-        let stringSecrets: Set<String> = ["password", "uuid"]
-        for key in stringSecrets where value[key] is String {
-            value[key] = "<redacted>"
+        redactValue(outbound) as? [String: Any] ?? outbound
+    }
+
+    private static func redactValue(_ value: Any) -> Any {
+        if var dictionary = value as? [String: Any] {
+            for (key, nested) in dictionary {
+                if redactedFieldNames.contains(key), nested is String {
+                    dictionary[key] = "<redacted>"
+                } else {
+                    dictionary[key] = redactValue(nested)
+                }
+            }
+            return dictionary
         }
-        if var obfs = value["obfs"] as? [String: Any], obfs["password"] is String {
-            obfs["password"] = "<redacted>"
-            value["obfs"] = obfs
+        if let array = value as? [Any] {
+            return array.map(redactValue)
         }
         return value
     }
@@ -703,6 +720,11 @@ public enum ConfigGenerator {
             value["alter_id"] = node.alterID ?? 0
             if node.tlsEnabled { value["tls"] = tls(for: node) }
             if let transport = transport(node.transport) { value["transport"] = transport }
+        case .vless:
+            value["uuid"] = try required(node.uuid, node: node, field: "uuid")
+            if let flow = node.flow { value["flow"] = flow }
+            if node.tlsEnabled { value["tls"] = tls(for: node) }
+            if let transport = transport(node.transport) { value["transport"] = transport }
         case .hysteria2:
             value["password"] = try required(node.password, node: node, field: "password")
             value["tls"] = tls(for: node)
@@ -726,11 +748,20 @@ public enum ConfigGenerator {
     }
 
     private static func tls(for node: ProxyNode) -> [String: Any] {
-        [
+        var value: [String: Any] = [
             "enabled": true,
             "server_name": node.sni ?? node.server,
             "insecure": node.skipCertificateVerification
         ]
+        if let fingerprint = node.utlsFingerprint {
+            value["utls"] = ["enabled": true, "fingerprint": fingerprint]
+        }
+        if let publicKey = node.realityPublicKey {
+            var reality: [String: Any] = ["enabled": true, "public_key": publicKey]
+            if let shortID = node.realityShortID { reality["short_id"] = shortID }
+            value["reality"] = reality
+        }
+        return value
     }
 
     private static func transport(_ options: TransportOptions?) -> [String: Any]? {
