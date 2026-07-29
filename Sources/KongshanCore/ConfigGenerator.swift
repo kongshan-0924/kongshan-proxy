@@ -271,7 +271,8 @@ public enum ConfigGenerator {
             primaryOutbound: primaryOutbound,
             availableGroups: generatedNames.union(nodeTags)
         )
-        route["default_domain_resolver"] = "dns-cn"
+        // 引导解析器固定走无连接的 UDP，**不能用 DoH**。见 dns(for:primaryOutbound:) 里的说明。
+        route["default_domain_resolver"] = "dns-bootstrap"
         var prefixRules: [[String: Any]] = []
         if input.outboundMode == .rule {
             // SOCKS 客户端可能只送 IP 过来；不嗅探的话域名规则整条落空，
@@ -329,14 +330,26 @@ public enum ConfigGenerator {
         let endpoints = try input.dnsSettings.endpoints()
         var servers: [[String: Any]] = []
 
-        if !endpoints.domestic.hostIsIPAddress {
-            servers.append([
-                "type": "udp",
-                "tag": "dns-bootstrap",
-                "server": "223.5.5.5",
-                "server_port": 53
-            ])
-        }
+        // 引导解析器：**必须无连接**，所以固定 UDP，不能复用 DoH。
+        //
+        // DoH 是一条长连接（HTTP/2 over TLS）。路由器 NAT 把它悄悄回收后 sing-box 察觉不到，
+        // 后续查询写进死 socket，一直卡到 10 秒超时才失败。而 route.default_domain_resolver
+        // 负责解析**出站节点自己的域名**——它一卡，整个代理跟着停摆，不只是某个网站打不开。
+        //
+        // 真机实证（0.1.46 日志）：每 ~16 分钟一簇失败，节点域名 `<节点>.example` 与
+        // 一批国内域名同时报 10.0s `context deadline exceeded`，末尾露出真相
+        // `read tcp <本机>->223.5.5.5:443: read: operation timed out`；
+        // 同一时刻用 curl 新建连接打同一个 DoH 端点 20/20 成功、30~56ms——服务器没问题，
+        // 是那条被复用的连接死了。UDP 每次查询独立收发，天然免疫这种陈旧连接。
+        //
+        // 安全上可接受：节点域名若被投毒，客户端会连到错误 IP，在 TLS/Reality 校验处
+        // 失败关闭，不会把凭据送出去。国内网站的解析仍走 DoH，隐私与抗投毒不受影响。
+        servers.append([
+            "type": "udp",
+            "tag": "dns-bootstrap",
+            "server": endpoints.domestic.hostIsIPAddress ? endpoints.domestic.host : "223.5.5.5",
+            "server_port": 53
+        ])
 
         var domestic = dohServer(
             endpoint: endpoints.domestic,

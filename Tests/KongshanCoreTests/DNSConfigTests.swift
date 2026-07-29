@@ -27,16 +27,23 @@ final class DNSConfigTests: XCTestCase {
         let dns = try XCTUnwrap(root["dns"] as? [String: Any])
         let servers = try XCTUnwrap(dns["servers"] as? [[String: Any]])
 
-        XCTAssertEqual(servers.count, 2)
+        // 引导解析器无条件存在，即使国内 DoH 已经是 IP（不需要被引导解析）也一样：
+        // 它的职责不止"解析 DoH 主机名"，更重要的是给 route.default_domain_resolver
+        // 提供一条**无连接**的解析通道，见下面 default_domain_resolver 的断言。
+        XCTAssertEqual(servers.map { $0["tag"] as? String }, ["dns-bootstrap", "dns-cn", "dns-remote"])
+        XCTAssertEqual(servers[0]["type"] as? String, "udp")
+        XCTAssertEqual(servers[0]["server"] as? String, "223.5.5.5")
+        XCTAssertEqual(servers[0]["server_port"] as? Int, 53)
+        XCTAssertNil(servers[0]["detour"])
         assertDoH(
-            servers[0],
+            servers[1],
             tag: "dns-cn",
             server: "223.5.5.5",
             path: "/dns-query",
             detour: nil
         )
         assertDoH(
-            servers[1],
+            servers[2],
             tag: "dns-remote",
             server: "8.8.8.8",
             path: "/dns-query",
@@ -51,8 +58,29 @@ final class DNSConfigTests: XCTestCase {
         XCTAssertEqual(dnsRules[0]["action"] as? String, "route")
         XCTAssertEqual(dnsRules[0]["server"] as? String, "dns-cn")
 
+        // **必须是无连接的 dns-bootstrap，不能是 DoH。**
+        // default_domain_resolver 负责解析出站节点自己的域名。DoH 是长连接，被路由器 NAT
+        // 悄悄回收后 sing-box 察觉不到，会往死 socket 里写并卡满 10 秒——那一刻整个代理
+        // 停摆，不只是某个网站打不开。真机实证：每 ~16 分钟一簇 10.0s
+        // `context deadline exceeded`，节点域名与国内域名同时中招；
+        // 同一时刻 curl 新建连接打同一 DoH 端点 20/20 成功，证明是连接陈旧而非服务器故障。
         let route = try XCTUnwrap(root["route"] as? [String: Any])
-        XCTAssertEqual(route["default_domain_resolver"] as? String, "dns-cn")
+        XCTAssertEqual(route["default_domain_resolver"] as? String, "dns-bootstrap")
+    }
+
+    /// 用户把国内 DoH 换成别的 IP 时，引导解析器要跟着走同一家，
+    /// 不能硬钉 223.5.5.5——否则用户以为换掉了阿里，实际节点域名还在问阿里。
+    func testBootstrapFollowsCustomDomesticResolverIP() throws {
+        let settings = DNSSettings(
+            domesticDoH: "https://119.29.29.29/dns-query",
+            remoteDoH: DNSSettings.defaults.remoteDoH
+        )
+        let root = try json(try ConfigGenerator.generate(input(dnsSettings: settings)))
+        let servers = try XCTUnwrap((root["dns"] as? [String: Any])?["servers"] as? [[String: Any]])
+
+        XCTAssertEqual(servers[0]["tag"] as? String, "dns-bootstrap")
+        XCTAssertEqual(servers[0]["type"] as? String, "udp")
+        XCTAssertEqual(servers[0]["server"] as? String, "119.29.29.29")
     }
 
     func testCustomDomainDoHUsesFiniteDirectBootstrapChain() throws {

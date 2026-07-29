@@ -2205,3 +2205,58 @@ BSD 的 `signal()` 带 SA_RESTART，poll 不会返回 EINTR，退出最多滞后
 - 17:42~17:56 有一次网络中断（DoH 到 223.5.5.5 报 `network is unreachable`、
   随后所有解析 10s 超时），恢复后自行正常，属环境事件。
 - App 连续运行 10 小时无内存增长；日志轮转正常（5.0MB 触发）。
+
+## 2026-07-29 20:40 — 节点域名解析走 DoH 导致代理周期性停摆 → 0.1.47
+
+### 发现：失败不是随机抖动，是每 ~16 分钟一簇
+
+复查 0.1.46 运行数据时发现失败时刻高度规律：
+17:09 → 17:25 → 17:42 → 17:54，19:49 → 20:05 → 20:21 → 20:33，间隔 12~17 分钟。
+每簇同时命中**节点自己的域名**与一批国内域名，全部报 10.0s `context deadline exceeded`。
+末尾一条露出真相：`read tcp <本机>:55361->223.5.5.5:443: read: operation timed out`。
+
+### 根因：DoH 长连接被 NAT 回收，而它正好是节点域名的解析通道
+
+`route.default_domain_resolver` 原本指向 `dns-cn`（DoH `https://223.5.5.5/dns-query`）。
+DoH 是一条 HTTP/2 over TLS 长连接；路由器 NAT 把它悄悄回收后 sing-box 察觉不到，
+后续查询写进死 socket，一直卡到 10 秒超时。而 `default_domain_resolver` 负责解析
+**出站节点自己的域名**——它一卡，整个代理跟着停摆，不只是某个网站打不开。
+
+**证伪了"服务器故障"这个更省事的解释**：同一时刻用 curl 新建连接打同一个 DoH 端点
+20/20 成功、30~56ms；UDP 53 同样 20/20。服务器完全正常，死的是那条被复用的连接。
+curl 每次新建连接所以永远看不到问题——这正是它长期没被发现的原因。
+
+### 修法
+
+`dns-bootstrap`（UDP，端口 53）改为**无条件生成**，`route.default_domain_resolver`
+指向它。此前 bootstrap 只在"国内 DoH 配成域名、需要先解析主机名"时才生成，
+默认配置是 IP，于是根本没有这条无连接通道。
+bootstrap 的地址跟随用户配置的国内 DoH（是 IP 就用它，否则回落 223.5.5.5），
+不硬钉阿里——否则用户以为换掉了阿里，实际节点域名还在问阿里。
+
+UDP 每次查询独立收发，天然免疫陈旧连接。安全上可接受：节点域名若被投毒，
+客户端会连到错误 IP，在 TLS/Reality 校验处失败关闭，不会把凭据送出去。
+国内网站解析仍走 DoH，隐私与抗投毒不受影响。
+
+**残留**：国内网站的解析仍可能撞上同一条陈旧 DoH 连接而失败一次。但影响面从
+"整个代理停摆"缩到"个别国内请求失败、重试即好"，量级完全不同。
+
+### 测试
+
+- `Tests/KongshanCoreTests/DNSConfigTests.swift`：改写默认配置的服务器断言
+  （现在是 `[dns-bootstrap, dns-cn, dns-remote]` 三个），
+  钉死 `default_domain_resolver == "dns-bootstrap"`，
+  新增"bootstrap 跟随用户自定义国内 DoH 的 IP"一条。
+- 全量 314 通过 / 1 跳过 / 0 失败，0 编译警告（含 sing-box 自身的配置校验）。
+
+### 真机确认
+
+- `config.json` 的 `default_domain_resolver = dns-bootstrap`，servers 为
+  `dns-bootstrap(udp 223.5.5.5:53) / dns-cn(https) / dns-remote(https, detour 节点)`。
+- 经代理 chatgpt 200（tls 0.43s）、baidu 200（0.075s）。
+- 0.1.47 / build 147 已装 `/Applications`，dist 只留当前版本。
+
+### 同时确认：0.1.46 的助手修复生效
+
+助手 PID 39659 **连续存活 1 小时 51 分**（修复前每 30 秒重启一次），
+崩溃报告停在 42 份不再增加。
