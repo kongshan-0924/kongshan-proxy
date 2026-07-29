@@ -2143,3 +2143,65 @@ sample 命中热点：MenuBarView.optionMenuContent/optionButton 在 SwiftUI 图
   `5c109e0412bf8e3fbdbd665d06aa65523fe4cc673d925492a30c5940b51cfe6a`
 - 已装 `/Applications/kongshan.app` 0.1.45，deep/strict 签名通过、arm64。
 - dist 只保留当前版本（0.1.43 / 0.1.44 的 DMG 已删）。
+
+## 2026-07-29 18:45 — 运行分析发现助手每 30 秒崩溃 → 0.1.46
+
+### 触发：例行分析运行情况时发现助手 PID 每 ~30 秒就变一次
+
+- `/Library/Logs/DiagnosticReports/` 里 8 小时攒了 **42 份 KongshanHelper 报告**，
+  `bug_type 309`、`EXC_BREAKPOINT / SIGTRAP`，进程存活时长稳定在 31 秒。
+- 栈顶：`dispatch_assert_queue_fail ← dispatch_assert_queue ←`
+  `_swift_task_checkIsolatedSwift ← swift_task_isCurrentExecutorWithFlagsImpl ←`
+  `closure #2 in <top-level>`，队列 `kongshan.helper.signal`。
+
+### 根因：Swift 6 顶层代码的 @MainActor 隔离 + dispatch 队列
+
+`swift-tools-version: 6.0` 下 `main.swift` 的**顶层代码是 @MainActor 隔离的**。
+助手当时用 `DispatchSource` 接管 SIGTERM/SIGINT，又挂了一个 30 秒自愈定时器，
+两个 handler 都跑在自建的 `signalQueue` 上。闭包一碰顶层状态（`state` / `listenFD`），
+Swift 运行时的执行器检查就 SIGTRAP——**编译期零提示**。
+
+后果比表面严重：
+1. `checkClientLiveness()`（0.1.33 加的 P1 防护：App 消失时停 root 内核）**从未执行过一次**，
+   每个助手实例都在定时器首次触发的瞬间死掉。
+2. `clientPID` 每 30 秒随进程重启丢失，自愈永远不可能达成条件。
+3. SIGTERM 的优雅退出路径同样一碰就 trap，`shutdownHelper()` 从未跑到。
+4. 一个 root 进程每 30 秒被 launchd 重新拉起，长期空转。
+
+**为什么一直没被发现**：TUN 表面完全正常——内核是独立进程，助手重启后靠
+`adoptOrphanKernel()` 重新认领，用户侧毫无感知。单元测试也覆盖不到 root 助手的运行时行为。
+
+### 修法：把并发整个去掉
+
+C 信号处理器（`@convention(c)` + `nonisolated(unsafe) static var terminationRequested`）
++ accept 循环内按 `CLOCK_MONOTONIC` 轮询自愈间隔。助手回归真正的单线程程序，
+没有队列、没有跨执行器调用，也就没有隔离断言可触发。
+`HelperState.requestExit/shouldExitValue` 随之删除。
+
+用单调时钟而非 wall clock：睡眠唤醒后系统时间会跳，
+会把"睡了 8 小时"误判成"App 失联 8 小时"而误停内核。
+
+BSD 的 `signal()` 带 SA_RESTART，poll 不会返回 EINTR，退出最多滞后一个 poll 周期（1s）；
+安装脚本的等待预算是 10s，够用。
+
+### 回归测试（`Tests/HelperProtocolTests/HelperMainIsolationTests.swift`，2 条）
+
+单元测试跑不到 root 助手的运行时行为，源码层守卫是唯一能自动化的防线：
+禁止 `DispatchSource`/`DispatchQueue`/`setEventHandler`/`DispatchWorkItem`（只扫代码、跳过注释），
+并钉死 C 信号处理器 + 单调时钟的写法。
+**已反向验证**：注入 `DispatchQueue(label:)` 后测试失败，移除后通过。
+
+### 测试与成品
+
+- `swift test` 313 通过 / 1 跳过 / 0 失败，`swift build` 0 警告。
+- 0.1.46 / build 146 已装 `/Applications`，`dist/kongshan-0.1.46.dmg`，dist 只留当前版本。
+- **助手需重装一次修复才生效**（磁盘上的 helper 二进制不随 App 更新）。
+
+### 顺带记录的今日运行数据
+
+- 入站连接 8703 条，真实失败率 **0.62%**（142 次失败里 88 次是广告拦截，属正常）。
+- 今日 `reality verification failed` = 0：已从 VLESS 节点切到自有 trojan 节点。
+- 内核重启 8 次，**mixed 端口全程锁死 49609**——0.1.45 的端口修复在真机确认生效。
+- 17:42~17:56 有一次网络中断（DoH 到 223.5.5.5 报 `network is unreachable`、
+  随后所有解析 10s 超时），恢复后自行正常，属环境事件。
+- App 连续运行 10 小时无内存增长；日志轮转正常（5.0MB 触发）。

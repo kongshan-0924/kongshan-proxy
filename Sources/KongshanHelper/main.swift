@@ -55,7 +55,6 @@ final class HelperState: @unchecked Sendable {
     private var kernelPID: Int32 = 0
     /// §2b.4 自愈：startTun 成功时记录的调用方 App PID。App 长期不在则自动停内核。
     private var clientPID: pid_t = 0
-    private var shouldExit = false
 
     func setKernelPID(_ pid: Int32) { lock.lock(); kernelPID = pid; lock.unlock() }
     func kernelPIDValue() -> Int32 { lock.lock(); defer { lock.unlock() }; return kernelPID }
@@ -63,9 +62,6 @@ final class HelperState: @unchecked Sendable {
 
     func setClientPID(_ pid: pid_t) { lock.lock(); clientPID = pid; lock.unlock() }
     func clientPIDValue() -> pid_t { lock.lock(); defer { lock.unlock() }; return clientPID }
-
-    func requestExit() { lock.lock(); shouldExit = true; lock.unlock() }
-    func shouldExitValue() -> Bool { lock.lock(); defer { lock.unlock() }; return shouldExit }
 }
 
 let state = HelperState()
@@ -671,32 +667,48 @@ guard listenFD >= 0 else {
     exit(EXIT_FAILURE)
 }
 
-// §2b.1 信号优雅退出：SIGTERM/SIGINT → 设退出标志 + shutdown listenFD 让 poll 返回。
-// 用 dispatch source 接管信号（先 SIG_IGN 让 dispatch 拦截）。
-signal(SIGTERM, SIG_IGN)
-signal(SIGINT, SIG_IGN)
-let signalQueue = DispatchQueue(label: "kongshan.helper.signal")
-for sig in [SIGTERM, SIGINT] {
-    let source = DispatchSource.makeSignalSource(signal: sig, queue: signalQueue)
-    source.setEventHandler {
-        state.requestExit()
-        shutdown(listenFD, Int32(SHUT_RDWR))
-    }
-    source.resume()
+// §2b.1 信号优雅退出 + §2b.4 自愈检查：**都不许用 DispatchSource**。
+//
+// main.swift 的顶层代码在 Swift 6 语言模式下是 @MainActor 隔离的，而 dispatch 的 handler
+// 跑在别的队列上。闭包一碰顶层状态（state / listenFD），运行时的执行器检查就直接 SIGTRAP，
+// 编译期毫无提示。真机实证（0.1.45 及之前）：助手每 30 秒——正好是自愈定时器周期——崩一次
+// 被 launchd 拉起，8 小时攒了 42 份 EXC_BREAKPOINT 报告，栈顶是
+// `dispatch_assert_queue_fail ← swift_task_isCurrentExecutor ← closure #2 in <top-level>`。
+// 后果是自愈逻辑**从未真正执行过**，SIGTERM 的优雅退出路径同样一碰就 trap。
+//
+// 改成最朴素的 C 信号处理器 + accept 循环内轮询：helper 回归真正的单线程程序，
+// 没有队列、没有跨执行器调用，也就没有隔离断言可触发。
+enum HelperSignals {
+    /// 信号处理器里只能碰 `sig_atomic_t`；`nonisolated(unsafe)` 是必需的——
+    /// 顶层 var 默认带 @MainActor 隔离，@convention(c) 处理器碰它同样会 trap。
+    nonisolated(unsafe) static var terminationRequested: sig_atomic_t = 0
 }
 
-// §2b.4 自愈定时器：每 30s 检查调用方 App 是否还在，不在则停内核。
-let livenessTimer = DispatchSource.makeTimerSource(queue: signalQueue)
-livenessTimer.schedule(deadline: .now() + 30, repeating: 30)
-livenessTimer.setEventHandler {
-    checkClientLiveness()
+let onTerminationSignal: @convention(c) (Int32) -> Void = { _ in
+    HelperSignals.terminationRequested = 1
 }
-livenessTimer.resume()
+signal(SIGTERM, onTerminationSignal)
+signal(SIGINT, onTerminationSignal)
+
+/// 自愈检查间隔（秒）：App 长期不在则停掉自己起的内核。
+let livenessCheckInterval: Double = 30
+
+/// 单调时钟。不能用 wall clock：睡眠唤醒后系统时间会跳，间隔判断会错乱。
+/// macOS 的 CLOCK_MONOTONIC 在睡眠期间不前进，正好是这里想要的语义
+/// （睡了 8 小时不该算作"App 失联 8 小时"）。
+func monotonicSeconds() -> Double {
+    var ts = timespec()
+    clock_gettime(CLOCK_MONOTONIC, &ts)
+    return Double(ts.tv_sec) + Double(ts.tv_nsec) / 1_000_000_000
+}
 
 FileHandle.standardError.write(Data("kongshan-helper \(helperVersion): 监听 \(HelperConstants.socketPath)\n".utf8))
 
-// §2b.1 accept 循环（单线程串行处理，够用）。用 poll 带 1s 超时周期检查 shouldExit。
-while !state.shouldExitValue() {
+// §2b.1 accept 循环（单线程串行处理，够用）。poll 带 1s 超时，用于周期检查退出标志与自愈。
+// BSD 的 signal() 带 SA_RESTART，poll 收到信号会自动重启而不是返回 EINTR，
+// 因此退出最多滞后一个 poll 周期（1s）——安装脚本的等待预算是 10s，够用。
+var lastLivenessCheck = monotonicSeconds()
+while HelperSignals.terminationRequested == 0 {
     var pfd = pollfd(fd: listenFD, events: Int16(POLLIN), revents: 0)
     let n = poll(&pfd, 1, 1000)
     if n > 0 && (pfd.revents & Int16(POLLIN)) != 0 {
@@ -708,6 +720,13 @@ while !state.shouldExitValue() {
         }
     } else if n < 0 && errno != EINTR {
         break
+    }
+
+    // 自愈挂在同一个循环里跑，与请求处理天然串行——不需要额外队列，也不需要额外的锁。
+    let now = monotonicSeconds()
+    if now - lastLivenessCheck >= livenessCheckInterval {
+        lastLivenessCheck = now
+        checkClientLiveness()
     }
 }
 
