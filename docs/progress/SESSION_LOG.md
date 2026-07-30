@@ -2697,3 +2697,26 @@ connections 标准 schema。
 - `swift test` **388 通过 / 1 跳过 / 0 失败**，`swift build` 0 警告。
 - 0.1.57 已装 `/Applications`；`dist/kongshan-0.1.57.dmg`，SHA-256
   `3a0eb120ee9d173ed2fb2dda0ab9d9e683eccb234de91e38761509dc098c946f`。
+
+## 2026-07-30 单实例保护（0.1.58）
+
+用户发现程序坞里有两个 kongshan。查下来是**两个进程真的都在跑**：
+`/Applications/kongshan.app` 与工作区的 `dist/kongshan.app`。
+
+**这不只是图标重复，是有害的**：两个实例都会改系统代理与系统 DNS，各自持有一份
+"原始设置"快照。后退出的那个会拿着**已经被对方改过**的快照去"还原"，
+把系统代理永久写成指向一个已经关掉的端口——正是 0.1.45 花力气根治的那类问题。
+
+根因是**代码里根本没有单实例保护**。`build_app.sh` 虽然会 `lsregister -u` 注销
+dist 副本，但那只是降低被 Launch Services 找到的概率；任何一次误启动（双击构建产物、
+验收脚本、Launch Services 认错同 bundle ID）都会拉起第二个。
+
+修法：`applicationWillFinishLaunching` 里检查同 bundle ID 的其它实例，
+有就激活对方并 `exit(EXIT_SUCCESS)`。用 `exit` 而不是 `NSApp.terminate`——
+后者会走 `applicationShouldTerminate`，那里有还原系统代理的逻辑，
+而本实例什么都没接管过，不该参与还原。
+
+**真机验证**：用 `open -n` 强制启动 dist 副本，它自行退出，只剩 `/Applications` 一个。
+同时清掉了 dist 副本的 Launch Services 登记。
+
+测试 388 通过 / 1 跳过 / 0 失败，0 警告。

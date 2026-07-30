@@ -53,6 +53,30 @@ final class KongshanAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     /// 改用确定信号：开机自启已启用时，冷启动几乎必然来自 launchd 的登录项，保持菜单栏静默常驻；
     /// 其余情况都是用户主动打开，直接展示主窗口。
     /// 自启开启时若用户手动重开应用，再次双击图标会走 reopen 打开窗口。
+    /// 已在运行的同 bundle ID 实例（不含自己）。抽成属性只为让下面的意图一眼可读。
+    private var otherRunningInstances: [NSRunningApplication] {
+        guard let identifier = Bundle.main.bundleIdentifier else { return [] }
+        let selfPID = ProcessInfo.processInfo.processIdentifier
+        return NSRunningApplication.runningApplications(withBundleIdentifier: identifier)
+            .filter { $0.processIdentifier != selfPID }
+    }
+
+    /// 单实例保护。**必须在做任何事之前**。
+    ///
+    /// 两个实例同时跑对这个应用是有害的，不只是程序坞里多个图标：两边都会去改
+    /// 系统代理与系统 DNS，各自持有一份「原始设置」快照。后退出的那个会拿着**已经被
+    /// 对方改过**的快照去"还原"，把代理设置永久写成指向一个已经关掉的端口。
+    ///
+    /// 真机遇到过：`/Applications` 与工作区 `dist/` 两个副本同时在跑
+    /// （构建产物被 Launch Services 记着，任何一次误启动就会拉起第二个）。
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        guard let existing = otherRunningInstances.first else { return }
+        existing.activate(options: [.activateAllWindows])
+        // 用 exit 而不是 NSApp.terminate：terminate 会走 applicationShouldTerminate，
+        // 那里有还原系统代理的逻辑。本实例什么都没接管过，不该参与还原。
+        exit(EXIT_SUCCESS)
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // SIGPIPE 默认会**直接杀掉进程**。App 会往内核 stdin 的管道里写几百 KB 配置
         // （SingBoxProcess.start / PrivilegedHelperClient.start）；内核若在读完前就退出
