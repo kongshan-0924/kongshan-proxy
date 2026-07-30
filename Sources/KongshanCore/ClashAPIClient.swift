@@ -32,10 +32,19 @@ public struct TrafficSample: Codable, Equatable, Sendable {
 public struct ConnectionSnapshot: Equatable, Sendable {
     public let connectionCount: Int
     public let memory: UInt64
+    /// 内核自启动以来的累计字节数（`/connections` 的 `uploadTotal`/`downloadTotal`）。
+    ///
+    /// 这是**唯一权威的累计量**。不能靠把 `/traffic` 的速率乘以采样间隔来估——
+    /// 那会漏掉两次采样之间开完又关掉的连接，也会被采样抖动放大误差；
+    /// 同样不能靠累加每条活跃连接的 upload/download，短命连接同样统计不到。
+    public let uploadTotal: Int64
+    public let downloadTotal: Int64
 
-    public init(connectionCount: Int, memory: UInt64) {
+    public init(connectionCount: Int, memory: UInt64, uploadTotal: Int64 = 0, downloadTotal: Int64 = 0) {
         self.connectionCount = connectionCount
         self.memory = memory
+        self.uploadTotal = uploadTotal
+        self.downloadTotal = downloadTotal
     }
 }
 
@@ -49,6 +58,12 @@ public struct ConnectionDetail: Identifiable, Equatable, Sendable {
     public let network: String       // tcp / udp
     public let upload: Int64
     public let download: Int64
+    /// 连接建立时间（`/connections` 每项的 `start`，ISO8601）。
+    ///
+    /// 用来算**首次采样**的速率：速率原本靠相邻两次采样的字节差，于是每条连接第一次
+    /// 出现时只能显示 `—`。短命连接（一次请求就关）往往只被采样到一次，
+    /// 结果是明明在传数据、界面上却始终是 `—`，看起来像统计坏了。
+    public let start: Date?
 
     public init(payload: [String: Any]) {
         id = payload["id"] as? String ?? UUID().uuidString
@@ -68,7 +83,19 @@ public struct ConnectionDetail: Identifiable, Equatable, Sendable {
         chains = ((payload["chains"] as? [String]) ?? []).reversed()
         upload = (payload["upload"] as? NSNumber)?.int64Value ?? 0
         download = (payload["download"] as? NSNumber)?.int64Value ?? 0
+        start = (payload["start"] as? String).flatMap(Self.isoFormatter.date(from:))
     }
+
+    /// 内核给的是带小数秒的 ISO8601（`2026-07-30T12:00:00.123456789+08:00`）。
+    /// `.withInternetDateTime` 单独用会因为小数秒解析失败，必须并上 `.withFractionalSeconds`。
+    /// `nonisolated(unsafe)`：Foundation 的 formatter 在**构造完成后不再修改**的前提下是
+    /// 线程安全的（Apple 文档明确写了这一点），这里正是只读使用。
+    /// 不能改成每次解析新建一个：连接页每秒解析上千条，那是实打实的开销。
+    nonisolated(unsafe) private static let isoFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
 }
 
 public enum CoreLogLevel: String, CaseIterable, Sendable {
@@ -257,7 +284,9 @@ public actor ClashAPIClient {
             }
             return ConnectionSnapshot(
                 connectionCount: connections.count,
-                memory: memory.uint64Value
+                memory: memory.uint64Value,
+                uploadTotal: (payload["uploadTotal"] as? NSNumber)?.int64Value ?? 0,
+                downloadTotal: (payload["downloadTotal"] as? NSNumber)?.int64Value ?? 0
             )
         }
     }

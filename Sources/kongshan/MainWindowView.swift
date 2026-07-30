@@ -594,6 +594,23 @@ private struct SettingsView: View {
 
             Form {
                 if tab == .tunnel {
+                Section("外观") {
+                    Picker("菜单栏图标", selection: menuBarIconStyleBinding) {
+                        ForEach(MenuBarIconStyle.allCases) { style in
+                            // 直接把三种图标画出来给用户挑，比只列名字直观得多。
+                            Label {
+                                Text(style.displayName)
+                            } icon: {
+                                Image(nsImage: MenuBarIcon.image(style: style, state: .systemProxy))
+                            }
+                            .tag(style)
+                        }
+                    }
+                    Text(state.menuBarIconStyle.summary + "。菜单栏会把图标染成单色，所以状态靠形状区分：关闭时是线稿、开启后填实、TUN 额外加一个点。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("代理模式") {
                     // 与仪表盘 / 托盘同一套模型：两种接管可同时开。
                     // 之前这里是单选 Picker，双开时点一下会静默关掉另一种。
@@ -1161,6 +1178,13 @@ private struct SettingsView: View {
         )
     }
 
+    private var menuBarIconStyleBinding: Binding<MenuBarIconStyle> {
+        Binding(
+            get: { state.menuBarIconStyle },
+            set: { style in Task { await state.setMenuBarIconStyle(style) } }
+        )
+    }
+
     private var strictRouteBinding: Binding<Bool> {
         Binding(
             get: { state.tunSettings.strictRoute },
@@ -1233,15 +1257,24 @@ private struct ManualNodeSheet: View {
     @State private var uploadMbps = ""
     @State private var downloadMbps = ""
     @State private var localError: String?
+    @State private var mode: Mode = .paste
+    @State private var linkText = ""
+    @State private var parsed: [ProxyNode] = []
+
+    private enum Mode: String, CaseIterable, Identifiable {
+        case paste = "粘贴链接"
+        case manual = "手动填写"
+        var id: Self { self }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
                 Image(systemName: "plus.circle.fill")
                     .font(.system(size: 16))
-                    .foregroundStyle(Theme.protocolTint(.hysteria2))
+                    .foregroundStyle(.tint)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("添加自建 Hysteria2 节点")
+                    Text("添加自建节点")
                         .font(.system(size: 13, weight: .semibold))
                     Text("保存后会生成独立的“自建”策略组")
                         .font(.caption)
@@ -1251,8 +1284,136 @@ private struct ManualNodeSheet: View {
             }
             .padding(.horizontal, 20)
             .padding(.top, 18)
-            .padding(.bottom, 12)
+            .padding(.bottom, 10)
 
+            Picker("", selection: $mode) {
+                ForEach(Mode.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 20)
+            .padding(.bottom, 6)
+
+            if mode == .paste { pasteForm } else { manualForm }
+
+            Divider()
+            HStack {
+                if mode == .paste, !parsed.isEmpty {
+                    Text("将添加 \(parsed.count) 个节点")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("取消") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("添加") { mode == .paste ? addParsed() : addNode() }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(mode == .paste && parsed.isEmpty)
+            }
+            .padding(16)
+        }
+        .frame(width: 470, height: 580)
+    }
+
+    // MARK: - 粘贴链接
+
+    private var pasteForm: some View {
+        Form {
+            Section {
+                TextEditor(text: $linkText)
+                    .font(.system(size: 11, design: .monospaced))
+                    .frame(minHeight: 140)
+                    .onChange(of: linkText) { _, _ in reparse() }
+                HStack {
+                    Button {
+                        linkText = NSPasteboard.general.string(forType: .string) ?? ""
+                        reparse()
+                    } label: {
+                        Label("从剪贴板粘贴", systemImage: "doc.on.clipboard")
+                    }
+                    Spacer()
+                    if !linkText.isEmpty {
+                        Button("清空") { linkText = ""; parsed = []; localError = nil }
+                            .buttonStyle(.link)
+                    }
+                }
+            } header: {
+                Text("分享链接")
+            } footer: {
+                Text("支持 ss / trojan / vmess / vless / hysteria2(hy2) / anytls。可一次粘贴多行，每行一个；解析不了的行会被跳过。")
+            }
+
+            if !parsed.isEmpty {
+                Section("解析结果") {
+                    ForEach(parsed) { node in
+                        HStack(spacing: 8) {
+                            ProtocolTag(value: node.protocolType)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(node.name)
+                                    .font(.system(size: 12, weight: .medium))
+                                    .lineLimit(1)
+                                Text("\(node.server):\(String(node.port))")
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                        }
+                    }
+                }
+            }
+
+            if let localError {
+                Section {
+                    Label(localError, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .font(.callout)
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    /// 边打边解析。解析是纯字符串处理、无网络无 IO，几十行链接也是微秒级。
+    private func reparse() {
+        let text = linkText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else {
+            parsed = []
+            localError = nil
+            return
+        }
+        parsed = NodeShareLink.parseAll(text)
+        guard parsed.isEmpty else {
+            localError = nil
+            return
+        }
+        // 一个都没解析出来时才报错。整段按单条再试一次，把真实原因带出来——
+        // 「端口无效」「不支持的链接类型」远比一句「没有可用链接」有用。
+        do {
+            _ = try NodeShareLink.parse(text)
+            localError = "没有识别到可用的分享链接"
+        } catch {
+            localError = error.localizedDescription
+        }
+    }
+
+    private func addParsed() {
+        let nodes = parsed
+        guard !nodes.isEmpty else { return }
+        Task {
+            await state.addManualNodes(nodes)
+            if let message = state.errorMessage {
+                localError = message
+                state.dismissError()
+            } else {
+                dismiss()
+            }
+        }
+    }
+
+    // MARK: - 手动填写（Hysteria2）
+
+    private var manualForm: some View {
             Form {
                 Section("基本信息") {
                     TextField("名称", text: $name)
@@ -1278,19 +1439,6 @@ private struct ManualNodeSheet: View {
                 }
             }
             .formStyle(.grouped)
-
-            Divider()
-            HStack {
-                Spacer()
-                Button("取消") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-                Button("添加") { addNode() }
-                    .keyboardShortcut(.defaultAction)
-                    .buttonStyle(.borderedProminent)
-            }
-            .padding(16)
-        }
-        .frame(width: 460, height: 560)
     }
 
     private func addNode() {

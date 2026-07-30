@@ -43,7 +43,14 @@ public struct ConnectionRateTracker: Sendable {
             )
             next[connection.id] = current
             guard let old = previous[connection.id] else {
-                return ConnectionLiveDetail(connection: connection, uploadRate: 0, downloadRate: 0)
+                // 首次见到这条连接：没有上一次采样可作差。用连接自身的建立时间当基线，
+                // 算出"自建立以来的平均速率"。短命连接常常只被采样到一次，
+                // 若在这里直接返回 0，界面上就永远是 `—`，看着像统计坏了。
+                return ConnectionLiveDetail(
+                    connection: connection,
+                    uploadRate: averageRate(bytes: connection.upload, since: connection.start, now: timestamp),
+                    downloadRate: averageRate(bytes: connection.download, since: connection.start, now: timestamp)
+                )
             }
             let elapsed = timestamp.timeIntervalSince(old.timestamp)
             guard elapsed > 0,
@@ -63,6 +70,19 @@ public struct ConnectionRateTracker: Sendable {
 
     public mutating func reset() {
         previous.removeAll(keepingCapacity: false)
+    }
+
+    /// 自连接建立以来的平均速率。缺 `start`、时间倒流、或连接太新（<0.2s，
+    /// 除出来会是个虚高的尖峰）都返回 0——宁可显示 `—` 也别给个假数。
+    private static func averageRate(bytes: Int64, since start: Date?, now: Date) -> Int64 {
+        guard bytes > 0, let start else { return 0 }
+        let elapsed = now.timeIntervalSince(start)
+        guard elapsed >= 0.2 else { return 0 }
+        return Int64(Double(bytes) / elapsed)
+    }
+
+    private func averageRate(bytes: Int64, since start: Date?, now: Date) -> Int64 {
+        Self.averageRate(bytes: bytes, since: start, now: now)
     }
 }
 

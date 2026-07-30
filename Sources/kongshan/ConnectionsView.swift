@@ -46,6 +46,15 @@ struct ConnectionsView: View {
                     .menuStyle(.borderlessButton)
                     .fixedSize()
                     Spacer()
+                    // 汇总：把"这些连接一共传了多少"直接给出来。
+                    // 只列每条连接的累计量、要用户自己心算加总是没意义的。
+                    HStack(spacing: 10) {
+                        Text("累计 ↑ \(Self.bytesOrDash(filteredConnections.reduce(0) { $0 + $1.upload }))")
+                        Text("↓ \(Self.bytesOrDash(filteredConnections.reduce(0) { $0 + $1.download }))")
+                    }
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    Divider().frame(height: 10)
                     Text("当前显示 \(filteredConnections.count) / \(state.connections.count) 条")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)

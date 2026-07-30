@@ -11,11 +11,51 @@ struct LogsView: View {
     @State private var showsExporter = false
     @State private var isPreparingExport = false
     @State private var filterText = ""
+    @State private var showsProblemsOnly = false
+    @State private var groupsByConnection = false
 
     private var filteredLogs: [LiveLogEntry] {
         let query = filterText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return state.liveLogs }
-        return state.liveLogs.filter { $0.entry.message.localizedCaseInsensitiveContains(query) }
+        return state.liveLogs.filter { item in
+            // 「只看问题」是排查时最先按的那一下：几千行里真正有信息量的通常只有几十行。
+            if showsProblemsOnly, item.entry.level != .error, item.entry.level != .warning {
+                return false
+            }
+            guard !query.isEmpty else { return true }
+            // 也匹配解析出的主机名：用户想查的通常是"某个域名怎么了"，
+            // 而主机名在正文里的位置和写法各行不一，只匹配整行会漏。
+            if item.entry.message.localizedCaseInsensitiveContains(query) { return true }
+            return CoreLogLine.parse(item.entry.message).host?.localizedCaseInsensitiveContains(query) ?? false
+        }
+    }
+
+    /// 按连接 ID 聚合。同一条连接的多行日志（入站 → 进程匹配 → 出站 → 失败原因）
+    /// 本来就是一个整体，散在几千行里靠肉眼找同号行是这一页最不好用的地方。
+    private var connectionGroups: [LogConnectionGroup] {
+        var order: [String] = []
+        var buckets: [String: [LiveLogEntry]] = [:]
+        var hosts: [String: String] = [:]
+
+        for item in filteredLogs {
+            let parsed = CoreLogLine.parse(item.entry.message)
+            // 没有连接 ID 的行（内核启动、DNS 缓存之类）单独成组，不能丢。
+            let key = parsed.connectionID ?? "sys-\(item.id)"
+            if buckets[key] == nil { order.append(key) }
+            buckets[key, default: []].append(item)
+            if hosts[key] == nil, let host = parsed.host { hosts[key] = host }
+        }
+
+        return order.map { key in
+            let entries = buckets[key] ?? []
+            return LogConnectionGroup(
+                id: key,
+                host: hosts[key],
+                entries: entries,
+                // 一组里只要有错就整组标红：那才是需要展开细看的组。
+                worstLevel: entries.contains { $0.entry.level == .error } ? .error
+                    : entries.contains { $0.entry.level == .warning } ? .warning : .info
+            )
+        }
     }
 
     var body: some View {
@@ -71,6 +111,16 @@ struct LogsView: View {
             SearchField(text: $filterText, placeholder: "搜索日志关键词…")
                 .frame(maxWidth: 220)
 
+            Toggle("只看问题", isOn: $showsProblemsOnly)
+                .toggleStyle(.checkbox)
+                .font(.caption)
+                .help("只显示警告与错误")
+
+            Toggle("按连接聚合", isOn: $groupsByConnection)
+                .toggleStyle(.checkbox)
+                .font(.caption)
+                .help("把同一条连接的多行日志折成一组，点开看完整链路")
+
             Toggle("暂停自动滚动", isOn: $pausesAutomaticScroll)
                 .toggleStyle(.checkbox)
                 .font(.caption)
@@ -88,18 +138,25 @@ struct LogsView: View {
     private var logList: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                let logs = filteredLogs
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(logs) { item in
-                        LogEntryRow(item: item)
-                            .id(item.id)
-                            .contextMenu {
-                                Button("复制消息") {
-                                    NSPasteboard.general.clearContents()
-                                    NSPasteboard.general.setString(item.entry.message, forType: .string)
+                    if groupsByConnection {
+                        ForEach(connectionGroups) { group in
+                            LogConnectionRow(group: group)
+                                .id(group.id)
+                            Divider().opacity(0.4)
+                        }
+                    } else {
+                        ForEach(filteredLogs) { item in
+                            LogEntryRow(item: item)
+                                .id(item.id)
+                                .contextMenu {
+                                    Button("复制消息") {
+                                        NSPasteboard.general.clearContents()
+                                        NSPasteboard.general.setString(item.entry.message, forType: .string)
+                                    }
                                 }
-                            }
-                        Divider().opacity(0.4)
+                            Divider().opacity(0.4)
+                        }
                     }
                 }
                 .padding(.horizontal, 20)
@@ -230,5 +287,73 @@ struct TextExportDocument: FileDocument {
 
     func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
         FileWrapper(regularFileWithContents: Data(text.utf8))
+    }
+}
+
+/// 一条连接的日志组。
+struct LogConnectionGroup: Identifiable {
+    let id: String
+    let host: String?
+    let entries: [LiveLogEntry]
+    let worstLevel: CoreLogLevel
+}
+
+/// 折叠的连接组。默认收起，只显示"目标主机 + 几行 + 最坏级别"；
+/// 展开才铺开完整链路。排查时先扫一眼哪组是红的，再点开那一组。
+private struct LogConnectionRow: View {
+    let group: LogConnectionGroup
+    @State private var isExpanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                isExpanded.toggle()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 10)
+                    Circle()
+                        .fill(tint)
+                        .frame(width: 6, height: 6)
+                    Text(group.host ?? "（无目标主机）")
+                        .font(.system(.caption, design: .monospaced).weight(.medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 8)
+                    Text("\(group.entries.count) 行")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.vertical, 5)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .contextMenu {
+                Button("复制整条链路") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(
+                        group.entries.map(\.entry.message).joined(separator: "\n"),
+                        forType: .string
+                    )
+                }
+            }
+
+            if isExpanded {
+                ForEach(group.entries) { item in
+                    LogEntryRow(item: item)
+                        .padding(.leading, 20)
+                }
+            }
+        }
+    }
+
+    private var tint: Color {
+        switch group.worstLevel {
+        case .error: .red
+        case .warning: .orange
+        default: .secondary
+        }
     }
 }

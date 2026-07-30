@@ -72,42 +72,60 @@ struct RoutingView: View {
                         .foregroundStyle(.secondary)
                     TextField("搜索规则或目标策略", text: $ruleSearch)
                         .textFieldStyle(.plain)
-                    Text("\(all.count) 条")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.tertiary)
+                    if keyword.isEmpty {
+                        Text("\(all.count) 条 · \(groups(of: all).count) 个目标")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.tertiary)
+                    } else {
+                        Text("匹配 \(matched.count) / \(all.count)")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.tertiary)
+                    }
                 }
                 .padding(.horizontal, 22)
                 .padding(.vertical, 10)
                 Divider()
 
-                List {
-                    ForEach(matched.prefix(200)) { rule in
-                        HStack(spacing: 10) {
-                            Text(rule.type.displayName)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .frame(width: 76, alignment: .leading)
-                            Text(rule.value)
-                                .font(.system(.caption, design: .monospaced))
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                            Spacer(minLength: 8)
-                            Text(rule.target)
-                                .font(.caption)
-                                .foregroundStyle(targetTint(rule.target))
+                // 搜索时给扁平结果（用户已经在找具体一条）；不搜索时按目标策略折叠。
+                // 三千多条规则平铺出来既没有全局认知、也找不到东西——用户真正想知道的是
+                // "哪些流量走哪个策略"，那正是按 target 分组的形状。
+                if keyword.isEmpty {
+                    List {
+                        ForEach(groups(of: all)) { group in
+                            RuleTargetGroupRow(group: group, tint: targetTint(group.target))
                         }
-                        .padding(.vertical, 1)
                     }
-                    if matched.count > 200 {
-                        Text("仅显示前 200 条，共 \(matched.count) 条匹配")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
+                    .listStyle(.inset)
+                    .scrollContentBackground(.hidden)
+                } else {
+                    List {
+                        ForEach(matched.prefix(300)) { rule in
+                            RuleRow(rule: rule, tint: targetTint(rule.target))
+                        }
+                        if matched.count > 300 {
+                            Text("仅显示前 300 条，共 \(matched.count) 条匹配——把关键词写得更具体些")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        }
                     }
+                    .listStyle(.inset)
+                    .scrollContentBackground(.hidden)
                 }
-                .listStyle(.inset)
-                .scrollContentBackground(.hidden)
             }
         }
+    }
+
+    /// 按目标策略分组，条数多的在前。用户扫这一屏就知道流量大致怎么分的。
+    private func groups(of rules: [SubscriptionRule]) -> [RuleTargetGroup] {
+        var order: [String] = []
+        var buckets: [String: [SubscriptionRule]] = [:]
+        for rule in rules {
+            if buckets[rule.target] == nil { order.append(rule.target) }
+            buckets[rule.target, default: []].append(rule)
+        }
+        return order
+            .map { RuleTargetGroup(target: $0, rules: buckets[$0] ?? []) }
+            .sorted { $0.rules.count > $1.rules.count }
     }
 
     private var perAppSection: some View {
@@ -344,5 +362,91 @@ struct BypassListSection: View {
                 Label(addTitle, systemImage: "plus")
             }
         }
+    }
+}
+
+/// 同一目标策略下的规则集合。
+struct RuleTargetGroup: Identifiable {
+    let target: String
+    let rules: [SubscriptionRule]
+    var id: String { target }
+}
+
+/// 折叠的目标策略组。默认收起——一屏看完"流量怎么分"，需要细看再展开。
+private struct RuleTargetGroupRow: View {
+    let group: RuleTargetGroup
+    let tint: Color
+    @State private var isExpanded = false
+
+    /// 展开后仍然限量：单个组也可能有上千条，全铺出来一样卡。
+    /// 但**必须把被省掉的条数说出来**，静默截断会让人以为规则就这么多。
+    private static let expandedLimit = 200
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                isExpanded.toggle()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 10)
+                    Text(group.target)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(tint)
+                        .lineLimit(1)
+                    Spacer(minLength: 8)
+                    Text("\(group.rules.count)")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(tint.opacity(0.12), in: Capsule())
+                }
+                .padding(.vertical, 3)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if isExpanded {
+                ForEach(group.rules.prefix(Self.expandedLimit)) { rule in
+                    RuleRow(rule: rule, tint: tint)
+                        .padding(.leading, 20)
+                }
+                if group.rules.count > Self.expandedLimit {
+                    Text("还有 \(group.rules.count - Self.expandedLimit) 条未显示，用上方搜索定位")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .padding(.leading, 20)
+                        .padding(.vertical, 3)
+                }
+            }
+        }
+    }
+}
+
+/// 单条规则。分组展开与搜索结果共用同一行样式。
+private struct RuleRow: View {
+    let rule: SubscriptionRule
+    let tint: Color
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(rule.type.displayName)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 76, alignment: .leading)
+            Text(rule.value)
+                .font(.system(.caption, design: .monospaced))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+            Spacer(minLength: 8)
+            Text(rule.target)
+                .font(.caption)
+                .foregroundStyle(tint)
+        }
+        .padding(.vertical, 1)
     }
 }

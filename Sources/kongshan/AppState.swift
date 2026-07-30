@@ -135,6 +135,12 @@ final class AppState {
     @ObservationIgnored private var connectionRateTracker = ConnectionRateTracker()
     private(set) var runtimeStartedAt: Date?
     private(set) var trafficHistory: [TrafficPoint] = []
+    /// 本次接管会话的累计流量。跨内核重启连续，停止接管时归零。
+    /// 见 `SessionTrafficAccumulator` —— 数据源必须是内核的权威累计量，不能靠速率积分。
+    private(set) var sessionUpload: Int64 = 0
+    private(set) var sessionDownload: Int64 = 0
+    var sessionTotal: Int64 { sessionUpload + sessionDownload }
+    @ObservationIgnored private var sessionTraffic = SessionTrafficAccumulator()
     private(set) var liveLogs: [LiveLogEntry] = []
     private(set) var logLevel: CoreLogLevel = .info
     private(set) var isApplyingRouting = false
@@ -271,8 +277,8 @@ final class AppState {
     @ObservationIgnored private var pathChangeTask: Task<Void, Never>?
     /// 上一次记录的物理网络指纹，用于判断"网络是否真的换了"（而不是信号抖动）。
     @ObservationIgnored private var lastNetworkSignature: String?
-    @ObservationIgnored private var wakeObserver: NSObjectProtocol?
-    @ObservationIgnored private var occlusionObserver: NSObjectProtocol?
+    /// 通知观察者令牌。交给独立持有者统一摘除，见 `NotificationObserverBag`。
+    @ObservationIgnored private let observerBag = NotificationObserverBag()
     /// 窗口内容是否真的在屏幕上。
     ///
     /// SwiftUI 的 onAppear/onDisappear 只反映"页面还在导航栈里"：App 被切到后台、
@@ -305,6 +311,8 @@ final class AppState {
     /// TUN 接管系统 DNS 之前探测到的内网 DNS 与搜索域。见 `LANResolverSnapshot`。
     /// 接管期间探测不到，所以要在内存里留住上一次的结果。
     @ObservationIgnored private(set) var lanResolverSnapshot: LANResolverSnapshot = .empty
+    /// 菜单栏图标样式，用户可在设置里切换。
+    private(set) var menuBarIconStyle: MenuBarIconStyle = .peak
     /// 上次实际用过的 mixed 端口，落盘复用。系统代理的地址会被 Chromium 系客户端缓存，
     /// 每次启动换端口会让它们打死端口、反复「正在重新连接」。nil 表示还没分配过。
     @ObservationIgnored private var preferredMixedPort: UInt16?
@@ -418,7 +426,7 @@ final class AppState {
         }
         if monitorsSystemEvents {
             // 睡眠唤醒后核心可能进入拒绝连接的假死态（sing-box#1709），网络也可能已切换。
-            wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            observerBag.add(to: NSWorkspace.shared.notificationCenter, NSWorkspace.shared.notificationCenter.addObserver(
                 forName: NSWorkspace.didWakeNotification,
                 object: nil,
                 queue: .main
@@ -426,9 +434,9 @@ final class AppState {
                 Task { @MainActor [weak self] in
                     self?.handleDidWake()
                 }
-            }
+            })
             // 窗口被遮挡/App 进后台时停掉"没人看的"视图状态刷新，见 windowContentIsVisible。
-            occlusionObserver = NotificationCenter.default.addObserver(
+            observerBag.add(to: .default, NotificationCenter.default.addObserver(
                 forName: NSApplication.didChangeOcclusionStateNotification,
                 object: nil,
                 queue: .main
@@ -436,7 +444,7 @@ final class AppState {
                 Task { @MainActor [weak self] in
                     self?.windowContentIsVisible = NSApplication.shared.occlusionState.contains(.visible)
                 }
-            }
+            })
         }
 
         if automaticallyInitialize {
@@ -1171,6 +1179,44 @@ final class AppState {
 
     func openLoginItemSystemSettings() async {
         await loginItemManager.openSystemSettings()
+    }
+
+    /// 批量加入自建节点（分享链接解析的结果）。
+    ///
+    /// `sourceID` 必须清成 nil —— 「本地自建」这个伪配置就是按 `sourceID == nil` 判定的
+    /// （见 `manualNodes`），带着别的 sourceID 进来会归到某个不存在的订阅下、界面上找不到。
+    /// `id` 也重发一遍：同一条链接粘两次不该被当成同一个节点覆盖掉。
+    /// 切换菜单栏图标样式。纯显示项，不碰内核，立即落盘即可。
+    func setMenuBarIconStyle(_ style: MenuBarIconStyle) async {
+        guard style != menuBarIconStyle else { return }
+        menuBarIconStyle = style
+        try? await persistSettings()
+    }
+
+    /// 菜单栏图标当前该显示哪种状态。
+    var menuBarIconState: MenuBarIcon.State {
+        guard let activeMode else { return .off }
+        return activeMode == .tun ? .tun : .systemProxy
+    }
+
+    func addManualNodes(_ parsed: [ProxyNode]) async {
+        guard !parsed.isEmpty else { return }
+        nodes.append(contentsOf: parsed.map { node in
+            var copy = node
+            copy.sourceID = nil
+            copy.id = UUID()
+            return copy
+        })
+        ensureActiveConfig()
+        do {
+            try await persistManualNodes()
+            try await persistSettings()
+            errorMessage = nil
+        } catch {
+            errorMessage = "保存自建节点失败：\(error.localizedDescription)"
+            return
+        }
+        await hotReloadAfterNodeChange()
     }
 
     func addManual(_ form: ManualHysteria2) async {
@@ -2050,6 +2096,7 @@ final class AppState {
                 groupSelections: settings.groupSelections,
                 activeConfigID: settings.activeConfigID,
                 speedTestMethod: settings.speedTestMethod,
+                menuBarIconStyle: menuBarIconStyle,
                 // 备份不含端口：那是本机运行时状态，导入别的机器的备份不该顶掉本机端口。
                 mixedPort: preferredMixedPort
             )
@@ -2219,6 +2266,7 @@ final class AppState {
             groupSelections = settings.groupSelections ?? [:]
             activeConfigID = settings.activeConfigID
             preferredMixedPort = settings.mixedPort
+            menuBarIconStyle = settings.menuBarIconStyle ?? .peak
         }
         if let data = try await storage.readIfPresent(from: rulesURL) {
             routingSettings = try JSONDecoder().decode(RoutingSettings.self, from: data).validated()
@@ -2254,6 +2302,7 @@ final class AppState {
                 groupSelections: groupSelections,
                 activeConfigID: activeConfigID,
                 speedTestMethod: speedTestMethod,
+                menuBarIconStyle: menuBarIconStyle,
                 mixedPort: preferredMixedPort
             )),
             to: settingsURL
@@ -2531,6 +2580,15 @@ final class AppState {
             activeConnectionCount = snapshot.connectionCount
         }
         if coreMemory != snapshot.memory { coreMemory = snapshot.memory }
+
+        // 会话累计流量。这条流是唯一的权威来源，无论仪表盘是否可见都要喂——
+        // 断一秒就永久少一秒的量，不像速率那样只是显示滞后。
+        sessionTraffic.record(
+            uploadTotal: snapshot.uploadTotal,
+            downloadTotal: snapshot.downloadTotal
+        )
+        if sessionUpload != sessionTraffic.upload { sessionUpload = sessionTraffic.upload }
+        if sessionDownload != sessionTraffic.download { sessionDownload = sessionTraffic.download }
     }
 
     private func receiveTraffic(_ sample: TrafficSample) {
@@ -2593,6 +2651,11 @@ final class AppState {
         coreVersion = "—"
         runtimeStartedAt = nil
         trafficHistory.removeAll(keepingCapacity: false)
+        // 会话累计只在**停止接管**时归零。内核重启（改设置 / 崩溃自愈 / 切配置）
+        // 走的是 markRuntimeStarted，那里不能清——跨内核重启保持连续正是这个累计量的意义。
+        sessionTraffic.reset()
+        sessionUpload = 0
+        sessionDownload = 0
     }
 
     /// 系统代理绕过表：在用户配置之外补上探测到的内网域名。
@@ -3291,6 +3354,8 @@ private struct PersistedSettings: Codable {
     /// 当前生效配置 ID 与测速方式，旧版设置文件没有这些字段。
     var activeConfigID: UUID?
     var speedTestMethod: SpeedTestMethod?
+    /// 菜单栏图标样式。旧版设置文件没有该字段。
+    var menuBarIconStyle: MenuBarIconStyle?
     /// 上次用过的本地 mixed 端口。旧版设置文件没有该字段（nil = 首次分配）。
     /// 属于本机运行时状态，**不进备份**：换台机器该端口未必空闲。
     var mixedPort: UInt16?

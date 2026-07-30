@@ -23,7 +23,17 @@ final class ClashStreamingTests: XCTestCase {
 
         let snapshot = try await first(await client.connectionStream())
 
-        XCTAssertEqual(snapshot, ConnectionSnapshot(connectionCount: 2, memory: 3_145_728))
+        // 累计量必须一并带上来：这是唯一权威的累计流量来源，之前被整个丢掉，
+        // 于是「本次会话用了多少」根本无从计算（见 `SessionTrafficAccumulator`）。
+        XCTAssertEqual(
+            snapshot,
+            ConnectionSnapshot(
+                connectionCount: 2,
+                memory: 3_145_728,
+                uploadTotal: 2_000,
+                downloadTotal: 1_000
+            )
+        )
         let request = try XCTUnwrap(fixture.requests.first)
         let components = try XCTUnwrap(URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false))
         XCTAssertEqual(components.scheme, "ws")

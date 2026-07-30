@@ -186,10 +186,13 @@ struct DashboardView: View {
                 Text(Theme.bytesOrDash(Int64(clamping: state.coreMemory)))
             } corner: {
                 if state.coreVersion != "—" {
-                    Text(state.coreVersion)
+                    // 裸一个「1.13.14」贴在「内核内存」旁边会被读成内存的某个数值。
+                    // 加上「内核」二字点明它是 sing-box 的版本号。
+                    Text("内核 \(state.coreVersion)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                        .help("内置 sing-box 版本")
                 }
             }
 
@@ -285,6 +288,8 @@ struct DashboardView: View {
                 }
             }
 
+            sessionTrafficRow
+
             Chart {
                 ForEach(state.trafficHistory) { point in
                     AreaMark(
@@ -377,6 +382,60 @@ struct DashboardView: View {
             }
         }
         .card(padding: 18)
+    }
+
+    /// 本次会话累计流量。速率是瞬时值、看完就没了，累计量才回答"这次用掉多少"。
+    /// 数据来自内核的权威累计计数器，跨内核重启连续（见 `SessionTrafficAccumulator`）。
+    private var sessionTrafficRow: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "chart.bar.fill")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            Text("本次会话")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Text(Theme.bytesOrDash(state.sessionTotal))
+                .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                .accessibilityLabel("本次会话共 \(Theme.bytesOrDash(state.sessionTotal))")
+
+            Divider().frame(height: 11)
+
+            sessionLeg(symbol: "arrow.up", tint: .blue, value: state.sessionUpload)
+            sessionLeg(symbol: "arrow.down", tint: .green, value: state.sessionDownload)
+
+            Spacer(minLength: 0)
+
+            if let started = state.runtimeStartedAt {
+                Text(Self.durationText(since: started))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Theme.cardFill.opacity(0.6), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+    }
+
+    private func sessionLeg(symbol: String, tint: Color, value: Int64) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: symbol)
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(tint)
+                .accessibilityHidden(true)
+            Text(Theme.bytesOrDash(value))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    /// 只显示到分钟级：秒级数字每秒变一次，会让整行一直在跳。
+    private static func durationText(since start: Date) -> String {
+        let seconds = max(0, Int(Date().timeIntervalSince(start)))
+        let hours = seconds / 3_600
+        let minutes = (seconds % 3_600) / 60
+        return hours > 0 ? "已运行 \(hours) 小时 \(minutes) 分" : "已运行 \(minutes) 分"
     }
 
     private func rateSummary(symbol: String, tint: Color, value: Int64, title: String) -> some View {

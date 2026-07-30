@@ -22,7 +22,7 @@ private struct MenuBarStatusIcon: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: state.menuBarSymbol)
+            Image(nsImage: MenuBarIcon.image(style: state.menuBarIconStyle, state: state.menuBarIconState))
             if state.isOn {
                 // 速率 0 时用占位符，避免空串导致 label 宽度跳变。
                 let dl = MenuRateFormatter.compact(state.downloadRate)
