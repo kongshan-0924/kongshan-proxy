@@ -2360,3 +2360,35 @@ extension AppStateTests {
         await fixture.state.stop()
     }
 }
+
+/// 全局 IPv6 判定。
+///
+/// 真机事故：用户开 TUN 后微信发不出图片。日志里全是
+/// `dial tcp [240e:...]:80: connect: no route to host`——微信 CDN 有 AAAA 记录，
+/// 应用优先走 IPv6，而物理链路到不了全局 IPv6。
+///
+/// 本该由 `stripIPv6()` 兜住，但判定把 ULA（`fd7e:...`，路由器普遍下发）当成了全局地址，
+/// 于是 TUN 照配 IPv6，应用照试 IPv6，全数失败。
+extension AppStateTests {
+    func testLinkLocalIsNotGloballyRoutable() {
+        XCTAssertFalse(AppState.isGloballyRoutableIPv6(0xfe, 0x80), "fe80::/10 链路本地")
+        XCTAssertFalse(AppState.isGloballyRoutableIPv6(0xfe, 0xbf))
+    }
+
+    /// 事故根因：ULA 不是全局地址。
+    func testUniqueLocalIsNotGloballyRoutable() {
+        XCTAssertFalse(AppState.isGloballyRoutableIPv6(0xfd, 0x7e), "fd7e:: 是路由器下发的 ULA")
+        XCTAssertFalse(AppState.isGloballyRoutableIPv6(0xfc, 0x00), "fc00::/7 整段都是 ULA")
+        XCTAssertFalse(AppState.isGloballyRoutableIPv6(0xfd, 0xff))
+    }
+
+    func testSiteLocalIsNotGloballyRoutable() {
+        XCTAssertFalse(AppState.isGloballyRoutableIPv6(0xfe, 0xc0), "fec0::/10 已废弃")
+    }
+
+    func testGlobalUnicastIsRoutable() {
+        XCTAssertTrue(AppState.isGloballyRoutableIPv6(0x24, 0x0e), "240e:: 电信全局段")
+        XCTAssertTrue(AppState.isGloballyRoutableIPv6(0x20, 0x01), "2001:: 全局单播")
+        XCTAssertTrue(AppState.isGloballyRoutableIPv6(0x26, 0x20))
+    }
+}

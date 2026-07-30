@@ -2720,3 +2720,43 @@ dist 副本，但那只是降低被 Launch Services 找到的概率；任何一�
 同时清掉了 dist 副本的 Launch Services 登记。
 
 测试 388 通过 / 1 跳过 / 0 失败，0 警告。
+
+## 2026-07-30 TUN 下微信发不出图片 → 0.1.59
+
+### 现象与根因
+
+用户报告：开 TUN 后微信图片发不出去（文字消息正常）。
+
+助手日志里是一整片同一个错误：
+`dial tcp [240e:e1:aa00:1001::25]:80: connect: no route to host`——
+`240e::` 是电信的**全局 IPv6** 段。微信的 CDN 有 AAAA 记录，应用按 Happy Eyeballs
+优先走 IPv6，而这台机器根本到不了全局 IPv6。
+
+三条证据咬合：
+- TUN 接口配着 `fdfe:dcba:9876::1/126`（生效配置里 address 有两个）
+- en0 只有 `fe80::`（链路本地）与 `fd7e:...`（**ULA**）
+- `route -n get -inet6 default` 无输出——**没有 IPv6 默认路由**
+
+代码里本来有针对这个的防护 `TunSettings.stripIPv6()`：物理网络没有全局 IPv6 时不给 TUN
+配 IPv6，应用看不到 IPv6 自然回落 IPv4。**但它没触发**——判定函数
+`physicalNetworkHasGlobalIPv6()` 只排除了链路本地 `fe80::/10`，
+**把 ULA `fc00::/7` 当成了全局地址**。用户路由器下发的 `fd7e:...` 正落在这一段。
+
+ULA 是 IPv6 版的 `192.168.x.x`：普遍存在、但不可全球路由。判定被它骗过 →
+认为"有 IPv6" → TUN 照配 IPv6 → 应用照试 IPv6 → 全数 `no route to host`。
+
+### 为什么是图片而不是文字
+
+文字走的是已建立的长连接；发图会向 CDN 开**新连接**，新连接才会重新做
+AAAA 解析与 Happy Eyeballs 选路，于是每次都撞在 IPv6 上。
+
+### 修法
+
+判定改为按前两字节排除三段非全局地址：`fe80::/10`（链路本地）、
+**`fc00::/7`（ULA）**、`fec0::/10`（站点本地，已废弃）。
+判定抽成 `internal static` 以便单测钉住——真机复现一次代价太大，新增 4 条测试。
+
+### 测试与成品
+
+- `swift test` **392 通过 / 1 跳过 / 0 失败**，0 编译警告。
+- 0.1.59 已装 `/Applications`；SHA-256 `73a58ae21578b7008fd7edc01b12a3912985c571eb1177cbfc17a1919ee5a0e0`。

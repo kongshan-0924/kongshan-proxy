@@ -3368,13 +3368,34 @@ final class AppState {
                 let inet6 = addr.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { $0.pointee }
                 // 链路本地 fe80::/10 不算全局 IPv6——没有它物理网络仍不可达 IPv6 目标。
                 let bytes = inet6.sin6_addr.__u6_addr.__u6_addr8
-                let isLinkLocal = bytes.0 == 0xfe && (bytes.1 & 0xc0) == 0x80
-                if !isLinkLocal { return true }
+                if Self.isGloballyRoutableIPv6(bytes.0, bytes.1) { return true }
             }
             guard let next = cursor.pointee.ifa_next else { break }
             cursor = next
         }
         return false
+    }
+
+    /// 这个 IPv6 地址是否**可全球路由**。只看前两个字节就够判定。
+    ///
+    /// 真机事故（2026-07-30）：用户开 TUN 后微信发不出图片。内核日志里全是
+    /// `dial tcp [240e:...]:80: connect: no route to host`——微信的 CDN 有 AAAA 记录，
+    /// 应用因此优先走 IPv6，而物理链路根本到不了全局 IPv6。
+    ///
+    /// 本该由 `stripIPv6()` 兜住（物理网络没 IPv6 就不给 TUN 配 IPv6，应用自然回落 IPv4），
+    /// 但判定只排除了链路本地 `fe80::/10`，**把 ULA `fc00::/7` 当成了全局地址**。
+    /// ULA 是 IPv6 版的 `192.168.x.x`：路由器普遍下发（用户机器上是 `fd7e:...`），
+    /// 但不可全球路由。于是判定为"有 IPv6"→ TUN 配上 IPv6 → 应用尝试 IPv6 → 全数失败。
+    ///
+    /// `internal` 而非 `private`：这段判定值得被单测钉住，真机复现一次代价太大。
+    nonisolated static func isGloballyRoutableIPv6(_ byte0: UInt8, _ byte1: UInt8) -> Bool {
+        // fe80::/10 链路本地：只在本网段有意义。
+        if byte0 == 0xfe && (byte1 & 0xc0) == 0x80 { return false }
+        // fc00::/7 唯一本地地址（ULA）：私有段，不可全球路由。
+        if (byte0 & 0xfe) == 0xfc { return false }
+        // fec0::/10 站点本地：已废弃，出现了也不该当全局。
+        if byte0 == 0xfe && (byte1 & 0xc0) == 0xc0 { return false }
+        return true
     }
 }
 
