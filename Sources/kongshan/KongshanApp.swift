@@ -20,17 +20,22 @@ struct KongshanApp: App {
 private struct MenuBarStatusIcon: View {
     let state: AppState
 
+    /// 0 时用固定占位符，避免空串让 label 宽度来回跳。
+    private func rateText(_ value: Int64) -> String {
+        let text = MenuRateFormatter.compact(value)
+        return text.isEmpty ? "—" : text
+    }
+
     var body: some View {
-        HStack(spacing: 4) {
-            Image(nsImage: MenuBarIcon.image(style: state.menuBarIconStyle, state: state.menuBarIconState))
-            if state.isOn {
-                // 速率 0 时用占位符，避免空串导致 label 宽度跳变。
-                let dl = MenuRateFormatter.compact(state.downloadRate)
-                let ul = MenuRateFormatter.compact(state.uploadRate)
-                Text("↓\(dl.isEmpty ? "—" : dl) ↑\(ul.isEmpty ? "—" : ul)")
-                    .monospacedDigit()
-            }
-        }
+        // 整块（图标 + 上下两行速率）画成一张模板图。MenuBarExtra 的 label 会套用系统
+        // 菜单栏字体并把内容压成一行，用 SwiftUI 排版控不住——见 MenuBarIcon.statusImage。
+        // 速率取的是**整机网卡**吞吐，不是代理流量，所以代理没开也照常显示。
+        Image(nsImage: MenuBarIcon.statusImage(
+            style: state.menuBarIconStyle,
+            state: state.menuBarIconState,
+            uploadText: rateText(state.nicUploadRate),
+            downloadText: rateText(state.nicDownloadRate)
+        ))
     }
 }
 

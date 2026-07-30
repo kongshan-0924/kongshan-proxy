@@ -142,6 +142,16 @@ final class AppState {
     @ObservationIgnored private var connectionRateTracker = ConnectionRateTracker()
     private(set) var runtimeStartedAt: Date?
     private(set) var trafficHistory: [TrafficPoint] = []
+    /// 整机网卡速率（菜单栏用）。
+    ///
+    /// 与 `uploadRate`/`downloadRate` 不是一回事：那两个读的是内核 `/traffic`，
+    /// **只统计走代理的流量**，且代理没开时恒为 0。菜单栏要回答的是"现在网速多少"，
+    /// 所以直接读物理网卡计数器，代理开不开都有读数。见 `NetworkThroughput`。
+    private(set) var nicUploadRate: Int64 = 0
+    private(set) var nicDownloadRate: Int64 = 0
+    @ObservationIgnored private var throughputCalculator = ThroughputRateCalculator()
+    @ObservationIgnored private var throughputTask: Task<Void, Never>?
+
     /// 本次接管会话的累计流量。跨内核重启连续，停止接管时归零。
     /// 见 `SessionTrafficAccumulator` —— 数据源必须是内核的权威累计量，不能靠速率积分。
     private(set) var sessionUpload: Int64 = 0
@@ -521,7 +531,28 @@ final class AppState {
         }
     }
 
+    /// 每秒采一次网卡计数器。菜单栏常驻，所以这个循环也常驻——
+    /// 一次 sysctl 是微秒级，比为省这点开销而让菜单栏时有时无划算。
+    private func startThroughputSampling() {
+        guard throughputTask == nil else { return }
+        throughputTask = Task { [weak self] in
+            while !Task.isCancelled {
+                if let counters = NetworkThroughput.physicalCounters() {
+                    await MainActor.run { [weak self] in
+                        guard let self else { return }
+                        let rate = self.throughputCalculator.rate(from: counters, at: self.now())
+                        // 等值判断：空闲时速率长时间是 0，@Observable 赋同值也会失效整棵视图图。
+                        if self.nicUploadRate != rate.upload { self.nicUploadRate = rate.upload }
+                        if self.nicDownloadRate != rate.download { self.nicDownloadRate = rate.download }
+                    }
+                }
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
     func initialize() async {
+        startThroughputSampling()
         guard !isReady else { return }
         do {
             // 清理上次遗留的接管。常见情况（无残留记录）都是秒回的空操作；

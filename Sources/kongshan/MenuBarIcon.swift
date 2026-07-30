@@ -40,6 +40,43 @@ enum MenuBarIcon {
         return image
     }
 
+    /// 图标 + 两行速率，合成为**一张模板图**。
+    ///
+    /// 为什么不用 SwiftUI 的 `HStack { Image; VStack { Text; Text } }`：MenuBarExtra 的 label
+    /// 会套用系统菜单栏字体并把内容压成一行——真机上试过，自定义字号不生效、第二行直接不见。
+    /// 自己画成一张图就完全可控：字号、行距、对齐、模板染色都是确定的。
+    static func statusImage(
+        style: MenuBarIconStyle,
+        state: State,
+        uploadText: String,
+        downloadText: String
+    ) -> NSImage {
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 8, weight: .medium)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            // 模板图只看 alpha，颜色随便给个不透明的即可。
+            .foregroundColor: NSColor.black
+        ]
+        let up = NSAttributedString(string: "↑\(uploadText)", attributes: attributes)
+        let down = NSAttributedString(string: "↓\(downloadText)", attributes: attributes)
+        let textWidth = ceil(max(up.size().width, down.size().width))
+
+        let iconWidth = canvas.width
+        let gap: CGFloat = 3
+        let total = NSSize(width: iconWidth + gap + textWidth, height: canvas.height)
+
+        let image = NSImage(size: total, flipped: false) { rect in
+            draw(style: style, state: state, in: NSRect(origin: .zero, size: canvas))
+            // 两行竖排，右对齐。行高压到 8.5 让两行正好落在 18pt 内。
+            let x = iconWidth + gap
+            up.draw(at: NSPoint(x: x + textWidth - ceil(up.size().width), y: rect.height / 2 + 0.5))
+            down.draw(at: NSPoint(x: x + textWidth - ceil(down.size().width), y: rect.height / 2 - 9))
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }
+
     private static func draw(style: MenuBarIconStyle, state: State, in rect: NSRect) {
         // 关闭态整体压淡。模板图标用 alpha 通道当遮罩，所以降低 alpha 就是"变淡"，
         // 这是菜单栏里表达"未启用"的通行做法（系统的蓝牙/隔空投送都是这个路子）。
