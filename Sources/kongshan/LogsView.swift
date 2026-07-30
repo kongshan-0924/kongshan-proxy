@@ -25,7 +25,7 @@ struct LogsView: View {
             // 也匹配解析出的主机名：用户想查的通常是"某个域名怎么了"，
             // 而主机名在正文里的位置和写法各行不一，只匹配整行会漏。
             if item.entry.message.localizedCaseInsensitiveContains(query) { return true }
-            return CoreLogLine.parse(item.entry.message).host?.localizedCaseInsensitiveContains(query) ?? false
+            return item.parsed.host?.localizedCaseInsensitiveContains(query) ?? false
         }
     }
 
@@ -37,7 +37,7 @@ struct LogsView: View {
         var hosts: [String: String] = [:]
 
         for item in filteredLogs {
-            let parsed = CoreLogLine.parse(item.entry.message)
+            let parsed = item.parsed
             // 没有连接 ID 的行（内核启动、DNS 缓存之类）单独成组，不能丢。
             let key = parsed.connectionID ?? "sys-\(item.id)"
             if buckets[key] == nil { order.append(key) }

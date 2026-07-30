@@ -594,23 +594,6 @@ private struct SettingsView: View {
 
             Form {
                 if tab == .tunnel {
-                Section("外观") {
-                    Picker("菜单栏图标", selection: menuBarIconStyleBinding) {
-                        ForEach(MenuBarIconStyle.allCases) { style in
-                            // 直接把三种图标画出来给用户挑，比只列名字直观得多。
-                            Label {
-                                Text(style.displayName)
-                            } icon: {
-                                Image(nsImage: MenuBarIcon.image(style: style, state: .systemProxy))
-                            }
-                            .tag(style)
-                        }
-                    }
-                    Text(state.menuBarIconStyle.summary + "。菜单栏会把图标染成单色，所以状态靠形状区分：关闭时是线稿、开启后填实、TUN 额外加一个点。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
                 Section("代理模式") {
                     // 与仪表盘 / 托盘同一套模型：两种接管可同时开。
                     // 之前这里是单选 Picker，双开时点一下会静默关掉另一种。
@@ -898,6 +881,23 @@ private struct SettingsView: View {
 
                 }
                 if tab == .general {
+                Section("外观") {
+                    Picker("菜单栏图标", selection: menuBarIconStyleBinding) {
+                        ForEach(MenuBarIconStyle.allCases) { style in
+                            // 直接把三种图标画出来给用户挑，比只列名字直观得多。
+                            Label {
+                                Text(style.displayName)
+                            } icon: {
+                                Image(nsImage: MenuBarIcon.image(style: style, state: .systemProxy))
+                            }
+                            .tag(style)
+                        }
+                    }
+                    Text(state.menuBarIconStyle.summary + "。菜单栏会把图标染成单色，所以状态靠形状区分：关闭时是线稿、开启后填实、TUN 额外加一个点。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("开机自启") {
                     Toggle("登录时启动 kongshan", isOn: launchAtLoginBinding)
                         .disabled(
@@ -939,7 +939,9 @@ private struct SettingsView: View {
                     }
                     LabeledContent("内核") {
                         HStack(spacing: 8) {
-                            Text("sing-box \(state.coreVersion)")
+                            // coreVersion 是内核 /version 的原样返回，已经带名字（`sing-box 1.13.14`）。
+                            // 再加前缀会显示成「sing-box sing-box 1.13.14」。
+                            Text(state.coreVersion)
                                 .foregroundStyle(.secondary)
                             Button(state.isCheckingKernelUpdate ? "检查中…" : "检查内核更新") {
                                 Task { await state.updateKernel() }

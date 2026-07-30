@@ -26,7 +26,18 @@ struct ConnectionsView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
+        // 只算一遍。`filteredConnections` 每次访问都要 filter + sort，而工具栏里的汇总、
+        // 计数和下面的列表都要用它——连接上千条时每秒重复三四遍纯属白工。
+        let list = filteredConnections
+        // 出站 tag → 节点名。内核回报的链路里节点是 `node-<uuid>` 形式的内部 tag，
+        // 直接显示就是一串 UUID 而不是「DMIT-Trojan」——信息量为零还占满整行。
+        // 每次渲染建一次即可：节点集合不大，而按需线性扫会变成
+        // 可见行数 × 链路长度 次遍历。
+        let nodeNames = Dictionary(
+            state.nodes.map { (ConfigGenerator.outboundTag(for: $0), $0.name) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        return VStack(spacing: 0) {
             header
             Divider()
             if state.status == .on && !state.connections.isEmpty {
@@ -49,13 +60,13 @@ struct ConnectionsView: View {
                     // 汇总：把"这些连接一共传了多少"直接给出来。
                     // 只列每条连接的累计量、要用户自己心算加总是没意义的。
                     HStack(spacing: 10) {
-                        Text("累计 ↑ \(Self.bytesOrDash(filteredConnections.reduce(0) { $0 + $1.upload }))")
-                        Text("↓ \(Self.bytesOrDash(filteredConnections.reduce(0) { $0 + $1.download }))")
+                        Text("累计 ↑ \(Self.bytesOrDash(list.reduce(0) { $0 + $1.upload }))")
+                        Text("↓ \(Self.bytesOrDash(list.reduce(0) { $0 + $1.download }))")
                     }
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
                     Divider().frame(height: 10)
-                    Text("当前显示 \(filteredConnections.count) / \(state.connections.count) 条")
+                    Text("当前显示 \(list.count) / \(state.connections.count) 条")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
@@ -64,7 +75,7 @@ struct ConnectionsView: View {
                 .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
                 Divider()
             }
-            content
+            content(list: list, nodeNames: nodeNames)
         }
         .pageBackground()
         .navigationTitle("连接")
@@ -96,7 +107,7 @@ struct ConnectionsView: View {
     }
 
     @ViewBuilder
-    private var content: some View {
+    private func content(list: [ConnectionLiveDetail], nodeNames: [String: String]) -> some View {
         if state.status != .on {
             ContentUnavailableView(
                 "代理未开启",
@@ -111,7 +122,6 @@ struct ConnectionsView: View {
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            let list = filteredConnections
             if list.isEmpty {
                 ContentUnavailableView(
                     "未匹配到相关连接",
@@ -123,7 +133,7 @@ struct ConnectionsView: View {
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         ForEach(list) { conn in
-                            row(conn)
+                            row(conn, nodeNames: nodeNames)
                             Divider()
                         }
                     }
@@ -135,7 +145,7 @@ struct ConnectionsView: View {
         }
     }
 
-    private func row(_ conn: ConnectionLiveDetail) -> some View {
+    private func row(_ conn: ConnectionLiveDetail, nodeNames: [String: String]) -> some View {
         HStack(alignment: .top, spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
@@ -157,7 +167,7 @@ struct ConnectionsView: View {
                             .truncationMode(.middle)
                     }
                 }
-                Text(chainText(conn))
+                Text(chainText(conn, nodeNames: nodeNames))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -186,8 +196,11 @@ struct ConnectionsView: View {
         .padding(.vertical, 7)
     }
 
-    private func chainText(_ conn: ConnectionLiveDetail) -> String {
-        let chain = conn.chains.joined(separator: " → ")
+    private func chainText(_ conn: ConnectionLiveDetail, nodeNames: [String: String]) -> String {
+        // 策略组名（`🚀 节点选择` 等）本来就可读，只把 `node-<uuid>` 换成节点名。
+        let chain = conn.chains
+            .map { nodeNames[$0] ?? $0 }
+            .joined(separator: " → ")
         if conn.rule.isEmpty { return chain }
         return chain.isEmpty ? conn.rule : "\(conn.rule)   ·   \(chain)"
     }

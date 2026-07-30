@@ -186,9 +186,9 @@ struct DashboardView: View {
                 Text(Theme.bytesOrDash(Int64(clamping: state.coreMemory)))
             } corner: {
                 if state.coreVersion != "—" {
-                    // 裸一个「1.13.14」贴在「内核内存」旁边会被读成内存的某个数值。
-                    // 加上「内核」二字点明它是 sing-box 的版本号。
-                    Text("内核 \(state.coreVersion)")
+                    // 内核的 /version 返回的就带名字（`sing-box 1.13.14`），
+                    // 不要再加「内核」前缀——真机上会读成「内核 sing-box 1.13.14」。
+                    Text(state.coreVersion)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -406,12 +406,6 @@ struct DashboardView: View {
             sessionLeg(symbol: "arrow.down", tint: .green, value: state.sessionDownload)
 
             Spacer(minLength: 0)
-
-            if let started = state.runtimeStartedAt {
-                Text(Self.durationText(since: started))
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.tertiary)
-            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -428,14 +422,6 @@ struct DashboardView: View {
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
         }
-    }
-
-    /// 只显示到分钟级：秒级数字每秒变一次，会让整行一直在跳。
-    private static func durationText(since start: Date) -> String {
-        let seconds = max(0, Int(Date().timeIntervalSince(start)))
-        let hours = seconds / 3_600
-        let minutes = (seconds % 3_600) / 60
-        return hours > 0 ? "已运行 \(hours) 小时 \(minutes) 分" : "已运行 \(minutes) 分"
     }
 
     private func rateSummary(symbol: String, tint: Color, value: Int64, title: String) -> some View {

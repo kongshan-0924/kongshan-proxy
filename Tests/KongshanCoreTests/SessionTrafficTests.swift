@@ -116,7 +116,10 @@ extension SessionTrafficTests {
         let live = tracker.update([detail(id: "a", upload: 0, download: 2_000, start: now.addingTimeInterval(-2))], at: now)
 
         XCTAssertEqual(live.count, 1)
-        XCTAssertEqual(live[0].downloadRate, 1_000)
+        // 容差断言而不是等值：start 经 ISO8601 往返会丢掉亚毫秒精度，
+        // 实际 elapsed 是 2.0001 之类，2000/2.0001 截断成 999。
+        // 精确到个位的断言在这里只会变成一条偶发失败的测试。
+        XCTAssertEqual(Double(live[0].downloadRate), 1_000, accuracy: 20)
         XCTAssertEqual(live[0].uploadRate, 0, "上行没有字节就该是 0")
     }
 
@@ -144,7 +147,12 @@ extension SessionTrafficTests {
             [detail(id: "a", upload: 0, download: 3_000, start: start)],
             at: t0.addingTimeInterval(2)
         )
-        XCTAssertEqual(live[0].downloadRate, 1_000, "(3000-1000)/2 = 1000，走差值而不是 3000/12")
+        XCTAssertEqual(
+            Double(live[0].downloadRate),
+            1_000,
+            accuracy: 20,
+            "(3000-1000)/2 = 1000，走差值而不是 3000/12"
+        )
     }
 
     func testStartIsParsedFromISO8601WithFractionalSeconds() {

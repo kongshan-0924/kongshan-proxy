@@ -41,10 +41,17 @@ struct TrafficPoint: Identifiable, Equatable, Sendable {
 struct LiveLogEntry: Identifiable, Equatable, Sendable {
     let id: UUID
     let entry: CoreLogEntry
+    /// 结构化解析结果（连接 ID / 主机 / 类别）。
+    ///
+    /// **必须在入库时解析一次并存下来**，不能在视图里按需解析：日志页按连接聚合与按主机
+    /// 搜索都要用它，而这两处都在 view body 里——2000 行 × 每来一条日志重算一次，
+    /// 高负载下就是每秒几万次字符串扫描。入库是每行只发生一次的地方。
+    let parsed: CoreLogLine
 
     init(id: UUID = UUID(), entry: CoreLogEntry) {
         self.id = id
         self.entry = entry
+        self.parsed = CoreLogLine.parse(entry.message)
     }
 }
 

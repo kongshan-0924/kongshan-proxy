@@ -65,6 +65,9 @@ struct RoutingView: View {
             let matched = keyword.isEmpty
                 ? all
                 : all.filter { $0.value.lowercased().contains(keyword) || $0.target.lowercased().contains(keyword) }
+            // 分组只算一次：header 的「N 个目标」与下面的列表都要用，
+            // 三千多条各分一遍纯属白工。
+            let targetGroups = keyword.isEmpty ? groups(of: all) : []
             VStack(spacing: 0) {
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass")
@@ -73,7 +76,7 @@ struct RoutingView: View {
                     TextField("搜索规则或目标策略", text: $ruleSearch)
                         .textFieldStyle(.plain)
                     if keyword.isEmpty {
-                        Text("\(all.count) 条 · \(groups(of: all).count) 个目标")
+                        Text("\(all.count) 条 · \(targetGroups.count) 个目标")
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.tertiary)
                     } else {
@@ -91,7 +94,7 @@ struct RoutingView: View {
                 // "哪些流量走哪个策略"，那正是按 target 分组的形状。
                 if keyword.isEmpty {
                     List {
-                        ForEach(groups(of: all)) { group in
+                        ForEach(targetGroups) { group in
                             RuleTargetGroupRow(group: group, tint: targetTint(group.target))
                         }
                     }
@@ -411,7 +414,8 @@ private struct RuleTargetGroupRow: View {
 
             if isExpanded {
                 ForEach(group.rules.prefix(Self.expandedLimit)) { rule in
-                    RuleRow(rule: rule, tint: tint)
+                    // 组内不重复显示目标策略：组头已经写了，每行再挂一遍纯粹是噪音。
+                    RuleRow(rule: rule, tint: tint, showsTarget: false)
                         .padding(.leading, 20)
                 }
                 if group.rules.count > Self.expandedLimit {
@@ -430,6 +434,8 @@ private struct RuleTargetGroupRow: View {
 private struct RuleRow: View {
     let rule: SubscriptionRule
     let tint: Color
+    /// 搜索结果里必须显示目标（结果是跨组混在一起的）；组内展开时省掉。
+    var showsTarget = true
 
     var body: some View {
         HStack(spacing: 10) {
@@ -443,9 +449,11 @@ private struct RuleRow: View {
                 .truncationMode(.middle)
                 .textSelection(.enabled)
             Spacer(minLength: 8)
-            Text(rule.target)
-                .font(.caption)
-                .foregroundStyle(tint)
+            if showsTarget {
+                Text(rule.target)
+                    .font(.caption)
+                    .foregroundStyle(tint)
+            }
         }
         .padding(.vertical, 1)
     }
