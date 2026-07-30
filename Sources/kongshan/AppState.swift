@@ -65,13 +65,16 @@ private final class AppWarningRelay: @unchecked Sendable {
 @MainActor
 @Observable
 final class AppState {
-    /// 入参是上次用过的 mixed 端口，可用就复用（见 `RuntimeSecrets.availableHighPort(preferred:)`）。
-    typealias RuntimeFactory = @Sendable (UInt16?) throws -> RuntimeParameters
+    /// 入参是上次用过的 mixed 端口，可用就复用（见 `RuntimeSecrets.stableHighPort(preferred:)`）。
+    /// 是 `async` 的：首选端口撞占用时要退避重试，不能同步 sleep 卡住主线程。
+    typealias RuntimeFactory = @Sendable (UInt16?) async throws -> RuntimeParameters
     typealias HealthVerifier = @Sendable (ClashAPIClient) async throws -> Void
     typealias ClashClientFactory = @Sendable (URL, String) -> ClashAPIClient
     typealias NowProvider = @Sendable () -> Date
     typealias ExitDiagnosticsProvider = @Sendable (String) async throws -> ExitDiagnosticsReport
     typealias TCPPingProvider = @Sendable (String, Int) async -> DelayResult
+    /// 入参是要排除的地址（TUN 自身），返回探测到的内网 DNS 快照。
+    typealias LANResolverProbing = @Sendable (Set<String>) async -> LANResolverSnapshot
 
     enum Status: Equatable {
         case off
@@ -269,6 +272,18 @@ final class AppState {
     /// 上一次记录的物理网络指纹，用于判断"网络是否真的换了"（而不是信号抖动）。
     @ObservationIgnored private var lastNetworkSignature: String?
     @ObservationIgnored private var wakeObserver: NSObjectProtocol?
+    @ObservationIgnored private var occlusionObserver: NSObjectProtocol?
+    /// 窗口内容是否真的在屏幕上。
+    ///
+    /// SwiftUI 的 onAppear/onDisappear 只反映"页面还在导航栈里"：App 被切到后台、
+    /// 窗口被完全遮挡、最小化，全都不会触发。而 `@Observable` 的写入**不做等值判断**，
+    /// 每秒往仪表盘/连接列表写一次就失效整棵视图图，AppKit 照样跑完整的布局与
+    /// CoreAnimation 提交——实机出现过后台空闲烧 50% CPU 持续 178 秒
+    /// （栈里 96 层 `_layoutSubtreeWithOldSize`，业务帧一个都没有）。
+    ///
+    /// 只挡"没人看的视图状态"，不挡数据流本身：托盘速率在菜单栏始终可见，
+    /// 连接速率跟踪也要连续采样才算得准，两者都不受此标志影响。
+    @ObservationIgnored private var windowContentIsVisible = true
     /// 是否监听系统事件（网络路径、睡眠唤醒）。测试夹具以 automaticallyInitialize=false
     /// 构建，不该有后台监听扰动断言的命令序列，因此跟随该标志。
     @ObservationIgnored private let monitorsSystemEvents: Bool
@@ -287,6 +302,9 @@ final class AppState {
     @ObservationIgnored private let loginItemManager: any LoginItemManaging
     @ObservationIgnored private var clashAPIClient: ClashAPIClient?
     @ObservationIgnored private var runtime: RuntimeParameters?
+    /// TUN 接管系统 DNS 之前探测到的内网 DNS 与搜索域。见 `LANResolverSnapshot`。
+    /// 接管期间探测不到，所以要在内存里留住上一次的结果。
+    @ObservationIgnored private(set) var lanResolverSnapshot: LANResolverSnapshot = .empty
     /// 上次实际用过的 mixed 端口，落盘复用。系统代理的地址会被 Chromium 系客户端缓存，
     /// 每次启动换端口会让它们打死端口、反复「正在重新连接」。nil 表示还没分配过。
     @ObservationIgnored private var preferredMixedPort: UInt16?
@@ -312,6 +330,7 @@ final class AppState {
 
     /// 特权助手客户端（零弹窗 TUN）。助手不可达时回退 `privilegedLauncher`（osascript）。
     @ObservationIgnored private let helperClient: PrivilegedHelperClient
+    @ObservationIgnored private let lanResolverProbe: LANResolverProbing
     /// 一次 TUN 生命周期固定使用同一后端，避免 helper 状态变化后 stop/reload 操作错进程。
     @ObservationIgnored private var activeTUNBackend: TUNBackend?
     /// 助手安装状态（UI 展示 + 决定是否走 helper 路径）。
@@ -337,6 +356,7 @@ final class AppState {
         clashClientFactory: ClashClientFactory? = nil,
         exitDiagnosticsProvider: ExitDiagnosticsProvider? = nil,
         tcpPingProvider: TCPPingProvider? = nil,
+        lanResolverProbe: LANResolverProbing? = nil,
         now: @escaping NowProvider = Date.init,
         automaticallyInitialize: Bool = true
     ) {
@@ -364,6 +384,16 @@ final class AppState {
             logErrorHandler: logWarningRelay.send
         )
         self.helperClient = PrivilegedHelperClient(binaryURL: binaryURL)
+        // 探测要跑 `scutil --dns` 和 `dig`，是**读真实宿主网络**的操作。
+        // 沿用本项目既有约定（`automaticallyInitialize == false` 的测试夹具不碰真实系统）：
+        // 夹具默认拿到空探测器。否则单测会读到开发机所在网络的内网 DNS 与域名，
+        // 悄悄污染绕过列表断言——真机上这条链路一切正常，CI 却在别人机器上飘。
+        // 想验证探测本身的测试自行注入。
+        let liveProbe: LANResolverProbing = { excluded in
+            await LANResolver.probe(excluding: excluded)
+        }
+        let inertProbe: LANResolverProbing = { _ in .empty }
+        self.lanResolverProbe = lanResolverProbe ?? (automaticallyInitialize ? liveProbe : inertProbe)
         self.runtimeFactory = runtimeFactory ?? Self.makeRuntimeParameters
         self.healthVerifier = healthVerifier ?? Self.waitUntilHealthy
         self.clashClientFactory = clashClientFactory ?? { controller, secret in
@@ -395,6 +425,16 @@ final class AppState {
             ) { [weak self] _ in
                 Task { @MainActor [weak self] in
                     self?.handleDidWake()
+                }
+            }
+            // 窗口被遮挡/App 进后台时停掉"没人看的"视图状态刷新，见 windowContentIsVisible。
+            occlusionObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.didChangeOcclusionStateNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.windowContentIsVisible = NSApplication.shared.occlusionState.contains(.visible)
                 }
             }
         }
@@ -543,9 +583,15 @@ final class AppState {
         do {
             let prepared = try await ruleSetService.prepare(includeAds: routingSettings.blockAds, mirror: ruleSetSettings.mirror, allowsNetwork: ruleSetSettings.autoUpdate)
             appendWarnings(prepared.warnings)
-            let runtime = try runtimeFactory(preferredMixedPort)
+            let runtime = try await runtimeFactory(preferredMixedPort)
             // 端口只在首次分配或旧端口被占时才变；变了立刻落盘，否则下次启动又是新端口。
             if preferredMixedPort != runtime.mixedPort {
+                // 退避重试都没等到首选端口才会走到这里（见 `RuntimeSecrets.stableHighPort`）。
+                // 端口一变系统代理设置也跟着变，缓存了旧端口的客户端会重连一次——
+                // 不说一声用户只会看到"某个 App 又开始转圈"，无从判断原因。
+                if let previous = preferredMixedPort {
+                    appendWarning("本地代理端口 \(previous) 被占用，已改用 \(runtime.mixedPort)；缓存了旧端口的客户端可能需要重连一次")
+                }
                 preferredMixedPort = runtime.mixedPort
                 try? await persistSettings()
             }
@@ -589,7 +635,7 @@ final class AppState {
             if usesSystemProxy {
                 try await systemProxyManager.enable(
                     port: Int(runtime.mixedPort),
-                    bypassDomains: routingSettings.systemProxyBypassEntries
+                    bypassDomains: bypassEntries(for: routingSettings)
                 )
             }
             if usesTun {
@@ -1351,7 +1397,10 @@ final class AppState {
                 // self 没了说明 App 已释放：直接结束循环。留着会变成没人能取消的空转任务。
                 guard let self else { return }
                 guard let client = self.clashAPIClient, self.status == .on else {
-                    self.connections = []   // 未运行/已停止时清空，避免残留旧连接列表
+                    // 未运行/已停止时清空，避免残留旧连接列表。已经是空的就别再赋值——
+                    // `@Observable` 不做等值判断，无条件写会让这条 1.5 秒的空转循环
+                    // 变成每 1.5 秒一次全量视图失效。
+                    if !self.connections.isEmpty { self.connections = [] }
                     try? await Task.sleep(for: .seconds(1.5))
                     continue
                 }
@@ -1359,9 +1408,12 @@ final class AppState {
                     let stream = await client.connectionDetailsStream()
                     for try await details in stream {
                         guard !Task.isCancelled else { break }
-                        self.connections = self.connectionRateTracker
-                            .update(details, at: self.now())
+                        // 速率跟踪必须每一帧都喂，否则速率算不准；排序和赋值可以省。
+                        let tracked = self.connectionRateTracker.update(details, at: self.now())
+                        guard self.windowContentIsVisible else { continue }
+                        let sorted = tracked
                             .sorted { ($0.download + $0.upload) > ($1.download + $1.upload) }
+                        if self.connections != sorted { self.connections = sorted }
                     }
                 } catch {
                     // 流断开（内核重启 / 网络抖动）：等一会再重订。
@@ -1645,8 +1697,8 @@ final class AppState {
             if activeModes.contains(.systemProxy) {
                 do {
                     try await systemProxyManager.updateBypassDomains(
-                        to: settings.systemProxyBypassEntries,
-                        rollbackTo: oldSettings.systemProxyBypassEntries
+                        to: bypassEntries(for: settings),
+                        rollbackTo: bypassEntries(for: oldSettings)
                     )
                 } catch {
                     await restoreOldSystemConfiguration(
@@ -2384,8 +2436,8 @@ final class AppState {
                 let stream = await client.connectionStream()
                 for try await snapshot in stream {
                     guard !Task.isCancelled else { return }
-                    self?.activeConnectionCount = snapshot.connectionCount
-                    self?.coreMemory = snapshot.memory
+                    // 同样的等值判断：连接数和内存占用在空闲时经常一秒都不变。
+                    self?.receiveConnectionSnapshot(snapshot)
                 }
                 if !Task.isCancelled {
                     self?.dashboardStreamEnded("连接推送已断开")
@@ -2474,10 +2526,23 @@ final class AppState {
         }
     }
 
+    private func receiveConnectionSnapshot(_ snapshot: ConnectionSnapshot) {
+        if activeConnectionCount != snapshot.connectionCount {
+            activeConnectionCount = snapshot.connectionCount
+        }
+        if coreMemory != snapshot.memory { coreMemory = snapshot.memory }
+    }
+
     private func receiveTraffic(_ sample: TrafficSample) {
         dashboardRetryDelay = 2
-        uploadRate = sample.up
-        downloadRate = sample.down
+        // `@Observable` 赋同样的值也会通知观察者 → 失效整棵视图图。空闲时速率长时间是 0，
+        // 无条件写就是每秒一次纯白工的全量重排。等值判断在这里几乎总是命中。
+        if uploadRate != sample.up { uploadRate = sample.up }
+        if downloadRate != sample.down { downloadRate = sample.down }
+        // trafficHistory 只有仪表盘的折线图在读，且每个点的时间戳都不同、等值判断救不了。
+        // 托盘速率订阅的是同一条流但根本不看历史 → 仪表盘不在屏幕上时继续 append，
+        // 等于每秒白白失效一次视图图。代价是重开仪表盘时折线从空开始画（有占位态）。
+        guard windowContentIsVisible, dashboardMonitorConsumers.contains(.dashboard) else { return }
         trafficHistory.append(TrafficPoint(
             timestamp: now(),
             upload: sample.up,
@@ -2530,6 +2595,41 @@ final class AppState {
         trafficHistory.removeAll(keepingCapacity: false)
     }
 
+    /// 系统代理绕过表：在用户配置之外补上探测到的内网域名。
+    ///
+    /// TUN 模式靠 `dns-lan` + 直连路由解决内网访问；**系统代理模式必须靠绕过表**——
+    /// 系统代理下 DNS 归 OS 管，内核只从 CONNECT 里拿到域名，若不绕过就会拿这个内网域名
+    /// 去问 `dns-remote`（经代理的公共 DoH），公共 DNS 当然不知道你的内网主机。
+    private func bypassEntries(for settings: RoutingSettings) -> [String] {
+        let lan = LANResolver.effective(settings: tunSettings, detected: lanResolverSnapshot)
+        guard lan.isUsable else { return settings.systemProxyBypassEntries }
+        var entries = settings.systemProxyBypassEntries
+        for suffix in lan.searchDomains {
+            // 同时给通配和裸后缀：macOS 的 `*.corp.com` 不匹配 `corp.com` 本身。
+            for entry in ["*.\(suffix)", suffix] where !entries.contains(entry) {
+                entries.append(entry)
+            }
+        }
+        return entries
+    }
+
+    /// 探测内网 DNS。只在能读到有效结果时才覆盖已有快照——TUN 接管期间读到的
+    /// 只有内核自己的地址（已被 excluding 排除），此时保留旧值而不是清空。
+    private func refreshLANResolverIfPossible(tunSettings: TunSettings) async {
+        // 关掉功能时**不清快照**：快照是探测到的原始事实，用不用由
+        // `LANResolver.effective` 按开关决定。清掉会造成一个隐蔽故障——
+        // TUN 运行中关掉再打开，重新生成配置时 DNS 已被接管、探不到东西，
+        // 于是快照永久为空，功能看着开着却不起作用。
+        guard tunSettings.lanDNSEnabled else { return }
+        // TUN 自身地址落在 172.16.0.0/12 里，不排掉会把内核当成"内网 DNS"而自指。
+        let excluded = Set(tunSettings.addresses.map { address in
+            String(address.split(separator: "/").first ?? "")
+        } + [tunSettings.dnsServerAddress])
+        let probed = await lanResolverProbe(excluded)
+        guard probed.isUsable else { return }
+        lanResolverSnapshot = probed
+    }
+
     private func generateConfiguration(
         runtime: RuntimeParameters,
         ruleSets: PreparedRuleSets,
@@ -2549,6 +2649,12 @@ final class AppState {
         let effectiveTun = enabledModes.contains(.tun) && !Self.physicalNetworkHasGlobalIPv6()
             ? tunSettings.stripIPv6()
             : tunSettings
+        // 内网 DNS 必须在**接管系统 DNS 之前**探测：TUN 一接管，系统 DNS 就只剩内核
+        // 自己的地址，再探什么都读不到。start() 里配置生成先于 systemDNSManager.enable，
+        // 所以这里读到的还是 DHCP 下发的真实内网 DNS。
+        // 重启内核时（崩溃自愈 / 改规则）DNS 已被接管，此时探测拿不到东西——
+        // 保留上一次的结果，否则一次重启就把内网分流悄悄弄丢。
+        await refreshLANResolverIfPossible(tunSettings: effectiveTun)
         let input = ConfigInput(
             nodes: activeConfigNodes,
             selectedNodeID: selectedNodeID,
@@ -2563,7 +2669,8 @@ final class AppState {
             outboundMode: outboundMode,
             tunSettings: effectiveTun,
             dnsSettings: dnsSettings,
-            groupDefaults: resolvedGroupDefaults()
+            groupDefaults: resolvedGroupDefaults(),
+            lanResolver: lanResolverSnapshot
         )
         // 生成 + JSON 编码大配置（几百出站、上千规则）很吃 CPU，放后台线程，别卡住主线程 UI。
         let result = try await Task.detached { try ConfigGenerator.generateWithWarnings(input) }.value
@@ -2598,8 +2705,8 @@ final class AppState {
     /// mixed 端口跨启动保持稳定（缓存了代理地址的客户端不会被换端口甩掉）；
     /// clash_api 端口与 secret 仍然每次随机——它们只在进程内使用，没有外部缓存问题，
     /// 而 secret 随机是真正的安全边界。
-    nonisolated private static func makeRuntimeParameters(preferredMixedPort: UInt16?) throws -> RuntimeParameters {
-        let mixedPort = try RuntimeSecrets.availableHighPort(preferred: preferredMixedPort)
+    nonisolated private static func makeRuntimeParameters(preferredMixedPort: UInt16?) async throws -> RuntimeParameters {
+        let mixedPort = try await RuntimeSecrets.stableHighPort(preferred: preferredMixedPort)
         var clashPort = try RuntimeSecrets.availableHighPort()
         while clashPort == mixedPort {
             clashPort = try RuntimeSecrets.availableHighPort()
@@ -2818,7 +2925,7 @@ final class AppState {
             do {
                 try await systemProxyManager.reassert(
                     port: Int(runtime.mixedPort),
-                    bypassDomains: routingSettings.systemProxyBypassEntries
+                    bypassDomains: bypassEntries(for: routingSettings)
                 )
             } catch {
                 appendWarning("网络变化后补挂系统代理失败：\(error.localizedDescription)")

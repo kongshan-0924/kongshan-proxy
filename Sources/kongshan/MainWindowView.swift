@@ -570,6 +570,7 @@ private struct SettingsView: View {
     @State private var subscriptionUpdateDraft = SubscriptionUpdateSettings.defaults
     @State private var testURLDraft = ""
     @State private var routingDraft = RoutingSettings.defaults
+    @State private var tunDraft = TunSettings.defaults
     @State private var tab: SettingsTab = .general
     @State private var backupDocument: BackupDocument?
     @State private var showsBackupExporter = false
@@ -612,6 +613,46 @@ private struct SettingsView: View {
                     Text("TUN 运行期间系统 DNS 会临时指向 \(state.tunSettings.dnsServerAddress) 以防解析绕过 TUN（macOS 特性），关闭或退出时自动还原。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                }
+
+                Section("内网 DNS 分流") {
+                    Toggle("把内网域名交给内网 DNS 解析", isOn: lanDNSEnabledBinding)
+                        .disabled(state.isBusy || !state.isReady)
+
+                    LabeledContent("自动探测到的 DNS", value: detectedLANServersText)
+                    LabeledContent("自动探测到的域名", value: detectedLANDomainsText)
+
+                    TextField("内网 DNS 服务器（留空＝用自动探测）", text: $tunDraft.lanDNSServer)
+                        .disabled(!state.tunSettings.lanDNSEnabled || state.isBusy || !state.isReady)
+
+                    Text("关掉它，内网域名会落到 Fake-IP 拿到一个 240.x 假地址，然后整段被路由进代理出口——表现就是内网设备一直加载。探测在接管系统 DNS 之前进行；网络不下发搜索域时，用下面的列表手填内网域名后缀。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                BypassListSection(
+                    title: "内网域名后缀",
+                    placeholder: "例如 corp.example.com 或 *.corp.example.com",
+                    addTitle: "添加内网域名",
+                    deleteHelp: "删除内网域名",
+                    identity: "lan-domain",
+                    values: $tunDraft.lanDomainSuffixes
+                )
+                Section {
+                    HStack {
+                        if tunDraft != state.tunSettings {
+                            StatusBadge(text: "有未应用的修改", tint: .orange)
+                        }
+                        Spacer()
+                        // 必须显式应用：改一个字符就重启内核会掐断所有连接。
+                        Button("应用内网 DNS 设置") {
+                            Task { await state.applyTunSettings(tunDraft) }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(state.isBusy || tunDraft == state.tunSettings)
+                    }
+                } footer: {
+                    Text("应用会重启内核（掐断当前连接），所以改完一次性应用。开关立即生效，无需按此按钮。")
                 }
 
                 // 手动绕过列表挪到这里：可上下滚动，逐条增删域名 / IP。
@@ -975,9 +1016,12 @@ private struct SettingsView: View {
             subscriptionUpdateDraft = state.subscriptionUpdateSettings
             testURLDraft = state.testURLString
             routingDraft = state.routingSettings
+            tunDraft = state.tunSettings
         }
         // 绕过设置在别处应用（如恢复默认）后，草稿同步跟上。
         .onChange(of: state.routingSettings) { _, new in routingDraft = new }
+        // 开关是立即生效的，草稿要跟上，否则"有未应用的修改"会一直挂着。
+        .onChange(of: state.tunSettings) { _, new in tunDraft = new }
         .fileExporter(
             isPresented: $showsBackupExporter,
             document: backupDocument,
@@ -1094,6 +1138,27 @@ private struct SettingsView: View {
     /// TUN 是否正在接管。安装/卸载助手会 bootout helper，此时做会留下孤儿 root 内核。
     private var tunActive: Bool {
         state.activeModes.contains(.tun)
+    }
+
+    private var detectedLANServersText: String {
+        let servers = state.lanResolverSnapshot.servers
+        return servers.isEmpty ? "未探测到（接管系统 DNS 前读取）" : servers.joined(separator: "、")
+    }
+
+    private var detectedLANDomainsText: String {
+        let domains = state.lanResolverSnapshot.searchDomains
+        return domains.isEmpty ? "未探测到（可在下方手填）" : domains.joined(separator: "、")
+    }
+
+    private var lanDNSEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { state.tunSettings.lanDNSEnabled },
+            set: { enabled in
+                var settings = state.tunSettings
+                settings.lanDNSEnabled = enabled
+                Task { await state.applyTunSettings(settings) }
+            }
+        )
     }
 
     private var strictRouteBinding: Binding<Bool> {

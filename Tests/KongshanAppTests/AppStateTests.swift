@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import Observation
 import ServiceManagement
 import XCTest
 @testable import KongshanCore
@@ -1375,7 +1376,8 @@ final class AppStateTests: XCTestCase {
         failOnceFor: [String]? = nil,
         healthFailures: Set<Int> = [],
         processExitMonitor: (any ProcessExitMonitoring)? = nil,
-        notificationSender: (any NotificationSending)? = nil
+        notificationSender: (any NotificationSending)? = nil,
+        lanResolverProbe: AppState.LANResolverProbing? = nil
     ) async throws -> RunningFixture {
         let root = temporaryDirectory()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1405,6 +1407,7 @@ final class AppStateTests: XCTestCase {
             notificationSender: notificationSender,
             runtimeFactory: { _ in runtime },
             healthVerifier: health.verify(client:),
+            lanResolverProbe: lanResolverProbe,
             automaticallyInitialize: false
         )
         state.nodes = [ProxyNode(
@@ -1641,6 +1644,105 @@ final class AppStateTests: XCTestCase {
 
         XCTAssertEqual(recorder.values.count, 2)
         XCTAssertEqual(recorder.values[1], runtime.mixedPort)
+    }
+
+    /// 端口真的换掉时必须说一声。换端口意味着系统代理设置也跟着变，缓存了旧端口的客户端
+    /// 会重连一次——不给提示，用户只看到"某个 App 又开始转圈"，完全无从判断原因。
+    /// 首次分配（原本就没有历史端口）不算"换"，不该冒出这条提示。
+    func testWarnsWhenPreferredMixedPortHasToChange() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        try await storage.prepare()
+
+        let first = try runtimeParameters()
+        var second = try runtimeParameters()
+        while second.mixedPort == first.mixedPort { second = try runtimeParameters() }
+        let handout = RuntimeHandout(values: [first, second])
+        let privileged = FakePrivilegedLauncher(root: root)
+
+        func makeState() -> AppState {
+            AppState(
+                storage: storage,
+                systemProxyManager: SystemProxyManager(storage: storage) { _, _ in
+                    ProcessResult(exitCode: 0, stdout: "", stderr: "")
+                },
+                singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+                privilegedLauncher: privileged,
+                runtimeFactory: { _ in handout.next() },
+                automaticallyInitialize: false
+            )
+        }
+
+        func prepare(_ state: AppState) {
+            state.nodes = [ProxyNode(
+                name: "local-test",
+                protocolType: .shadowsocks,
+                server: "127.0.0.1",
+                port: 9,
+                password: "placeholder",
+                method: "aes-128-gcm"
+            )]
+            state.selectedNodeID = state.nodes[0].id
+            state.activeConfigID = AppState.localConfigID
+        }
+
+        let initial = makeState()
+        await initial.initialize()
+        prepare(initial)
+        await initial.startSystemProxy()
+        XCTAssertFalse(
+            initial.warnings.contains { $0.contains("被占用") },
+            "首次分配端口不算「换端口」，不该提示"
+        )
+
+        let relaunched = makeState()
+        await relaunched.initialize()
+        prepare(relaunched)
+        await relaunched.startSystemProxy()
+
+        let notice = try XCTUnwrap(
+            relaunched.warnings.first { $0.contains("被占用") },
+            "端口被迫改变时必须给出可诊断的提示"
+        )
+        XCTAssertTrue(notice.contains("\(first.mixedPort)"))
+        XCTAssertTrue(notice.contains("\(second.mixedPort)"))
+    }
+
+    /// `@Observable` 的写入不做等值判断：赋一模一样的值也会通知观察者、失效整棵视图图。
+    /// 连接页在代理未运行时是一条 1.5 秒的空转循环，原实现每轮都无条件 `connections = []`，
+    /// 于是空闲状态下每 1.5 秒白白重排一整个窗口。实机代价：后台空闲烧 50% CPU 持续
+    /// 178 秒，栈里 96 层 `_layoutSubtreeWithOldSize`，业务帧一个都没有。
+    func testIdleConnectionsMonitoringDoesNotNotifyObservers() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        try await storage.prepare()
+        let state = AppState(
+            storage: storage,
+            systemProxyManager: SystemProxyManager(storage: storage) { _, _ in
+                ProcessResult(exitCode: 0, stdout: "", stderr: "")
+            },
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            privilegedLauncher: FakePrivilegedLauncher(root: root),
+            automaticallyInitialize: false
+        )
+        await state.initialize()
+        XCTAssertEqual(state.status, .off)
+
+        let invalidated = expectation(description: "connections 被重新赋值")
+        invalidated.isInverted = true
+        withObservationTracking {
+            _ = state.connections
+        } onChange: {
+            invalidated.fulfill()
+        }
+
+        state.startConnectionsMonitoring()
+        defer { state.stopConnectionsMonitoring() }
+        // 空转循环是 1.5 秒一轮，等够两轮。
+        await fulfillment(of: [invalidated], timeout: 3.4)
+        XCTAssertTrue(state.connections.isEmpty)
     }
 
     func testOldSettingsWithoutMixedPortStillLoad() async throws {
@@ -2180,6 +2282,27 @@ extension AppStateTests {
 }
 
 /// 记录 runtimeFactory 每次拿到的 preferred 端口。工厂闭包是 @Sendable，故自带锁。
+/// 按调用顺序发放 `RuntimeParameters`，发完后一直给最后一份。
+/// 用来模拟"上次的端口这次拿不到了"。工厂闭包是 @Sendable，故自带锁。
+private final class RuntimeHandout: @unchecked Sendable {
+    private let lock = NSLock()
+    private let values: [RuntimeParameters]
+    private var index = 0
+
+    init(values: [RuntimeParameters]) {
+        precondition(!values.isEmpty)
+        self.values = values
+    }
+
+    func next() -> RuntimeParameters {
+        lock.withLock {
+            let value = values[min(index, values.count - 1)]
+            index += 1
+            return value
+        }
+    }
+}
+
 private final class PreferredPortRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var storage: [UInt16?] = []
@@ -2190,5 +2313,39 @@ private final class PreferredPortRecorder: @unchecked Sendable {
 
     func record(_ port: UInt16?) {
         lock.withLock { storage.append(port) }
+    }
+}
+
+// MARK: - 内网 DNS 分流在 AppState 层的贯通
+
+/// 配置生成层已有测试保证 `dns-lan` 的存在与规则顺序；这里补的是 AppState 这一环：
+/// 探测结果要真的进到快照，并且**系统代理的绕过表也要带上内网域名**——
+/// 系统代理模式下 DNS 归 OS 管，内核只从 CONNECT 里拿到域名，不绕过就会拿内网域名
+/// 去问经代理的公共 DoH。
+extension AppStateTests {
+    func testLANProbeFeedsSnapshotAndSystemProxyBypass() async throws {
+        let fixture = try await makeRunningFixture(
+            lanResolverProbe: { excluded in
+                // TUN 自身地址必须已被排除后再交给探测器。
+                XCTAssertTrue(excluded.contains("172.19.0.1"))
+                return LANResolverSnapshot(
+                    servers: ["172.16.16.7"],
+                    searchDomains: ["corp.example.com"]
+                )
+            }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        XCTAssertEqual(fixture.state.lanResolverSnapshot.servers, ["172.16.16.7"])
+        XCTAssertEqual(fixture.state.lanResolverSnapshot.searchDomains, ["corp.example.com"])
+
+        let recorded = await fixture.network.arguments
+        let bypass = try XCTUnwrap(recorded.first { $0.first == "-setproxybypassdomains" })
+        XCTAssertTrue(bypass.contains("*.corp.example.com"), "绕过表缺通配形式：\(bypass)")
+        XCTAssertTrue(bypass.contains("corp.example.com"), "macOS 的 *.x 不匹配 x 本身，裸后缀也要给：\(bypass)")
+        // 用户原有的绕过项不能被顶掉。
+        XCTAssertTrue(bypass.contains("127.0.0.1"))
+
+        await fixture.state.stop()
     }
 }

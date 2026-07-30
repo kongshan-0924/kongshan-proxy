@@ -70,6 +70,7 @@ TUN 每次启停都需要 root 授权。若想省去反复输密码，可在「�
 ## 权限与恢复
 
 - 系统代理：开启前保存每个活动网络服务的原始代理快照；正常关闭时精确恢复。App 异常结束后重新打开，会先尝试恢复遗留快照。
+- 内网访问：TUN 模式下系统 DNS 被指向 TUN 自身，内网域名会落到 Fake-IP 拿一个 `240.x` 假地址、再被整段路由进代理出口——表现就是内网设备"一直加载"。因此启动时（**接管系统 DNS 之前**）会探测内网 DNS 与内网域名，把内网域名交给内网 DNS 解析并直连；系统代理模式下同时把内网域名加进 bypass。域名来源依次是：DHCP 下发的搜索域 → 没有时，用内网 DNS 自身的 PTR 反解推断（`AD1.corp.example.com` → `corp.example.com`，且要求该域在内网 DNS 上解析到私有地址，防误判）。可在「设置 → 隧道 → 内网 DNS 分流」关闭或手动指定。
 - 节点域名解析：`route.default_domain_resolver` 固定走**无连接的 UDP**（`dns-bootstrap`），不用 DoH。DoH 是一条长连接，被路由器 NAT 悄悄回收后内核察觉不到，后续查询会写进死 socket 卡满 10 秒；而这条解析链负责解析**出站节点自己的域名**，它一卡整个代理就停摆，不只是某个网站打不开。国内网站的解析仍走 DoH，隐私与抗投毒不受影响。
 - 本地端口：mixed inbound 的端口首次分配后写入 `settings.json`，之后**跨启动复用**，只有被别的进程占用时才另选。Chromium 内核的客户端（ChatGPT 桌面版内嵌的 codex、Chrome）会缓存解析到的系统代理地址，端口每次启动都变会让它们持续去打已经关掉的旧端口，表现为反复「正在重新连接」、重试若干次才恢复。该端口只监听 `127.0.0.1`，随机化在这里从来不是安全边界（它还会通过系统代理设置公开给本机每个 App），固定下来不降低安全性。clash_api 端口与 secret 仍每次随机。
 - TUN：配置以只读文件描述符传给经授权启动的 root sing-box（osascript 兜底走 0600 FIFO；免密码助手走 Unix socket 的 SCM_RIGHTS 只读管道），不落盘；磁盘恢复记录只含 PID、内核路径和启动时间。重启 App 时会核对进程身份，再执行恢复。
@@ -98,6 +99,7 @@ Clash API 的随机端口与 secret 只保存在内存，不写入设置、日�
 - TUN 模式固定使用 gVisor 栈与 Fake-IP（见「TUN 的工作方式」）；strict_route 可能影响局域网、虚拟机、容器或其他 VPN。
 - **所在网络若有透明代理，任何代理客户端的节点都会连不上**（表现为 Reality 校验失败、Hysteria2 无网络活动）。判据与排查步骤见 `docs/design/tun-real-machine-debug.md`。
 - 同时运行多个 TUN 客户端（如本应用与 Stash/Surge）会互抢默认路由，务必只开其中一个。
+- 内网 DNS 只在启动时探测一次（接管后 `scutil --dns` 只剩内核自己的地址，探不到）。**TUN 运行中换网络**（如从公司到家）不会重新探测，此时旧的内网域名会被送去已不可达的内网 DNS；关掉再开即可重新探测。
 - ad-hoc 构建下的登录项批准、通知权限与 TUN 授权行为受 macOS 系统策略影响，需要在最终安装路径人工确认。
 - 自动测试不能代替真实机场订阅、节点可用性、Google/国内站点、出口 IP、DNS leak、强杀 App 恢复、24 小时 Instruments Leaks/Allocations 与 Activity Monitor Energy Impact 验收。
 

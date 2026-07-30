@@ -54,7 +54,41 @@ public enum RuntimeSecrets {
            bindLoopback(port: preferred) != nil {
             return preferred
         }
+        return try kernelChosenHighPort()
+    }
 
+    /// 首选端口撞占用时的重试退避。总预算 ~1.5 秒，且只有真撞上才付这个代价。
+    public static let defaultPreferredPortRetryDelays: [Duration] = [
+        .milliseconds(100),
+        .milliseconds(200),
+        .milliseconds(400),
+        .milliseconds(800),
+    ]
+
+    /// 和 `availableHighPort(preferred:)` 同样的语义，但首选端口撞占用时**带退避重试**。
+    /// 只给需要跨启动稳定的 mixed 端口用；clash_api 端口每次随机，没有复用需求。
+    ///
+    /// 为什么必须重试：端口池 `49152...65535` 就是 macOS 的临时端口范围本身，首选端口
+    /// 随时可能被别的进程的临时连接、或上一个内核尚未回收完的 pcb 短暂占住。只探一次
+    /// 就换端口的话，一次**瞬时**冲突会**永久**改写落盘端口——2026-07-30 实机就这样从
+    /// 49609 掉到 65408，而事后 49609 是空闲的。端口一变系统代理设置跟着变，
+    /// 缓存了代理地址的 Chromium 系客户端又开始反复「正在重新连接」，
+    /// 正是复用首选端口本来要根治的症状。所以这里宁可多等一秒也别换端口。
+    public static func stableHighPort(
+        preferred: UInt16?,
+        retryDelays: [Duration] = defaultPreferredPortRetryDelays
+    ) async throws -> UInt16 {
+        if let preferred, HelperConstants.loopbackHighPorts.contains(Int(preferred)) {
+            if bindLoopback(port: preferred) != nil { return preferred }
+            for delay in retryDelays {
+                try await Task.sleep(for: delay)
+                if bindLoopback(port: preferred) != nil { return preferred }
+            }
+        }
+        return try kernelChosenHighPort()
+    }
+
+    private static func kernelChosenHighPort() throws -> UInt16 {
         for _ in 0..<16 {
             // 范围与 helper 白名单同源（HelperConstants）：helper 只放行这个区间的
             // mixed/clash_api 端口，两处各自硬编码会漂移成"测试全绿、真机被拒"。

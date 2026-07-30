@@ -1,6 +1,130 @@
 # 项目交接
 
-## 2026-07-28 v0.1.45 固定本地代理端口（当前版本，已真机验收）
+## 2026-07-30 0.1.51 内网 DNS 分流（当前版本）
+
+### 解决的问题
+
+TUN 模式下用 Windows App 连内网设备"一直在加载"。
+
+**根因不是劫持，是 Fake-IP 把内网域名吞了。** 内网 AD 域是个 `.com`，既不命中
+`geosite-cn`，也就必然掉进 `dns-fakeip`；fakeip 不校验域名是否存在，任何名字都给
+`240.0.0.0/4` 的假 IP，而假 IP 整段被路由进代理出口 → 流量被发去国外节点连办公室的机器。
+
+**路由层完全没问题**（这点先排除了）：`route_exclude_address` 生效得很干净，
+`route get 172.16.16.7` 走 en0，TUN 开着时 TCP 3389/389/135/445/53 实测全通。
+
+### 修法
+
+- `dns.servers` 加 `{tag: dns-lan, type: udp, server: <内网DNS>, port: 53}`，**无 detour**。
+- `dns.rules` **首位**插内网后缀规则——必须排在 geosite-cn 与 fakeip 之前。
+- 路由把内网后缀并进直连规则（内网域名可能解析到 DMZ 公网 IP，按 IP 判定会落空）。
+- 系统代理模式另加 bypass（该模式 DNS 归 OS 管，内核只从 CONNECT 拿域名）。
+- 探测**必须在接管系统 DNS 之前**：接管后 `scutil --dns` 只剩内核自己的地址。
+
+### 关键难点：企业网不下发搜索域
+
+真机 `scutil --dns` 只有 nameserver、**没有 search domain**。纯靠搜索域探测一个域名都
+找不到。加了 **PTR 推断**，用 AD 的固有结构：`PTR(内网DNS)` → `AD1.<AD域>` → 候选域，
+再要求**该域在同一台服务器上解析到私有 IP** 才接受。第二步是防误判的关键
+（`114.114.114.114` → `public1.114dns.com`，但 `114dns.com` 解析出公网地址会被拒）。
+
+### 真机验证（系统代理模式，零配置）
+
+- `dns-lan = {172.16.16.7:53, udp}`；`dns.rules[0] = {domain_suffix: ["<AD域>"], server: "dns-lan"}`
+- 系统代理绕过表三个服务都含 `*.<AD域>` 与 `<AD域>`
+- `settings.json` 里手动项全为空 ⇒ 域名**完全来自 PTR 推断**
+- 全量 344 通过 / 1 跳过 / 0 失败，0 编译警告
+
+### 待用户验证
+
+**TUN 模式需要点一次并输密码**（App 重建 cdhash 变，助手要重装一次）。
+验完看 `dig @172.19.0.1 <内网主机>` 应返回真实内网 IP 而不是 240.x。
+
+### 已知边界
+
+内网 DNS 只在启动时探测。**TUN 运行中换网络**不会重新探测，旧内网域名会被送去
+已不可达的内网 DNS；关掉再开即可。
+
+### 顺带确认
+
+助手连续存活 6 小时以上，0.1.46 的 SIGTRAP 修复稳住了。
+
+## 2026-07-30 11:05 运行复查：两个待修问题（最新）
+
+App 已连续跑 10h41m，0.1.47 的 DNS 修复未复发（~16 分钟节律彻底消失），
+崩溃报告归零，排除断网窗口后真实失败率 0.67%。**但发现两个新问题，建议在
+推送/发布前一并处理成 0.1.48**（详细证据链见 `docs/progress/SESSION_LOG.md`
+「2026-07-30 11:05」条）。
+
+| # | 问题 | 严重度 | 根因位置 |
+|---|---|---|---|
+| A | 固定 mixed 端口在一次完整重启后从 49609 变成 65408，而 49609 当时空闲 | 中（0.1.45 要治的「正在重新连接」会重现） | `RuntimeSecrets.availableHighPort(preferred:)` 首选端口只探测一次、无重试 |
+| B | 主 App 后台空闲时烧 50% CPU 持续 178 秒（04:43–04:46） | 低（自行结束、无崩溃、10h 内 1 次） | `AppState` 每秒无条件写 `@Observable` 属性 → 全图失效 → 深 96 层 AppKit 布局 |
+
+**A 的判定依据**：此前六次启动 mixed 全是 49609、clash-api 是散乱随机端口；
+08:35:24 这次 mixed 65408 / clash-api 65409 **相邻**，是「首选端口绑定失败、
+连续两次内核分配」的指纹。`preferredMixedPort` 不被 `clearRuntimeState()` 清空，
+崩溃自愈路径复用 `currentConfig` 不可能换端口，`config.json` mtime=08:35:24
+证明走的是完整 `start()`。端口池 `49_152...65_535` 就是 macOS 临时端口范围，
+首选端口随时可能被瞬时占用 → **0.1.45 的保证目前只是概率性的**。
+修法：首选端口 3–5 次 × 200–300ms 退避重试；端口真变了给一条 warning。
+
+**B 的判定依据**：`cpu_resource.diag` 热栈无任何业务帧，96 层
+`_layoutSubtreeWithOldSize` 触底在 `ObservationCenter.invalidate` /
+`SystemSegmentedControl._overrideSizeThatFits`；那三分钟连接量反而更低
+（1/3/1/6，邻近 11–15），排除「连接多导致渲染重」。当前后台空闲基线 CPU 4–5.6%，
+与「每秒至少一次全图失效」吻合。修法：`AppState.swift:1354/1362/2479-2480`
+加等值守卫。**178 秒那次的确切触发条件采样不足，未定论。**
+
+## 2026-07-30 0.1.47 DNS 停摆修复（当前版本）
+
+### 仓库状态：本地领先 `origin/main` 两个提交，**未推送、未发 Release**
+
+```
+dac3718 fix(dns): 节点域名解析改走无连接 UDP，根治代理每 ~16 分钟停摆 10 秒   ← 0.1.47
+cc10d39 fix(helper): 助手每 30 秒 SIGTRAP 崩溃——Swift 6 顶层代码的 actor 隔离  ← 0.1.46
+```
+
+GitHub 上最新 Release 仍是 **v0.1.45**。工作区干净，分支 `main`。
+`dist/kongshan-0.1.47.dmg`，`/Applications/kongshan.app` = 0.1.47。
+测试 314 通过 / 1 跳过 / 0 失败，0 编译警告。
+
+### 0.1.46：免密码助手每 30 秒 SIGTRAP 崩溃
+
+`swift-tools-version: 6.0` 下 `main.swift` 顶层代码是 @MainActor 隔离的，
+助手却把 `DispatchSource` 信号处理与 30 秒自愈定时器挂在自建队列上，
+闭包一碰顶层状态就触发执行器断言 → SIGTRAP，**编译期零提示**。
+后果：`checkClientLiveness()`（App 消失时停 root 内核）从未执行过一次；
+SIGTERM 优雅退出路径从未跑到；一个 root 进程每 30 秒被 launchd 拉起。
+一直没被发现是因为 TUN 表面完全正常——内核是独立进程，助手重启后靠
+`adoptOrphanKernel()` 重新认领，用户无感。
+修法是把并发整个去掉：C 信号处理器 + accept 循环内按 `CLOCK_MONOTONIC` 轮询。
+回归测试是源码层守卫（禁 `DispatchSource`/`DispatchQueue`/`setEventHandler`），
+已反向验证注入后会失败。**助手需重装一次修复才生效**（helper 二进制不随 App 更新）。
+
+### 0.1.47：`default_domain_resolver` 走 DoH，长连接被 NAT 回收后整个代理停摆
+
+失败每 ~16 分钟一簇、全部 10.0s `context deadline exceeded`，末尾露出
+`read tcp ...->223.5.5.5:443: operation timed out`。DoH 是 HTTP/2 over TLS 长连接，
+路由器 NAT 悄悄回收后 sing-box 察觉不到，而这条通道正好负责解析**出站节点自己的域名**
+——它一卡，整个代理跟着停摆。修法：`dns-bootstrap`（UDP 53）改为无条件生成，
+`route.default_domain_resolver` 指向它；地址跟随用户配置的国内 DoH，不硬钉阿里。
+
+### 2026-07-30 00:07 实机复核（本次会话实测，非推断）
+
+| 项 | 结果 |
+|---|---|
+| 0.1.47 DNS 修复 | ✅ 修复前 19:49→20:05→20:21→20:33 每 16 分钟一簇；20:48 起 3h19m 内**只剩 1 次**（22:11），周期性消失 |
+| 0.1.46 助手修复 | ✅ 助手 PID 39659 连续存活 **5h14m**（修复前每 30 秒重启）；崩溃报告停在 42 份，最后一份 18:34（修复前） |
+| 0.1.45 端口固定 | ✅ `settings.json` mixedPort = 49609，跨多次重启未变 |
+| 资源 | App RSS 100MB / 内核 43MB，运行 3h23m 无增长 |
+
+残留（已知、可接受）：国内网站解析仍可能撞上陈旧 DoH 连接失败一次，
+影响面已从"整个代理停摆"缩到"个别请求失败、重试即好"。
+另有节点侧偶发 `i/o timeout` / `connection reset by peer`（00:01、00:03），
+属节点或链路问题，与 DNS 修复无关。
+
+## 2026-07-28 v0.1.45 固定本地代理端口（已真机验收）
 
 版本号 0.1.45 = 0.1.44 的同一份代码（`verify_m4.sh` 会重新构建并递增补丁号）。
 

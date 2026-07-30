@@ -2260,3 +2260,270 @@ UDP 每次查询独立收发，天然免疫陈旧连接。安全上可接受：�
 
 助手 PID 39659 **连续存活 1 小时 51 分**（修复前每 30 秒重启一次），
 崩溃报告停在 42 份不再增加。
+
+## 2026-07-30 00:10 — 进度核对 + 交接文档补齐到 0.1.47
+
+- 发现 `HANDOFF.md` / `PROGRESS.md` / `NEXT_STEPS.md` 停留在 0.1.45 视角（Jul 28 23:00 最后修改），
+  而代码已到 0.1.47。下一位接手会漏掉 0.1.46/0.1.47 两个修复，以及"未推送未发布"这个阻塞项。
+  三份已补齐。
+- 实机复核（非推断，均为本次实测）：
+  - **0.1.47 生效**：修复前 19:49→20:05→20:21→20:33 每 ~16 分钟一簇 `deadline exceeded`；
+    带修复的内核 20:48:46 启动后，到 00:07（3h19m）只剩 1 次（22:11），周期性消失。
+  - **0.1.46 生效**：助手 PID 39659 连续存活 5h14m（修复前每 30 秒重启）；
+    `/Library/Logs/DiagnosticReports/` 的 KongshanHelper 报告停在 42 份，最后一份 18:34（修复前）。
+  - **0.1.45 生效**：`settings.json` mixedPort = 49609，跨多次重启未变。
+  - 资源：App RSS 100MB / 内核 43MB，运行 3h23m 无增长。
+- 仓库状态：`main` 干净，领先 `origin/main` 两个提交（cc10d39、dac3718），
+  GitHub 最新 Release 仍是 v0.1.45。`dist/` 只留 0.1.47 DMG。
+- 顺带记录待观察项：节点 179.253.249.94:2087 在 00:01/00:03 出现 `dial i/o timeout`
+  与 `connection reset by peer`，与 DNS 修复无关，属节点或链路侧。
+
+## 2026-07-30 00:25 — 运行情况分析（0.1.47 上线后首次完整复盘）
+
+日志窗口 2026-07-29 16:32 → 2026-07-30 00:20（7h48m），7184 条入站连接，5 次内核启动。
+
+### 三个修复全部实证生效
+
+- **0.1.47（DNS）**：真实失败按分钟聚集后，修复前是教科书式的 ~16 分钟节律
+  （17:09→17:25→17:42→17:54，19:49→20:05→20:21→20:33）；带修复的内核 20:48:46 起，
+  节律**彻底消失**，剩下的 22:11 / 22:29 / 22:36 / 00:01 / 00:03 / 00:20 各自对应系统事件，
+  互相间隔 2/7/85/2/17 分钟，无周期性。
+- **0.1.46（助手）**：助手 PID 39659 连续存活 5h29m；崩溃报告 42 份全部在 7-29，
+  最后一份 18:34（修复前）。socket 存在，目录 `drwx--x--x root:admin` 符合设计。
+- **0.1.45（端口）**：5 次内核启动全部 `tcp server started at 127.0.0.1:49609`，
+  `settings.json` mixedPort 自 20:43:43 未变。
+
+### 失败率
+
+201 条 ERROR 中 132 条是广告拦截（`outbound/block[reject]`，属预期）。
+真实失败 69 条 / 7184 连接 = **0.96%**（前日 0.62%）。多出来的部分几乎全在 22:11 那一簇。
+
+### 22:11 的 17 条失败 = 机器睡眠，非应用问题
+
+错误签名是 `missing default interface` + `network is unreachable` +
+`can't assign requested address`，即**默认路由被拆掉**，与 DNS 停摆的签名
+（清一色 10.0s `context deadline exceeded`）完全不同。
+`pmset -g log` 佐证：22:11:58 有 Wake Requests，22:29:28 / 22:37:22 是 dark wake
+——与日志里 22:29（2 条）、22:36（1 条）的失败精确对应。数秒内自行恢复。
+
+### 当前状态（00:25）
+
+App PID 51271 于 ~00:21 重启（无崩溃报告，属正常退出重开），RSS 111MB / CPU 0.2%；
+内核未运行（重启后未再开代理）；系统代理 `Enabled: No`；无 recovery 文件；无残留内核
+——**退出清理路径工作正常**。
+
+### 一处无害的观察：系统代理残留端口与实际端口不一致
+
+`networksetup -getwebproxy Wi-Fi` 显示 `Port: 50269`，而实际用的是 49609。
+成因：`-setwebproxystate off` 只改状态、不清 server/port 字段，于是下一次
+`enable()` 的快照会把 kongshan 自己的遗留值当成"用户原始设置"记下来，自我延续。
+**当前无害**——`Enabled: No` 时 macOS 忽略 server/port。
+理论风险仅在"快照时 enabled=Yes 且是我们自己的端口"才成立，而 `enable()` 有
+`recoveryPending` 守卫（recovery 文件在就拒绝再次接管），需同时丢失 recovery 文件才可能触发。
+优先级低，记录备查。
+
+## 2026-07-30 11:05 — 运行情况复查，发现两个新问题
+
+窗口：2026-07-30 01:31:45 → 11:03（当前日志），App 已连续运行 10h41m（PID 51271，
+自 00:21:50 起），内核 PID 76467 自 08:35:24 起，助手 PID 74655 自 08:09:18 起。
+
+### 总体健康度
+
+- 入站连接 5679；ERROR 387，其中 206 是广告拦截（`outbound/block[reject]`），
+  真实失败 181 → 3.19%。但 143/181 挤在 07:08–07:46 的一次断网窗口里；
+  **排除断网后 38/5679 = 0.67%**，与 0.1.47 修复后的基线一致。
+- 断网两次：`07:12:25 ERROR network: missing default interface` →
+  `07:44:15 INFO network: updated default interface en0`（32 分钟无默认路由，
+  期间稳定每分钟 2–3 次失败，恢复瞬间 07:44 一次 17 连失败后归零）；
+  第二次约 08:11 → `08:35:24 network: updated default interface en0`。
+  两段都是系统侧网络不可用，非 App 缺陷。
+- **0.1.47 未复发**：10.0s `context deadline exceeded` 分布为 04:01(×4 同一秒簇)、
+  07:11/07:44/07:46(断网)、09:09–09:15(×5)、09:47、10:15、10:26，
+  间隔 28/11 分钟不等，修复前那种整齐 ~16 分钟节律已消失。
+- **崩溃报告归零**：`/Library/Logs/DiagnosticReports` 里 kongshan 相关只剩 1 份，
+  且不是崩溃，是 CPU 资源报告；此前 42 份助手崩溃报告已被系统清理。App 零崩溃。
+- 内核 PPID = 51271（App 子进程、非 root），说明当前只有系统代理、无 TUN；
+  助手在跑但空闲（launchd KeepAlive 拉起，属预期）。
+
+### 新问题 A：固定端口在断网/重启后被换掉（0.1.45 的保证只是概率性的）
+
+事实链：
+- 端口历史：07-29 17:56 / 18:47 / 18:52 / 20:43 / 20:48、07-30 00:31 六次启动
+  mixed 全部复用 **49609**，clash-api 分别是 54991/53153/53520/57757/57757/52726（散乱）。
+- 07-30 08:35:24 这次变成 mixed **65408** + clash-api **65409**，**两者相邻**
+  ——这是「首选端口绑定失败、连续两次落到内核分配」的指纹。
+- `settings.json` 已被改写为 65408，系统代理也已指向 65408；而**此刻 49609 空闲**。
+- `preferredMixedPort` 是 `@ObservationIgnored` 存储属性，不被 `clearRuntimeState()`
+  清空（那里清的是另一个 `mixedPort`），所以 08:35 时它确实是 49609。
+- 崩溃自愈路径（`handleUnexpectedCoreExit`）复用 `currentConfig`、不调 `runtimeFactory`，
+  不可能换端口；`config.json` mtime = 08:35:24 证明走的是完整 `start()`。
+
+根因（代码层，确定）：`RuntimeSecrets.availableHighPort(preferred:)`
+对首选端口**只探测一次**，`bindLoopback(preferred) != nil` 一旦为 nil 就直接
+落到 16 次内核分配，**无重试、无退避**。而端口池 `49_152...65_535` 正是 macOS
+临时端口范围本身，首选端口随时可能被任意进程瞬时占用（含旧内核尚未释放的 pcb）。
+于是一次瞬时冲突就永久改写落盘端口 → 系统代理端口变化 → Chromium 系客户端
+重现「正在重新连接」，正是 0.1.45 要根治的症状。
+（具体是谁在 08:35:24 占着 49609 无法回溯确认，不下结论。）
+
+建议修法：首选端口改成 3–5 次 × 200–300ms 退避重试；端口真的变了时
+`appendWarning` 一条，让用户知道客户端为什么要重连。
+
+### 新问题 B：主 App 空闲后台烧 50% CPU 178 秒
+
+`/Library/Logs/DiagnosticReports/kongshan_2026-07-30-044629_*.cpu_resource.diag`：
+0.1.47 (147)，PID 51271，04:43:30 → 04:46:28，
+"90 seconds cpu time over 178 seconds (50% cpu average)"，
+Action taken: none，Footprint 156.73 MB，1 线程，7 采样，
+状态 `Non-Frontmost App, Suppressed`，User Activity 7/7 `Idle`。
+
+热栈全在 AppKit/SwiftUI 布局，无任何 kongshan 业务帧（最深只到 `KongshanApp.$main()`）：
+`__CFRunLoopDoSources0` → `CA::Transaction::commit` → `NSDisplayCycleFlush`
+→ `-[NSWindow layoutIfNeeded]` → **96 层嵌套 `_layoutSubtreeWithOldSize`**
+→ `ObservationCenter.invalidate` / `StaticBody.updateValue` / `ViewGraph.sizeThatFits`
+/ `SystemSegmentedControl._overrideSizeThatFits` / `PlatformViewRepresentableAdaptor.overrideSizeThatFits`。
+
+排除了「连接多导致渲染重」：那三分钟入站连接量反而更低
+（04:43=1 / 04:44=3 / 04:45=1 / 04:46=6，邻近分钟 11–15，白天正常 12–26）。
+
+已确认的高频无条件写入（`AppState` 标了 `@Observable`，写入不做等值判断，
+赋同样的值也会失效整棵视图图）：
+- `AppState.swift:1354` `self.connections = []` —— 未运行时每 1.5s 无条件执行一次；
+- `AppState.swift:1362` 每次推送（~1s）整体替换数组 + `.sorted`；
+- `AppState.swift:2479-2480` `uploadRate` / `downloadRate` 每次流量采样（~1s）无条件写。
+
+实测当前基线 CPU 4–5.6%（后台、空闲），对纯 SwiftUI 空闲 App 明显偏高，
+与「每秒至少一次全图失效」的开销吻合。**178 秒那次的确切触发条件只有 7 个采样，
+无法定论**，但方向清楚：1/s 的无条件失效 × 经由 `SystemSegmentedControl` 的
+昂贵布局协商。事件自行结束、无崩溃、10h+ 只出现 1 次。
+
+建议修法（低风险）：给这几处加等值守卫
+（`if !connections.isEmpty { connections = [] }`、rate 变了才赋值），
+先把空闲态的每秒失效消掉，再观察是否还复发。
+
+### 顺带澄清（此前的疑点）
+
+`settings.json` mtime 一直在动（10:40:13 → 10:55:16）不是异常：它和
+`subscriptions.json` mtime 完全同步，是订阅自动更新顺带 `persistSettings()`。
+
+## 2026-07-30 14:20 — 内网 DNS 分流：TUN 下内网设备"一直加载" → 0.1.50
+
+### 现象与用户判断
+
+用户开 TUN 后用 Windows App 连内网设备一直加载，怀疑"流量或域控 DNS 172.16.16.7 被劫持"。
+
+### 诊断：路由是对的，坏的只有 DNS
+
+- 路由**无问题**：`route_exclude_address` 生效得很干净，路由表里 `172.0/12`、`172.32/11`、
+  `172.64/10`、`172.128/9` 精确地把 `172.16.0.0/12` 留给了物理网卡；
+  `route get 172.16.16.7` 走 en0；TUN 开着时实测 TCP 3389/389/135/445/53 **全通**。
+- 域控**无问题**：`dig @172.16.16.7` 正常，反解出 `AD1.<AD域>`（真实域名不入库）。
+- 坏在 DNS，证据对照表（经 TUN 的 172.19.0.1 vs 直接问域控）：
+  - `AD1.<AD域>` → **240.0.0.21** vs 真实内网 IP
+  - `definitely-not-real-abc123.internal`（根本不存在）→ **240.0.0.61** vs 空
+- 机理：AD 域是个 `.com`，既不命中 `geosite-cn`，也就必然掉进 `dns-fakeip`；
+  fakeip 不校验域名是否存在，任何名字都给 `240.0.0.0/4` 的假 IP，
+  而假 IP 整段被 `route.rules` 送进代理出口 → 流量被发去国外节点连办公室的机器。
+
+### 修法
+
+`LANResolver`（新增）+ `TunSettings` 三个字段 + `ConfigGenerator` 生成 `dns-lan`：
+
+- `dns.servers` 加 `{tag: dns-lan, type: udp, server: <内网DNS>, port: 53}`，**无 detour**。
+- `dns.rules` **首位**插 `{domain_suffix: [...], server: dns-lan}`——必须排在 geosite-cn
+  与 fakeip 之前，否则内网域名照样被吞。
+- 路由上把内网后缀并进 `bypassRule` 的直连规则：内网域名可能解析到 DMZ 的公网 IP，
+  那时按 IP 判定的私有网段规则会落空。
+- 系统代理模式另需绕过表：该模式下 DNS 归 OS 管，内核只从 CONNECT 拿到域名，
+  不绕过就会拿内网域名去问经代理的公共 DoH。同时给 `*.x` 和裸 `x`
+  （macOS 的 `*.corp.com` 不匹配 `corp.com` 本身）。
+
+### 关键难点：企业网不下发搜索域
+
+真机实测 `scutil --dns` 只有 `nameserver[0] : 172.16.16.7` / `nameserver[1] : 114.114.114.114`，
+**没有 search domain**。纯靠搜索域的自动探测在该网络一个域名都找不到，功能等于没开。
+
+加了一层 **PTR 推断**，用的是 Active Directory 的固有结构：
+1. `PTR(172.16.16.7)` → `AD1.<AD域>` → 候选域 `<AD域>`
+2. 在同一台服务器上正解该域 → **私有 IP** ⇒ 接受
+
+第 2 步是防误判的关键。反例已验：`PTR(114.114.114.114)` → `public1.114dns.com`，
+但 `114dns.com` 解析出来是公网地址会被拒；何况公网地址在第 1 步就被 `isPrivateIPv4` 滤掉了。
+只在没有搜索域时才跑，且只问第一台私有 DNS、`+time=1 +tries=1`，最坏付 2 秒。
+
+### 期间修掉的两个自己的缺陷
+
+1. **关掉功能时清空快照**会造成隐蔽故障：TUN 运行中关掉再打开，重新生成配置时 DNS 已被
+   接管、探不到东西，快照永久为空——功能看着开着却不起作用。改为不清快照，
+   用不用交给 `LANResolver.effective` 按开关决定。
+2. **默认探测器在单测里真的去读了开发机网络**（`scutil --dns` + `dig`），
+   拿到真实的内网 DNS 与域名，污染了绕过列表断言（2 个测试 6 处断言失败）。
+   按项目既有约定（`automaticallyInitialize == false` 的夹具不碰真实系统）在一处修掉，
+   而不是改 32 个构造点。
+
+### 测试（新增 24 条）
+
+- `Tests/KongshanCoreTests/LANResolverTests.swift` 18 条：scutil 解析（含作用域解析器与
+  `*.arpa`/`local` 噪音）、**排除 TUN 自身地址**（它也在 172.16.0.0/12 里，不排会自指）、
+  公网 DNS 不收、单标签后缀只放行 `lan`/`intranet` 之类、手动与自动的合成、
+  PTR 推断的正例与反例、有搜索域时不白跑推断查询。
+- `DNSConfigTests` 6 条：`dns-lan` 字段、**规则顺序**（lan < cn、lan < fakeip）、
+  路由直连、未探测到时不生成、开关可关、过 sing-box check、**过助手白名单**
+  （TUN 配置要经 root 助手投喂，check 通过 ≠ 白名单放行，两道关独立）。
+- `AppStateTests` 1 条：探测 → 快照 → 系统代理绕过表的贯通。
+
+### 真机验证（系统代理模式，零配置）
+
+- `config.json`：`dns-lan = {172.16.16.7:53, udp}`；`dns.rules[0] = {domain_suffix:
+  ["<AD域>"], server: "dns-lan"}`；路由直连后缀含该域。
+- 系统代理绕过表三个服务都含 `*.<AD域>` 与 `<AD域>`。
+- `settings.json` 里 `lanDNSServer=''`、`lanDomainSuffixes=[]` ⇒ 域名**完全来自 PTR 推断**。
+- 全量 344 通过 / 1 跳过 / 0 失败，0 编译警告。
+- 0.1.50 / build 150 已装 `/Applications`，dist 只留当前版本。
+
+### 待用户验证
+
+**TUN 模式需要你点一次并输密码**（App 重建 cdhash 变，助手要重装一次）。验完看：
+`dig @172.19.0.1 <内网主机>` 应返回真实内网 IP，而不是 240.x。
+
+### 已知边界
+
+内网 DNS 只在启动时探测（接管后 `scutil --dns` 只剩内核自己的地址）。
+**TUN 运行中换网络**不会重新探测，旧内网域名会被送去已不可达的内网 DNS；关掉再开即可。
+
+### 顺带确认
+
+助手连续存活 6 小时（08:09 起），0.1.46 的 SIGTRAP 修复稳住了。
+
+## 2026-07-30 14:45 — TUN 真机验证通过 + 发布收尾（0.1.51）
+
+### TUN 模式验证通过（用户输密码重装助手后）
+
+| 查询 | 经 TUN 的 DNS | 域控 | 判定 |
+|---|---|---|---|
+| `AD1.<AD域>` | **真实内网 IP** | 同 | ✅（修复前是 `240.0.0.21`） |
+| `<AD域>` | **另一台域控的私有 IP** | 同 | ✅ AD 多 DC 轮询，正常 |
+| `www.google.com` | `240.0.0.31` | — | ✅ 非内网域名仍走 Fake-IP |
+| 不存在的名字 | `240.0.0.67` | — | ✅ 同上 |
+
+用户侧现象：**Windows App 连内网设备恢复正常**。
+分流是精确的——只把内网域名摘出来，其余流量行为完全没变。
+
+**一个沟通教训**：给用户的验证命令里用了占位符「你的内网主机名」，用户原样执行，
+查了个不存在的名字拿到 240.x，误以为没修好。验证命令要给可直接执行的具体值，
+或明确标出需要替换的部分。
+
+### 发布前把真实内网域名从源码/文档里清掉
+
+`LANResolver.swift` 的注释与 SESSION_LOG 里写了用户的真实 AD 域名（5 处），
+已全部改为 `corp.example.com` 占位。测试夹具里的 `172.16.16.7` 保留——
+RFC1918 私有地址不含身份信息，且能让注释对应真实案例。
+
+因为改动了源码，**重新构建**以保证发布的 DMG 与发布的源码一致（0.1.50 → 0.1.51）。
+
+### 成品
+
+- `dist/kongshan-0.1.51.dmg`，SHA-256
+  `a9843a6429b204790238071b8b84811e83ceac858763c30d64e9c8e794d47a42`
+- 已装 `/Applications`，deep/strict 签名通过、arm64、hardened runtime（flags `adhoc,runtime`）
+- 全量 344 通过 / 1 跳过 / 0 失败，0 编译警告；dist 只留当前版本

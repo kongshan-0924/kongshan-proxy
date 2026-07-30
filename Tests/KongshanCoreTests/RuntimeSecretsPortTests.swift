@@ -79,6 +79,55 @@ final class RuntimeSecretsPortTests: XCTestCase {
         XCTAssertEqual(try RuntimeSecrets.availableHighPort(preferred: port), port)
     }
 
+    // MARK: - 首选端口的退避重试（stableHighPort）
+
+    /// 真机事故的回归测试：2026-07-30 一次完整重启后 mixed 端口从 49609 掉到 65408，
+    /// 而事后 49609 是空闲的——说明只是**瞬时**占用（旧内核尚未回收的 pcb / 别的进程的
+    /// 临时连接，端口池 49152~65535 就是 macOS 临时端口范围本身）。原实现只探一次，
+    /// 于是一次瞬时冲突永久改写了落盘端口，系统代理端口跟着变，
+    /// Chromium 系客户端又开始反复「正在重新连接」。这里钉死"宁可多等也别换端口"。
+    func testStableHighPortWaitsForPreferredPortToBeReleased() async throws {
+        let port = try RuntimeSecrets.availableHighPort()
+        let listener = try makeListener(port: port)
+
+        // 150ms 后释放，模拟上一个内核的监听 socket 还没回收干净。
+        let release = Task {
+            try? await Task.sleep(for: .milliseconds(150))
+            close(listener)
+        }
+
+        let allocated = try await RuntimeSecrets.stableHighPort(
+            preferred: port,
+            retryDelays: RuntimeSecrets.defaultPreferredPortRetryDelays
+        )
+        await release.value
+
+        XCTAssertEqual(allocated, port, "首选端口只是被短暂占用，退避重试后必须拿回同一个")
+    }
+
+    /// 重试不能变成死等：端口被别的进程长期占着时仍要及时让位。
+    func testStableHighPortFallsBackWhenPreferredStaysOccupied() async throws {
+        let port = try RuntimeSecrets.availableHighPort()
+        let listener = try makeListener(port: port)
+        defer { close(listener) }
+
+        let allocated = try await RuntimeSecrets.stableHighPort(
+            preferred: port,
+            retryDelays: [.milliseconds(1), .milliseconds(1)]
+        )
+        XCTAssertNotEqual(allocated, port)
+        XCTAssertTrue(HelperConstants.loopbackHighPorts.contains(Int(allocated)))
+    }
+
+    /// 端口空闲时一次都不该退避，否则每次启动都白等——退避只在真撞上时才付代价。
+    func testStableHighPortDoesNotSleepWhenPreferredIsFree() async throws {
+        let port = try RuntimeSecrets.availableHighPort()
+        let started = ContinuousClock.now
+        let allocated = try await RuntimeSecrets.stableHighPort(preferred: port, retryDelays: [.seconds(30)])
+        XCTAssertEqual(allocated, port)
+        XCTAssertLessThan(ContinuousClock.now - started, .seconds(1))
+    }
+
     private static func loopbackAddress(port: UInt16) -> sockaddr_in {
         var address = sockaddr_in()
         address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)

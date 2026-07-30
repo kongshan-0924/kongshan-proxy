@@ -1,3 +1,4 @@
+import HelperProtocol
 import Foundation
 import XCTest
 @testable import KongshanCore
@@ -233,9 +234,100 @@ final class DNSConfigTests: XCTestCase {
         )
     }
 
+    // MARK: - 内网 DNS 分流
+
+    private var lanSnapshot: LANResolverSnapshot {
+        LANResolverSnapshot(servers: ["172.16.16.7"], searchDomains: ["corp.example.com"])
+    }
+
+    /// 内网规则**必须排在 geosite-cn 与 fakeip 之前**。
+    /// 真机遇到的 AD 域是个 `.com`：既不命中 geosite-cn，也就必然掉进 fakeip，
+    /// 拿到 240.x 假 IP，而假 IP 整段被路由进代理出口 → 内网设备一直加载。
+    func testLANRuleComesBeforeChinaAndFakeIPRules() throws {
+        let root = try json(try ConfigGenerator.generate(
+            input(proxyMode: .tun, lanResolver: lanSnapshot)
+        ))
+        let dns = try XCTUnwrap(root["dns"] as? [String: Any])
+
+        let servers = try XCTUnwrap(dns["servers"] as? [[String: Any]])
+        let lan = try XCTUnwrap(servers.first { $0["tag"] as? String == "dns-lan" })
+        XCTAssertEqual(lan["type"] as? String, "udp", "内网 DNS 走 UDP：无连接，不会像 DoH 那样卡死")
+        XCTAssertEqual(lan["server"] as? String, "172.16.16.7")
+        XCTAssertEqual(lan["server_port"] as? Int, 53)
+        XCTAssertNil(lan["detour"], "内网 DNS 必须直连，绝不能绕经代理出口")
+
+        let rules = try XCTUnwrap(dns["rules"] as? [[String: Any]])
+        XCTAssertEqual(rules.first?["server"] as? String, "dns-lan", "内网规则必须是第一条")
+        XCTAssertEqual(rules.first?["domain_suffix"] as? [String], ["corp.example.com"])
+
+        let lanIndex = try XCTUnwrap(rules.firstIndex { $0["server"] as? String == "dns-lan" })
+        let fakeIPIndex = try XCTUnwrap(rules.firstIndex { $0["server"] as? String == "dns-fakeip" })
+        let cnIndex = try XCTUnwrap(rules.firstIndex { $0["server"] as? String == "dns-cn" })
+        XCTAssertLessThan(lanIndex, cnIndex)
+        XCTAssertLessThan(lanIndex, fakeIPIndex)
+    }
+
+    /// DNS 解对了还不够：内网域名可能解析到 DMZ 的公网 IP，
+    /// 那时按 IP 判定的私有网段规则会落空，流量还是被送进代理。
+    func testLANDomainsAlsoRoutedDirect() throws {
+        let root = try json(try ConfigGenerator.generate(
+            input(proxyMode: .tun, lanResolver: lanSnapshot)
+        ))
+        let rules = try XCTUnwrap((root["route"] as? [String: Any])?["rules"] as? [[String: Any]])
+        let direct = try XCTUnwrap(rules.first {
+            $0["outbound"] as? String == "direct" && ($0["domain_suffix"] as? [String])?.contains("corp.example.com") == true
+        })
+        XCTAssertEqual(direct["action"] as? String, "route")
+    }
+
+    func testNoLANServerWhenNothingDetected() throws {
+        let root = try json(try ConfigGenerator.generate(input(proxyMode: .tun)))
+        let dns = try XCTUnwrap(root["dns"] as? [String: Any])
+        let servers = try XCTUnwrap(dns["servers"] as? [[String: Any]])
+        XCTAssertNil(servers.first { $0["tag"] as? String == "dns-lan" })
+        let rules = try XCTUnwrap(dns["rules"] as? [[String: Any]])
+        XCTAssertNil(rules.first { $0["server"] as? String == "dns-lan" })
+    }
+
+    func testLANSplitCanBeTurnedOff() throws {
+        var tun = TunSettings.defaults
+        tun.lanDNSEnabled = false
+        let root = try json(try ConfigGenerator.generate(
+            input(proxyMode: .tun, tunSettings: tun, lanResolver: lanSnapshot)
+        ))
+        let servers = try XCTUnwrap((root["dns"] as? [String: Any])?["servers"] as? [[String: Any]])
+        XCTAssertNil(servers.first { $0["tag"] as? String == "dns-lan" })
+    }
+
+    /// 内核自己得认这份配置——`dns-lan` 的字段名/类型写错时单测照样全绿，只有 check 能拦住。
+    func testLANSplitConfigPassesBundledCoreCheck() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let ruleSets = try await compileRuleSets(in: directory)
+
+        var tun = TunSettings.defaults
+        tun.lanDomainSuffixes = ["ops.example.com"]
+        let config = try ConfigGenerator.generate(ConfigInput(
+            nodes: [node],
+            selectedNodeID: node.id,
+            runtime: RuntimeParameters(mixedPort: 51_080, clashPort: 51_909, secret: "memory-only"),
+            routing: RoutingConfiguration(settings: routingSettings, ruleSets: ruleSets),
+            enabledModes: [.tun],
+            tunSettings: tun,
+            dnsSettings: .defaults,
+            lanResolver: lanSnapshot
+        ))
+        let result = try await SingBoxProcess(binaryURL: singBoxURL).check(config: config)
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+    }
+
     private func input(
         proxyMode: ProxyMode = .systemProxy,
-        dnsSettings: DNSSettings = .defaults
+        dnsSettings: DNSSettings = .defaults,
+        tunSettings: TunSettings = .defaults,
+        lanResolver: LANResolverSnapshot = .empty
     ) -> ConfigInput {
         ConfigInput(
             nodes: [node],
@@ -249,8 +341,10 @@ final class DNSConfigTests: XCTestCase {
                     ads: nil
                 )
             ),
-            proxyMode: proxyMode,
-            dnsSettings: dnsSettings
+            enabledModes: [proxyMode],
+            tunSettings: tunSettings,
+            dnsSettings: dnsSettings,
+            lanResolver: lanResolver
         )
     }
 
@@ -328,5 +422,38 @@ private actor DNSLogCollector {
 
     func value() -> String {
         lines.joined()
+    }
+}
+
+/// 内网分流配置必须能过**助手的白名单**，不只是过 sing-box 的 check。
+///
+/// TUN 恰恰是内网分流最需要生效的场景，而 TUN 的配置要经 root 助手投喂——
+/// 白名单拒了就整条链路起不来。sing-box check 通过 ≠ 助手放行，两道关是独立的。
+extension DNSConfigTests {
+    func testLANSplitConfigPassesHelperWhitelist() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let ruleSets = try await compileRuleSets(in: directory)
+
+        let config = try ConfigGenerator.generate(ConfigInput(
+            nodes: [node],
+            selectedNodeID: node.id,
+            // 助手白名单要求 clash_api secret ≥16 字符（真机上是 32 字节随机的 base64）。
+            runtime: RuntimeParameters(
+                mixedPort: 51_080,
+                clashPort: 51_909,
+                secret: "0123456789abcdef0123456789abcdef"
+            ),
+            routing: RoutingConfiguration(settings: routingSettings, ruleSets: ruleSets),
+            enabledModes: [.tun],
+            dnsSettings: .defaults,
+            lanResolver: LANResolverSnapshot(servers: ["172.16.16.7"], searchDomains: ["corp.example.com"])
+        ))
+
+        let result = HelperConfigWhitelist.validate(config)
+        XCTAssertTrue(result.ok, "助手白名单拒绝了内网分流配置：\(result.reason ?? "未给原因")")
+        XCTAssertNotNil(result.sanitizedData)
     }
 }

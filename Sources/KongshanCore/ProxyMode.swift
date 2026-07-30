@@ -36,15 +36,41 @@ public struct TunSettings: Codable, Equatable, Sendable {
     public var strictRoute: Bool
     public var addresses: [String]
     public var mtu: Int
+    /// 内网 DNS 分流：把内网域名交给内网 DNS，而不是落到 fakeip 被送进代理。
+    /// 见 `LANResolverSnapshot` 的说明——关掉它内网设备会"一直加载"。
+    public var lanDNSEnabled: Bool
+    /// 手动指定内网 DNS 服务器。留空则用自动探测（TUN 接管前读到的 DHCP DNS）。
+    public var lanDNSServer: String
+    /// 手动补充的内网域名后缀，与自动探测到的搜索域合并。
+    /// 网络不下发搜索域时只能靠这里手填。
+    public var lanDomainSuffixes: [String]
 
     public init(
         strictRoute: Bool,
         addresses: [String],
-        mtu: Int
+        mtu: Int,
+        lanDNSEnabled: Bool = true,
+        lanDNSServer: String = "",
+        lanDomainSuffixes: [String] = []
     ) {
         self.strictRoute = strictRoute
         self.addresses = addresses
         self.mtu = mtu
+        self.lanDNSEnabled = lanDNSEnabled
+        self.lanDNSServer = lanDNSServer
+        self.lanDomainSuffixes = lanDomainSuffixes
+    }
+
+    /// 旧版 settings.json 没有内网分流这三个字段。合成的 `init(from:)` 对非可选属性
+    /// 缺键会**整体解码失败**——那等于用户升级一次就丢掉全部隧道设置，所以必须手写。
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        strictRoute = try container.decode(Bool.self, forKey: .strictRoute)
+        addresses = try container.decode([String].self, forKey: .addresses)
+        mtu = try container.decode(Int.self, forKey: .mtu)
+        lanDNSEnabled = try container.decodeIfPresent(Bool.self, forKey: .lanDNSEnabled) ?? true
+        lanDNSServer = try container.decodeIfPresent(String.self, forKey: .lanDNSServer) ?? ""
+        lanDomainSuffixes = try container.decodeIfPresent([String].self, forKey: .lanDomainSuffixes) ?? []
     }
 
     public static let defaults = TunSettings(

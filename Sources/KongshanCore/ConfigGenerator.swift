@@ -43,6 +43,8 @@ public struct ConfigInput: Sendable {
     /// 各策略组重启后要恢复的选中出站（组名 → 出站 tag）。
     /// 内核不落盘选择状态，不带上它们的话每次重启按服务分组全部回退。
     public let groupDefaults: [String: String]
+    /// TUN 接管系统 DNS **之前**探测到的内网 DNS 与搜索域。空则不生成内网分流。
+    public let lanResolver: LANResolverSnapshot
 
     public var usesSystemProxy: Bool { enabledModes.contains(.systemProxy) }
     public var usesTun: Bool { enabledModes.contains(.tun) }
@@ -57,7 +59,8 @@ public struct ConfigInput: Sendable {
         outboundMode: OutboundMode = .rule,
         tunSettings: TunSettings = .defaults,
         dnsSettings: DNSSettings = .defaults,
-        groupDefaults: [String: String] = [:]
+        groupDefaults: [String: String] = [:],
+        lanResolver: LANResolverSnapshot = .empty
     ) {
         self.outboundMode = outboundMode
         self.nodes = nodes
@@ -69,6 +72,7 @@ public struct ConfigInput: Sendable {
         self.tunSettings = tunSettings
         self.dnsSettings = dnsSettings
         self.groupDefaults = groupDefaults
+        self.lanResolver = lanResolver
     }
 
     /// 单一模式的便捷入口。
@@ -265,11 +269,13 @@ public enum ConfigGenerator {
         outbounds.append(["type": "direct", "tag": "direct"])
         outbounds.append(["type": "block", "tag": "reject"])
 
+        let lanResolver = LANResolver.effective(settings: input.tunSettings, detected: input.lanResolver)
         var route = try route(
             for: input.routing,
             outboundMode: input.outboundMode,
             primaryOutbound: primaryOutbound,
-            availableGroups: generatedNames.union(nodeTags)
+            availableGroups: generatedNames.union(nodeTags),
+            lanDomainSuffixes: lanResolver.isUsable ? lanResolver.searchDomains : []
         )
         // 引导解析器固定走无连接的 UDP，**不能用 DoH**。见 dns(for:primaryOutbound:) 里的说明。
         route["default_domain_resolver"] = "dns-bootstrap"
@@ -361,6 +367,20 @@ public enum ConfigGenerator {
         }
         servers.append(domestic)
 
+        // 内网 DNS：把内网域名交给内网自己的 DNS，而不是让它落到 fakeip。
+        // 不加这条，内网域名会拿到 240.0.0.0/4 的假 IP，而假 IP 整段被路由进代理出口，
+        // 于是内网设备表现为"一直在加载"——流量被送去国外节点连你办公室的机器。
+        // 详见 `LANResolverSnapshot` 的注释（含真机证据）。
+        let lan = LANResolver.effective(settings: input.tunSettings, detected: input.lanResolver)
+        if lan.isUsable, let lanServer = lan.servers.first {
+            servers.append([
+                "type": "udp",
+                "tag": "dns-lan",
+                "server": lanServer,
+                "server_port": 53
+            ])
+        }
+
         var remote = dohServer(
             endpoint: endpoints.remote,
             tag: "dns-remote",
@@ -386,6 +406,15 @@ public enum ConfigGenerator {
         }
 
         var rules: [[String: Any]] = []
+        // **必须排在 geosite-cn 与 fakeip 之前**：内网域名常常长得像公网域名
+        // （真机遇到的 AD 域就是个 `.com`），既不会命中 geosite-cn，也就必然掉进 fakeip。
+        if lan.isUsable {
+            rules.append([
+                "domain_suffix": lan.searchDomains,
+                "action": "route",
+                "server": "dns-lan"
+            ])
+        }
         if input.routing != nil, input.outboundMode == .rule {
             rules.append([
                 "rule_set": "geosite-cn",
@@ -523,7 +552,8 @@ public enum ConfigGenerator {
         for routing: RoutingConfiguration?,
         outboundMode: OutboundMode = .rule,
         primaryOutbound: String = "手动选择",
-        availableGroups: Set<String> = []
+        availableGroups: Set<String> = [],
+        lanDomainSuffixes: [String] = []
     ) throws -> [String: Any] {
         // 全局 / 直连不参与分流：不加载任何规则集，直接给一个兜底出口。
         switch outboundMode {
@@ -544,7 +574,7 @@ public enum ConfigGenerator {
             .filter(\.enabled)
             .map { customRouteRule($0, fallback: primaryOutbound, available: availableGroups) }
 
-        if let bypass = bypassRule(for: settings) {
+        if let bypass = bypassRule(for: settings, extraDomainSuffixes: lanDomainSuffixes) {
             rules.append(bypass)
         }
 
@@ -620,7 +650,13 @@ public enum ConfigGenerator {
         return [field: [rule.value], "action": "route", "outbound": outbound]
     }
 
-    private static func bypassRule(for settings: RoutingSettings) -> [String: Any]? {
+    /// - Parameter extraDomainSuffixes: 内网域名后缀。除了 DNS 要交给内网 DNS 解析，
+    ///   路由上也必须直连——内网域名可能解析到 DMZ 的公网 IP，那时按 IP 判定的
+    ///   私有网段规则就落空了，流量还是会被送进代理。
+    private static func bypassRule(
+        for settings: RoutingSettings,
+        extraDomainSuffixes: [String] = []
+    ) -> [String: Any]? {
         var exactDomains: [String] = []
         var domainSuffixes: [String] = []
         for domain in settings.bypassDomains {
@@ -631,6 +667,10 @@ public enum ConfigGenerator {
             } else {
                 exactDomains.append(domain)
             }
+        }
+
+        for suffix in extraDomainSuffixes where !domainSuffixes.contains(suffix) {
+            domainSuffixes.append(suffix)
         }
 
         var rule: [String: Any] = ["action": "route", "outbound": "direct"]
