@@ -5,7 +5,15 @@ enum LoginItemStatus: Equatable, Sendable {
     case notRegistered
     case enabled
     case requiresApproval
-    case notFound
+    /// 系统还不认识这个 App（`SMAppService.Status.notFound`）。
+    ///
+    /// **这是可注册的正常状态，不是错误**：ad-hoc 签名的 App 在第一次
+    /// `register()` 之前系统本来就查不到它。此前和「不是应用包」共用一个 `.notFound`，
+    /// 界面于是把开关禁掉并显示"应用包不可用"——用户被永久挡在功能之外，
+    /// 而其实打开开关就能注册。
+    case notRegisteredYet
+    /// 真的不是 `.app` 包（例如直接跑 `swift run` 的可执行文件）。此时功能确实用不了。
+    case unsupported
 }
 
 protocol LoginItemManaging: Sendable {
@@ -36,7 +44,7 @@ final class LoginItemManager: LoginItemManaging, @unchecked Sendable {
     }
 
     func currentStatus() async -> LoginItemStatus {
-        guard isApplicationBundle() else { return .notFound }
+        guard isApplicationBundle() else { return .unsupported }
         return Self.map(SMAppService.mainApp.status)
     }
 
@@ -72,8 +80,8 @@ final class LoginItemManager: LoginItemManaging, @unchecked Sendable {
         case .notRegistered: .notRegistered
         case .enabled: .enabled
         case .requiresApproval: .requiresApproval
-        case .notFound: .notFound
-        @unknown default: .notFound
+        case .notFound: .notRegisteredYet
+        @unknown default: .notRegisteredYet
         }
     }
 }

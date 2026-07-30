@@ -250,7 +250,12 @@ struct PolicyGroupsView: View {
                         .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
-                    Spacer(minLength: 0)
+                    Spacer(minLength: 4)
+                    // 延迟提到右上角。这是用户扫一屏节点时唯一要找的数字，
+                    // 原本挤在下面一排小标签的末尾，得逐张卡片看过去才能比较。
+                    if case let .node(node) = option {
+                        delayBadge(node)
+                    }
                 }
                 HStack(spacing: 6) {
                     switch option {
@@ -265,8 +270,6 @@ struct PolicyGroupsView: View {
                                 .background(Color.orange.opacity(0.12), in: Capsule())
                                 .help("订阅节点倍率")
                         }
-                        Text("·").font(.caption2).foregroundStyle(.tertiary)
-                        delayBadge(node)
                     case .reference:
                         Text("策略引用")
                             .font(.caption2)
@@ -277,7 +280,10 @@ struct PolicyGroupsView: View {
             }
             .frame(maxWidth: .infinity, minHeight: 72, alignment: .topLeading)
             .padding(12)
-            .background(Theme.cardFill, in: RoundedRectangle(cornerRadius: 10))
+            .background(
+                isSelected ? AnyShapeStyle(Color.accentColor.opacity(0.09)) : AnyShapeStyle(Theme.cardFill),
+                in: RoundedRectangle(cornerRadius: 10)
+            )
             .overlay(
                 RoundedRectangle(cornerRadius: 10)
                     .strokeBorder(

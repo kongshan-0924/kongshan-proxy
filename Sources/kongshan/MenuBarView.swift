@@ -65,7 +65,7 @@ struct MenuBarView: View {
             .disabled(
                 !state.isReady
                     || state.loginItemStatus == .requiresApproval
-                    || state.loginItemStatus == .notFound
+                    || state.loginItemStatus == .unsupported
             )
 
         Button("刷新订阅") {

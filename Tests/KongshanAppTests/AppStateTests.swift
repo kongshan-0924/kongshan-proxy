@@ -1151,7 +1151,18 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(LoginItemManager.map(.notRegistered), .notRegistered)
         XCTAssertEqual(LoginItemManager.map(.enabled), .enabled)
         XCTAssertEqual(LoginItemManager.map(.requiresApproval), .requiresApproval)
-        XCTAssertEqual(LoginItemManager.map(.notFound), .notFound)
+        // 系统的 .notFound 不是错误：ad-hoc 签名的 App 在第一次 register() 之前
+        // 系统本来就查不到它。必须映射成「可注册」而不是与「不是应用包」混为一谈——
+        // 混了以后界面会禁掉开关并显示「应用包不可用」，用户被永久挡在功能之外。
+        XCTAssertEqual(LoginItemManager.map(.notFound), .notRegisteredYet)
+        XCTAssertNotEqual(LoginItemManager.map(.notFound), .unsupported)
+    }
+
+    /// 只有真的不是 `.app` 包时才报「不可用」。
+    func testNonBundleEnvironmentReportsUnsupported() async {
+        let manager = LoginItemManager(isApplicationBundle: { false })
+        let status = await manager.currentStatus()
+        XCTAssertEqual(status, .unsupported)
     }
 
     func testInitializeOnlyReadsLoginItemStatusWithoutRegistering() async throws {

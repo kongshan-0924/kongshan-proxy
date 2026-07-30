@@ -903,7 +903,7 @@ private struct SettingsView: View {
                         .disabled(
                             !state.isReady
                                 || state.loginItemStatus == .requiresApproval
-                                || state.loginItemStatus == .notFound
+                                || state.loginItemStatus == .unsupported
                         )
                     LabeledContent("登录项状态", value: loginItemStatusTitle)
                     if state.loginItemStatus == .requiresApproval {
@@ -913,7 +913,7 @@ private struct SettingsView: View {
                         Button("打开系统登录项设置") {
                             Task { await state.openLoginItemSystemSettings() }
                         }
-                    } else if state.loginItemStatus == .notFound {
+                    } else if state.loginItemStatus == .unsupported {
                         Text("当前运行环境不是可注册的应用包；请从打包后的 kongshan.app 使用此功能。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -1239,7 +1239,8 @@ private struct SettingsView: View {
         case .notRegistered: "未启用"
         case .enabled: "已启用"
         case .requiresApproval: "等待系统批准"
-        case .notFound: "应用包不可用"
+        case .notRegisteredYet: "未注册（打开开关即可）"
+        case .unsupported: "应用包不可用"
         }
     }
 }
