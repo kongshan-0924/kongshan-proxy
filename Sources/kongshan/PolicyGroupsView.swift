@@ -84,6 +84,10 @@ struct PolicyGroupsView: View {
 
     private func groupRow(_ group: PolicyGroup) -> some View {
         HStack(spacing: 9) {
+            Image(systemName: groupSymbol(group))
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(groupTint(group))
+                .frame(width: 18)
             VStack(alignment: .leading, spacing: 1) {
                 Text(group.name)
                     .font(.system(size: 12, weight: .medium))
@@ -282,16 +286,16 @@ struct PolicyGroupsView: View {
             .padding(12)
             .background(
                 isSelected ? AnyShapeStyle(Color.accentColor.opacity(0.09)) : AnyShapeStyle(Theme.cardFill),
-                in: RoundedRectangle(cornerRadius: 10)
+                in: RoundedRectangle(cornerRadius: 8)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 10)
+                RoundedRectangle(cornerRadius: 8)
                     .strokeBorder(
                         isSelected ? Color.accentColor.opacity(0.8) : Color.secondary.opacity(0.18),
                         lineWidth: isSelected ? 1.5 : 0.5
                     )
             )
-            .contentShape(RoundedRectangle(cornerRadius: 10))
+            .contentShape(RoundedRectangle(cornerRadius: 8))
         }
         .buttonStyle(.plain)
         .disabled(state.isBusy || !isSelectable)

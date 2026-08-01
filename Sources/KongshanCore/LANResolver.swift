@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import SystemConfiguration
 
 /// 内网解析信息：TUN 接管系统 DNS **之前**从 macOS 解析器配置里读出来的内网 DNS 与域名。
 ///
@@ -99,6 +100,7 @@ public enum LANResolver {
     private static let privateOnlyTopLevels: Set<String> = ["lan", "intranet", "internal", "home", "corp", "private"]
 
     public typealias OutputProvider = @Sendable () async throws -> String
+    public typealias PhysicalOutputProvider = @Sendable (_ interface: String) async throws -> String
 
     public static let defaultOutputProvider: OutputProvider = {
         try await ProcessRunner.run(
@@ -106,6 +108,65 @@ public enum LANResolver {
             arguments: ["--dns"],
             timeout: 5
         ).stdout
+    }
+
+    public static let defaultPhysicalOutputProvider: PhysicalOutputProvider = { interface in
+        try await ProcessRunner.run(
+            executable: URL(fileURLWithPath: "/usr/sbin/ipconfig"),
+            arguments: ["getpacket", interface],
+            timeout: 5
+        ).stdout
+    }
+
+    /// TUN 接管后 `scutil --dns` 只会看到 TUN 自己。这里先用
+    /// SystemConfiguration 取物理 PrimaryInterface，再读该接口的 DHCP 数据，
+    /// 因此切 Wi-Fi / 热点时仍能拿到新网络的原始 DNS。
+    public static func primaryPhysicalInterface() -> String? {
+        guard let store = SCDynamicStoreCreate(nil, "kongshan.lan-resolver" as CFString, nil, nil),
+              let state = SCDynamicStoreCopyValue(store, "State:/Network/Global/IPv4" as CFString)
+                as? [String: Any],
+              let interface = state["PrimaryInterface"] as? String,
+              interface.hasPrefix("en") else {
+            return nil
+        }
+        return interface
+    }
+
+    public static func parseDHCPPacket(_ output: String, excluding: Set<String> = []) -> LANResolverSnapshot {
+        var servers: [String] = []
+        var domains: [String] = []
+        for rawLine in output.split(separator: "\n", omittingEmptySubsequences: true) {
+            let parts = rawLine.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2 else { continue }
+            let key = parts[0].trimmingCharacters(in: .whitespaces)
+            let value = parts[1].trimmingCharacters(in: .whitespaces)
+            if key.hasPrefix("domain_name_server") {
+                for token in value.components(separatedBy: CharacterSet(charactersIn: "0123456789.").inverted)
+                    where isPrivateIPv4(token) && !excluding.contains(token) && !servers.contains(token) {
+                    servers.append(token)
+                }
+            } else if key.hasPrefix("domain_name") || key.hasPrefix("domain_search") {
+                for token in value.components(separatedBy: CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-").inverted) {
+                    guard let domain = normalizedDomain(token), !domains.contains(domain) else { continue }
+                    domains.append(domain)
+                }
+            }
+        }
+        return LANResolverSnapshot(servers: servers, searchDomains: domains)
+    }
+
+    public static func probePhysicalService(
+        excluding: Set<String> = [],
+        interfaceProvider: @Sendable () -> String? = primaryPhysicalInterface,
+        outputProvider: PhysicalOutputProvider = defaultPhysicalOutputProvider,
+        query: DNSQuery = defaultDNSQuery
+    ) async -> LANResolverSnapshot {
+        guard let interface = interfaceProvider(),
+              let output = try? await outputProvider(interface) else { return .empty }
+        let parsed = parseDHCPPacket(output, excluding: excluding)
+        guard parsed.searchDomains.isEmpty, !parsed.servers.isEmpty else { return parsed }
+        let inferred = await inferDomains(fromServers: parsed.servers, query: query)
+        return LANResolverSnapshot(servers: parsed.servers, searchDomains: inferred)
     }
 
     public enum QueryKind: Sendable {

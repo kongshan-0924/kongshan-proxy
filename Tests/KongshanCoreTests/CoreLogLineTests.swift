@@ -61,4 +61,28 @@ final class CoreLogLineTests: XCTestCase {
         XCTAssertEqual(CoreLogLine.parse("").message, "")
         XCTAssertNil(CoreLogLine.parse("   ").connectionID)
     }
+
+    func testClassifiesExpectedRuleRejectionWithoutHidingOtherPermissionErrors() {
+        let expected = CoreLogLine.parse(
+            "[1 0ms] connection: open connection to ads.example:443 using outbound/block[reject]: operation not permitted"
+        )
+        XCTAssertTrue(expected.isExpectedRuleRejection)
+
+        let unexpected = CoreLogLine.parse(
+            "[2 0ms] outbound/trojan[node]: operation not permitted"
+        )
+        XCTAssertFalse(unexpected.isExpectedRuleRejection)
+    }
+
+    func testClassifiesNetworkTransitionRootCausesCaseInsensitively() {
+        for marker in [
+            "missing default interface",
+            "network is unreachable",
+            "can't assign requested address",
+            "use of closed network connection"
+        ] {
+            XCTAssertTrue(CoreLogLine.parse("dial failed: \(marker.uppercased())").isNetworkTransitionFailure)
+        }
+        XCTAssertFalse(CoreLogLine.parse("dial tcp: i/o timeout").isNetworkTransitionFailure)
+    }
 }

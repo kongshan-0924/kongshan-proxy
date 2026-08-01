@@ -2760,3 +2760,166 @@ AAAA 解析与 Happy Eyeballs 选路，于是每次都撞在 IPv6 上。
 
 - `swift test` **392 通过 / 1 跳过 / 0 失败**，0 编译警告。
 - 0.1.59 已装 `/Applications`；SHA-256 `73a58ae21578b7008fd7edc01b12a3912985c571eb1177cbfc17a1919ee5a0e0`。
+
+## 2026-08-01 — 项目深度阅读与当前状态核对
+
+### 阶段 1：文档、版本与目录基线
+
+- 已完成：通读 README、交接/进度/下一步、设计与验收文档，核对 Git、版本、产物和源码/测试规模。
+- 修改文件：无业务文件；本次结束统一更新四份项目记录。
+- 测试结果：本阶段未运行测试。
+- 当前状态：提交基线为 `f4d8911`（v0.1.59），`main` 与 `origin/main` 一致；工作区已有 7 个未提交文件，版本草稿为 v0.1.60。
+- 风险/注意事项：文档首页仍写 v0.1.58，且 DMG v0.1.59 与已构建 App v0.1.60 并存，不能混为同一交付物。
+- 下一步：沿 AppState、配置生成、系统接管、特权助手、Clash API 与 UI 阅读端到端链路。
+- 下一位 Agent 如何接手：先以 Git 状态和 `VERSION` 为版本边界，不要把旧文档标题当当前事实。
+
+### 阶段 2：源码与架构链路
+
+- 已完成：确认三目标结构（HelperProtocol / KongshanCore / kongshan）、订阅转换、配置生成与校验、系统代理/DNS 事务、TUN helper 安全边界、运行监控、自愈和八页 UI。
+- 修改文件：无业务文件。
+- 测试结果：静态核对 `git diff --check` 通过；内置 sing-box 为 arm64 1.13.14，SHA-256 与验收记录一致。
+- 当前状态：核心设计是“纯配置生成 + AppState 单点编排 + 外部 sing-box 内核”，网络副作用均在生成/校验/健康确认之后进入事务。
+- 风险/注意事项：`AppState.swift` 已达 3528 行，是主要复杂度集中点；特权 helper 白名单明确不做全字段读取能力封锁，安全边界以阻止 root 写文件和远程无鉴权控制为主。
+- 下一步：核对 v0.1.60 未提交性能改动并运行完整测试。
+- 下一位 Agent 如何接手：修改 TUN/DNS/helper 前先读 `docs/design/` 和 HANDOFF 中的“别改回去”条目。
+
+### 阶段 3：v0.1.60 草稿与测试门禁
+
+- 已完成：核对 7 个未提交文件；确认目标为减少相同内容落盘、菜单栏重绘/宽度变化、图表刷新频率和日志逐行 Observation 失效。
+- 修改文件：`docs/HANDOFF.md`、`docs/PROGRESS.md`、`docs/NEXT_STEPS.md`、`docs/progress/SESSION_LOG.md`。
+- 测试结果：全量 `swift test` 共 400 条，398 通过、1 跳过、1 失败；失败为 `testLogEntriesAreFlushedInBatchesInsteadOfPerLine`，单独复跑仍失败，值为 0。`git diff --check` 通过。
+- 当前状态：v0.1.60 App 已构建并 ad-hoc + hardened runtime 签名，但未通过测试门禁；可交付 DMG 仍为 v0.1.59。
+- 风险/注意事项：失败可能在 Observation 测试同步方式，也可能说明批量发布通知未按测试预期发生；未诊断前不能宣称性能草稿已验收。
+- 下一步：先定位并修复该失败，再跑全量测试、`swift build` 与 `scripts/verify_m4.sh`，最后才提交/打 DMG。
+- 下一位 Agent 如何接手：保留现有 7 个业务文件改动，从失败测试和 `AppState.flushPendingLogs()` 的通知时序开始，不要先改功能范围。
+
+### 阶段 4：真机运行、资源与句柄审计
+
+- 已完成：只读核对安装版本、进程树、系统代理、helper、系统内存压力、CPU/RSS、socket/fd、
+  崩溃报告，并对主 App 做 10 秒调用栈采样。
+- 修改文件：仅四份项目记录；未改业务代码、未重启代理、未改网络配置。
+- 测试结果：0.1.60/build 160 已运行约 11 小时；App 连续 5 个有效样本为
+  26.1%/31.0%/28.0%/33.3%/33.3% CPU、约 221 MB；sing-box 0.4%~0.7%/31 MB；
+  helper 0%/4~6 MB。App/core fd 83/76~80，42 ESTABLISHED + 2 LISTEN，无 CLOSE_WAIT。
+- 当前状态：接管和数据面正常，资源问题明确在 App/UI。`sample` 中主线程 7931 样本，
+  1467 落在 NSWindow 递归布局，1408 落在 SwiftUI ViewGraph 更新，并出现 Dashboard/Charts 栈。
+- 风险/注意事项：主窗口可见时 26%~33% CPU 对菜单栏代理不可接受；系统整体内存仍有
+  58% 可用，无内存压力或句柄泄漏证据。
+- 下一步：把 Dashboard 的实时数字与 Chart 隔离，增加窗口可见性能门禁。
+- 下一位 Agent 如何接手：复现时保持仪表盘可见并累积到 60 点；不要只跑后台空闲 M4。
+
+### 阶段 5：错误日志分类与运行包/源码边界
+
+- 已完成：分析当前 1.9 MB 与轮转 5.2 MB 日志、旧 15.7 MB TUN 日志，关联 pmset
+  睡眠记录，并用二进制符号核对安装包实际包含的性能改动。
+- 修改文件：`docs/HANDOFF.md`、`docs/PROGRESS.md`、`docs/NEXT_STEPS.md`、本文件。
+- 测试结果：两份活跃日志共 227 条 ERROR：150 条预期 block，29 条接口/路由切换，
+  12 条 direct，12 条 DNS deadline，10 条节点 dial timeout，13 条 reset/EOF，1 条取消。
+  23:41 错误与 DarkWake 精确重合；07:18 故障簇后自动恢复，08:16 后无持续节点错误。
+- 当前状态：安装二进制已有 `trafficSampleParity`、`nicUploadText`、`statusCache`，没有
+  `pendingLogs`/`logFlushTask`；说明运行包包含前半批优化，但早于工作区最后修改。
+- 风险/注意事项：不能把 `block[reject]` 当节点故障，也不能用当前工作区源码直接解释
+  安装包全部行为；现有降采样已在运行仍高 CPU，优化方向必须转向视图观察边界。
+- 下一步：先修 Dashboard CPU 与失败测试，再完整构建、安装并做同口径前后对照。
+- 下一位 Agent 如何接手：保留现有未提交改动；以二进制符号/mtime 和 Git diff 明确版本边界。
+
+### 阶段 6：Dashboard 根因优化与日志诊断降噪
+
+- 已完成：拆分 Dashboard 流量卡的速率、会话累计量和 Chart Observation 边界；新增只读的真实安装版可见窗口 CPU/RSS 门禁；修正日志批量测试回调时序；识别预期规则拒绝与四类换网根因，并把同一 30 秒桶内的警告/错误聚成一次“网络切换期间”。
+- 修改文件：`Sources/kongshan/DashboardView.swift`、`Sources/KongshanCore/CoreLogLine.swift`、`Sources/kongshan/LogsView.swift`、`Tests/KongshanAppTests/AppStateTests.swift`、`Tests/KongshanAppTests/LogsViewGroupingTests.swift`、`Tests/KongshanCoreTests/CoreLogLineTests.swift`、`scripts/verify_dashboard_performance.sh`。
+- 测试结果：`CoreLogLineTests` 10/10、`LogsViewGroupingTests` 2/2、日志批量刷新定向测试 1/1 通过；脚本 `zsh -n` 与 `git diff --check` 通过。
+- 当前状态：功能实现完成，尚待全量测试、release 构建、M4/真实窗口性能门禁和成品替换验收。
+- 风险/注意事项：性能脚本不启动、不退出、不重启 App，也不修改代理；失败仅在 `/private/tmp` 保存调用栈。预期 block 只从“只看问题”和聚合严重度中排除，原始日志与导出仍完整保留。
+- 下一步：运行全量测试、构建 v0.1.61 App/DMG，再按正常退出和代理恢复硬门槛替换安装版。
+- 下一位 Agent 如何接手：若性能门禁失败，先读脚本保存的 `sample.txt`，不要放宽阈值或强制结束当前代理进程。
+
+### 阶段 7：v0.1.61 构建、安全替换与无接管复测
+
+- 已完成：全量测试和 release 构建；生成/验签 App 与 DMG；向旧版发送正常退出事件，验证 App/内核 PID 消失、系统代理恢复、恢复文件清除和直连 HTTPS 可用后才安装；新版已打开。
+- 修改文件：`VERSION` 自增至 0.1.61；成品 `dist/kongshan.app`、`dist/kongshan-0.1.61.dmg`；更新四份项目记录。旧版备份在 `/private/tmp/kongshan-0.1.60-backup-20260801-100438.app`。
+- 测试结果：`swift test` 403 通过/1 跳过/0 失败；`swift build` 与 release 构建通过；M4 平均 CPU 0.280%、最大 RSS 125,840 KB；DMG verify 通过。新版代理关闭、窗口可见时平均 CPU 0.100%、最高 0.3%、最大 RSS 150,512 KB。
+- 当前状态：`/Applications/kongshan.app` 为 v0.1.61/build 161，PID 34001，系统代理关闭、无 sing-box、无恢复文件、直连网络正常。
+- 风险/注意事项：没有对旧版或新版发送 TERM/KILL。由于改变系统代理属于网络设置变更，UI 点击前需用户当下确认；因此有真实流量的 Chart 性能终验尚未执行。更新后 ad-hoc cdhash 改变，TUN helper 未来可能提示重装。
+- 下一步：用户确认后用 App 自身开启“系统代理”，等待 Chart 积累数据，再跑真实窗口性能门禁并复查网络/日志。
+- 下一位 Agent 如何接手：先确认 PID 34001 仍是 v0.1.61 且代理仍关闭；不要直接写 `networksetup`，不要强制结束 App。
+
+### 阶段 8：系统代理开启后的全 UI 资源终验
+
+- 已完成：确认 v0.1.61 系统代理通过 `127.0.0.1:65495` 正常接管；在真实 60 点流量曲线、342 节点配置、3,479 条规则、20 条实时连接、日志稳态/突发/聚合、消息、设置和关闭窗口后台场景逐一采样；最终恢复仪表盘。
+- 修改文件：仅四份项目记录；未修改业务代码、节点、规则或代理模式。临时采样脚本已从 `/private/tmp` 清理。
+- 测试结果：每场景稳定后取 10 个 1 秒样本。App 平均/峰值 CPU：仪表盘 2.78/4.9%，复测 1.45/2.5%；配置 0.31/0.7%；代理 1.15/2.1%；规则 0.30/1.3%；连接 1.91/4.5%；日志突发 6.36/15.9%；日志稳态 0.95/4.7%；聚合日志突发 3.13/8.6%；消息稳态 0.66/1.6%；设置 0.18/0.4%；菜单栏后台 0.57/1.2%。
+- 当前状态：全部低于平均 CPU 10%、单次 20%、RSS 256 MB 门禁；页面 RSS 约 136~190 MB，峰值后可回落。旧版仪表盘 26%~33%，新版下降约九成。sing-box 各场景平均 0.07%~1.11%，RSS 约 42.3~48.9 MB。
+- 风险/注意事项：未聚合日志持续流入仍是最高负载，但留有余量；消息页首次 8% 是前一日志压力场景的衰减值，延长稳定后复测为平均 0.66%。测试请求只访问 Apple 成功探测页。
+- 完整性结果：系统内存 61% 可用；App/core FD 98/81，46 ESTABLISHED + 2 LISTEN，无 CLOSE_WAIT；无新崩溃；日志末 2,000 行 0 ERROR/0 WARN；最终系统代理仍开启且代理 HTTPS 返回 200。
+- 收尾验证：`git diff --check` 通过；App PID 34001、sing-box PID 34873 仍运行；HTTP/HTTPS/SOCKS 仍指向 `127.0.0.1:65495`，再次经代理访问 Apple 成功探测页返回 200。
+- 下一步：提交前复核未提交工作区；日常仅观察极端 2,000 行高频日志流，未出现真实压力前不继续优化。
+- 下一位 Agent 如何接手：以本阶段数据为 v0.1.61 真机基线；复测必须保持真实流量曲线可见并沿用相同 10×1 秒口径，不要拿代理关闭的空闲结果作对照。
+
+### 阶段 9：21:44~21:50 长时间运行复查
+
+- 已完成：在不切换页面、不停止进程、不修改系统代理的前提下，重新核对版本、进程时长、
+  系统代理、连续 CPU/RSS、FD、TCP、内存压力、日志、崩溃报告和 HTTPS 数据面。
+- 修改文件：仅四份项目记录；未修改业务代码、配置、节点、规则或代理模式。
+- 测试结果：连接突发期 App 19 个有效样本平均 CPU 4.51%、峰值 7.5%、RSS 189~191 MB；
+  安静期 11 个有效样本平均 3.76%、峰值 5.7%、RSS 184 MB。sing-box 安静期平均 0.36%、
+  峰值 0.9%、RSS 30 MB。系统可用内存 58%，无 throttled pages。
+- 当前状态：App/core/helper PID 为 34001/45932/10543。App FD 连续 10 秒固定 108；core FD
+  73~75，ESTABLISHED 39~41、LISTEN 2、CLOSE_WAIT 0。HTTP/HTTPS/SOCKS 仍指向
+  `127.0.0.1:65495`，代理 HTTPS 返回 200。
+- 问题与分析：采样开头系统 CloudTelemetry 短时间高频创建 iCloud 连接，带来 App 9.2% 单点
+  和 core 连接/FD 突发；流量停止后资源自然回落。当前日志 15:36 后共 25 ERROR、0 WARN，
+  最后两条是 21:23 的规则主动拒绝；最近真实异常为 17:06 的换网/默认接口丢失簇。
+- 重建边界：13:11/13:34 的 sing-box 启动分别与订阅、规则和 `config.json` 修改时间吻合，
+  且无新崩溃报告；判断为配置重载证据较强，但日志没有记录具体 UI 发起动作，不能百分百反推操作。
+- 风险/注意事项：当前资源已受控，无 P0/P1 性能问题；继续观察真实 2,000 行高频日志和
+  多小时 FD 趋势即可，不应仅凭一次连接突发继续改代码。
+- 下一步：提交前复核现有 dirty worktree；运行层面保持日常观察，不需要重启或清理。
+- 下一位 Agent 如何接手：再次取样必须报告流量阶段与安静期，避免把系统连接风暴误判成 UI 回退。
+
+### 阶段 10：v0.1.62 功能与工程收口（构建前）
+
+- 已完成：当前生效配置差异判断，未生效订阅/节点变化不再重启内核；新增最多 200 条、脱敏持久化的运行事件，覆盖启停、重载/回滚、崩溃自愈、换网和唤醒；消息页增加「警告 / 运行事件」分段。
+- 换网恢复：通过 SystemConfiguration 取物理 PrimaryInterface，再读 DHCP DNS，不受 TUN 系统 DNS 接管干扰；物理网络身份真实变化时刷新 LAN DNS 并重建内核，同时清掉 DoH 旧传输连接。
+- UI/工程：代理组列表补类型图标并统一 8pt 卡片圆角；新增只读 `scripts/verify_long_run_health.sh`；构建脚本支持可选 Developer ID、Keychain 和 notary profile，无凭据时仍为 ad-hoc。
+- 测试结果：新增 LAN DHCP 解析/推断、换网 TUN/系统代理重载、事件有界持久化回归；全量 `swift test` 410 通过 / 1 跳过 / 0 失败，helper 真实 cdhash 探针通过。
+- 资源短验收：当前 v0.1.61 运行版 3 次只读采样，App 平均/峰值 CPU 1.533%/2.3%、RSS 219280 KB、FD 111；core FD 211、174 ESTABLISHED、0 CLOSE_WAIT，门禁通过。
+- 当前边界：尚未构建、替换或打开 v0.1.62；当前安装版与系统代理保持原状。
+- 下一步：`swift build` → 构建 App/DMG → M4/验签 → 旧版正常退出及代理恢复硬门槛 → 安装打开新版。
+
+### 阶段 11：v0.1.62 构建、安全替换与最终验收
+
+- 已完成：`swift build`、release App/DMG、验签和 M4 门禁；旧 v0.1.61 仅通过 Apple 正常退出，
+  确认 App/core PID 消失、系统代理关闭、恢复文件清除、直连 HTTPS 返回 200 后才替换；
+  `/Applications/kongshan.app` 已打开为 v0.1.62/build 162。
+- 修改文件：v0.1.60~v0.1.62 成套源码、测试、脚本与四份项目记录；成品为
+  `dist/kongshan-0.1.62.dmg`。旧版备份位于
+  `/private/tmp/kongshan-0.1.61-backup-20260801-2316.app`。
+- 测试结果：全量 `swift test` 410 通过/1 跳过/0 失败；`swift build`、release、arm64、
+  deep/strict 签名、hardened runtime、DMG verify 均通过。M4 平均 CPU 0.940%、最大 RSS
+  132,016 KB；安装版可见仪表盘平均 CPU 0.180%、最大 RSS 123,440 KB。
+- 成品校验：DMG SHA-256 为
+  `d047e6f75c082ff7aadbb6bc895418935a2db84f8405d656b8f641ea5c3bd8d7`；主程序 SHA-256 为
+  `4dd045a2efd0b8d949ece1f336bd4bad3e837bda37e3c4eaa95a48356ae82f77`。
+- 当前状态：新版 PID 68610；系统代理关闭、无 sing-box、无恢复文件，直连 HTTPS 返回 200。
+  整个替换过程未向旧版发送 TERM/KILL，也未直接修改 `networksetup`。
+- 风险/注意事项：真实公司网/家庭网/手机热点切换、合盖睡眠唤醒和无透明代理网络出口 IP
+  仍需用户现场参与；ad-hoc cdhash 改变后 TUN helper 可能要求从 UI 重装一次，绝不能放宽校验。
+- 下一步：按 `docs/NEXT_STEPS.md` 做上述三项真机验收；需要长时间资源观察时运行
+  `KONGSHAN_HEALTH_SAMPLE_COUNT=360 KONGSHAN_HEALTH_INTERVAL_SECONDS=10 scripts/verify_long_run_health.sh`。
+- 下一位 Agent 如何接手：先确认安装版版本和代理状态；不要强杀 App，不要直接写系统代理设置，
+  不要把 v0.1.61 的长期采样结果误当成 v0.1.62 长期运行结论。
+
+### 阶段 12：提交前静态与运行复核
+
+- 已完成：核对四份项目记录、安装包版本/哈希/签名、当前进程、系统代理、恢复文件和直连网络；
+  未重启 App、未修改系统代理或节点配置。
+- 测试结果：`git diff --check` 通过；五个本轮脚本 `zsh -n` 通过；提交前全量 `swift test`
+  再次 410 通过/1 跳过/0 失败，helper 对当前安装版的 identifier、路径和 cdhash 校验一致；
+  DMG 与主程序 SHA-256 仍与阶段 11 一致，安装 App deep/strict 签名校验通过。
+- 环境说明：首次 `swift test` 被沙箱禁止写入 `~/.cache/clang/ModuleCache`，未进入测试代码；
+  在允许使用本机模块缓存后以同一命令通过，不属于项目失败。
+- 当前状态：v0.1.62 PID 68610，单点 CPU 1.5%、RSS 133,344 KB；无 sing-box；
+  `scutil --proxy` 为空，无 `*recovery*.json`，不经代理访问 Apple HTTPS 返回 200。
+- 风险/注意事项：这是代理关闭后的短时单点，不替代一小时长时间资源门禁，也不能替代真实换网、
+  合盖睡眠和无透明代理网络验收。
+- 下一步：检查 Git 变更边界和敏感信息后，提交 v0.1.60~v0.1.62 成套改动。

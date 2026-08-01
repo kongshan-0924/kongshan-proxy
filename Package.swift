@@ -17,7 +17,8 @@ let package = Package(
         .target(name: "HelperProtocol"),
         .target(
             name: "KongshanCore",
-            dependencies: [.product(name: "Yams", package: "Yams"), "HelperProtocol"]
+            dependencies: [.product(name: "Yams", package: "Yams"), "HelperProtocol"],
+            linkerSettings: [.linkedFramework("SystemConfiguration")]
         ),
         .executableTarget(name: "kongshan", dependencies: ["KongshanCore", "HelperProtocol"]),
         // 特权助手（以 root 运行）。极小、职责单一：起/停内置 sing-box。

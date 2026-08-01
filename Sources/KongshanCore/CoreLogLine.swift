@@ -21,6 +21,19 @@ public struct CoreLogLine: Equatable, Sendable {
     /// 去掉前缀后的正文。前缀里的 ID 和耗时已单独成字段，正文里重复显示只是噪音。
     public let message: String
 
+    /// 规则明确命中 reject 的预期拒绝，不是节点或网络故障。
+    public var isExpectedRuleRejection: Bool {
+        let normalized = message.lowercased()
+        return normalized.contains("using outbound/block[reject]")
+            && normalized.contains("operation not permitted")
+    }
+
+    /// 物理网络切换时常见的根因。其后同一时间窗内的 DNS、direct、节点错误多为派生噪音。
+    public var isNetworkTransitionFailure: Bool {
+        let normalized = message.lowercased()
+        return Self.networkTransitionFailureMarkers.contains { normalized.contains($0) }
+    }
+
     public init(connectionID: String?, host: String?, category: String?, message: String) {
         self.connectionID = connectionID
         self.host = host
@@ -77,4 +90,11 @@ public struct CoreLogLine: Equatable, Sendable {
         }
         return nil
     }
+
+    private static let networkTransitionFailureMarkers = [
+        "missing default interface",
+        "network is unreachable",
+        "can't assign requested address",
+        "use of closed network connection"
+    ]
 }

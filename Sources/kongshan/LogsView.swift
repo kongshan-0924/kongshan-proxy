@@ -18,8 +18,9 @@ struct LogsView: View {
         let query = filterText.trimmingCharacters(in: .whitespacesAndNewlines)
         return state.liveLogs.filter { item in
             // 「只看问题」是排查时最先按的那一下：几千行里真正有信息量的通常只有几十行。
-            if showsProblemsOnly, item.entry.level != .error, item.entry.level != .warning {
-                return false
+            if showsProblemsOnly {
+                guard item.entry.level == .error || item.entry.level == .warning else { return false }
+                guard !item.parsed.isExpectedRuleRejection else { return false }
             }
             guard !query.isEmpty else { return true }
             // 也匹配解析出的主机名：用户想查的通常是"某个域名怎么了"，
@@ -32,30 +33,7 @@ struct LogsView: View {
     /// 按连接 ID 聚合。同一条连接的多行日志（入站 → 进程匹配 → 出站 → 失败原因）
     /// 本来就是一个整体，散在几千行里靠肉眼找同号行是这一页最不好用的地方。
     private var connectionGroups: [LogConnectionGroup] {
-        var order: [String] = []
-        var buckets: [String: [LiveLogEntry]] = [:]
-        var hosts: [String: String] = [:]
-
-        for item in filteredLogs {
-            let parsed = item.parsed
-            // 没有连接 ID 的行（内核启动、DNS 缓存之类）单独成组，不能丢。
-            let key = parsed.connectionID ?? "sys-\(item.id)"
-            if buckets[key] == nil { order.append(key) }
-            buckets[key, default: []].append(item)
-            if hosts[key] == nil, let host = parsed.host { hosts[key] = host }
-        }
-
-        return order.map { key in
-            let entries = buckets[key] ?? []
-            return LogConnectionGroup(
-                id: key,
-                host: hosts[key],
-                entries: entries,
-                // 一组里只要有错就整组标红：那才是需要展开细看的组。
-                worstLevel: entries.contains { $0.entry.level == .error } ? .error
-                    : entries.contains { $0.entry.level == .warning } ? .warning : .info
-            )
-        }
+        LogConnectionGrouping.groups(from: filteredLogs)
     }
 
     var body: some View {
@@ -114,12 +92,12 @@ struct LogsView: View {
             Toggle("只看问题", isOn: $showsProblemsOnly)
                 .toggleStyle(.checkbox)
                 .font(.caption)
-                .help("只显示警告与错误")
+                .help("只显示警告与错误，排除规则命中的预期拒绝")
 
             Toggle("按连接聚合", isOn: $groupsByConnection)
                 .toggleStyle(.checkbox)
                 .font(.caption)
-                .help("把同一条连接的多行日志折成一组，点开看完整链路")
+                .help("把同一条连接的多行日志折成一组，并合并网络切换期间的派生错误")
 
             Toggle("暂停自动滚动", isOn: $pausesAutomaticScroll)
                 .toggleStyle(.checkbox)
@@ -224,6 +202,58 @@ struct LogsView: View {
                 state.errorMessage = "准备日志导出失败：\(error.localizedDescription)"
             }
         }
+    }
+}
+
+enum LogConnectionGrouping {
+    static let transitionWindow: TimeInterval = 30
+
+    static func groups(from logs: [LiveLogEntry]) -> [LogConnectionGroup] {
+        var order: [String] = []
+        var buckets: [String: [LiveLogEntry]] = [:]
+        var hosts: [String: String] = [:]
+
+        let transitionBuckets = Set(logs.lazy.compactMap { item -> Int64? in
+            guard item.parsed.isNetworkTransitionFailure else { return nil }
+            return timeBucket(for: item.entry.receivedAt)
+        })
+
+        for item in logs {
+            let parsed = item.parsed
+            let bucket = timeBucket(for: item.entry.receivedAt)
+            let isProblem = item.entry.level == .error || item.entry.level == .warning
+            let isDuringTransition = isProblem && transitionBuckets.contains(bucket)
+            // 同一 30 秒窗口内的派生错误合成一次网络切换事件；其余仍按连接 ID 聚合。
+            let key = isDuringTransition ? "network-transition-\(bucket)" : parsed.connectionID ?? "sys-\(item.id)"
+            if buckets[key] == nil { order.append(key) }
+            buckets[key, default: []].append(item)
+            if isDuringTransition {
+                hosts[key] = "网络切换期间"
+            } else if hosts[key] == nil, let host = parsed.host {
+                hosts[key] = host
+            }
+        }
+
+        return order.map { key in
+            let entries = buckets[key] ?? []
+            return LogConnectionGroup(
+                id: key,
+                host: hosts[key],
+                entries: entries,
+                worstLevel: diagnosticLevel(for: entries)
+            )
+        }
+    }
+
+    private static func timeBucket(for date: Date) -> Int64 {
+        Int64(floor(date.timeIntervalSinceReferenceDate / transitionWindow))
+    }
+
+    private static func diagnosticLevel(for entries: [LiveLogEntry]) -> CoreLogLevel {
+        let problems = entries.filter { !$0.parsed.isExpectedRuleRejection }
+        if problems.contains(where: { $0.entry.level == .error }) { return .error }
+        if problems.contains(where: { $0.entry.level == .warning }) { return .warning }
+        return .info
     }
 }
 

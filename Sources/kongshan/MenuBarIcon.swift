@@ -51,30 +51,58 @@ enum MenuBarIcon {
         uploadText: String,
         downloadText: String
     ) -> NSImage {
-        let font = NSFont.monospacedDigitSystemFont(ofSize: 8, weight: .medium)
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: font,
-            // 模板图只看 alpha，颜色随便给个不透明的即可。
-            .foregroundColor: NSColor.black
-        ]
-        let up = NSAttributedString(string: "↑\(uploadText)", attributes: attributes)
-        let down = NSAttributedString(string: "↓\(downloadText)", attributes: attributes)
-        let textWidth = ceil(max(up.size().width, down.size().width))
+        // 同一组文字往往连续出现（空闲时长期是 `—`），缓存能省掉重复的文本度量与绘制。
+        // 上限只是防御性的：速率文字的取值空间本来就很小。
+        let key = "\(style.rawValue)-\(state)-\(uploadText)-\(downloadText)"
+        if let cached = statusCache[key] { return cached }
+        if statusCache.count > 200 { statusCache.removeAll(keepingCapacity: true) }
+
+        let up = NSAttributedString(string: "↑\(uploadText)", attributes: textAttributes)
+        let down = NSAttributedString(string: "↓\(downloadText)", attributes: textAttributes)
 
         let iconWidth = canvas.width
         let gap: CGFloat = 3
-        let total = NSSize(width: iconWidth + gap + textWidth, height: canvas.height)
+        let total = NSSize(width: iconWidth + gap + statusTextWidth, height: canvas.height)
 
         let image = NSImage(size: total, flipped: false) { rect in
             draw(style: style, state: state, in: NSRect(origin: .zero, size: canvas))
             // 两行竖排，右对齐。行高压到 8.5 让两行正好落在 18pt 内。
             let x = iconWidth + gap
-            up.draw(at: NSPoint(x: x + textWidth - ceil(up.size().width), y: rect.height / 2 + 0.5))
-            down.draw(at: NSPoint(x: x + textWidth - ceil(down.size().width), y: rect.height / 2 - 9))
+            up.draw(at: NSPoint(x: x + statusTextWidth - ceil(up.size().width), y: rect.height / 2 + 0.5))
+            down.draw(at: NSPoint(x: x + statusTextWidth - ceil(down.size().width), y: rect.height / 2 - 9))
             return true
         }
         image.isTemplate = true
+        statusCache[key] = image
         return image
+    }
+
+    private static var statusCache: [String: NSImage] = [:]
+
+    private static let textAttributes: [NSAttributedString.Key: Any] = [
+        .font: NSFont.monospacedDigitSystemFont(ofSize: 8, weight: .medium),
+        // 模板图只看 alpha，颜色随便给个不透明的即可。
+        .foregroundColor: NSColor.black
+    ]
+
+    /// 速率文字区的**固定宽度**。
+    ///
+    /// 让图片宽度随数字变化，会导致状态项每次都改尺寸，而状态项一改尺寸 AppKit 就要
+    /// 重排整条菜单栏——这是每两秒一次的全局布局，实测能把一个空闲的菜单栏应用推到
+    /// 两位数 CPU。
+    ///
+    /// 39 是**实测**出来的：`↑999.9M` 在 8pt monospaced-digit 下要 38.03pt。
+    /// 别拍脑袋改小——文字是右对齐画的，宽度不够就从左边啃掉箭头和首位数字。
+    /// `testMenuBarStatusTextWidthFitsWidestRate` 钉住这个下界。
+    static let statusTextWidth: CGFloat = 39
+
+    /// 最宽的速率文字。`MenuRateFormatter` 的输出形态穷举下来，`999.9M` 最宽
+    /// （M 比 G/K 宽，`.` 比数字窄所以三位整数是最坏情况），配上更宽的 `↑` 箭头。
+    static let widestRateSample = "↑999.9M"
+
+    /// 度量一段速率文字在菜单栏字体下的宽度。只给测试用。
+    static func statusTextRenderedWidth(_ text: String) -> CGFloat {
+        NSAttributedString(string: text, attributes: textAttributes).size().width
     }
 
     private static func draw(style: MenuBarIconStyle, state: State, in rect: NSRect) {

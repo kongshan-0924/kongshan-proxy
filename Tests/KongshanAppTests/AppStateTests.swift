@@ -776,8 +776,12 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(try dnsURLs(from: attempts[1]), customDNSSettings)
     }
 
+    /// 注意样本数是点数的**两倍**：图表隔一个采样点才入图（见 `receiveTraffic`），
+    /// 因为每次 append 都要整页重排，而趋势图不需要秒级精度。
+    /// 速率数字（`uploadRate`/`downloadRate`）不受此影响，每一帧都要更新。
     func testDashboardMonitoringKeepsSixtyPointsAndIsIdempotent() async throws {
-        let streams = DashboardStreamFixture(sampleCount: 65)
+        // 130 个样本 → 偶数下标入图共 65 个点 → 截到 60 个，留下的是样本 10…128。
+        let streams = DashboardStreamFixture(sampleCount: 130)
         let fixture = try await makeModeFixture(
             initialMode: .systemProxy,
             clashClientFactory: { controller, secret in
@@ -796,10 +800,14 @@ final class AppStateTests: XCTestCase {
             fixture.state.trafficHistory.count == 60 && fixture.state.activeConnectionCount == 2
         }
 
-        XCTAssertEqual(fixture.state.uploadRate, 64)
-        XCTAssertEqual(fixture.state.downloadRate, 128)
-        XCTAssertEqual(fixture.state.trafficHistory.first?.upload, 5)
-        XCTAssertEqual(fixture.state.trafficHistory.last?.download, 128)
+        // 最后一个样本是 129：速率读数必须是它，不能停在最后入图的那个点上。
+        XCTAssertEqual(fixture.state.uploadRate, 129)
+        XCTAssertEqual(fixture.state.downloadRate, 258)
+        XCTAssertEqual(fixture.state.trafficHistory.first?.upload, 10)
+        XCTAssertEqual(fixture.state.trafficHistory.last?.download, 256)
+        // 入图的点必须是均匀隔一个取的，不能因为等值判断之类的原因变成不规则采样。
+        let uploads = fixture.state.trafficHistory.map(\.upload)
+        XCTAssertEqual(uploads, Array(stride(from: Int64(10), through: 128, by: 2)))
         XCTAssertEqual(fixture.state.coreMemory, 4_194_304)
         XCTAssertNotNil(fixture.state.runtimeStartedAt)
         XCTAssertEqual(streams.requestCount(path: "/traffic"), 1)
@@ -920,6 +928,83 @@ final class AppStateTests: XCTestCase {
         XCTAssertTrue(fixture.state.liveLogs.isEmpty)
         fixture.state.stopLogMonitoring()
         try await waitUntil { streams.terminationCount == 1 }
+        await fixture.state.stop()
+    }
+
+    /// 日志行是**成批**并入 `liveLogs` 的，不是逐行。
+    ///
+    /// 逐行 append 时 `@Observable` 每行失效一次整棵视图图，而内核忙起来一秒能推几十行
+    /// → 一秒几十次全量重排，且正好发生在用户盯着日志页的时候。攒批不丢行，只是最多
+    /// 晚 200ms 显示。
+    ///
+    /// 判据：**第一次通知过后列表里已经有一大批行**。逐行 append 的话这个值恒为 1。
+    /// 这样只需订阅一次就能定性，不必去数总通知次数（那要反复重订，反而不稳）。
+    func testLogEntriesAreFlushedInBatchesInsteadOfPerLine() async throws {
+        let lineCount = 300
+        let streams = LogStreamFixture(sampleCount: lineCount)
+        let fixture = try await makeModeFixture(
+            initialMode: .systemProxy,
+            clashClientFactory: { controller, secret in
+                ClashAPIClient(
+                    controller: controller,
+                    secret: secret,
+                    streamFactory: streams.stream(for:)
+                )
+            }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        // onChange 在写入**之前**回调，所以要跳到下一个主线程节拍再读批量大小。
+        let firstBatch = ObservationCounter()
+        let state = fixture.state
+        withObservationTracking {
+            _ = state.liveLogs
+        } onChange: {
+            Task { @MainActor in firstBatch.set(state.liveLogs.count) }
+        }
+
+        fixture.state.startLogMonitoring()
+        try await waitUntil { fixture.state.liveLogs.count == lineCount }
+        try await waitUntil { firstBatch.value > 0 }
+
+        // 一行都不能少，顺序也不能乱。
+        XCTAssertEqual(fixture.state.liveLogs.first?.entry.message, "message-0")
+        XCTAssertEqual(fixture.state.liveLogs.last?.entry.message, "message-\(lineCount - 1)")
+        XCTAssertGreaterThan(
+            firstBatch.value,
+            1,
+            "第一次通知后只有 \(firstBatch.value) 行，说明退回了逐行 append"
+        )
+
+        fixture.state.stopLogMonitoring()
+        await fixture.state.stop()
+    }
+
+    /// 清空之后，尚未并入的行不能在下一次 flush 时"复活"。
+    func testClearingLogsDropsPendingEntries() async throws {
+        let streams = LogStreamFixture(sampleCount: 50)
+        let fixture = try await makeModeFixture(
+            initialMode: .systemProxy,
+            clashClientFactory: { controller, secret in
+                ClashAPIClient(
+                    controller: controller,
+                    secret: secret,
+                    streamFactory: streams.stream(for:)
+                )
+            }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        fixture.state.startLogMonitoring()
+        try await waitUntil { !fixture.state.liveLogs.isEmpty }
+
+        fixture.state.clearLiveLogs()
+        XCTAssertTrue(fixture.state.liveLogs.isEmpty)
+        // 等够一个 flush 周期：若 pending 没被丢弃，这里就会冒出旧行。
+        try await Task.sleep(for: .milliseconds(400))
+        XCTAssertTrue(fixture.state.liveLogs.isEmpty, "清空后待发的旧行不该复活")
+
+        fixture.state.stopLogMonitoring()
         await fixture.state.stop()
     }
 
@@ -1145,6 +1230,47 @@ final class AppStateTests: XCTestCase {
         let notificationCount = await notifications.count
         XCTAssertEqual(notificationCount, 1)
         await scheduler.cancel()
+    }
+
+    func testInactiveSubscriptionChangesDoNotRestartRunningCore() async throws {
+        let responses = SubscriptionResponses([
+            """
+            proxies:
+              - {name: inactive-a, type: ss, server: 2.2.2.2, port: 443, cipher: aes-128-gcm, password: first}
+            """,
+            """
+            proxies:
+              - {name: inactive-b, type: ss, server: 3.3.3.3, port: 443, cipher: aes-128-gcm, password: second}
+            """
+        ])
+        let fixture = try await makeModeFixture(
+            initialMode: .systemProxy,
+            subscriptionLoader: { _ in
+                let yaml = await responses.next()
+                return HTTPDownload(data: Data(yaml.utf8), statusCode: 200)
+            }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let initialPID = await fixture.core.currentPID
+
+        await fixture.state.importSubscription(
+            url: URL(string: "https://example.com/inactive.yaml")!,
+            name: "inactive"
+        )
+        let sourceID = try XCTUnwrap(fixture.state.subscriptions.first?.id)
+        XCTAssertEqual(fixture.state.activeConfigID, AppState.localConfigID)
+        let afterImportPID = await fixture.core.currentPID
+        XCTAssertEqual(afterImportPID, initialPID)
+
+        await fixture.state.refreshSubscription(id: sourceID)
+        XCTAssertEqual(fixture.state.nodes.filter { $0.sourceID == sourceID }.map(\.name), ["inactive-b"])
+        let afterRefreshPID = await fixture.core.currentPID
+        XCTAssertEqual(afterRefreshPID, initialPID)
+
+        await fixture.state.setActiveConfig(sourceID)
+        let activeSubscriptionPID = await fixture.core.currentPID
+        XCTAssertNotEqual(activeSubscriptionPID, initialPID, "切换到变化后的配置仍必须重启内核")
+        await fixture.state.stop()
     }
 
     func testLoginItemManagerMapsEverySystemStatus() {
@@ -1449,7 +1575,11 @@ final class AppStateTests: XCTestCase {
         tunStartFailureCalls: Set<Int> = [],
         clashClientFactory: AppState.ClashClientFactory? = nil,
         processExitMonitor: (any ProcessExitMonitoring)? = nil,
-        notificationSender: (any NotificationSending)? = nil
+        notificationSender: (any NotificationSending)? = nil,
+        lanResolverProbe: AppState.LANResolverProbing? = nil,
+        subscriptionLoader: @escaping SubscriptionService.Loader = { _ in
+            HTTPDownload(data: Data(), statusCode: 500)
+        }
     ) async throws -> ModeFixture {
         let root = temporaryDirectory()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1476,9 +1606,7 @@ final class AppStateTests: XCTestCase {
         )
         let state = AppState(
             storage: storage,
-            subscriptionService: SubscriptionService(storage: storage) { _ in
-                HTTPDownload(data: Data(), statusCode: 500)
-            },
+            subscriptionService: SubscriptionService(storage: storage, loader: subscriptionLoader),
             ruleSetService: RuleSetService(
                 storage: storage,
                 binaryURL: singBoxURL,
@@ -1493,6 +1621,7 @@ final class AppStateTests: XCTestCase {
             runtimeFactory: { _ in runtime },
             healthVerifier: { _ in },
             clashClientFactory: clashClientFactory,
+            lanResolverProbe: lanResolverProbe,
             automaticallyInitialize: false
         )
         state.nodes = [ProxyNode(
@@ -2290,6 +2419,86 @@ extension AppStateTests {
             XCTAssertFalse(MenuRateFormatter.compact(value).contains(" "), "菜单栏格式不能含空格")
         }
     }
+
+    /// 菜单栏发布的是**格式化后的文字**而不是原始字节数。
+    ///
+    /// 原始速率几乎每次采样都在变（哪怕只差几字节），而 `@Observable` 的每次写入都会
+    /// 失效视图图 → MenuBarExtra 重建 label → 重绘 NSImage → 状态项换尺寸 → 整条菜单栏
+    /// 重排。按显示文字比较能把绝大多数无谓更新挡在源头：同一档位内（如 1.2M）
+    /// 往往连续多次采样都是同一串字。
+    func testMenuBarRateTextCollapsesSubDisplayChanges() {
+        // 同一档位内的抖动必须归一到同一串字——这正是等值判断能生效的前提。
+        XCTAssertEqual(AppState.menuRateText(1_258_291), AppState.menuRateText(1_258_400))
+        // 0 要给固定占位符，不能是空串（空串会让菜单栏宽度来回跳）。
+        XCTAssertEqual(AppState.menuRateText(0), "—")
+        XCTAssertEqual(AppState.menuRateText(-1), "—")
+        XCTAssertNotEqual(AppState.menuRateText(1_048_576), AppState.menuRateText(2 * 1_048_576))
+    }
+
+    /// 图片宽度必须**固定**。宽度一变，状态项就要改尺寸，AppKit 随即重排整条菜单栏；
+    /// 这是每两秒一次的全局布局，实测能把一个空闲的菜单栏应用推到两位数 CPU。
+    func testMenuBarStatusImageWidthDoesNotDependOnRateText() {
+        let narrow = MenuBarIcon.statusImage(style: .peak, state: .off, uploadText: "—", downloadText: "—")
+        let wide = MenuBarIcon.statusImage(
+            style: .peak,
+            state: .off,
+            uploadText: "999.9M",
+            downloadText: "999.9M"
+        )
+        XCTAssertEqual(narrow.size.width, wide.size.width, "菜单栏图宽度不能随速率文字变化")
+        XCTAssertEqual(narrow.size.height, wide.size.height)
+    }
+
+    /// 固定宽度得真的装得下最宽的一串，否则数字会被右边界裁掉。
+    func testMenuBarStatusTextWidthFitsWidestRate() {
+        let widest = MenuBarIcon.statusTextRenderedWidth(MenuBarIcon.widestRateSample)
+        XCTAssertLessThanOrEqual(
+            widest,
+            MenuBarIcon.statusTextWidth,
+            "\(MenuBarIcon.widestRateSample) 需要 \(widest)pt，超过预留的 \(MenuBarIcon.statusTextWidth)pt"
+        )
+    }
+
+    /// 同一组入参必须命中缓存返回同一个实例：菜单栏空闲时长期是同一串字，
+    /// 每次都重新度量文本 + 走一遍 CoreGraphics 绘制纯属白工。
+    func testMenuBarStatusImageIsCachedPerInputs() {
+        let first = MenuBarIcon.statusImage(style: .valley, state: .tun, uploadText: "1.2M", downloadText: "3.4K")
+        let second = MenuBarIcon.statusImage(style: .valley, state: .tun, uploadText: "1.2M", downloadText: "3.4K")
+        XCTAssertTrue(first === second, "同一组入参应命中缓存")
+
+        let otherState = MenuBarIcon.statusImage(
+            style: .valley,
+            state: .systemProxy,
+            uploadText: "1.2M",
+            downloadText: "3.4K"
+        )
+        XCTAssertFalse(first === otherState, "状态是 key 的一部分，不能串图")
+    }
+}
+
+/// 记录 `@Observable` 通知发生时的观测值。onChange 在任意线程回调，故加锁。
+private final class ObservationCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = 0
+
+    var value: Int { lock.withLock { storage } }
+
+    /// 只记第一次：后续通知会盖掉我们想验证的那个"首批大小"。
+    func set(_ value: Int) {
+        lock.withLock { if storage == 0 { storage = value } }
+    }
+}
+
+private actor SubscriptionResponses {
+    private var values: [String]
+
+    init(_ values: [String]) {
+        self.values = values
+    }
+
+    func next() -> String {
+        values.isEmpty ? "" : values.removeFirst()
+    }
 }
 
 /// 记录 runtimeFactory 每次拿到的 preferred 端口。工厂闭包是 @Sendable，故自带锁。
@@ -2358,6 +2567,111 @@ extension AppStateTests {
         XCTAssertTrue(bypass.contains("127.0.0.1"))
 
         await fixture.state.stop()
+    }
+
+    func testNetworkChangeReprobesLANDNSAndReloadsTUN() async throws {
+        let responses = LANResolverResponses([
+            LANResolverSnapshot(servers: ["10.0.0.53"], searchDomains: ["old.corp.example"]),
+            LANResolverSnapshot(servers: ["172.16.16.7"], searchDomains: ["new.corp.example"])
+        ])
+        let fixture = try await makeModeFixture(
+            initialMode: .tun,
+            processExitMonitor: FakeProcessExitMonitor(),
+            lanResolverProbe: { excluded in
+                XCTAssertTrue(excluded.contains("172.19.0.1"))
+                return await responses.next()
+            }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let before = await fixture.privileged.startedConfigs()
+        XCTAssertEqual(before.count, 1)
+
+        await fixture.state.reassertTakeoversAfterNetworkChange(identityChangedForTesting: true)
+
+        let configs = await fixture.privileged.startedConfigs()
+        XCTAssertEqual(configs.count, 2)
+        XCTAssertEqual(fixture.state.lanResolverSnapshot.servers, ["172.16.16.7"])
+        let latest = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(configs.last)) as? [String: Any])
+        let dns = try XCTUnwrap(latest["dns"] as? [String: Any])
+        let servers = try XCTUnwrap(dns["servers"] as? [[String: Any]])
+        let lan = try XCTUnwrap(servers.first { $0["tag"] as? String == "dns-lan" })
+        XCTAssertEqual(lan["server"] as? String, "172.16.16.7")
+        XCTAssertTrue(fixture.state.runtimeEvents.contains { $0.title == "物理网络已变更" })
+        XCTAssertTrue(fixture.state.runtimeEvents.contains {
+            $0.title == "网络变化已重载" && $0.previousPID != nil && $0.currentPID != nil
+        })
+        await fixture.state.stop()
+    }
+
+    func testNetworkChangeRestartsSystemCoreToRefreshDoHTransport() async throws {
+        let fixture = try await makeRunningFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let previousPIDValue = await fixture.core.currentPID
+        let previousPID = try XCTUnwrap(previousPIDValue)
+
+        await fixture.state.reassertTakeoversAfterNetworkChange(identityChangedForTesting: true)
+
+        let currentPIDValue = await fixture.core.currentPID
+        let currentPID = try XCTUnwrap(currentPIDValue)
+        XCTAssertNotEqual(currentPID, previousPID)
+        XCTAssertEqual(fixture.state.status, .on)
+        XCTAssertTrue(fixture.state.runtimeEvents.contains {
+            $0.title == "网络变化已应用" && $0.currentPID == currentPID
+        })
+        await fixture.state.stop()
+    }
+
+    func testRuntimeEventsAreBoundedPersistedAndClearable() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        let privileged = FakePrivilegedLauncher(root: root)
+        func makeState() -> AppState {
+            AppState(
+                storage: storage,
+                systemProxyManager: SystemProxyManager(storage: storage) { _, _ in
+                    ProcessResult(exitCode: 0, stdout: "", stderr: "")
+                },
+                systemDNSManager: SystemDNSManager(storage: storage) { _, _ in
+                    ProcessResult(exitCode: 0, stdout: "", stderr: "")
+                },
+                singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+                privilegedLauncher: privileged,
+                automaticallyInitialize: false
+            )
+        }
+        let state = makeState()
+        await state.initialize()
+
+        for index in 0..<205 {
+            state.recordRuntimeEvent(title: "event-\(index)")
+        }
+        XCTAssertEqual(state.runtimeEvents.count, 200)
+        XCTAssertEqual(state.runtimeEvents.first?.title, "event-5")
+        try await Task.sleep(for: .milliseconds(350))
+
+        let reloaded = makeState()
+        await reloaded.initialize()
+        XCTAssertEqual(reloaded.runtimeEvents.count, 200)
+        XCTAssertEqual(reloaded.runtimeEvents.last?.title, "event-204")
+
+        reloaded.clearRuntimeEvents()
+        try await Task.sleep(for: .milliseconds(350))
+        let stored = try Data(contentsOf: root.appending(path: "runtime-events.json"))
+        XCTAssertTrue(try JSONDecoder().decode([RuntimeEvent].self, from: stored).isEmpty)
+    }
+}
+
+private actor LANResolverResponses {
+    private var values: [LANResolverSnapshot]
+
+    init(_ values: [LANResolverSnapshot]) {
+        self.values = values
+    }
+
+    func next() -> LANResolverSnapshot {
+        guard values.count > 1 else { return values.first ?? .empty }
+        return values.removeFirst()
     }
 }
 

@@ -111,6 +111,7 @@ final class AppState {
     var speedTestMethod: SpeedTestMethod = .tcpPing
     var errorMessage: String?
     var warnings: [String] = []
+    private(set) var runtimeEvents: [RuntimeEvent] = []
     var isReady = false
     var routingSettings = RoutingSettings.defaults
     var preferredMode: ProxyMode = .systemProxy
@@ -142,13 +143,22 @@ final class AppState {
     @ObservationIgnored private var connectionRateTracker = ConnectionRateTracker()
     private(set) var runtimeStartedAt: Date?
     private(set) var trafficHistory: [TrafficPoint] = []
+    /// 只让一半的流量采样点进图表，见 receiveTraffic。
+    @ObservationIgnored private var trafficSampleParity = false
     /// 整机网卡速率（菜单栏用）。
     ///
     /// 与 `uploadRate`/`downloadRate` 不是一回事：那两个读的是内核 `/traffic`，
     /// **只统计走代理的流量**，且代理没开时恒为 0。菜单栏要回答的是"现在网速多少"，
     /// 所以直接读物理网卡计数器，代理开不开都有读数。见 `NetworkThroughput`。
-    private(set) var nicUploadRate: Int64 = 0
-    private(set) var nicDownloadRate: Int64 = 0
+    /// **发布的是格式化后的文字，不是原始字节数**。
+    ///
+    /// 菜单栏每秒读一次这两个值。原始速率几乎每秒都在变（哪怕只差几字节），
+    /// 而 `@Observable` 的每次写入都会失效视图图 → MenuBarExtra 的 label 重建 →
+    /// 重新绘制 NSImage → 状态项尺寸变化 → 整条菜单栏重排。
+    /// 按**显示文字**比较能把绝大多数无谓的更新挡在源头：空闲时文字长时间是 `—`，
+    /// 有流量时同一档位内（如 1.2M）也往往连续多秒不变。
+    private(set) var nicUploadText = "—"
+    private(set) var nicDownloadText = "—"
     @ObservationIgnored private var throughputCalculator = ThroughputRateCalculator()
     @ObservationIgnored private var throughputTask: Task<Void, Never>?
 
@@ -200,6 +210,23 @@ final class AppState {
         guard let activeConfigID, activeConfigID != Self.localConfigID else { return [] }
         var seen = Set<String>()
         return (discoveredRules[activeConfigID] ?? []).filter { seen.insert($0.id).inserted }
+    }
+
+    /// 只有这些内容会进入当前运行配置。其它订阅的节点、用量和更新时间变化都不该重启内核。
+    private struct ActiveRuntimeContent: Equatable {
+        let id: UUID?
+        let nodes: [ProxyNode]
+        let policyGroups: [PolicyGroup]
+        let rules: [SubscriptionRule]
+    }
+
+    private var activeRuntimeContent: ActiveRuntimeContent {
+        ActiveRuntimeContent(
+            id: activeConfigID,
+            nodes: activeConfigNodes,
+            policyGroups: activeConfigPolicyGroups,
+            rules: subscriptionRules
+        )
     }
 
     /// 配置页展示用的一项配置。
@@ -338,6 +365,9 @@ final class AppState {
     @ObservationIgnored private var dashboardMonitorConsumers: Set<DashboardMonitorConsumer> = []
     @ObservationIgnored private var logTask: Task<Void, Never>?
     @ObservationIgnored private var isLogsVisible = false
+    /// 尚未并入 `liveLogs` 的日志行，以及负责并入的定时任务。见 `receiveLog`。
+    @ObservationIgnored private var pendingLogs: [LiveLogEntry] = []
+    @ObservationIgnored private var logFlushTask: Task<Void, Never>?
     /// 断流重连（睡眠唤醒后 WebSocket 必断）。指数退避，收到数据即复位。
     @ObservationIgnored private var dashboardRetryTask: Task<Void, Never>?
     @ObservationIgnored private var dashboardRetryDelay: Double = 2
@@ -352,6 +382,7 @@ final class AppState {
     /// 切节点等高频操作的落盘防抖任务。500ms 内的多次切节点只触发一次磁盘写入，
     /// 避免连续点选节点时每次都同步落盘 settings.json。退出前 flush 确保最后一次选择不丢。
     @ObservationIgnored private var persistSettingsTask: Task<Void, Never>?
+    @ObservationIgnored private var persistRuntimeEventsTask: Task<Void, Never>?
 
     /// 特权助手客户端（零弹窗 TUN）。助手不可达时回退 `privilegedLauncher`（osascript）。
     @ObservationIgnored private let helperClient: PrivilegedHelperClient
@@ -415,7 +446,9 @@ final class AppState {
         // 悄悄污染绕过列表断言——真机上这条链路一切正常，CI 却在别人机器上飘。
         // 想验证探测本身的测试自行注入。
         let liveProbe: LANResolverProbing = { excluded in
-            await LANResolver.probe(excluding: excluded)
+            let physical = await LANResolver.probePhysicalService(excluding: excluded)
+            if !physical.servers.isEmpty { return physical }
+            return await LANResolver.probe(excluding: excluded)
         }
         let inertProbe: LANResolverProbing = { _ in .empty }
         self.lanResolverProbe = lanResolverProbe ?? (automaticallyInitialize ? liveProbe : inertProbe)
@@ -531,7 +564,13 @@ final class AppState {
         }
     }
 
-    /// 每秒采一次网卡计数器。菜单栏常驻，所以这个循环也常驻——
+    /// 0 时用固定占位符，避免空串让菜单栏宽度来回跳。
+    nonisolated static func menuRateText(_ value: Int64) -> String {
+        let text = MenuRateFormatter.compact(value)
+        return text.isEmpty ? "—" : text
+    }
+
+    /// 每 2 秒采一次网卡计数器。菜单栏常驻，所以这个循环也常驻——
     /// 一次 sysctl 是微秒级，比为省这点开销而让菜单栏时有时无划算。
     private func startThroughputSampling() {
         guard throughputTask == nil else { return }
@@ -541,12 +580,15 @@ final class AppState {
                     await MainActor.run { [weak self] in
                         guard let self else { return }
                         let rate = self.throughputCalculator.rate(from: counters, at: self.now())
-                        // 等值判断：空闲时速率长时间是 0，@Observable 赋同值也会失效整棵视图图。
-                        if self.nicUploadRate != rate.upload { self.nicUploadRate = rate.upload }
-                        if self.nicDownloadRate != rate.download { self.nicDownloadRate = rate.download }
+                        let up = Self.menuRateText(rate.upload)
+                        let down = Self.menuRateText(rate.download)
+                        if self.nicUploadText != up { self.nicUploadText = up }
+                        if self.nicDownloadText != down { self.nicDownloadText = down }
                     }
                 }
-                try? await Task.sleep(for: .seconds(1))
+                // 2 秒一次。菜单栏速率是"扫一眼知道有没有在跑"的信息，不需要秒级精度；
+                // 而每次更新的真实代价是一次全菜单栏重排，频率减半就是代价减半。
+                try? await Task.sleep(for: .seconds(2))
             }
         }
     }
@@ -696,6 +738,11 @@ final class AppState {
             mixedPort = usesSystemProxy ? runtime.mixedPort : nil
             activeModes = modes
             status = .on
+            recordRuntimeEvent(
+                title: "内核已启动",
+                detail: runtimeModeDescription(modes),
+                currentPID: startedPID
+            )
             markRuntimeStarted()
             startNetworkPathMonitoringIfNeeded()
             if let startedPID {
@@ -746,6 +793,7 @@ final class AppState {
             }
             clearRuntimeState()
             setFailure(error.localizedDescription + restoreNote)
+            recordRuntimeEvent(level: .error, title: "内核启动失败")
         }
     }
 
@@ -812,6 +860,7 @@ final class AppState {
         }
         clearRuntimeState()
         status = .off
+        recordRuntimeEvent(title: "内核已停止", previousPID: previousPID)
         if !restoreFailures.isEmpty {
             // 快照已保留，重开 App 会自动重试；但在那之前网络是坏的，必须明确告知怎么手工恢复。
             errorMessage = "以下系统设置未能还原，网络可能不通，请手工清空或重开 kongshan 自动重试——"
@@ -856,6 +905,7 @@ final class AppState {
         await flushPersistSettingsIfNeeded()
         if !activeModes.isEmpty {
             await stop()
+            await flushRuntimeEventsIfNeeded()
             return status == .off
         } else {
             do {
@@ -865,9 +915,11 @@ final class AppState {
                 try await systemDNSManager.recoverIfNeeded()
                 clearRuntimeState()
                 status = .off
+                await flushRuntimeEventsIfNeeded()
                 return true
             } catch {
                 setFailure("退出前恢复系统代理失败：\(error.localizedDescription)")
+                await flushRuntimeEventsIfNeeded()
                 return false
             }
         }
@@ -875,6 +927,7 @@ final class AppState {
 
     func importSubscription(url: URL, name: String? = nil, autoUpdate: Bool = true) async {
         guard !isBusy else { return }
+        let previousActiveContent = activeRuntimeContent
         let trimmed = (name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let source = SubscriptionSource(
             name: trimmed.isEmpty ? (url.host ?? "订阅 \(subscriptions.count + 1)") : trimmed,
@@ -901,7 +954,7 @@ final class AppState {
             try await persistSettings()
             errorMessage = nil
             await rescheduleSubscriptionUpdates()
-            await hotReloadAfterNodeChange()
+            await reloadAfterActiveContentChange(from: previousActiveContent)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -936,6 +989,7 @@ final class AppState {
 
     func removeSubscription(id: UUID) async {
         guard !isBusy, let index = subscriptions.firstIndex(where: { $0.id == id }) else { return }
+        let previousActiveContent = activeRuntimeContent
         subscriptions.remove(at: index)
         nodes.removeAll { $0.sourceID == id }
         discoveredPolicyGroups[id] = nil
@@ -952,12 +1006,13 @@ final class AppState {
             errorMessage = "删除订阅失败：\(error.localizedDescription)"
             return
         }
-        await hotReloadAfterNodeChange()
+        await reloadAfterActiveContentChange(from: previousActiveContent)
     }
 
     /// 删除本地「自建节点」配置：清空全部手动节点。
     func removeLocalConfig() async {
         guard !isBusy, !manualNodes.isEmpty else { return }
+        let previousActiveContent = activeRuntimeContent
         nodes.removeAll { $0.sourceID == nil }
         if activeConfigID == Self.localConfigID { activeConfigID = nil }
         ensureActiveConfig()
@@ -969,7 +1024,7 @@ final class AppState {
             errorMessage = "删除自建节点失败：\(error.localizedDescription)"
             return
         }
-        await hotReloadAfterNodeChange()
+        await reloadAfterActiveContentChange(from: previousActiveContent)
     }
 
     func refreshSubscriptions() async {
@@ -982,8 +1037,8 @@ final class AppState {
     /// 只刷新单个订阅。
     func refreshSubscription(id: UUID) async {
         guard !isBusy, let index = subscriptions.firstIndex(where: { $0.id == id }) else { return }
+        let previousActiveContent = activeRuntimeContent
         let source = subscriptions[index]
-        let previousNodes = nodes
         do {
             let result = try await subscriptionService.refresh(source)
             if !result.usedCache {
@@ -1002,7 +1057,7 @@ final class AppState {
             errorMessage = "刷新配置失败：\(error.localizedDescription)"
             return
         }
-        if nodes != previousNodes { await hotReloadAfterNodeChange() }
+        await reloadAfterActiveContentChange(from: previousActiveContent)
     }
 
     private func performSubscriptionRefresh(
@@ -1012,7 +1067,7 @@ final class AppState {
         guard !isBusy else { return true }
         var collectedWarnings: [String] = []
         var failedSubscriptions: [String] = []
-        let previousNodes = nodes
+        let previousActiveContent = activeRuntimeContent
         for index in subscriptions.indices {
             let source = subscriptions[index]
             // 定时更新跳过关掉自动更新的订阅；用户主动刷新不受限制。
@@ -1038,10 +1093,7 @@ final class AppState {
         selectFirstNodeIfNeeded()
         try? await persistSubscriptions()
         try? await persistSettings()
-        // 节点 ID 是确定性的：内容没变时集合相等，不会白白重启内核。
-        if nodes != previousNodes {
-            await hotReloadAfterNodeChange()
-        }
+        await reloadAfterActiveContentChange(from: previousActiveContent)
         if notifyOnFailure, !failedSubscriptions.isEmpty {
             do {
                 try await notificationSender.send(
@@ -1100,6 +1152,7 @@ final class AppState {
             }
         }
         liveLogs.removeAll(keepingCapacity: false)
+        discardPendingLogs()
         ruleSetSettings.lastUpdatedAt = nil
         try? await persistSettings()
         errorMessage = nil
@@ -1239,6 +1292,7 @@ final class AppState {
 
     func addManualNodes(_ parsed: [ProxyNode]) async {
         guard !parsed.isEmpty else { return }
+        let previousActiveContent = activeRuntimeContent
         nodes.append(contentsOf: parsed.map { node in
             var copy = node
             copy.sourceID = nil
@@ -1254,10 +1308,11 @@ final class AppState {
             errorMessage = "保存自建节点失败：\(error.localizedDescription)"
             return
         }
-        await hotReloadAfterNodeChange()
+        await reloadAfterActiveContentChange(from: previousActiveContent)
     }
 
     func addManual(_ form: ManualHysteria2) async {
+        let previousActiveContent = activeRuntimeContent
         do {
             nodes.append(try form.makeNode())
             // 没有其他配置时，本地节点配置自动生效。
@@ -1269,12 +1324,13 @@ final class AppState {
             errorMessage = error.localizedDescription
             return
         }
-        await hotReloadAfterNodeChange()
+        await reloadAfterActiveContentChange(from: previousActiveContent)
     }
 
     func removeManualNode(id: UUID) async {
         guard !isBusy,
               let index = nodes.firstIndex(where: { $0.id == id && $0.sourceID == nil }) else { return }
+        let previousActiveContent = activeRuntimeContent
         let removedName = nodes[index].name
         nodes.remove(at: index)
         for (group, name) in groupSelections where name == removedName {
@@ -1291,6 +1347,11 @@ final class AppState {
             errorMessage = "删除自建节点失败：\(error.localizedDescription)"
             return
         }
+        await reloadAfterActiveContentChange(from: previousActiveContent)
+    }
+
+    private func reloadAfterActiveContentChange(from previous: ActiveRuntimeContent) async {
+        guard previous != activeRuntimeContent else { return }
         await hotReloadAfterNodeChange()
     }
 
@@ -1304,7 +1365,7 @@ final class AppState {
             await stop()
             return
         }
-        await applyRoutingSettings(routingSettings)
+        await applyRoutingSettings(routingSettings, operation: "当前配置")
     }
 
     // 内置策略组用固定 ID：PolicyGroup(name:) 默认每次生成新 UUID，
@@ -1704,7 +1765,7 @@ final class AppState {
             }
             return
         }
-        await applyRoutingSettings(routingSettings)
+        await applyRoutingSettings(routingSettings, operation: "出站模式")
         if case .failed = status {
             outboundMode = previous
             return
@@ -1712,7 +1773,7 @@ final class AppState {
         try? await persistSettings()
     }
 
-    func applyRoutingSettings(_ requestedSettings: RoutingSettings) async {
+    func applyRoutingSettings(_ requestedSettings: RoutingSettings, operation: String = "分流规则") async {
         guard !isBusy else { return }
         isApplyingRouting = true
         defer { isApplyingRouting = false }
@@ -1756,7 +1817,7 @@ final class AppState {
                     newConfig: newConfig,
                     oldConfig: oldConfig,
                     client: client,
-                    operation: "分流规则"
+                    operation: operation
                 ) else {
                     return
                 }
@@ -1772,7 +1833,7 @@ final class AppState {
                         config: oldConfig,
                         client: client,
                         updateError: error,
-                        operation: "分流规则"
+                        operation: operation
                     )
                     return
                 }
@@ -1789,7 +1850,7 @@ final class AppState {
                         config: oldConfig,
                         client: client,
                         updateError: error,
-                        operation: "分流规则"
+                        operation: operation
                     )
                     return
                 }
@@ -1806,8 +1867,12 @@ final class AppState {
             markRuntimeStarted()
             resumeDashboardMonitoringIfNeeded()
             resumeLogMonitoringIfNeeded()
+            if !activeModes.contains(.tun) {
+                recordConfigurationApplied(operation: operation)
+            }
         } catch {
             errorMessage = "应用分流规则失败：\(error.localizedDescription)"
+            recordRuntimeEvent(level: .error, title: "\(operation)应用失败")
         }
     }
 
@@ -1851,7 +1916,7 @@ final class AppState {
         }
     }
 
-    func applyTunSettings(_ requestedSettings: TunSettings) async {
+    func applyTunSettings(_ requestedSettings: TunSettings, operation: String = "TUN 设置") async {
         guard !isBusy else { return }
         isApplyingRouting = true
         defer { isApplyingRouting = false }
@@ -1889,7 +1954,7 @@ final class AppState {
                 newConfig: newConfig,
                 oldConfig: oldConfig,
                 client: client,
-                operation: "TUN 设置"
+                operation: operation
             ) else {
                 tunSettings = oldTunSettings
                 return
@@ -1906,10 +1971,11 @@ final class AppState {
         } catch {
             tunSettings = oldTunSettings
             errorMessage = "应用 TUN 设置失败：\(error.localizedDescription)"
+            recordRuntimeEvent(level: .error, title: "\(operation)应用失败")
         }
     }
 
-    func applyDNSSettings(_ requestedSettings: DNSSettings) async {
+    func applyDNSSettings(_ requestedSettings: DNSSettings, operation: String = "DNS 设置") async {
         guard !isBusy else { return }
         isApplyingRouting = true
         defer { isApplyingRouting = false }
@@ -1952,7 +2018,7 @@ final class AppState {
                     newConfig: newConfig,
                     oldConfig: oldConfig,
                     client: client,
-                    operation: "DNS 设置"
+                    operation: operation
                 ) else {
                     return
                 }
@@ -1985,9 +2051,13 @@ final class AppState {
             markRuntimeStarted()
             resumeDashboardMonitoringIfNeeded()
             resumeLogMonitoringIfNeeded()
+            if !activeModes.contains(.tun) {
+                recordConfigurationApplied(operation: operation)
+            }
         } catch {
             dnsSettings = oldDNSSettings
             errorMessage = "应用 DNS 设置失败：\(error.localizedDescription)"
+            recordRuntimeEvent(level: .error, title: "\(operation)应用失败")
         }
     }
 
@@ -2026,12 +2096,14 @@ final class AppState {
         logLevel = level
         // 不清空的话旧等级的行仍留在列表里，用户会以为切换没生效。
         liveLogs.removeAll(keepingCapacity: true)
+        discardPendingLogs()
         suspendLogMonitoring()
         resumeLogMonitoringIfNeeded()
     }
 
     func clearLiveLogs() {
         liveLogs.removeAll(keepingCapacity: false)
+        discardPendingLogs()
     }
 
     func exportLogs() async throws -> String {
@@ -2073,6 +2145,9 @@ final class AppState {
         ===== 当前消息 =====
         \(errorMessage ?? "无错误")
         \(warnings.isEmpty ? "无警告" : warnings.joined(separator: "\n"))
+
+        ===== 运行事件 =====
+        \(runtimeEventDiagnosticText)
 
         ===== 脱敏配置 =====
         \(configText)
@@ -2309,7 +2384,84 @@ final class AppState {
         if let data = try await storage.readIfPresent(from: rulesURL) {
             routingSettings = try JSONDecoder().decode(RoutingSettings.self, from: data).validated()
         }
+        if let data = try await storage.readIfPresent(from: runtimeEventsURL),
+           let decoded = try? JSONDecoder().decode([RuntimeEvent].self, from: data) {
+            runtimeEvents = Array(decoded.suffix(Self.runtimeEventLimit))
+        }
         ensureActiveConfig()
+    }
+
+    private static let runtimeEventLimit = 200
+
+    func clearRuntimeEvents() {
+        runtimeEvents.removeAll(keepingCapacity: false)
+        scheduleRuntimeEventsPersist()
+    }
+
+    func recordRuntimeEvent(
+        level: RuntimeEvent.Level = .info,
+        title: String,
+        detail: String? = nil,
+        previousPID: Int32? = nil,
+        currentPID: Int32? = nil
+    ) {
+        runtimeEvents.append(RuntimeEvent(
+            timestamp: now(),
+            level: level,
+            title: title,
+            detail: detail,
+            previousPID: previousPID,
+            currentPID: currentPID
+        ))
+        if runtimeEvents.count > Self.runtimeEventLimit {
+            runtimeEvents.removeFirst(runtimeEvents.count - Self.runtimeEventLimit)
+        }
+        scheduleRuntimeEventsPersist()
+    }
+
+    private func scheduleRuntimeEventsPersist() {
+        persistRuntimeEventsTask?.cancel()
+        persistRuntimeEventsTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled, let self else { return }
+            self.persistRuntimeEventsTask = nil
+            try? await self.persistRuntimeEvents()
+        }
+    }
+
+    private func persistRuntimeEvents() async throws {
+        try await storage.writeAtomically(
+            try JSONEncoder.sorted.encode(runtimeEvents),
+            to: runtimeEventsURL
+        )
+    }
+
+    private func flushRuntimeEventsIfNeeded() async {
+        guard persistRuntimeEventsTask != nil else { return }
+        persistRuntimeEventsTask?.cancel()
+        persistRuntimeEventsTask = nil
+        try? await persistRuntimeEvents()
+    }
+
+    private var runtimeEventDiagnosticText: String {
+        guard !runtimeEvents.isEmpty else { return "无" }
+        return runtimeEvents.map { event in
+            var fields = [event.timestamp.formatted(.iso8601), event.title]
+            if let detail = event.detail { fields.append(detail) }
+            if event.previousPID != nil || event.currentPID != nil {
+                fields.append("PID \(event.previousPID.map { String($0) } ?? "-") -> \(event.currentPID.map { String($0) } ?? "-")")
+            }
+            return fields.joined(separator: " | ")
+        }.joined(separator: "\n")
+    }
+
+    private func runtimeModeDescription(_ modes: Set<ProxyMode>) -> String {
+        let names = [ProxyMode.systemProxy, .tun].filter(modes.contains).map(\.displayName)
+        return names.isEmpty ? "未接管" : names.joined(separator: " + ")
+    }
+
+    private func recordConfigurationApplied(operation: String) {
+        recordRuntimeEvent(title: "\(operation)已应用", currentPID: monitoredCorePID)
     }
 
     private func persistSubscriptions() async throws {
@@ -2391,6 +2543,7 @@ final class AppState {
             await armRunningSystemCoreIfAvailable()
             resumeDashboardMonitoringIfNeeded()
             resumeLogMonitoringIfNeeded()
+            recordRuntimeEvent(level: .warning, title: "\(operation)应用失败，已回滚", currentPID: monitoredCorePID)
         } catch {
             await singBoxProcess.stop()
             let restoreMessage: String
@@ -2405,6 +2558,7 @@ final class AppState {
             setFailure(
                 "\(operation)更新失败且旧配置无法恢复：\(updateError.localizedDescription)；\(error.localizedDescription)；\(restoreMessage)"
             )
+            recordRuntimeEvent(level: .error, title: "\(operation)应用与回滚均失败")
         }
     }
 
@@ -2439,6 +2593,11 @@ final class AppState {
             try await healthVerifier(client)
             currentConfig = newConfig
             await armCoreExitMonitoring(pid: record.pid)
+            recordRuntimeEvent(
+                title: "\(operation)已重载",
+                previousPID: previousPID,
+                currentPID: record.pid
+            )
             return true
         } catch {
             let updateError = error
@@ -2470,6 +2629,12 @@ final class AppState {
                 await armCoreExitMonitoring(pid: record.pid)
                 resumeDashboardMonitoringIfNeeded()
                 resumeLogMonitoringIfNeeded()
+                recordRuntimeEvent(
+                    level: .warning,
+                    title: "\(operation)重载失败，已回滚",
+                    previousPID: previousPID,
+                    currentPID: record.pid
+                )
                 return false
             } catch let rollbackError {
                 if oldConfigurationRecord != nil {
@@ -2484,6 +2649,7 @@ final class AppState {
                 setFailure(
                     "\(operation)更新失败且旧 TUN 配置无法恢复：\(updateError.localizedDescription)；\(rollbackError.localizedDescription)"
                 )
+                recordRuntimeEvent(level: .error, title: "\(operation)重载与回滚均失败", previousPID: previousPID)
                 return false
             }
         }
@@ -2583,14 +2749,56 @@ final class AppState {
         logRetryTask = nil
         logTask?.cancel()
         logTask = nil
+        // 停止前把攒着的行补上：日志页是用户主动打开看的，最后 200ms 不该凭空消失。
+        // 退出/切等级路径会先清空 liveLogs 再走到这里，那时 pendingLogs 已被丢弃，不会复活。
+        logFlushTask?.cancel()
+        logFlushTask = nil
+        flushPendingLogs()
     }
+
+    /// 日志行先攒着，按 `logFlushInterval` 成批并入 `liveLogs`。
+    ///
+    /// 逐行 append 的代价：`@Observable` 每次写入都失效整棵视图图，而内核忙起来
+    /// （开着 info 等级 + 连接量大）一秒能推几十行 → 一秒几十次全量重排。
+    /// 这比之前修掉的"每秒一次"严重一个数量级，而且正好发生在用户盯着日志页的时候。
+    /// 攒批**不丢行**，只是最多晚 200ms 显示——日志页本来就是滚动流，没人能分辨。
+    private static let logFlushInterval = Duration.milliseconds(200)
 
     private func receiveLog(_ entry: CoreLogEntry) {
         logRetryDelay = 2
-        liveLogs.append(LiveLogEntry(entry: entry))
+        pendingLogs.append(LiveLogEntry(entry: entry))
+        // 单次爆发也不能无限攒：超过上限的部分横竖会被 trim 掉，留着只是白占内存。
+        if pendingLogs.count > KernelLogStore.defaultBufferedLineLimit {
+            pendingLogs.removeFirst(pendingLogs.count - KernelLogStore.defaultBufferedLineLimit)
+        }
+        scheduleLogFlush()
+    }
+
+    private func scheduleLogFlush() {
+        guard logFlushTask == nil else { return }
+        logFlushTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.logFlushInterval)
+            guard let self, !Task.isCancelled else { return }
+            self.logFlushTask = nil
+            self.flushPendingLogs()
+        }
+    }
+
+    private func flushPendingLogs() {
+        guard !pendingLogs.isEmpty else { return }
+        liveLogs.append(contentsOf: pendingLogs)
+        pendingLogs.removeAll(keepingCapacity: true)
         if liveLogs.count > KernelLogStore.defaultBufferedLineLimit {
             liveLogs.removeFirst(liveLogs.count - KernelLogStore.defaultBufferedLineLimit)
         }
+    }
+
+    /// 丢弃尚未并入的日志行。切等级/清空/停止监控都要调用——
+    /// 否则待发的旧行会在下一次 flush 时"复活"到已经清空的列表里。
+    private func discardPendingLogs() {
+        logFlushTask?.cancel()
+        logFlushTask = nil
+        pendingLogs.removeAll(keepingCapacity: false)
     }
 
     private func logStreamEnded(_ message: String) {
@@ -2639,6 +2847,11 @@ final class AppState {
         // 托盘速率订阅的是同一条流但根本不看历史 → 仪表盘不在屏幕上时继续 append，
         // 等于每秒白白失效一次视图图。代价是重开仪表盘时折线从空开始画（有占位态）。
         guard windowContentIsVisible, dashboardMonitorConsumers.contains(.dashboard) else { return }
+        // 隔一个采样点才入图。图表是这一页最贵的部件（60 个点 + 面积/折线双系列），
+        // 每次 append 都要整页重排；实测仪表盘开着时它占了三成以上的 CPU。
+        // 曲线是看趋势的，2 秒一个点足够，而代价直接减半。
+        trafficSampleParity.toggle()
+        guard trafficSampleParity else { return }
         trafficHistory.append(TrafficPoint(
             timestamp: now(),
             upload: sample.up,
@@ -2723,12 +2936,15 @@ final class AppState {
         // 于是快照永久为空，功能看着开着却不起作用。
         guard tunSettings.lanDNSEnabled else { return }
         // TUN 自身地址落在 172.16.0.0/12 里，不排掉会把内核当成"内网 DNS"而自指。
-        let excluded = Set(tunSettings.addresses.map { address in
-            String(address.split(separator: "/").first ?? "")
-        } + [tunSettings.dnsServerAddress])
-        let probed = await lanResolverProbe(excluded)
+        let probed = await lanResolverProbe(tunResolverExclusions(tunSettings))
         guard probed.isUsable else { return }
         lanResolverSnapshot = probed
+    }
+
+    private func tunResolverExclusions(_ settings: TunSettings) -> Set<String> {
+        Set(settings.addresses.map { address in
+            String(address.split(separator: "/").first ?? "")
+        } + [settings.dnsServerAddress])
     }
 
     private func generateConfiguration(
@@ -2893,6 +3109,7 @@ final class AppState {
         }
 
         appendWarning("检测到内核意外退出（PID \(pid)），正在自动重启")
+        recordRuntimeEvent(level: .warning, title: "检测到内核意外退出", previousPID: pid)
         status = .starting
         errorMessage = nil
         do {
@@ -2934,6 +3151,7 @@ final class AppState {
             await armCoreExitMonitoring(pid: restartedPID)
             resumeDashboardMonitoringIfNeeded()
             resumeLogMonitoringIfNeeded()
+            recordRuntimeEvent(title: "内核已自动恢复", previousPID: pid, currentPID: restartedPID)
         } catch {
             if stopRequestedDuringCrashHandling { return }
             await finishCoreCrash(
@@ -2973,6 +3191,7 @@ final class AppState {
         clearRuntimeState()
         let failureMessage = [message, cleanupMessage].compactMap { $0 }.joined(separator: "；")
         setFailure(failureMessage)
+        recordRuntimeEvent(level: .error, title: "内核自动恢复失败")
         do {
             try await notificationSender.send(
                 title: "kongshan 内核已停止",
@@ -3020,8 +3239,19 @@ final class AppState {
 
     /// 补挂系统代理/DNS。`resetConnections` 为 true 时无条件重置全部连接
     /// （睡眠唤醒场景：连接必然已死，但客户端不知道）。
-    private func reassertTakeoversAfterNetworkChange(resetConnections: Bool = false) async {
+    func reassertTakeoversAfterNetworkChange(resetConnections: Bool = false, identityChangedForTesting: Bool? = nil) async {
         guard status == .on, !isBusy else { return }
+        let identityChanged = identityChangedForTesting ?? networkIdentityChanged()
+        if identityChanged {
+            recordRuntimeEvent(title: "物理网络已变更", detail: "正在刷新 LAN DNS 与 DoH 连接")
+            if activeModes.contains(.tun) {
+                lanResolverSnapshot = await lanResolverProbe(tunResolverExclusions(tunSettings))
+                await applyTunSettings(tunSettings, operation: "网络变化")
+            } else {
+                await applyDNSSettings(dnsSettings, operation: "网络变化")
+            }
+            guard status == .on else { return }
+        }
         if activeModes.contains(.systemProxy), let runtime {
             do {
                 try await systemProxyManager.reassert(
@@ -3049,7 +3279,6 @@ final class AppState {
         // （聊天流式响应、下载、SSH 全部遭殃）。只在**网络身份真的变了**时才重置。
         // 指纹**无条件**更新：写成 `resetConnections || networkIdentityChanged()` 会短路，
         // 唤醒那次就不会刷新指纹，下一次路径事件拿睡前的旧指纹比对，又白白多重置一次。
-        let identityChanged = networkIdentityChanged()
         if resetConnections || identityChanged, let clashAPIClient {
             try? await clashAPIClient.closeAllConnections()
         }
@@ -3099,6 +3328,7 @@ final class AppState {
     /// 稳定 3 秒后做一次健康检查并补挂接管；真正的进程退出由退出监控兜底。
     private func handleDidWake() {
         guard status == .on else { return }
+        recordRuntimeEvent(title: "系统已唤醒", detail: "正在检查内核与接管")
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(3))
             await self?.verifyCoreAfterWake()
@@ -3190,6 +3420,10 @@ final class AppState {
 
     private var rulesURL: URL {
         storage.rootDirectory.appending(path: "rules.json")
+    }
+
+    private var runtimeEventsURL: URL {
+        storage.rootDirectory.appending(path: "runtime-events.json")
     }
 
     // MARK: - 特权助手（零弹窗 TUN）

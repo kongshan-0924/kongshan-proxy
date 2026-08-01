@@ -20,12 +20,6 @@ struct KongshanApp: App {
 private struct MenuBarStatusIcon: View {
     let state: AppState
 
-    /// 0 时用固定占位符，避免空串让 label 宽度来回跳。
-    private func rateText(_ value: Int64) -> String {
-        let text = MenuRateFormatter.compact(value)
-        return text.isEmpty ? "—" : text
-    }
-
     var body: some View {
         // 整块（图标 + 上下两行速率）画成一张模板图。MenuBarExtra 的 label 会套用系统
         // 菜单栏字体并把内容压成一行，用 SwiftUI 排版控不住——见 MenuBarIcon.statusImage。
@@ -33,8 +27,8 @@ private struct MenuBarStatusIcon: View {
         Image(nsImage: MenuBarIcon.statusImage(
             style: state.menuBarIconStyle,
             state: state.menuBarIconState,
-            uploadText: rateText(state.nicUploadRate),
-            downloadText: rateText(state.nicDownloadRate)
+            uploadText: state.nicUploadText,
+            downloadText: state.nicDownloadText
         ))
     }
 }

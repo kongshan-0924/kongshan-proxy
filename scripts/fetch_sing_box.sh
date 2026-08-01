@@ -4,8 +4,17 @@ set -euo pipefail
 version=1.13.14
 archive="sing-box-${version}-darwin-arm64.tar.gz"
 expected=73e8967b0fc08e17bce4263ca56ebc394822401a16497a1c4e02316c888202ab
+expected_binary=813d8effd02a19572a8d75aef29fc073101404ca535b2496be86f21827c7684d
 url="https://github.com/SagerNet/sing-box/releases/download/v${version}/${archive}"
 target=Vendor/sing-box/sing-box
+
+if [[ -x "$target" ]] \
+    && file "$target" | grep -q 'arm64' \
+    && [[ "$(shasum -a 256 "$target" | awk '{print $1}')" == "$expected_binary" ]]; then
+    print "Using verified sing-box $version at $target"
+    exit 0
+fi
+
 temp_dir=$(mktemp -d /tmp/kongshan-fetch.XXXXXX)
 archive_path="$temp_dir/$archive"
 binary_path="$temp_dir/sing-box"

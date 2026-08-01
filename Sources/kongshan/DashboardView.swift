@@ -14,7 +14,7 @@ struct DashboardView: View {
                     heroControlCard
                     coreOnlyBanner
                     metrics
-                    trafficChart
+                    DashboardTrafficCard()
 
                     if state.nodes.isEmpty {
                         ContentUnavailableView(
@@ -270,8 +270,22 @@ struct DashboardView: View {
 
     // MARK: - 速率曲线
 
-    private var trafficChart: some View {
-        VStack(alignment: .leading, spacing: 14) {
+    /// 三块各自跟踪 Observation：速率每秒变，只更新标题；累计量和图表互不牵连。
+    private struct DashboardTrafficCard: View {
+        var body: some View {
+            VStack(alignment: .leading, spacing: 14) {
+                TrafficHeader()
+                SessionTrafficRow()
+                TrafficPlot()
+            }
+            .card(padding: 18)
+        }
+    }
+
+    private struct TrafficHeader: View {
+        @Environment(AppState.self) private var state
+
+        var body: some View {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("网络流量")
@@ -282,14 +296,92 @@ struct DashboardView: View {
                     }
                 }
                 Spacer()
-                HStack(spacing: 18) {
+                HStack(spacing: 12) {
                     rateSummary(symbol: "arrow.up", tint: .blue, value: state.uploadRate, title: "上传")
                     rateSummary(symbol: "arrow.down", tint: .green, value: state.downloadRate, title: "下载")
                 }
             }
+        }
 
-            sessionTrafficRow
+        private func rateSummary(symbol: String, tint: Color, value: Int64, title: String) -> some View {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(tint)
+                    .frame(width: 22, height: 22)
+                    .overlay(
+                        Image(systemName: symbol)
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.white)
+                    )
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(Theme.rateOrDash(value))
+                        .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                    Text(title)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 112, alignment: .leading)
+        }
 
+        private func legendDot(color: Color, title: String) -> some View {
+            HStack(spacing: 5) {
+                Circle().fill(color).frame(width: 7, height: 7)
+                Text(title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// 本次会话累计流量。数据来自内核权威累计计数器，跨内核重启连续。
+    private struct SessionTrafficRow: View {
+        @Environment(AppState.self) private var state
+
+        var body: some View {
+            HStack(spacing: 10) {
+                Image(systemName: "chart.bar.fill")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+                Text("本次会话")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Text(Theme.bytesOrDash(state.sessionTotal))
+                    .font(.system(size: 13, weight: .semibold).monospacedDigit())
+                    .accessibilityLabel("本次会话共 \(Theme.bytesOrDash(state.sessionTotal))")
+
+                Divider().frame(height: 11)
+                sessionLeg(symbol: "arrow.up", tint: .blue, value: state.sessionUpload)
+                sessionLeg(symbol: "arrow.down", tint: .green, value: state.sessionDownload)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Theme.cardFill.opacity(0.6), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+        }
+
+        private func sessionLeg(symbol: String, tint: Color, value: Int64) -> some View {
+            HStack(spacing: 4) {
+                Image(systemName: symbol)
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(tint)
+                    .accessibilityHidden(true)
+                Text(Theme.bytesOrDash(value))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private struct TrafficPlot: View {
+        @Environment(AppState.self) private var state
+
+        var body: some View {
             Chart {
                 ForEach(state.trafficHistory) { point in
                     AreaMark(
@@ -345,8 +437,6 @@ struct DashboardView: View {
                     AxisGridLine().foregroundStyle(.quaternary)
                     AxisValueLabel {
                         if let bytes = value.as(Int64.self) {
-                            // 坐标轴的 0 刻度要显示「0」；Theme.bytes 对 0 返回空串（UI 占位用），
-                            // 直接用会让 0 刻度变成空标签。
                             Text(bytes == 0 ? "0" : Theme.bytes(bytes))
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
@@ -362,12 +452,8 @@ struct DashboardView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            // 固定高度：占位视图放在 overlay 里，用 minHeight 会被撑到几百点高。
             .frame(height: 200)
-            // 每秒推送一次，禁用隐式动画避免持续重绘带来的 CPU 占用。
-            .transaction { transaction in
-                transaction.animation = nil
-            }
+            .transaction { transaction in transaction.animation = nil }
             .overlay {
                 if state.trafficHistory.isEmpty {
                     VStack(spacing: 7) {
@@ -380,77 +466,6 @@ struct DashboardView: View {
                     }
                 }
             }
-        }
-        .card(padding: 18)
-    }
-
-    /// 本次会话累计流量。速率是瞬时值、看完就没了，累计量才回答"这次用掉多少"。
-    /// 数据来自内核的权威累计计数器，跨内核重启连续（见 `SessionTrafficAccumulator`）。
-    private var sessionTrafficRow: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "chart.bar.fill")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .accessibilityHidden(true)
-            Text("本次会话")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Text(Theme.bytesOrDash(state.sessionTotal))
-                .font(.system(size: 13, weight: .semibold).monospacedDigit())
-                .accessibilityLabel("本次会话共 \(Theme.bytesOrDash(state.sessionTotal))")
-
-            Divider().frame(height: 11)
-
-            sessionLeg(symbol: "arrow.up", tint: .blue, value: state.sessionUpload)
-            sessionLeg(symbol: "arrow.down", tint: .green, value: state.sessionDownload)
-
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Theme.cardFill.opacity(0.6), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-    }
-
-    private func sessionLeg(symbol: String, tint: Color, value: Int64) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: symbol)
-                .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(tint)
-                .accessibilityHidden(true)
-            Text(Theme.bytesOrDash(value))
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    private func rateSummary(symbol: String, tint: Color, value: Int64, title: String) -> some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(tint)
-                .frame(width: 22, height: 22)
-                .overlay(
-                    Image(systemName: symbol)
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(.white)
-                )
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(Theme.rateOrDash(value))
-                    .font(.system(size: 13, weight: .semibold).monospacedDigit())
-                Text(title)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    private func legendDot(color: Color, title: String) -> some View {
-        HStack(spacing: 5) {
-            Circle().fill(color).frame(width: 7, height: 7)
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
     }
 

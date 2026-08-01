@@ -10,6 +10,42 @@ import XCTest
 /// 内网 AD 域是个 `.com`，既不命中 geosite-cn 也就必然掉进 fakeip，
 /// 拿到 240.0.0.21 这个假 IP，而假 IP 整段被路由进代理出口。
 final class LANResolverTests: XCTestCase {
+    func testParsesPhysicalDHCPPacketAndExcludesTUNAddress() {
+        let output = """
+        domain_name_server (ip_mult): {172.19.0.1, 172.16.16.7}
+        domain_name (string): corp.example.com
+        """
+        XCTAssertEqual(
+            LANResolver.parseDHCPPacket(output, excluding: ["172.19.0.1"]),
+            LANResolverSnapshot(servers: ["172.16.16.7"], searchDomains: ["corp.example.com"])
+        )
+    }
+
+    func testPhysicalProbeUsesPrimaryInterfaceAndInfersDomain() async {
+        let snapshot = await LANResolver.probePhysicalService(
+            interfaceProvider: { "en7" },
+            outputProvider: { interface in
+                XCTAssertEqual(interface, "en7")
+                return "domain_name_server (ip_mult): {10.0.0.53}"
+            },
+            query: { argument, kind, server in
+                XCTAssertEqual(server, "10.0.0.53")
+                switch kind {
+                case .reverse:
+                    XCTAssertEqual(argument, "10.0.0.53")
+                    return ["dc1.office.example.com."]
+                case .ipv4:
+                    XCTAssertEqual(argument, "office.example.com")
+                    return ["10.0.0.10"]
+                }
+            }
+        )
+        XCTAssertEqual(
+            snapshot,
+            LANResolverSnapshot(servers: ["10.0.0.53"], searchDomains: ["office.example.com"])
+        )
+    }
+
     /// 按真机 `scutil --dns` 的形状构造（含作用域解析器与反解区噪音）。
     private let sample = """
     DNS configuration

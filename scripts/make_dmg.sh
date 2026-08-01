@@ -32,5 +32,15 @@ hdiutil create \
     -ov \
     "$dmg_path" >/dev/null
 
+if [[ -n "${KONGSHAN_CODESIGN_IDENTITY:-}" && "$KONGSHAN_CODESIGN_IDENTITY" != "-" ]]; then
+    codesign --force --sign "$KONGSHAN_CODESIGN_IDENTITY" --timestamp "$dmg_path"
+fi
+
+# 公证是可选发布步骤；只使用本机 Keychain 中已配好的 profile，脚本不接收也不保存账号密钥。
+if [[ -n "${KONGSHAN_NOTARY_PROFILE:-}" ]]; then
+    xcrun notarytool submit "$dmg_path" --keychain-profile "$KONGSHAN_NOTARY_PROFILE" --wait
+    xcrun stapler staple "$dmg_path"
+fi
+
 size=$(du -h "$dmg_path" | cut -f1)
 print "Built $dmg_path  ($size)"

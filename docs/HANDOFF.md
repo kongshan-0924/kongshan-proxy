@@ -1,9 +1,63 @@
 # 项目交接
 
-## 当前状态：v0.1.58 已发布（2026-07-30）
+## 当前状态：v0.1.62 已安装并安全替换完成（2026-08-01）
 
-代码在 `main`、已推送、Release 已发；仓库只有 `main` 一条分支，工作区干净。
-测试 **388 通过 / 1 跳过 / 0 失败**，0 编译警告。本机 `/Applications` 已装 v0.1.58。
+`VERSION`、`dist/kongshan.app` 与 `/Applications/kongshan.app` 均为 v0.1.62/build 162；
+DMG 为 `dist/kongshan-0.1.62.dmg`，SHA-256
+`d047e6f75c082ff7aadbb6bc895418935a2db84f8405d656b8f641ea5c3bd8d7`，主程序 SHA-256
+`4dd045a2efd0b8d949ece1f336bd4bad3e837bda37e3c4eaa95a48356ae82f77`。
+
+全量 `swift test`：**410 通过 / 1 跳过 / 0 失败（共 411）**。`swift build`、release 构建、
+arm64、deep/strict 签名、hardened runtime、sing-box 1.13.14、DMG 校验与隔离 M4 均通过；
+M4 平均 CPU 0.940%，最大 RSS 132,016 KB。真实安装版可见仪表盘平均 CPU 0.180%，
+最大 RSS 123,440 KB。
+
+### 2026-08-01 v0.1.62 安全替换与运行结论
+
+- 旧 v0.1.61 App/core PID 为 34001/45932。只发送 Apple 正常退出事件，未发送 TERM/KILL。
+- 确认两个 PID 均消失、HTTP/HTTPS/SOCKS 全部关闭、恢复文件清除且直连 HTTPS 返回 200 后，
+  才替换安装包并打开新版。
+- 旧 App 可恢复备份在 `/private/tmp/kongshan-0.1.61-backup-20260801-2316.app`。
+- 新版已打开（PID 68610），系统代理保持关闭，没有 sing-box 或恢复文件，直连 HTTPS 返回 200。
+- 新增长期资源门禁短验通过：App 平均/峰值 CPU 1.533%/2.3%、RSS 219,280 KB、FD 111；
+  core FD 211、174 ESTABLISHED、0 CLOSE_WAIT。该样本取自替换前仍有真实流量的 v0.1.61，
+  用于验证脚本与既有运行基线，不应误写成 v0.1.62 长期运行结论。
+
+### 2026-08-01 v0.1.61 安全替换与运行结论（历史基线）
+
+- 旧 v0.1.60 退出前 PID 23969，子 sing-box PID 23979，系统 HTTP/HTTPS/SOCKS 指向
+  `127.0.0.1:65495`。仅发送 Apple 正常退出事件，1.89 秒返回；未发送 TERM/KILL。
+- 退出后两个 PID 均消失，三类系统代理全部关闭，`proxy-recovery.json` 清除；不经过代理的
+  Apple HTTPS 返回 200。满足硬门槛后才安装新版。
+- 旧 App 可恢复备份在 `/private/tmp/kongshan-0.1.60-backup-20260801-100438.app`；新版主程序
+  SHA-256 为 `62fb0380bd8e4dfa68e4527490fe811ccd59d5d1f0fd38fe8e0b942a0b0cd142`。
+- 新版已打开（PID 34001），按设计没有自动恢复接管，也没有启动 sing-box 或留下恢复文件；
+  直连网络正常。代理关闭、窗口可见时 10 次平均 CPU 0.100%，最高 0.3%，最大 RSS 150,512 KB。
+- 用户已通过 App 开启系统代理；HTTP/HTTPS/SOCKS 均为 `127.0.0.1:65495`，真实流量曲线、
+  20 条连接与 3,479 条规则下完成全页面采样。仪表盘平均 CPU 2.78%、峰值 4.9%；再次复测
+  平均 1.45%、峰值 2.5%，相比旧版 26%~33% 下降约九成且通过 10%/20% 性能门禁。
+- 最高负载是未聚合日志持续流入：平均 CPU 6.36%、峰值 15.9%；开启按连接聚合后同类突发
+  平均 3.13%、峰值 8.6%。静态/实时页面平均均低于 2%，菜单栏后台稳定平均 0.57%。
+- 页面 RSS 约 136~190 MB，日志页峰值后能回落，不是单向泄漏；系统内存仍有 61% 可用。
+  测试后 App/core FD 98/81，对应 46 ESTABLISHED + 2 LISTEN，无 CLOSE_WAIT、无新崩溃，
+  日志末 2,000 行 0 ERROR/0 WARN，最终代理 HTTPS 返回 200。
+
+### 2026-08-01 21:44~21:50 运行复查
+
+- App PID 34001 已连续运行约 11 小时 45 分；sing-box PID 45932 已连续运行约 8 小时 15 分，
+  helper PID 10543 已运行超过一天。系统 HTTP/HTTPS/SOCKS 仍为 `127.0.0.1:65495`。
+- 连接突发期 App 20 秒平均 CPU 4.51%、峰值 7.5%，RSS 189~191 MB；安静期 11 个有效样本
+  平均 3.76%、峰值 5.7%，RSS 回落并稳定在 184 MB。sing-box 安静期平均 0.36%、峰值 0.9%、30 MB。
+- 突发来自系统 CloudTelemetry 高频创建 `gateway.icloud.com` 连接；core FD 随后从约 94 回落到
+  73~75，ESTABLISHED 从 60 回落到 39~41，连续 10 秒 0 CLOSE_WAIT；App FD 固定 108。
+- 13:11 与 13:34 的核心重建分别贴合订阅、规则和生成配置文件的修改时间，无崩溃报告；
+  现有证据更符合受控配置重载，而不是异常自愈，但日志没有记录具体 UI 发起动作。
+- 当前日志 15:36 后共 25 条 ERROR、0 WARN；最后两条为 21:23 的 `block[reject]` 预期拒绝。
+  最近真实异常停在 17:06 的默认接口丢失/换网簇，之后未继续。最终代理 HTTPS 返回 200。
+
+历史审计中旧版有流量、仪表盘可见时约 26%~33% CPU / 221 MB，热点明确在
+`NSWindow layoutIfNeeded` -> SwiftUI ViewGraph -> Dashboard/Charts；sing-box 仅 0.4%~0.7% / 31 MB。
+本轮已把速率标题、会话累计量和 Chart 拆成独立 Observation 节点，并新增真实窗口性能门禁。
 
 **接手先读这三份**：`README.md`（软件现状）、`docs/PROGRESS.md`（能力清单）、
 `docs/NEXT_STEPS.md`（下一步）。本文件往下是逐版本的根因记录，按需检索。

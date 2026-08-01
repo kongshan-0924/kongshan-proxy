@@ -55,7 +55,16 @@ install -m 644 Resources/AppIcon.icns "$stage_app/Contents/Resources/AppIcon.icn
 # 与安装时钉客户端 cdhash（挡替换重签）合起来，才完整堵住免密码助手的同用户提权面。
 # ad-hoc 也会被内核强制 hardened runtime（无需 Developer ID）；App 不捆第三方 dylib，library
 # validation 不会挡自带库。改动后务必确认 App 仍能正常启动。
-codesign --force --deep --options runtime --sign - --timestamp=none "$stage_app"
+sign_identity=${KONGSHAN_CODESIGN_IDENTITY:--}
+typeset -a codesign_args
+codesign_args=(--force --deep --options runtime --sign "$sign_identity")
+if [[ "$sign_identity" == "-" ]]; then
+    codesign_args+=(--timestamp=none)
+else
+    codesign_args+=(--timestamp)
+    [[ -z "${KONGSHAN_CODESIGN_KEYCHAIN:-}" ]] || codesign_args+=(--keychain "$KONGSHAN_CODESIGN_KEYCHAIN")
+fi
+codesign "${codesign_args[@]}" "$stage_app"
 
 if [[ -e "$app_path" ]]; then
     rm -rf "$app_path"
