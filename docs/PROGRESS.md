@@ -1,11 +1,21 @@
 # 项目进度
 
-## 当前版本边界（2026-08-01）
+## 当前版本边界（2026-08-02）
 
-- 已构建、验签、安装并打开 v0.1.62/build 162；旧 v0.1.61 经正常退出并确认系统代理/网络恢复后才替换，未发 TERM/KILL。
-- 成品：`dist/kongshan-0.1.62.dmg`，SHA-256 `d047e6f75c082ff7aadbb6bc895418935a2db84f8405d656b8f641ea5c3bd8d7`。
-- 当前测试：`swift test` 410 通过、1 跳过、0 失败；`swift build`、release、M4、arm64、deep/strict 签名、hardened runtime 与 DMG verify 均通过。
-- Git 原提交基线为 `f4d8911`（v0.1.59）；v0.1.60~v0.1.62 成套改动已整理并在本轮统一提交。
+- 已构建、验签、安装并打开 v0.1.63/build 163；旧 v0.1.62 经正常退出并确认系统代理/网络恢复后才替换，未发 TERM/KILL。
+- 成品：`dist/kongshan-0.1.63.dmg`，SHA-256 `7a6fd4862ebc3563a6680fb7526561d5e8267b219f02c42ee1ca98a5c87a9338`。
+- 当前测试：`swift test` 411 通过、1 跳过、0 失败；release、M4、arm64、deep/strict 签名、hardened runtime 与 DMG verify 均通过。
+- Git 基线为 `8ded0d3`（v0.1.62）；v0.1.63 菜单稳定性修复在本轮单独提交。
+
+## v0.1.63 菜单节点选择稳定性
+
+- [x] 下拉菜单正文不再观察每秒变化的代理速率，避免展开期间反复重建 `NSMenu`；状态栏图标实时速率保留。
+- [x] 新增 `MenuBarViewStabilityTests` 源码守卫；全量测试 411 通过/1 跳过/0 失败。
+- [x] M4 平均 CPU 0.660%、最大 RSS 132,016 KB；helper identifier、路径与 cdhash 探针通过。
+- [x] 安装后首次复核系统代理关闭、无 sing-box/恢复文件、直连 HTTPS 200；最终复核时系统代理
+  已开启，新版 sing-box PID 74228 监听 `127.0.0.1:65495`，代理 HTTPS 200，接管正常。
+- [x] 最终单点 App/core CPU 2.7%/0.9%，RSS 203,952/45,456 KB；本轮未操作代理开关。
+- [ ] 用户手动展开节点子菜单做最终鼠标交互确认；自动化受 macOS Apple Event 权限 -1743 限制。
 
 ## v0.1.62 安装后健康
 

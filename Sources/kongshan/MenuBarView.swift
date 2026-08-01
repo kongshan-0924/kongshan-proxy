@@ -10,12 +10,6 @@ struct MenuBarView: View {
 
     var body: some View {
         Text(state.statusText)
-        if state.isOn {
-            // 速率 0 时用占位符避免内容闪烁导致菜单高度跳动。
-            let dl = MenuRateFormatter.full(state.downloadRate)
-            let ul = MenuRateFormatter.full(state.uploadRate)
-            Text("下载 \(dl.isEmpty ? "—" : dl)   上传 \(ul.isEmpty ? "—" : ul)")
-        }
 
         Button("打开仪表盘") { openMainWindow() }
             .keyboardShortcut("d")
@@ -180,6 +174,8 @@ struct MenuBarView: View {
 
 enum MenuRateFormatter {
     /// 菜单栏图标宽度直接跟着这里的字符数变，必须最紧凑且长度稳定：单字母单位、不带空格。
+    /// 下拉菜单正文不能读取每秒变化的代理速率；否则整个 NSMenu 会在展开时反复重建，
+    /// 节点子菜单随之闪烁。实时速率只显示在状态栏图标上。
     /// 不要换成 ByteCountFormatter——它会给出「900 字节」「1.5 MB」这类本地化 2 字母单位，
     /// 比手写格式更宽、且在 B↔KB 之间跳字符数（用户反馈过菜单栏一跳一跳）。
     /// 0 时返回空串，由调用方统一填「—」。
@@ -194,7 +190,4 @@ enum MenuRateFormatter {
         }
     }
 
-    static func full(_ bytes: Int64) -> String {
-        AppState.formatRate(bytes)
-    }
 }

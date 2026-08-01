@@ -2923,3 +2923,24 @@ AAAA 解析与 Happy Eyeballs 选路，于是每次都撞在 IPv6 上。
 - 风险/注意事项：这是代理关闭后的短时单点，不替代一小时长时间资源门禁，也不能替代真实换网、
   合盖睡眠和无透明代理网络验收。
 - 下一步：检查 Git 变更边界和敏感信息后，提交 v0.1.60~v0.1.62 成套改动。
+
+### 阶段 13：v0.1.63 菜单节点选择闪烁修复与安全替换
+
+- 已完成：定位菜单节点子菜单闪烁根因；删除下拉菜单正文对每秒变化的
+  `state.uploadRate/downloadRate` 的观察，保留状态栏图标实时速率；新增源码守卫测试。
+- 修改文件：`Sources/kongshan/MenuBarView.swift`、`Tests/KongshanAppTests/MenuBarViewStabilityTests.swift`、
+  `VERSION` 与四份项目记录；成品为 `dist/kongshan-0.1.63.dmg`。
+- 测试结果：定向测试 1/1；全量 `swift test` 411 通过/1 跳过/0 失败；helper identifier、路径、
+  cdhash 探针通过；M4 平均 CPU 0.660%、最大 RSS 132,016 KB；DMG verify 与安装版 deep/strict 签名通过。
+- 安全替换：旧 v0.1.62 只收到 Apple 正常退出事件，未发 TERM/KILL；确认 App/core 退出、
+  恢复文件清除、Wi-Fi HTTP/HTTPS/SOCKS 关闭、直连 HTTPS 200 后才安装并打开 v0.1.63。
+- 成品校验：DMG SHA-256 `7a6fd4862ebc3563a6680fb7526561d5e8267b219f02c42ee1ca98a5c87a9338`；
+  主程序 SHA-256 `b3f8d3a440d3673ac787851abe22c60f4b933c9b03968f20ed31b9d5bbbd3664`。
+- 当前状态：安装后首次复核系统代理关闭、无 sing-box/恢复文件、默认接口 `en0`、直连 HTTPS 200；
+  最终复核时系统代理已开启（本轮未操作开关），新版 sing-box PID 74228 在 `127.0.0.1:65495`
+  监听，恢复快照存在，代理 HTTPS 200。App/core 单点 CPU 2.7%/0.9%，RSS 203,952/45,456 KB。
+- 风险/注意事项：macOS 以 -1743 拒绝当前自动化进程向 `System Events` 发送 Apple Event，未能
+  自动持续悬停节点子菜单。源码依赖切断和回归测试已覆盖根因，最终鼠标交互仍需用户手动确认。
+- 下一步：用户展开任一节点子菜单保持 10 秒并移动鼠标确认稳定；之后按既有清单继续真实换网、
+  睡眠唤醒和无透明代理网络验收。
+- 下一位 Agent 如何接手：先确认安装版版本及代理仍关闭；不要为 UI 测试修改系统代理或隐私权限。

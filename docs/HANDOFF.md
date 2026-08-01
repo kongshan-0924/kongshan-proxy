@@ -1,6 +1,35 @@
 # 项目交接
 
-## 当前状态：v0.1.62 已安装并安全替换完成（2026-08-01）
+## 当前状态：v0.1.63 已安装并安全替换完成（2026-08-02）
+
+`VERSION`、`dist/kongshan.app` 与 `/Applications/kongshan.app` 均为 v0.1.63/build 163；
+DMG 为 `dist/kongshan-0.1.63.dmg`，SHA-256
+`7a6fd4862ebc3563a6680fb7526561d5e8267b219f02c42ee1ca98a5c87a9338`，主程序 SHA-256
+`b3f8d3a440d3673ac787851abe22c60f4b933c9b03968f20ed31b9d5bbbd3664`。
+
+全量 `swift test`：**411 通过 / 1 跳过 / 0 失败（共 412）**。release 构建、arm64、
+deep/strict 签名、hardened runtime、helper 信任探针、DMG 校验与隔离 M4 均通过；
+M4 平均 CPU 0.660%，最大 RSS 132,016 KB。
+
+### 2026-08-02 v0.1.63 菜单节点选择闪烁修复
+
+- 根因：`MenuBarView` 的下拉菜单正文直接读取每秒变化的 `state.uploadRate/downloadRate`；
+  SwiftUI 在菜单展开时持续重建 `NSMenu`，节点子菜单会闪退、重开或丢失鼠标选择。
+- 修复：删除下拉菜单里重复的实时速率行；菜单栏图标仍照常显示上下行速率，没有减少主要信息。
+  新增源码守卫测试，禁止菜单正文重新订阅这两个高频状态。
+- 安全替换：旧 v0.1.62 仅收到 Apple 正常退出事件，未发送 TERM/KILL；确认 App 和 sing-box
+  均退出、恢复文件清除、Wi-Fi 三类系统代理关闭、直连 HTTPS 返回 200 后才安装并打开新版。
+- 安装后首次复核：v0.1.63 PID 73775，系统代理关闭，无 sing-box、无恢复文件，默认接口 `en0`，
+  直连 HTTPS 返回 200；这证明替换过程没有自动恢复旧接管。
+- 最终复核时系统代理已开启（本轮没有执行代理开关操作），新版 sing-box PID 74228 在
+  `127.0.0.1:65495` 监听，恢复快照存在，代理 HTTPS 返回 200。App/core 单点 CPU 2.7%/0.9%，
+  RSS 203,952/45,456 KB，接管链路正常。
+- 旧版备份：`/private/tmp/kongshan-0.1.62-backup-20260802-0005.app` 和
+  `/private/tmp/kongshan-0.1.62-retired-20260802-0005.app`。
+- 验证边界：macOS 拒绝当前自动化进程向 `System Events` 发送 Apple Event（-1743），因此未能
+  自动持续悬停节点子菜单；根因依赖已切断且有回归测试，仍建议用户手动展开菜单确认一次交互。
+
+### 2026-08-01 v0.1.62 安全替换与运行结论（历史）
 
 `VERSION`、`dist/kongshan.app` 与 `/Applications/kongshan.app` 均为 v0.1.62/build 162；
 DMG 为 `dist/kongshan-0.1.62.dmg`，SHA-256
@@ -11,8 +40,6 @@ DMG 为 `dist/kongshan-0.1.62.dmg`，SHA-256
 arm64、deep/strict 签名、hardened runtime、sing-box 1.13.14、DMG 校验与隔离 M4 均通过；
 M4 平均 CPU 0.940%，最大 RSS 132,016 KB。真实安装版可见仪表盘平均 CPU 0.180%，
 最大 RSS 123,440 KB。
-
-### 2026-08-01 v0.1.62 安全替换与运行结论
 
 - 旧 v0.1.61 App/core PID 为 34001/45932。只发送 Apple 正常退出事件，未发送 TERM/KILL。
 - 确认两个 PID 均消失、HTTP/HTTPS/SOCKS 全部关闭、恢复文件清除且直连 HTTPS 返回 200 后，
