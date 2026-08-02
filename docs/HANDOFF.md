@@ -1,17 +1,33 @@
 # 项目交接
 
-## 当前状态：v0.1.63 已安装并安全替换完成（2026-08-02）
+## 当前状态：v0.1.64 已安装并安全替换完成（2026-08-02）
 
-`VERSION`、`dist/kongshan.app` 与 `/Applications/kongshan.app` 均为 v0.1.63/build 163；
-DMG 为 `dist/kongshan-0.1.63.dmg`，SHA-256
-`7a6fd4862ebc3563a6680fb7526561d5e8267b219f02c42ee1ca98a5c87a9338`，主程序 SHA-256
-`b3f8d3a440d3673ac787851abe22c60f4b933c9b03968f20ed31b9d5bbbd3664`。
+`VERSION`、`dist/kongshan.app` 与 `/Applications/kongshan.app` 均为 v0.1.64/build 164；
+DMG 为 `dist/kongshan-0.1.64.dmg`，SHA-256
+`163353f02eb31f545811d0d06fa6fd79f5d0569877ac6d0a36d6aec2fd29cd08`，主程序 SHA-256
+`f408bb811e5b53df440a839dd77ddf100fa93473530ed7b4a6c4b34634b8053e`。
 
-全量 `swift test`：**411 通过 / 1 跳过 / 0 失败（共 412）**。release 构建、arm64、
-deep/strict 签名、hardened runtime、helper 信任探针、DMG 校验与隔离 M4 均通过；
-M4 平均 CPU 0.660%，最大 RSS 132,016 KB。
+全量测试发现 407 项：**406 通过 / 1 跳过 / 0 失败**。release 构建、arm64、
+deep/strict 签名、hardened runtime、DMG 校验与隔离 M4 均通过；M4 五次 CPU 均为 0.0%，
+最大 RSS 126,592 KB。
 
-### 2026-08-02 v0.1.63 菜单节点选择闪烁修复
+### 2026-08-02 v0.1.64 菜单稳定性根治与面板入口修复
+
+- v0.1.63 的修复只删除了菜单正文的代理速率，判断不完整：`MenuBarExtra` 的 label 仍读取
+  `nicUploadText/nicDownloadText`，每 2 秒替换一次 `NSImage`，仍会打断同一 Scene 的原生菜单跟踪。
+- v0.1.64 状态项只读取低频的图标样式与接管状态，彻底删除整机网速采样、格式化与速率合成图；
+  实时代理速率仍在仪表盘显示。这样菜单展开期间没有周期性 label 更新。
+- “打开仪表盘”此前用 `(NSApp.delegate as? KongshanAppDelegate)?`，强转失败会静默无操作；现改为
+  App 入口直接把 `appDelegate.showMainWindow` 注入 `MenuBarView`，并有源码守卫测试。
+- 安全替换：旧 v0.1.63 只收到 Apple 正常退出事件，未发 TERM/KILL；确认 App/core 退出、
+  三类系统代理关闭、恢复文件清除、直连 HTTPS 200 后才安装并打开 v0.1.64。
+- 当前状态：安装版 PID 92135，系统代理保持关闭，无 sing-box/恢复文件，直连 HTTPS 200；
+  Computer Use 已确认主窗口正常渲染。旧版备份和退役副本在
+  `/private/tmp/kongshan-0.1.63-{backup,retired}-20260802-1151.app`。
+- 验证边界：Computer Use 可读界面，但本机未批准对 kongshan 的点击/按键操作，无法自动关闭窗口后
+  再从状态项点击打开。源码依赖和入口已覆盖，最终菜单悬停、节点选择、重新打开窗口需用户手动确认。
+
+### 2026-08-02 v0.1.63 菜单节点选择闪烁修复（历史，未完全解决）
 
 - 根因：`MenuBarView` 的下拉菜单正文直接读取每秒变化的 `state.uploadRate/downloadRate`；
   SwiftUI 在菜单展开时持续重建 `NSMenu`，节点子菜单会闪退、重开或丢失鼠标选择。

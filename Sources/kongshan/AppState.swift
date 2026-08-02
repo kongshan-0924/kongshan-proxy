@@ -145,23 +145,6 @@ final class AppState {
     private(set) var trafficHistory: [TrafficPoint] = []
     /// 只让一半的流量采样点进图表，见 receiveTraffic。
     @ObservationIgnored private var trafficSampleParity = false
-    /// 整机网卡速率（菜单栏用）。
-    ///
-    /// 与 `uploadRate`/`downloadRate` 不是一回事：那两个读的是内核 `/traffic`，
-    /// **只统计走代理的流量**，且代理没开时恒为 0。菜单栏要回答的是"现在网速多少"，
-    /// 所以直接读物理网卡计数器，代理开不开都有读数。见 `NetworkThroughput`。
-    /// **发布的是格式化后的文字，不是原始字节数**。
-    ///
-    /// 菜单栏每秒读一次这两个值。原始速率几乎每秒都在变（哪怕只差几字节），
-    /// 而 `@Observable` 的每次写入都会失效视图图 → MenuBarExtra 的 label 重建 →
-    /// 重新绘制 NSImage → 状态项尺寸变化 → 整条菜单栏重排。
-    /// 按**显示文字**比较能把绝大多数无谓的更新挡在源头：空闲时文字长时间是 `—`，
-    /// 有流量时同一档位内（如 1.2M）也往往连续多秒不变。
-    private(set) var nicUploadText = "—"
-    private(set) var nicDownloadText = "—"
-    @ObservationIgnored private var throughputCalculator = ThroughputRateCalculator()
-    @ObservationIgnored private var throughputTask: Task<Void, Never>?
-
     /// 本次接管会话的累计流量。跨内核重启连续，停止接管时归零。
     /// 见 `SessionTrafficAccumulator` —— 数据源必须是内核的权威累计量，不能靠速率积分。
     private(set) var sessionUpload: Int64 = 0
@@ -331,8 +314,8 @@ final class AppState {
     /// CoreAnimation 提交——实机出现过后台空闲烧 50% CPU 持续 178 秒
     /// （栈里 96 层 `_layoutSubtreeWithOldSize`，业务帧一个都没有）。
     ///
-    /// 只挡"没人看的视图状态"，不挡数据流本身：托盘速率在菜单栏始终可见，
-    /// 连接速率跟踪也要连续采样才算得准，两者都不受此标志影响。
+    /// 只挡"没人看的视图状态"，不挡数据流本身：会话累计量与连接速率跟踪都要
+    /// 连续采样才算得准，两者不受此标志影响。
     @ObservationIgnored private var windowContentIsVisible = true
     /// 是否监听系统事件（网络路径、睡眠唤醒）。测试夹具以 automaticallyInitialize=false
     /// 构建，不该有后台监听扰动断言的命令序列，因此跟随该标志。
@@ -564,37 +547,7 @@ final class AppState {
         }
     }
 
-    /// 0 时用固定占位符，避免空串让菜单栏宽度来回跳。
-    nonisolated static func menuRateText(_ value: Int64) -> String {
-        let text = MenuRateFormatter.compact(value)
-        return text.isEmpty ? "—" : text
-    }
-
-    /// 每 2 秒采一次网卡计数器。菜单栏常驻，所以这个循环也常驻——
-    /// 一次 sysctl 是微秒级，比为省这点开销而让菜单栏时有时无划算。
-    private func startThroughputSampling() {
-        guard throughputTask == nil else { return }
-        throughputTask = Task { [weak self] in
-            while !Task.isCancelled {
-                if let counters = NetworkThroughput.physicalCounters() {
-                    await MainActor.run { [weak self] in
-                        guard let self else { return }
-                        let rate = self.throughputCalculator.rate(from: counters, at: self.now())
-                        let up = Self.menuRateText(rate.upload)
-                        let down = Self.menuRateText(rate.download)
-                        if self.nicUploadText != up { self.nicUploadText = up }
-                        if self.nicDownloadText != down { self.nicDownloadText = down }
-                    }
-                }
-                // 2 秒一次。菜单栏速率是"扫一眼知道有没有在跑"的信息，不需要秒级精度；
-                // 而每次更新的真实代价是一次全菜单栏重排，频率减半就是代价减半。
-                try? await Task.sleep(for: .seconds(2))
-            }
-        }
-    }
-
     func initialize() async {
-        startThroughputSampling()
         guard !isReady else { return }
         do {
             // 清理上次遗留的接管。常见情况（无残留记录）都是秒回的空操作；
@@ -2844,7 +2797,7 @@ final class AppState {
         if uploadRate != sample.up { uploadRate = sample.up }
         if downloadRate != sample.down { downloadRate = sample.down }
         // trafficHistory 只有仪表盘的折线图在读，且每个点的时间戳都不同、等值判断救不了。
-        // 托盘速率订阅的是同一条流但根本不看历史 → 仪表盘不在屏幕上时继续 append，
+        // 会话累计量订阅的是同一条流但不看历史 → 仪表盘不在屏幕上时继续 append，
         // 等于每秒白白失效一次视图图。代价是重开仪表盘时折线从空开始画（有占位态）。
         guard windowContentIsVisible, dashboardMonitorConsumers.contains(.dashboard) else { return }
         // 隔一个采样点才入图。图表是这一页最贵的部件（60 个点 + 面积/折线双系列），

@@ -2944,3 +2944,28 @@ AAAA 解析与 Happy Eyeballs 选路，于是每次都撞在 IPv6 上。
 - 下一步：用户展开任一节点子菜单保持 10 秒并移动鼠标确认稳定；之后按既有清单继续真实换网、
   睡眠唤醒和无透明代理网络验收。
 - 下一位 Agent 如何接手：先确认安装版版本及代理仍关闭；不要为 UI 测试修改系统代理或隐私权限。
+
+### 阶段 14：v0.1.64 菜单稳定性根治、面板入口与安全替换
+
+- 问题复现结论：用户确认 v0.1.63 仍会闪烁且“打开仪表盘”无响应。上次只删除菜单正文的
+  `uploadRate/downloadRate`，遗漏了 `MenuBarExtra` label 每 2 秒读取网卡速率并替换 `NSImage`；
+  同一 Scene 的原生菜单跟踪仍会被打断。
+- 已完成：状态项改为只绘制低频代理状态图标；删除 AppState 网卡速率采样、菜单栏速率格式化和
+  `statusImage` 合成图。面板入口改为从 `KongshanApp` 直接注入 `appDelegate.showMainWindow`，
+  不再使用失败时静默无操作的 `NSApp.delegate` 强转。
+- 修改文件：`KongshanApp.swift`、`MenuBarView.swift`、`MenuBarIcon.swift`、`AppState.swift`、
+  两个测试文件、`README.md`、`VERSION` 与四份项目记录。实时速率仍在仪表盘显示。
+- 测试结果：定向测试 2/2；全量发现 407 项，406 通过/1 跳过/0 失败；release、arm64、
+  deep/strict 签名、DMG verify 通过。M4 五次 CPU 均 0.0%，平均 0.000%，最大 RSS 126,592 KB。
+- 成品校验：`dist/kongshan-0.1.64.dmg` SHA-256
+  `163353f02eb31f545811d0d06fa6fd79f5d0569877ac6d0a36d6aec2fd29cd08`；主程序 SHA-256
+  `f408bb811e5b53df440a839dd77ddf100fa93473530ed7b4a6c4b34634b8053e`。
+- 安全替换：旧 v0.1.63 只收到 Apple 正常退出事件，未发 TERM/KILL；确认 App/core 消失、
+  Wi-Fi 三类系统代理关闭、恢复文件清除、直连 HTTPS 200 后才安装并打开新版。旧版备份与退役副本
+  位于 `/private/tmp/kongshan-0.1.63-{backup,retired}-20260802-1151.app`。
+- 当前状态：安装版 v0.1.64/build 164，PID 92135；系统代理关闭，无 sing-box/恢复文件，直连 HTTPS
+  200。Computer Use 已确认主窗口正常渲染。
+- 验证边界：Computer Use 未获本机对 kongshan 的点击/按键授权，无法自动关闭窗口后点击状态项；
+  用户仍需手动确认子菜单保持 10 秒、节点可选择、关闭窗口后“打开仪表盘”有效。
+- 下一位 Agent 如何接手：先读取本阶段，不要恢复菜单栏周期速率；若用户仍复现，再考虑用 AppKit
+  `NSStatusItem/NSMenu` 取代 SwiftUI `MenuBarExtra`，不要继续给高频刷新打补丁。

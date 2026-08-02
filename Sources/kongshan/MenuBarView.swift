@@ -7,11 +7,12 @@ import SwiftUI
 /// 菜单是瞬时的，不建立任何 Clash WebSocket。
 struct MenuBarView: View {
     @Environment(AppState.self) private var state
+    let openMainWindow: () -> Void
 
     var body: some View {
         Text(state.statusText)
 
-        Button("打开仪表盘") { openMainWindow() }
+        Button("打开仪表盘", action: openMainWindow)
             .keyboardShortcut("d")
 
         Divider()
@@ -107,7 +108,7 @@ struct MenuBarView: View {
             }
             if options.count > Self.menuOptionLimit {
                 Divider()
-                Button("在代理页选择全部（\(options.count) 个）…") { openMainWindow() }
+                Button("在代理页选择全部（\(options.count) 个）…", action: openMainWindow)
             }
         }
     }
@@ -146,10 +147,6 @@ struct MenuBarView: View {
         text.count > max ? String(text.prefix(max)) + "…" : text
     }
 
-    private func openMainWindow() {
-        (NSApp.delegate as? KongshanAppDelegate)?.showMainWindow()
-    }
-
     private var outboundModeBinding: Binding<OutboundMode> {
         Binding(
             get: { state.outboundMode },
@@ -170,24 +167,4 @@ struct MenuBarView: View {
             set: { enabled in Task { await state.setLaunchAtLoginEnabled(enabled) } }
         )
     }
-}
-
-enum MenuRateFormatter {
-    /// 菜单栏图标宽度直接跟着这里的字符数变，必须最紧凑且长度稳定：单字母单位、不带空格。
-    /// 下拉菜单正文不能读取每秒变化的代理速率；否则整个 NSMenu 会在展开时反复重建，
-    /// 节点子菜单随之闪烁。实时速率只显示在状态栏图标上。
-    /// 不要换成 ByteCountFormatter——它会给出「900 字节」「1.5 MB」这类本地化 2 字母单位，
-    /// 比手写格式更宽、且在 B↔KB 之间跳字符数（用户反馈过菜单栏一跳一跳）。
-    /// 0 时返回空串，由调用方统一填「—」。
-    static func compact(_ bytes: Int64) -> String {
-        let value = max(0, bytes)
-        switch value {
-        case 0: return ""
-        case 0..<1_024: return "\(value)B"
-        case 1_024..<1_048_576: return String(format: "%.1fK", Double(value) / 1_024)
-        case 1_048_576..<1_073_741_824: return String(format: "%.1fM", Double(value) / 1_048_576)
-        default: return String(format: "%.1fG", Double(value) / 1_073_741_824)
-        }
-    }
-
 }

@@ -7,7 +7,7 @@ struct KongshanApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            MenuBarView()
+            MenuBarView(openMainWindow: appDelegate.showMainWindow)
                 .environment(appDelegate.appState)
         } label: {
             MenuBarStatusIcon(state: appDelegate.appState)
@@ -21,14 +21,11 @@ private struct MenuBarStatusIcon: View {
     let state: AppState
 
     var body: some View {
-        // 整块（图标 + 上下两行速率）画成一张模板图。MenuBarExtra 的 label 会套用系统
-        // 菜单栏字体并把内容压成一行，用 SwiftUI 排版控不住——见 MenuBarIcon.statusImage。
-        // 速率取的是**整机网卡**吞吐，不是代理流量，所以代理没开也照常显示。
-        Image(nsImage: MenuBarIcon.statusImage(
+        // MenuBarExtra 的 label 只能读取低频状态。周期性速率更新会让原生 NSMenu
+        // 在展开时被 SwiftUI 重建，表现为子菜单闪烁、按钮点击丢失。
+        Image(nsImage: MenuBarIcon.image(
             style: state.menuBarIconStyle,
-            state: state.menuBarIconState,
-            uploadText: state.nicUploadText,
-            downloadText: state.nicDownloadText
+            state: state.menuBarIconState
         ))
     }
 }
@@ -77,8 +74,8 @@ final class KongshanAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         // （端口被占、配置被拒），写端拿到 EPIPE 的同时收到 SIGPIPE → 整个 App 被杀。
         // 全局忽略一次，write 改为返回 -1/EPIPE 由各写入点自行处理。
         signal(SIGPIPE, SIG_IGN)
-        // 状态项本身要持续显示速率，因此它是一个常驻监控消费者；仪表盘开关只增减
-        // 另一个消费者，不会再把托盘依赖的同一条 WebSocket 误取消。
+        // 会话累计流量必须跨窗口关闭持续采样，因此保留常驻监控消费者；状态项本身
+        // 不读取这些高频数据，避免 MenuBarExtra 在菜单展开时重建。
         appState.startMenuBarMonitoring()
         Task { @MainActor in
             guard await LoginItemManager().currentStatus() != .enabled else { return }
