@@ -15,6 +15,18 @@ private actor CallCounter {
     }
 }
 
+private actor StringRecorder {
+    private var values: [String] = []
+
+    func append(_ value: String) {
+        values.append(value)
+    }
+
+    func snapshot() -> [String] {
+        values
+    }
+}
+
 private func manualNode(name: String, server: String) -> ManualHysteria2 {
     ManualHysteria2(
         name: name,
@@ -94,6 +106,93 @@ final class AppStateTests: XCTestCase {
 
         XCTAssertEqual(state.selectedNodeID, originalID)
         XCTAssertTrue(state.errorMessage?.contains("没有测速成功") == true)
+    }
+
+    func testTestAndSelectFastestOnlyTestsCurrentPolicyMembers() async {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let calls = StringRecorder()
+        let source = SubscriptionSource(
+            name: "policy-test",
+            url: URL(string: "https://example.com/sub.yaml")!
+        )
+        let included = ProxyNode(
+            sourceID: source.id,
+            name: "组内节点",
+            protocolType: .shadowsocks,
+            server: "included.example",
+            port: 443,
+            password: "secret",
+            method: "aes-128-gcm"
+        )
+        let excluded = ProxyNode(
+            sourceID: source.id,
+            name: "组外节点",
+            protocolType: .shadowsocks,
+            server: "excluded.example",
+            port: 443,
+            password: "secret",
+            method: "aes-128-gcm"
+        )
+        let state = AppState(
+            storage: Storage(rootDirectory: root),
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            tcpPingProvider: { host, _ in
+                await calls.append(host)
+                return .success(host == "included.example" ? 20 : 200)
+            },
+            automaticallyInitialize: false
+        )
+        state.subscriptions = [source]
+        state.nodes = [included, excluded]
+        state.activeConfigID = source.id
+        state.selectedNodeID = excluded.id
+        state.discoveredPolicyGroups[source.id] = [
+            PolicyGroup(name: "流媒体", kind: .selector, members: [included.name])
+        ]
+
+        await state.testAndSelectFastest(in: "流媒体")
+
+        let testedHosts = await calls.snapshot()
+        XCTAssertEqual(testedHosts, ["included.example"])
+        XCTAssertEqual(state.selectedNodeID, excluded.id, "非主策略的选择不应改写全局主节点")
+        XCTAssertEqual(state.selectedMemberName(in: "流媒体"), included.name)
+        XCTAssertFalse(state.delays.keys.contains(excluded.id))
+    }
+
+    func testAllDelaysPublishesResultsInBatches() async {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let state = AppState(
+            storage: Storage(rootDirectory: root),
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            tcpPingProvider: { _, _ in .success(25) },
+            automaticallyInitialize: false
+        )
+        state.nodes = (0..<20).map { index in
+            ProxyNode(
+                name: "node-\(index)",
+                protocolType: .shadowsocks,
+                server: "127.0.0.1",
+                port: 443,
+                password: "secret",
+                method: "aes-128-gcm"
+            )
+        }
+        state.activeConfigID = AppState.localConfigID
+        state.selectedNodeID = state.nodes.first?.id
+        let firstBatch = ObservationCounter()
+        withObservationTracking {
+            _ = state.delays
+        } onChange: {
+            Task { @MainActor in firstBatch.set(state.delays.count) }
+        }
+
+        await state.testAllDelays()
+        try? await Task.sleep(for: .milliseconds(20))
+
+        XCTAssertEqual(state.delays.count, 20)
+        XCTAssertEqual(firstBatch.value, 20, "小于发布批次时应一次性合并，不能逐节点刷新")
     }
 
     func testExitDiagnosticRefreshKeepsLastSuccessWhenNextRequestFails() async {
@@ -1273,6 +1372,42 @@ final class AppStateTests: XCTestCase {
         await fixture.state.stop()
     }
 
+    func testActiveConfigSwitchRollsUIAndPersistenceBackWhenCoreReloadFails() async throws {
+        let fixture = try await makeRunningFixture(healthFailures: [2])
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let oldConfigID = try XCTUnwrap(fixture.state.activeConfigID)
+        let oldNodeID = try XCTUnwrap(fixture.state.selectedNodeID)
+        let source = SubscriptionSource(
+            name: "reload-failure",
+            url: URL(string: "https://example.com/reload-failure.yaml")!
+        )
+        let newNode = ProxyNode(
+            sourceID: source.id,
+            name: "new-node",
+            protocolType: .shadowsocks,
+            server: "127.0.0.1",
+            port: 9,
+            password: "secret",
+            method: "aes-128-gcm"
+        )
+        fixture.state.subscriptions = [source]
+        fixture.state.nodes.append(newNode)
+
+        await fixture.state.setActiveConfig(source.id)
+
+        XCTAssertEqual(fixture.state.status, .on)
+        XCTAssertEqual(fixture.state.activeConfigID, oldConfigID)
+        XCTAssertEqual(fixture.state.selectedNodeID, oldNodeID)
+        XCTAssertTrue(fixture.state.errorMessage?.contains("已恢复旧配置") == true)
+        let persisted = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: Data(contentsOf: fixture.root.appending(path: "settings.json"))
+            ) as? [String: Any]
+        )
+        XCTAssertEqual(persisted["activeConfigID"] as? String, oldConfigID.uuidString)
+        await fixture.state.stop()
+    }
+
     func testLoginItemManagerMapsEverySystemStatus() {
         XCTAssertEqual(LoginItemManager.map(.notRegistered), .notRegistered)
         XCTAssertEqual(LoginItemManager.map(.enabled), .enabled)
@@ -1433,6 +1568,24 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(fixture.state.status, .off)
         XCTAssertNil(stoppedPID)
         XCTAssertEqual(stoppedHealthCount, 2)
+    }
+
+    func testTerminationStopsCoreStartedOnlyForDelayTesting() async throws {
+        let fixture = try await makeRunningFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        await fixture.state.stop()
+
+        let started = await fixture.state.startCoreForTestingIfNeeded()
+        let runningPID = await fixture.core.currentPID
+        XCTAssertTrue(started)
+        XCTAssertTrue(fixture.state.activeModes.isEmpty)
+        XCTAssertNotNil(runningPID)
+
+        let safeToTerminate = await fixture.state.prepareForTermination()
+        let stoppedPID = await fixture.core.currentPID
+        XCTAssertTrue(safeToTerminate)
+        XCTAssertEqual(fixture.state.status, .off)
+        XCTAssertNil(stoppedPID)
     }
 
     func testSystemCrashRestartFailureRestoresProxyAndNotifies() async throws {

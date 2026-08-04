@@ -9,22 +9,29 @@ struct PolicyGroupsView: View {
     @State private var searchText = ""
     @State private var sortOption: NodeSortOption = .defaultOrder
 
-    private var currentGroup: PolicyGroup {
-        let groups = state.displayPolicyGroups
-        return groups.first { $0.name == selectedGroupName } ?? groups.first ?? PolicyGroup(name: "手动选择")
-    }
-
-    /// 只有 selector 能手动指定成员；urltest 由内核按测速自动选路。
-    private var isSelectable: Bool { currentGroup.kind == .selector }
-
     var body: some View {
+        let groups = state.displayPolicyGroups
+        let currentGroup = groups.first { $0.name == selectedGroupName }
+            ?? groups.first
+            ?? PolicyGroup(name: "手动选择")
+        let options = state.groupOptions(currentGroup)
+        let selectedName = state.selectedMemberName(in: currentGroup.name, options: options)
+        let delays = state.delays
+        let isSelectable = currentGroup.kind == .selector
+
         VStack(spacing: 0) {
-            header
+            header(currentGroup: currentGroup, isSelectable: isSelectable)
             Divider()
             HStack(spacing: 0) {
-                groupColumn
+                groupColumn(groups: groups, currentGroupName: currentGroup.name)
                 Divider()
-                nodeColumn
+                nodeColumn(
+                    currentGroup: currentGroup,
+                    options: options,
+                    selectedName: selectedName,
+                    delays: delays,
+                    isSelectable: isSelectable
+                )
             }
         }
         .pageBackground()
@@ -33,7 +40,7 @@ struct PolicyGroupsView: View {
 
     // MARK: - 顶部
 
-    private var header: some View {
+    private func header(currentGroup: PolicyGroup, isSelectable: Bool) -> some View {
         PageHeader(title: "代理", subtitle: "为每个策略选择出站节点；出站模式决定分流是否生效") {
             HStack(spacing: 10) {
                 Picker("出站模式", selection: outboundModeBinding) {
@@ -43,7 +50,7 @@ struct PolicyGroupsView: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(width: 240)
+                .frame(width: 220)
                 .help(state.outboundMode.detail)
                 .disabled(state.isBusy || !state.isReady)
 
@@ -52,6 +59,7 @@ struct PolicyGroupsView: View {
                 } label: {
                     Label(state.isTestingAllDelays ? "测速中…" : "测速全部", systemImage: "gauge.with.dots.needle.67percent")
                 }
+                .fixedSize(horizontal: true, vertical: false)
                 .disabled(state.testableNodes.isEmpty || state.isTestingAllDelays)
 
                 Button {
@@ -59,6 +67,7 @@ struct PolicyGroupsView: View {
                 } label: {
                     Label("测速并选最快", systemImage: "bolt.badge.checkmark")
                 }
+                .fixedSize(horizontal: true, vertical: false)
                 .disabled(
                     state.testableNodes.isEmpty
                         || state.isTestingAllDelays
@@ -71,9 +80,9 @@ struct PolicyGroupsView: View {
 
     // MARK: - 左列：策略
 
-    private var groupColumn: some View {
-        List(selection: Binding(get: { currentGroup.name }, set: { selectedGroupName = $0 })) {
-            ForEach(state.displayPolicyGroups, id: \.name) { group in
+    private func groupColumn(groups: [PolicyGroup], currentGroupName: String) -> some View {
+        List(selection: Binding(get: { currentGroupName }, set: { selectedGroupName = $0 })) {
+            ForEach(groups, id: \.name) { group in
                 groupRow(group).tag(group.name)
             }
         }
@@ -83,10 +92,11 @@ struct PolicyGroupsView: View {
     }
 
     private func groupRow(_ group: PolicyGroup) -> some View {
-        HStack(spacing: 9) {
-            Image(systemName: groupSymbol(group))
+        let appearance = groupAppearance(group)
+        return HStack(spacing: 9) {
+            Image(systemName: appearance.symbol)
                 .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(groupTint(group))
+                .foregroundStyle(appearance.tint)
                 .frame(width: 18)
             VStack(alignment: .leading, spacing: 1) {
                 Text(group.name)
@@ -104,30 +114,44 @@ struct PolicyGroupsView: View {
     }
 
     private func subtitle(for group: PolicyGroup) -> String {
-        if group.kind == .urltest { return "自动选路 · \(state.groupOptions(group).count) 个" }
-        return state.selectedMemberName(in: group.name) ?? "未选择"
+        let options = state.groupOptions(group)
+        if group.kind == .urltest { return "自动选路 · \(options.count) 个" }
+        return state.selectedMemberName(in: group.name, options: options) ?? "未选择"
     }
 
-    private func groupSymbol(_ group: PolicyGroup) -> String {
-        switch group.name {
-        case "手动选择": "hand.tap"
-        case "自动选择": "bolt.badge.automatic"
-        default: group.kind == .urltest ? "bolt.badge.automatic" : "rectangle.3.group"
+    private func groupAppearance(_ group: PolicyGroup) -> (symbol: String, tint: Color) {
+        let name = group.name.lowercased()
+        if group.kind == .urltest || name.contains("自动") || name.contains("auto") {
+            return ("bolt.badge.automatic", .green)
         }
-    }
-
-    private func groupTint(_ group: PolicyGroup) -> Color {
-        switch group.name {
-        case "手动选择": .blue
-        case "自动选择": .green
-        default: group.kind == .urltest ? .green : .purple
+        if name.contains("手动") { return ("hand.tap", .blue) }
+        if name.contains("netflix") || name.contains("hbo") || name.contains("disney")
+            || name.contains("youtube") || name.contains("bilibili") || name.contains("mytv") {
+            return ("play.tv.fill", .red)
         }
+        if name.contains("telegram") { return ("paperplane.fill", .blue) }
+        if name == "ai" || name.contains("openai") || name.contains("claude") || name.contains("gemini") {
+            return ("brain.head.profile", .mint)
+        }
+        if name.contains("crypto") || name.contains("币") { return ("bitcoinsign.circle.fill", .orange) }
+        if name.contains("steam") || name.contains("epic") || name.contains("xbox")
+            || name.contains("playstation") || name.contains("bahamut") || name.contains("游戏") {
+            return ("gamecontroller.fill", .indigo)
+        }
+        if name.contains("spotify") || name.contains("music") || name.contains("音乐") {
+            return ("music.note", .green)
+        }
+        if name.contains("apple") || name.contains("icloud") { return ("apple.logo", .primary) }
+        if name.contains("microsoft") || name.contains("onedrive") { return ("cloud.fill", .blue) }
+        if name.contains("direct") || name.contains("直连") { return ("arrow.right.circle.fill", .green) }
+        if name.contains("prox") || name.contains("节点") { return ("point.3.connected.trianglepath.dotted", .purple) }
+        return ("rectangle.3.group", .purple)
     }
 
-    // MARK: - 右列：成员
-
-    private var processedOptions: [GroupOption] {
-        let options = state.groupOptions(currentGroup)
+    private func processedOptions(
+        _ options: [GroupOption],
+        delays: [UUID: Int?]
+    ) -> [GroupOption] {
         var result = options
 
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -150,20 +174,28 @@ struct PolicyGroupsView: View {
             result.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         case .latencyAscending:
             result.sort { opt1, opt2 in
-                delayValue(for: opt1) < delayValue(for: opt2)
+                delayValue(for: opt1, delays: delays) < delayValue(for: opt2, delays: delays)
             }
         }
         return result
     }
 
-    private func delayValue(for option: GroupOption) -> Int {
+    // MARK: - 右列：成员
+
+    private func delayValue(for option: GroupOption, delays: [UUID: Int?]) -> Int {
         guard case let .node(node) = option else { return 999_999 }
-        guard let delay = state.delays[node.id] else { return 888_888 }
+        guard let delay = delays[node.id] else { return 888_888 }
         guard let ms = delay else { return 999_000 }
         return ms
     }
 
-    private var nodeColumn: some View {
+    private func nodeColumn(
+        currentGroup: PolicyGroup,
+        options: [GroupOption],
+        selectedName: String?,
+        delays: [UUID: Int?],
+        isSelectable: Bool
+    ) -> some View {
         VStack(spacing: 0) {
             // 工具条：搜索框 + 排序菜单
             HStack(spacing: 10) {
@@ -193,8 +225,8 @@ struct PolicyGroupsView: View {
             Divider()
 
             ScrollView {
-                let options = processedOptions
-                if options.isEmpty {
+                let visibleOptions = processedOptions(options, delays: delays)
+                if visibleOptions.isEmpty {
                     ContentUnavailableView(
                         searchText.isEmpty ? "当前配置没有节点" : "未匹配到相关节点",
                         systemImage: searchText.isEmpty ? "tray" : "magnifyingglass",
@@ -209,8 +241,14 @@ struct PolicyGroupsView: View {
                         columns: [GridItem(.adaptive(minimum: 190), spacing: 12)],
                         spacing: 12
                     ) {
-                        ForEach(options) { option in
-                            optionCard(option)
+                        ForEach(visibleOptions) { option in
+                            optionCard(
+                                option,
+                                in: currentGroup.name,
+                                selectedName: selectedName,
+                                delay: optionDelay(option, delays: delays),
+                                isSelectable: isSelectable
+                            )
                         }
                     }
                     .padding(18)
@@ -218,6 +256,11 @@ struct PolicyGroupsView: View {
             }
             .scrollIndicators(.hidden)
         }
+    }
+
+    private func optionDelay(_ option: GroupOption, delays: [UUID: Int?]) -> Int?? {
+        guard case let .node(node) = option else { return nil }
+        return delays[node.id]
     }
 
     private func hintBanner(_ text: String) -> some View {
@@ -234,10 +277,21 @@ struct PolicyGroupsView: View {
         .padding(.top, 14)
     }
 
-    private func optionCard(_ option: GroupOption) -> some View {
-        let isSelected = state.isSelected(option, in: currentGroup.name)
+    private func optionCard(
+        _ option: GroupOption,
+        in groupName: String,
+        selectedName: String?,
+        delay: Int??,
+        isSelectable: Bool
+    ) -> some View {
+        let isSelected = option.name == selectedName
+        let metadata: NodeNameMetadata? = if case let .node(node) = option {
+            NodeNameMetadata.parse(node.name)
+        } else {
+            nil
+        }
         return Button {
-            Task { await state.select(optionName: option.name, in: currentGroup.name) }
+            Task { await state.select(optionName: option.name, in: groupName) }
         } label: {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
@@ -245,7 +299,7 @@ struct PolicyGroupsView: View {
                         .font(.system(size: 12))
                         .foregroundStyle(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
                     if case let .node(node) = option,
-                       let flag = NodeNameMetadata.parse(node.name).flag,
+                       let flag = metadata?.flag,
                        !node.name.contains(flag) {
                         Text(flag)
                             .font(.system(size: 15))
@@ -257,15 +311,15 @@ struct PolicyGroupsView: View {
                     Spacer(minLength: 4)
                     // 延迟提到右上角。这是用户扫一屏节点时唯一要找的数字，
                     // 原本挤在下面一排小标签的末尾，得逐张卡片看过去才能比较。
-                    if case let .node(node) = option {
-                        delayBadge(node)
+                    if case .node = option {
+                        delayBadge(delay)
                     }
                 }
                 HStack(spacing: 6) {
                     switch option {
                     case let .node(node):
                         ProtocolTag(value: node.protocolType)
-                        if let multiplier = NodeNameMetadata.parse(node.name).multiplierText {
+                        if let multiplier = metadata?.multiplierText {
                             Text(multiplier)
                                 .font(.caption2.weight(.bold).monospacedDigit())
                                 .foregroundStyle(.orange)
@@ -299,7 +353,7 @@ struct PolicyGroupsView: View {
         }
         .buttonStyle(.plain)
         .disabled(state.isBusy || !isSelectable)
-        .help(helpText(for: option))
+        .help(helpText(for: option, isSelectable: isSelectable))
     }
 
     private func symbol(for option: GroupOption, selected: Bool) -> String {
@@ -310,7 +364,7 @@ struct PolicyGroupsView: View {
         }
     }
 
-    private func helpText(for option: GroupOption) -> String {
+    private func helpText(for option: GroupOption, isSelectable: Bool) -> String {
         if !isSelectable { return "该策略由内核自动选路，不能手动指定" }
         switch option {
         case let .node(node): return "\(node.server):\(node.port)"
@@ -319,8 +373,8 @@ struct PolicyGroupsView: View {
     }
 
     @ViewBuilder
-    private func delayBadge(_ node: ProxyNode) -> some View {
-        switch state.delays[node.id] {
+    private func delayBadge(_ delay: Int??) -> some View {
+        switch delay {
         case let .some(.some(value)):
             HStack(spacing: 4) {
                 Circle().fill(Theme.delayColor(value)).frame(width: 6, height: 6)

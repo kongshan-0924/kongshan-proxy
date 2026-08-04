@@ -7,7 +7,7 @@ cd "$project_dir"
 swift test
 zsh scripts/build_app.sh
 
-app_path="$project_dir/dist/kongshan.app"
+app_path=${KONGSHAN_APP_PATH:-"$project_dir/.build/kongshan.app"}
 app_binary="$app_path/Contents/MacOS/kongshan"
 core_binary="$app_path/Contents/Resources/sing-box"
 

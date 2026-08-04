@@ -13,7 +13,7 @@ if [[ ${KONGSHAN_VERIFY_SKIP_BUILD:-0} != 1 ]]; then
     zsh scripts/verify_m3.sh
 fi
 
-app_path=${KONGSHAN_VERIFY_APP_PATH:-"$project_dir/dist/kongshan.app"}
+app_path=${KONGSHAN_VERIFY_APP_PATH:-${KONGSHAN_APP_PATH:-"$project_dir/.build/kongshan.app"}}
 app_binary="$app_path/Contents/MacOS/kongshan"
 core_binary="$app_path/Contents/Resources/sing-box"
 

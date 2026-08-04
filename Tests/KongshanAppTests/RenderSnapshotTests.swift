@@ -39,8 +39,12 @@ final class RenderSnapshotTests: XCTestCase {
             PolicyGroup(name: "AI", kind: .urltest)
         ]
         state.discoveredPolicyGroups[state.snapshotSourceID!] = [
+            PolicyGroup(name: "Proxies", kind: .selector),
             PolicyGroup(name: "Netflix", kind: .selector),
-            PolicyGroup(name: "Telegram", kind: .selector)
+            PolicyGroup(name: "YouTube", kind: .selector),
+            PolicyGroup(name: "AI", kind: .selector),
+            PolicyGroup(name: "Telegram", kind: .selector),
+            PolicyGroup(name: "Steam", kind: .selector)
         ]
         render(
             PolicyGroupsView().environment(state),
@@ -51,6 +55,14 @@ final class RenderSnapshotTests: XCTestCase {
         render(
             RoutingView().environment(state),
             name: "routing",
+            size: CGSize(width: 740, height: 640)
+        )
+
+        let noSubscriptionRules = makeState()
+        noSubscriptionRules.discoveredRules[noSubscriptionRules.snapshotSourceID!] = []
+        render(
+            RoutingView().environment(noSubscriptionRules),
+            name: "routing-no-subscription-rules",
             size: CGSize(width: 740, height: 640)
         )
 

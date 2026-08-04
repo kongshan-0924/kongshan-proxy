@@ -1,18 +1,19 @@
 #!/bin/zsh
-# 把 dist/kongshan.app 打包成拖拽安装式 DMG（含 /Applications 快捷方式）。
-# 先运行 build_app.sh 产出 dist/kongshan.app，再运行本脚本。
+# 把 .build/kongshan.app 打包成拖拽安装式 DMG（含 /Applications 快捷方式）。
+# dist 只保留最新 DMG，不保存可运行 App 副本。
 set -euo pipefail
 
 project_dir="${0:A:h:h}"
 cd "$project_dir"
 
-app_path="dist/kongshan.app"
+app_path=${KONGSHAN_APP_PATH:-"$project_dir/.build/kongshan.app"}
 if [[ ! -d "$app_path" ]]; then
     print "错误：$app_path 不存在，请先运行 scripts/build_app.sh" >&2
     exit 1
 fi
 
 version=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$app_path/Contents/Info.plist")
+mkdir -p "$project_dir/dist"
 dmg_path="dist/kongshan-$version.dmg"
 
 staging=$(mktemp -d)
@@ -43,4 +44,7 @@ if [[ -n "${KONGSHAN_NOTARY_PROFILE:-}" ]]; then
 fi
 
 size=$(du -h "$dmg_path" | cut -f1)
+find "$project_dir/dist" -maxdepth 1 -type f -name 'kongshan-*.dmg' ! -name "kongshan-$version.dmg" -delete
+rm -rf "$project_dir/dist/kongshan.app"
+rm -f "$project_dir/dist/.metadata_never_index" "$project_dir/dist/.DS_Store"
 print "Built $dmg_path  ($size)"

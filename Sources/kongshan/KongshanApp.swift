@@ -6,27 +6,10 @@ struct KongshanApp: App {
     @NSApplicationDelegateAdaptor(KongshanAppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        MenuBarExtra {
-            MenuBarView(openMainWindow: appDelegate.showMainWindow)
-                .environment(appDelegate.appState)
-        } label: {
-            MenuBarStatusIcon(state: appDelegate.appState)
+        // 状态项由 AppKit 管理，避免周期性速度刷新让 SwiftUI 重建正在跟踪的菜单。
+        Settings {
+            EmptyView()
         }
-    }
-}
-
-/// 图标放在独立 View 里，让 @Observable 的状态变化在 View body 层被追踪，
-/// 而不是依赖 Scene body 重新求值。
-private struct MenuBarStatusIcon: View {
-    let state: AppState
-
-    var body: some View {
-        // MenuBarExtra 的 label 只能读取低频状态。周期性速率更新会让原生 NSMenu
-        // 在展开时被 SwiftUI 重建，表现为子菜单闪烁、按钮点击丢失。
-        Image(nsImage: MenuBarIcon.image(
-            style: state.menuBarIconStyle,
-            state: state.menuBarIconState
-        ))
     }
 }
 
@@ -37,6 +20,7 @@ final class KongshanAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     let appState = AppState()
 
     private var mainWindowController: NSWindowController?
+    private var menuBarController: MenuBarController?
     private var preparingToTerminate = false
 
     /// LSUIElement 应用启动时不会被激活（实测 `isActive=false`、`ppid=1`、
@@ -74,8 +58,14 @@ final class KongshanAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         // （端口被占、配置被拒），写端拿到 EPIPE 的同时收到 SIGPIPE → 整个 App 被杀。
         // 全局忽略一次，write 改为返回 -1/EPIPE 由各写入点自行处理。
         signal(SIGPIPE, SIG_IGN)
+        let menuBarController = MenuBarController(
+            state: appState,
+            openMainWindow: { [weak self] in self?.showMainWindow() }
+        )
+        self.menuBarController = menuBarController
+        menuBarController.start()
         // 会话累计流量必须跨窗口关闭持续采样，因此保留常驻监控消费者；状态项本身
-        // 不读取这些高频数据，避免 MenuBarExtra 在菜单展开时重建。
+        // 的整机速度由 MenuBarController 独立采样，不进入 SwiftUI Observation 图。
         appState.startMenuBarMonitoring()
         Task { @MainActor in
             guard await LoginItemManager().currentStatus() != .enabled else { return }
@@ -141,6 +131,10 @@ final class KongshanAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             sender.reply(toApplicationShouldTerminate: safeToTerminate)
         }
         return .terminateLater
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        menuBarController?.stop()
     }
 
     private func makeMainWindowController() -> NSWindowController {

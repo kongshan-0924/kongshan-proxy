@@ -1,15 +1,112 @@
 # 项目交接
 
-## 当前状态：v0.1.64 已安装并安全替换完成（2026-08-02）
+## 当前状态：v0.1.67 已安装并发布（2026-08-04）
 
-`VERSION`、`dist/kongshan.app` 与 `/Applications/kongshan.app` 均为 v0.1.64/build 164；
-DMG 为 `dist/kongshan-0.1.64.dmg`，SHA-256
-`163353f02eb31f545811d0d06fa6fd79f5d0569877ac6d0a36d6aec2fd29cd08`，主程序 SHA-256
-`f408bb811e5b53df440a839dd77ddf100fa93473530ed7b4a6c4b34634b8053e`。
+`VERSION` 与 `/Applications/kongshan.app` 均为 v0.1.67/build 167。正式成品只保留
+`dist/kongshan-0.1.67.dmg`，SHA-256
+`0524eeac9e4149fa95ecf734136fd6fbcc18b02ba62bbab8672110201d068854`；主程序 SHA-256
+`e25a6ab7fd234bbd25c12778ac3de938fc730608671980bd8ef566b26a37580b`。全量测试 414 通过、
+2 跳过、0 失败；deep/strict 签名、DMG CRC、主程序与内核 arm64、M4 性能门禁均通过。
 
-全量测试发现 407 项：**406 通过 / 1 跳过 / 0 失败**。release 构建、arm64、
-deep/strict 签名、hardened runtime、DMG 校验与隔离 M4 均通过；M4 五次 CPU 均为 0.0%，
-最大 RSS 126,592 KB。
+GitHub Release：`https://github.com/kongshan-0924/kongshan-proxy/releases/tag/v0.1.67`。
+
+### 2026-08-04 v0.1.67 发布与单副本收口
+
+- 发布前界面确认系统代理开启；只发送 `Command-Q` 正常退出，未使用 TERM/KILL。退出后 App/core
+  消失、两类 recovery 文件清除，直连 Apple HTTPS 200/约 48 ms，才开始备份和替换。
+- 配置备份位于 `~/Library/Application Support/kongshan-backups/`，文件名
+  `kongshan-config-0.1.67-20260804-154816.tar.gz`，权限 0600，SHA-256
+  `0ed99fe951da6299237c9ada05ca1de7bea746501657031ccf8be75369ab76da`。保留设置、规则、订阅元数据和
+  订阅 YAML；只排除可再生 Fake-IP 缓存、日志、临时运行目录和 recovery 文件，不进入 Git/Release。
+- 构建脚本改为把可运行 App 放在已忽略的 `.build`；`dist` 只输出最新 DMG。`make_dmg.sh` 在新 DMG
+  成功后清理旧 DMG 和历史 `dist/kongshan.app`，避免 LaunchServices/程序坞识别第二份 App。
+- 发布 M4：414 通过、2 跳过、0 失败；五次 CPU 0.5/0.0/0.5/0.0/0.9%，平均 0.380%，最大 RSS
+  116,128 KB。release、arm64、deep/strict、sing-box 1.13.14、规则集和残留检查均通过。
+- 正式 App 经 `/Applications` 暂存验签后原子替换；安装版为 v0.1.67/build 167，签名和主程序哈希
+  与候选一致。已删除 `.build` 临时 App 和 `/private/tmp` 中 v0.1.60-v0.1.67 的旧 App 备份。
+- 最终只存在 `/Applications/kongshan.app`；程序坞持久项也只指向该路径，`dist` 只剩最新 DMG。
+- 助手真机身份探针确认 bundle 路径和 cdhash 都匹配，`isTrusted = true`，无需重装 TUN 助手。
+
+### 2026-08-04 v0.1.67 安全替换
+
+- v0.1.66 退出前已确认接管关闭、无 sing-box/recovery，三类系统代理为 off、直连 HTTPS 200；只通过
+  App 的 `Command-Q` 正常退出，未发送 TERM/KILL。退出后再次确认 App/core 消失且网络正常。
+- 旧版退出后完整 M4 通过：7 条定向测试无失败；CPU 0.6/0.0/1.1/0.0/0.6%，平均 0.460%，
+  最大 RSS 113,952 KB；签名、arm64、Info.plist、无残留子进程/连接/恢复文件均通过。
+- v0.1.67 采用暂存验签后原子切换，安装版 deep/strict 签名通过；旧 App 备份已在本次“只保留最新版”
+  收口中删除，旧版本不再提供本地 App 回滚。
+- 新版 PID 40968，UI 显示“已关闭”和 v0.1.67 (167)；启动后 6 次 CPU 0.0%~0.2%，RSS 97 MB 左右，
+  无 sing-box、代理或 recovery，直连 HTTPS 200。未自动恢复旧接管。
+- 后续真机身份探针确认当前安装版与助手记录的 bundle 路径、cdhash 均一致，`isTrusted = true`；此前
+  页面短暂显示“需重装”已不再是当前发布阻塞，未放宽任何助手校验。
+
+### 2026-08-03 v0.1.67 无订阅规则配置的规则页
+
+- 根因：`useSubscriptionRules` 是跨配置保留的全局偏好，默认值为开启；规则页未判断当前配置的
+  `subscriptionRules` 是否为空，导致空配置仍显示“应用订阅规则”已开启，页面语义矛盾。
+- 修复：规则页只取一次当前配置规则；规则为空时隐藏无效的订阅规则开关，页头改为“当前配置未提供
+  订阅规则；仍可管理内置分流和分应用代理”。不重置已保存的偏好，因此切回带规则的配置仍沿用用户选择。
+  广告拦截和分应用代理在无订阅规则配置中继续可用。
+- 验证：新增 `routing-no-subscription-rules.png` 离屏快照，确认空状态页不再出现该开关；全量测试通过。
+- 本节修复已随 v0.1.67 安装；无规则页离屏快照已验证。最终真机切换到 `vmiss` 的视觉复核仍可后续进行，
+  但不需要为此改变当前生效配置。
+
+### 2026-08-04 最新运行审计
+
+- App PID 42138，10 次样本 CPU 0.0%~0.1%，RSS 46,544~58,112 KB，FD 98；无监听端口、无 sing-box。
+  系统内存可用 37%，用户数据目录 27 MB，近 7 天无 kongshan/sing-box 崩溃报告。
+- `scutil --proxy` 为空、无 recovery 文件，默认路由 `en0`；直连 Apple HTTPS 返回 200，总耗时约 52 ms。
+- 24 小时统一日志 0 ERROR/FAULT、0 WARN。运行事件共 55 条 info、1 条 error；唯一错误是 8 月 3 日
+  00:44 的一次内核启动失败，13 秒后 TUN 成功启动，之后多次换网均成功重载，未再复发；8 月 4 日
+  13:04 内核正常停止。
+- 当前生效配置是“奶昔”，其单订阅自动更新关闭，时间不变化符合设置。只有 TAG 开启自动更新，但最后
+  成功更新时间仍为 7 月 29 日；消息页显示 HTTP 401、TLS、离线后继续使用缓存，并有通知权限未开启。
+  结合调度逻辑，失败后会每 15 分钟重试；应更新 TAG 的订阅凭据/地址，或不再使用时关闭其自动更新。
+- 代理关闭时 App 保留 1 条稳定 HTTPS 连接且 10 秒内没有增长，无监听端口；结合 TAG 重试状态，当前
+  不像泄漏。旧 `sing-box-tun.log` 约 15 MB、已停用，可由 UI 的缓存清理按需删除，不自动处理。
+
+## 历史状态：v0.1.66 已安装并安全替换完成（2026-08-02）
+
+`VERSION`、`dist/kongshan.app` 与 `/Applications/kongshan.app` 均为 v0.1.66/build 166；
+DMG 为 `dist/kongshan-0.1.66.dmg`，SHA-256
+`67a2e713fee550610e49d8b8634245ef84ac971eae1a66d14c7b6541a649bd1d`，主程序 SHA-256
+`1a5e53f7f51af1b94996b84420ed57b1dde4172c0d4a4d3833569f0aa1afd46c`。
+
+全量测试：**414 通过 / 2 跳过 / 0 失败**。release 构建、arm64、deep/strict 签名、
+hardened runtime、DMG 校验与隔离 M4 均通过；最终 M4 平均 CPU 0.620%，最大 RSS 129,984 KB。
+
+### 2026-08-02 v0.1.66 代理页、测速与交互性能
+
+- 策略组按用途使用不同 SF Symbol 与颜色；紧凑窗口下两个测速按钮完整显示。代理页一次渲染只计算
+  一次策略、选中项、节点元数据和延迟快照，避免节点卡片重复解析与查询。
+- 批量 TCP 测速并发提高到 32；URL 测速为 16 个有界并发、单节点 3 秒超时，并按 24 条结果合并
+  发布到 Observation。141 节点真机样本由约 30 秒降到约 17.3 秒，App 峰值 CPU 45.6% 降到
+  16.8%；最终安装版受当时网络响应波动影响约 26.1 秒完成，操作期间仍可交互。
+- “测速并选最快”只测当前策略候选，不再扫完整配置。配置切换热重载失败会回滚配置 ID、组选择、
+  当前节点、延迟和落盘设置；诊断快照或设置落盘失败只告警，不再错误回滚已经健康运行的代理。
+- 真机审计发现 URL 测速启动的“仅内核”状态在正常退出时会残留 sing-box；根因是退出流程只判断
+  `activeModes`。现同时判断 `runtime` 并复用统一 `stop()`，新增真实测试内核回归，最终成品复测已确认
+  App/core 一起退出、无恢复文件、系统代理关闭、DNS 回到 `192.168.2.1`、直连 HTTPS 200。
+- 最终安装版 PID 42138，重新打开后保持“已关闭”，没有自动接管或启动内核。被替换候选备份在
+  `/private/tmp/kongshan-0.1.66-pre-lifecycle-fix-retired-20260802-234725.app`。
+
+### 2026-08-02 v0.1.65 原生状态栏实时速度与稳定菜单
+
+- 用 AppKit `NSStatusItem + NSMenu` 取代 SwiftUI `MenuBarExtra`；状态栏按钮每 2 秒独立更新固定宽度
+  速度图，`NSMenu` 从启动到退出保持同一个对象，速度刷新不再打断菜单跟踪。
+- 整机速度直接复用 `NetworkThroughput.physicalCounters()` 与 `ThroughputRateCalculator`，只统计
+  `en*` 物理网卡；没有把高频字段重新放进 `AppState` 或 SwiftUI Observation 图。
+- 菜单只在 `menuWillOpen` 时根据 `AppState` 构建一次，展开期间冻结内容；出站模式、代理开关、
+  节点、测速、刷新订阅、开机启动、面板和退出均改用原生 `NSMenuItem` target/action。
+- 5 条菜单定向回归通过，覆盖菜单身份不变、相同速度不重复换图、固定图宽、原生面板动作和
+  AppKit 架构守卫；全量 410 通过/1 跳过/0 失败。
+- 隔离 M4 五次 CPU 0.2/0.0/0.4/0.0/0.4%，平均 0.200%，最大 RSS 121,184 KB；真实安装版
+  主窗口可见且状态栏刷新时平均 CPU 0.630%、峰值 4.2%，最大 RSS 127,712 KB。
+- 安全替换：旧 v0.1.64 只收到 Apple 正常退出事件，未发 TERM/KILL；确认 App/core 消失、
+  三类系统代理关闭、恢复文件清除、直连 HTTPS 200 后才跑 M4、安装并打开 v0.1.65。
+- 当前安装版 PID 7659；系统代理保持关闭，无 sing-box/恢复文件，直连 HTTPS 200；Computer Use
+  已确认主窗口正常。最终状态栏速度显示、节点子菜单保持和节点选择需用户用鼠标确认。
+- 旧版备份和退役副本：`/private/tmp/kongshan-0.1.64-{backup,retired}-20260802-133855.app`。
 
 ### 2026-08-02 v0.1.64 菜单稳定性根治与面板入口修复
 
@@ -26,6 +123,16 @@ deep/strict 签名、hardened runtime、DMG 校验与隔离 M4 均通过；M4 �
   `/private/tmp/kongshan-0.1.63-{backup,retired}-20260802-1151.app`。
 - 验证边界：Computer Use 可读界面，但本机未批准对 kongshan 的点击/按键操作，无法自动关闭窗口后
   再从状态项点击打开。源码依赖和入口已覆盖，最终菜单悬停、节点选择、重新打开窗口需用户手动确认。
+
+### 2026-08-02 状态栏实时速度恢复方案（已由 v0.1.65 实施）
+
+- 若要同时保留实时速度和稳定菜单，不应再让周期性速度进入 SwiftUI `MenuBarExtra` 的 label；固定宽度、
+  降低刷新频率或 `TimelineView` 仍可能使同一 Scene 的原生菜单在跟踪期间被重建。
+- 推荐只迁移托盘层到 AppKit `NSStatusItem + NSMenu`：状态栏按钮独立更新速度图，持久化 `NSMenu`
+  不随速度刷新替换；菜单仅在 `menuWillOpen` 时按 `AppState` 构建一次，展开期间保持内容稳定。
+- 仪表盘和其余界面继续使用 SwiftUI；节点选择、代理开关和“打开仪表盘”改用 `NSMenuItem`
+  target/action 调用现有 `AppState` 与 `KongshanAppDelegate.showMainWindow()`。
+- 上述方案已在 v0.1.65 完成，保留本节作为设计取舍记录。
 
 ### 2026-08-02 v0.1.63 菜单节点选择闪烁修复（历史，未完全解决）
 

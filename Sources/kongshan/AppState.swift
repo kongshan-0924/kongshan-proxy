@@ -80,6 +80,9 @@ final class AppState {
     typealias NowProvider = @Sendable () -> Date
     typealias ExitDiagnosticsProvider = @Sendable (String) async throws -> ExitDiagnosticsReport
     typealias TCPPingProvider = @Sendable (String, Int) async -> DelayResult
+    private static let delayPublishBatchSize = 24
+    private static let bulkURLTestConcurrency = 16
+    private static let bulkURLTestTimeoutMilliseconds = 3_000
     /// 入参是要排除的地址（TUN 自身），返回探测到的内网 DNS 快照。
     typealias LANResolverProbing = @Sendable (Set<String>) async -> LANResolverSnapshot
 
@@ -275,13 +278,31 @@ final class AppState {
     /// 切换生效配置。组选择与延迟按节点归属，换配置即清空；运行中则用新配置热重载。
     func setActiveConfig(_ id: UUID) async {
         guard id != activeConfigID, configItems.contains(where: { $0.id == id }) else { return }
+        let previousConfigID = activeConfigID
+        let previousGroupSelections = groupSelections
+        let previousSelectedNodeID = selectedNodeID
+        let previousDelays = delays
+
         activeConfigID = id
         groupSelections = [:]
         selectedNodeID = nil
         delays = [:]
         selectFirstNodeIfNeeded()
-        try? await persistSettings()
-        await hotReloadAfterNodeChange()
+        guard await hotReloadAfterNodeChange() else {
+            // 热重载会把内核回滚到旧配置；UI 与持久化状态也必须同步回滚，
+            // 否则界面显示新机场、实际流量仍走旧机场，下一次启动还会继续错位。
+            activeConfigID = previousConfigID
+            groupSelections = previousGroupSelections
+            selectedNodeID = previousSelectedNodeID
+            delays = previousDelays
+            try? await persistSettings()
+            return
+        }
+        do {
+            try await persistSettings()
+        } catch {
+            appendWarning("当前配置已切换，但保存失败：\(error.localizedDescription)")
+        }
     }
 
     /// 没有生效配置或它已消失时，挑一个可用配置顶上。
@@ -646,7 +667,6 @@ final class AppState {
                 dnsSettings: dnsSettings
             )
             appendWarnings(configWarnings)
-            try await writeDiagnosticConfig(config)
 
             let check = try await singBoxProcess.check(config: config)
             guard check.exitCode == 0 else {
@@ -691,6 +711,12 @@ final class AppState {
             mixedPort = usesSystemProxy ? runtime.mixedPort : nil
             activeModes = modes
             status = .on
+            do {
+                try await writeDiagnosticConfig(config)
+            } catch {
+                // 诊断快照不是运行前置条件。写失败不能把已经健康的代理停掉。
+                appendWarning("代理已启动，但诊断快照写入失败：\(error.localizedDescription)")
+            }
             recordRuntimeEvent(
                 title: "内核已启动",
                 detail: runtimeModeDescription(modes),
@@ -856,7 +882,7 @@ final class AppState {
     func prepareForTermination() async -> Bool {
         // 退出前先冲掉未完成的防抖落盘（用户切节点后 500ms 内退出会丢最后一次选择）。
         await flushPersistSettingsIfNeeded()
-        if !activeModes.isEmpty {
+        if !activeModes.isEmpty || runtime != nil {
             await stop()
             await flushRuntimeEventsIfNeeded()
             return status == .off
@@ -1310,15 +1336,16 @@ final class AppState {
 
     /// 节点集合变化后（订阅刷新 / 增删自建），运行中的内核不重载就用不上新出站，
     /// 已删除的节点还会留在旧配置里。复用分流的热重载路径（校验 → 快速重启 → 失败回滚）。
-    private func hotReloadAfterNodeChange() async {
-        guard status == .on else { return }
+    @discardableResult
+    private func hotReloadAfterNodeChange() async -> Bool {
+        guard status == .on else { return true }
         if activeConfigNodes.isEmpty || activeModes.isEmpty {
             // 节点删光后配置生成必然失败；「只跑内核」的测速态也没有回滚需求。
             // 两种情况都直接停掉，而不是让热重载报错回滚到含幽灵节点的旧配置。
             await stop()
-            return
+            return status == .off
         }
-        await applyRoutingSettings(routingSettings, operation: "当前配置")
+        return await applyRoutingSettings(routingSettings, operation: "当前配置")
     }
 
     // 内置策略组用固定 ID：PolicyGroup(name:) 默认每次生成新 UUID，
@@ -1367,6 +1394,11 @@ final class AppState {
     /// 不把无法解析的原始值直接显示出来。
     func selectedMemberName(in group: String) -> String? {
         let options = displayPolicyGroups.first { $0.name == group }.map(groupOptions) ?? []
+        return selectedMemberName(in: group, options: options)
+    }
+
+    /// 已经算过成员的界面路径复用该结果，避免每张节点卡片再次重建节点名索引。
+    func selectedMemberName(in group: String, options: [GroupOption]) -> String? {
         if let name = groupSelections[group], options.contains(where: { $0.name == name }) {
             return name
         }
@@ -1597,16 +1629,23 @@ final class AppState {
             errorMessage = "当前配置没有可测速的节点"
             return
         }
+        await testDelays(testable)
+    }
+
+    @discardableResult
+    private func testDelays(_ testable: [ProxyNode]) async -> Bool {
+        guard !isTestingAllDelays, !testable.isEmpty else { return false }
         isTestingAllDelays = true
         defer { isTestingAllDelays = false }
 
-        // TCP 方式：直连握手，不需要内核。有界并发 + 每测完一个立刻回填延迟——
-        // 后台跑、不阻塞前台，测速结果一个个显示出来，而不是全部跑完才一次性刷新。
+        // TCP 方式：直连握手，不需要内核。32 个有界并发让大订阅不会被 3 秒超时
+        // 拖成几十秒；结果按大批次合并发布，避免每个节点都让整张代理页重新布局。
         if speedTestMethod == .tcpPing {
             let nodes = testable
             await withTaskGroup(of: (UUID, DelayResult).self) { group in
                 var next = 0
-                let seed = min(16, nodes.count)
+                var pending: [(UUID, DelayResult)] = []
+                let seed = min(32, nodes.count)
                 while next < seed {
                     let node = nodes[next]; next += 1
                     group.addTask { [tcpPingProvider] in
@@ -1614,7 +1653,11 @@ final class AppState {
                     }
                 }
                 while let (id, result) = await group.next() {
-                    applyDelay(result, to: id)
+                    pending.append((id, result))
+                    if pending.count == Self.delayPublishBatchSize {
+                        publishDelayResults(pending)
+                        pending.removeAll(keepingCapacity: true)
+                    }
                     if next < nodes.count {
                         let node = nodes[next]; next += 1
                         group.addTask { [tcpPingProvider] in
@@ -1622,25 +1665,37 @@ final class AppState {
                         }
                     }
                 }
+                publishDelayResults(pending)
             }
-            return
+            return true
         }
 
         // URL 方式：需要内核在跑，之后同样有界并发 + 逐个回填。
-        guard await startCoreForTestingIfNeeded() else { return }
+        guard await startCoreForTestingIfNeeded() else { return false }
         guard let client = clashAPIClient, let testURL = URL(string: testURLString) else {
             errorMessage = "内核控制接口不可用"
-            return
+            return false
         }
         let targets: [(id: UUID, tag: String)] = testable.map {
             (id: $0.id, tag: ConfigGenerator.outboundTag(for: $0))
         }
         await withTaskGroup(of: (UUID, DelayResult).self) { group in
             var next = 0
-            let seed = min(8, targets.count)
+            var pending: [(UUID, DelayResult)] = []
+            let seed = min(Self.bulkURLTestConcurrency, targets.count)
+            let timeoutMilliseconds = Self.bulkURLTestTimeoutMilliseconds
             func delayTask(_ target: (id: UUID, tag: String)) -> @Sendable () async -> (UUID, DelayResult) {
                 { @Sendable in
-                    do { return (target.id, .success(try await client.delay(node: target.tag, testURL: testURL))) }
+                    do {
+                        return (
+                            target.id,
+                            .success(try await client.delay(
+                                node: target.tag,
+                                testURL: testURL,
+                                timeoutMilliseconds: timeoutMilliseconds
+                            ))
+                        )
+                    }
                     catch { return (target.id, .failure(error.localizedDescription)) }
                 }
             }
@@ -1648,12 +1703,30 @@ final class AppState {
                 group.addTask(operation: delayTask(targets[next])); next += 1
             }
             while let (id, result) = await group.next() {
-                applyDelay(result, to: id)
+                pending.append((id, result))
+                if pending.count == Self.delayPublishBatchSize {
+                    publishDelayResults(pending)
+                    pending.removeAll(keepingCapacity: true)
+                }
                 if next < targets.count {
                     group.addTask(operation: delayTask(targets[next])); next += 1
                 }
             }
+            publishDelayResults(pending)
         }
+        return true
+    }
+
+    private func publishDelayResults(_ results: [(UUID, DelayResult)]) {
+        guard !results.isEmpty else { return }
+        var updated = delays
+        for (id, result) in results {
+            switch result {
+            case let .success(value): updated[id] = value
+            case .failure: updated.updateValue(nil, forKey: id)
+            }
+        }
+        if updated != delays { delays = updated }
     }
 
     func testAndSelectFastest(in group: String) async {
@@ -1669,7 +1742,7 @@ final class AppState {
             return
         }
 
-        await testAllDelays()
+        guard await testDelays(candidates) else { return }
         let fastest = candidates.compactMap { node -> (ProxyNode, Int)? in
             guard case let .some(.some(value)) = delays[node.id] else { return nil }
             return (node, value)
@@ -1726,8 +1799,9 @@ final class AppState {
         try? await persistSettings()
     }
 
-    func applyRoutingSettings(_ requestedSettings: RoutingSettings, operation: String = "分流规则") async {
-        guard !isBusy else { return }
+    @discardableResult
+    func applyRoutingSettings(_ requestedSettings: RoutingSettings, operation: String = "分流规则") async -> Bool {
+        guard !isBusy else { return false }
         isApplyingRouting = true
         defer { isApplyingRouting = false }
 
@@ -1737,7 +1811,7 @@ final class AppState {
                 routingSettings = settings
                 try await persistRoutingSettings()
                 errorMessage = nil
-                return
+                return true
             }
             guard let runtime,
                   let oldConfig = currentConfig,
@@ -1772,7 +1846,7 @@ final class AppState {
                     client: client,
                     operation: operation
                 ) else {
-                    return
+                    return false
                 }
             } else {
                 suspendDashboardMonitoring()
@@ -1788,7 +1862,7 @@ final class AppState {
                         updateError: error,
                         operation: operation
                     )
-                    return
+                    return false
                 }
             }
 
@@ -1805,7 +1879,7 @@ final class AppState {
                         updateError: error,
                         operation: operation
                     )
-                    return
+                    return false
                 }
             }
 
@@ -1814,8 +1888,16 @@ final class AppState {
             if !activeModes.contains(.tun) {
                 await armRunningSystemCoreIfAvailable()
             }
-            try await persistRoutingSettings()
-            try await writeDiagnosticConfig(newConfig)
+            do {
+                try await persistRoutingSettings()
+            } catch {
+                appendWarning("\(operation)已生效，但保存失败：\(error.localizedDescription)")
+            }
+            do {
+                try await writeDiagnosticConfig(newConfig)
+            } catch {
+                appendWarning("\(operation)已生效，但诊断快照写入失败：\(error.localizedDescription)")
+            }
             errorMessage = nil
             markRuntimeStarted()
             resumeDashboardMonitoringIfNeeded()
@@ -1823,9 +1905,11 @@ final class AppState {
             if !activeModes.contains(.tun) {
                 recordConfigurationApplied(operation: operation)
             }
+            return true
         } catch {
             errorMessage = "应用分流规则失败：\(error.localizedDescription)"
             recordRuntimeEvent(level: .error, title: "\(operation)应用失败")
+            return false
         }
     }
 
@@ -1915,8 +1999,16 @@ final class AppState {
 
             tunSettings = requestedSettings
             currentConfig = newConfig
-            try await persistSettings()
-            try await writeDiagnosticConfig(newConfig)
+            do {
+                try await persistSettings()
+            } catch {
+                appendWarning("\(operation)已生效，但保存失败：\(error.localizedDescription)")
+            }
+            do {
+                try await writeDiagnosticConfig(newConfig)
+            } catch {
+                appendWarning("\(operation)已生效，但诊断快照写入失败：\(error.localizedDescription)")
+            }
             errorMessage = nil
             markRuntimeStarted()
             resumeDashboardMonitoringIfNeeded()
@@ -1998,8 +2090,16 @@ final class AppState {
             if !activeModes.contains(.tun) {
                 await armRunningSystemCoreIfAvailable()
             }
-            try await persistSettings()
-            try await writeDiagnosticConfig(newConfig)
+            do {
+                try await persistSettings()
+            } catch {
+                appendWarning("\(operation)已生效，但保存失败：\(error.localizedDescription)")
+            }
+            do {
+                try await writeDiagnosticConfig(newConfig)
+            } catch {
+                appendWarning("\(operation)已生效，但诊断快照写入失败：\(error.localizedDescription)")
+            }
             errorMessage = nil
             markRuntimeStarted()
             resumeDashboardMonitoringIfNeeded()

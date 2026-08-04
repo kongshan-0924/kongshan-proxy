@@ -17,23 +17,29 @@ struct RoutingView: View {
     }
 
     var body: some View {
+        let subscriptionRules = state.subscriptionRules
         VStack(spacing: 0) {
-            header
+            header(hasSubscriptionRules: !subscriptionRules.isEmpty)
             Divider()
-            content
+            content(subscriptionRules)
         }
         .pageBackground()
         .navigationTitle("规则")
         .onAppear { refreshRunningApps() }
     }
 
-    private var header: some View {
-        PageHeader(title: "规则", subtitle: "配置「\(activeName)」自带的分流规则（只读）") {
+    private func header(hasSubscriptionRules: Bool) -> some View {
+        let subtitle = hasSubscriptionRules
+            ? "配置「\(activeName)」自带的分流规则（只读）"
+            : "当前配置未提供订阅规则；仍可管理内置分流和分应用代理"
+        return PageHeader(title: "规则", subtitle: subtitle) {
             HStack(spacing: 12) {
                 if state.isApplyingRouting {
                     ProgressView().controlSize(.small)
                 }
-                Toggle("应用订阅规则", isOn: useSubscriptionRulesBinding)
+                if hasSubscriptionRules {
+                    Toggle("应用订阅规则", isOn: useSubscriptionRulesBinding)
+                }
                 Toggle("拦截广告", isOn: blockAdsBinding)
             }
             .toggleStyle(.switch)
@@ -43,18 +49,17 @@ struct RoutingView: View {
     }
 
     @ViewBuilder
-    private var content: some View {
+    private func content(_ subscriptionRules: [SubscriptionRule]) -> some View {
         VStack(spacing: 0) {
             perAppSection
             Divider()
-            subscriptionRulesContent
+            subscriptionRulesContent(subscriptionRules)
         }
     }
 
     @ViewBuilder
-    private var subscriptionRulesContent: some View {
-        let all = state.subscriptionRules
-        if all.isEmpty {
+    private func subscriptionRulesContent(_ rules: [SubscriptionRule]) -> some View {
+        if rules.isEmpty {
             ContentUnavailableView {
                 Label("当前配置没有自带规则", systemImage: "arrow.triangle.branch")
             } description: {
@@ -63,11 +68,11 @@ struct RoutingView: View {
         } else {
             let keyword = ruleSearch.trimmingCharacters(in: .whitespaces).lowercased()
             let matched = keyword.isEmpty
-                ? all
-                : all.filter { $0.value.lowercased().contains(keyword) || $0.target.lowercased().contains(keyword) }
+                ? rules
+                : rules.filter { $0.value.lowercased().contains(keyword) || $0.target.lowercased().contains(keyword) }
             // 分组只算一次：header 的「N 个目标」与下面的列表都要用，
             // 三千多条各分一遍纯属白工。
-            let targetGroups = keyword.isEmpty ? groups(of: all) : []
+            let targetGroups = keyword.isEmpty ? groups(of: rules) : []
             VStack(spacing: 0) {
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass")
@@ -76,11 +81,11 @@ struct RoutingView: View {
                     TextField("搜索规则或目标策略", text: $ruleSearch)
                         .textFieldStyle(.plain)
                     if keyword.isEmpty {
-                        Text("\(all.count) 条 · \(targetGroups.count) 个目标")
+                        Text("\(rules.count) 条 · \(targetGroups.count) 个目标")
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.tertiary)
                     } else {
-                        Text("匹配 \(matched.count) / \(all.count)")
+                        Text("匹配 \(matched.count) / \(rules.count)")
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.tertiary)
                     }

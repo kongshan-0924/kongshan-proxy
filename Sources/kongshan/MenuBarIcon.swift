@@ -40,6 +40,49 @@ enum MenuBarIcon {
         return image
     }
 
+    /// 图标与上下行速率合成一张固定尺寸模板图。更新图片不会改变状态项宽度，
+    /// 也不会触碰 MenuBarController 持有的原生菜单对象。
+    static func statusImage(
+        style: MenuBarIconStyle,
+        state: State,
+        uploadText: String,
+        downloadText: String
+    ) -> NSImage {
+        let key = "\(style.rawValue)-\(state)-\(uploadText)-\(downloadText)"
+        if let cached = statusCache[key] { return cached }
+        if statusCache.count > 200 { statusCache.removeAll(keepingCapacity: true) }
+
+        let up = NSAttributedString(string: "↑\(uploadText)", attributes: textAttributes)
+        let down = NSAttributedString(string: "↓\(downloadText)", attributes: textAttributes)
+        let gap: CGFloat = 3
+        let total = NSSize(width: canvas.width + gap + statusTextWidth, height: canvas.height)
+
+        let image = NSImage(size: total, flipped: false) { rect in
+            draw(style: style, state: state, in: NSRect(origin: .zero, size: canvas))
+            let x = canvas.width + gap
+            up.draw(at: NSPoint(x: x + statusTextWidth - ceil(up.size().width), y: rect.height / 2 + 0.5))
+            down.draw(at: NSPoint(x: x + statusTextWidth - ceil(down.size().width), y: rect.height / 2 - 9))
+            return true
+        }
+        image.isTemplate = true
+        statusCache[key] = image
+        return image
+    }
+
+    private static var statusCache: [String: NSImage] = [:]
+
+    private static let textAttributes: [NSAttributedString.Key: Any] = [
+        .font: NSFont.monospacedDigitSystemFont(ofSize: 8, weight: .medium),
+        .foregroundColor: NSColor.black
+    ]
+
+    static let statusTextWidth: CGFloat = 39
+    static let widestRateSample = "↑999.9M"
+
+    static func statusTextRenderedWidth(_ text: String) -> CGFloat {
+        NSAttributedString(string: text, attributes: textAttributes).size().width
+    }
+
     private static func draw(style: MenuBarIconStyle, state: State, in rect: NSRect) {
         // 关闭态整体压淡。模板图标用 alpha 通道当遮罩，所以降低 alpha 就是"变淡"，
         // 这是菜单栏里表达"未启用"的通行做法（系统的蓝牙/隔空投送都是这个路子）。
