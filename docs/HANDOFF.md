@@ -8,7 +8,9 @@
 `e25a6ab7fd234bbd25c12778ac3de938fc730608671980bd8ef566b26a37580b`。全量测试 414 通过、
 2 跳过、0 失败；deep/strict 签名、DMG CRC、主程序与内核 arm64、M4 性能门禁均通过。
 
-GitHub Release：`https://github.com/kongshan-0924/kongshan-proxy/releases/tag/v0.1.67`。
+`main` 与 `v0.1.67` 标签已推送；GitHub Release 已发布并上传唯一 DMG：
+`https://github.com/kongshan-0924/kongshan-proxy/releases/tag/v0.1.67`。GitHub 返回的资产 digest 与本地
+SHA-256 一致。旧 Release 和旧版本标签已清理，远端只保留历史基线标签与 v0.1.67。
 
 ### 2026-08-04 v0.1.67 发布与单副本收口
 

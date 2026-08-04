@@ -12,7 +12,8 @@
 - [x] 配置已备份到 `~/Library/Application Support/kongshan-backups/`，归档校验通过且未进入 Git。
 - [x] 构建 App 迁到 `.build`，`dist` 只保留最新 DMG；系统和程序坞仅剩 `/Applications/kongshan.app`。
 - [x] 助手真机身份探针 `isTrusted = true`，无需重装，未放宽 cdhash 校验。
-- [x] v0.1.67 已推送并发布到 GitHub Release，旧 GitHub Release/标签按“只保留最新版”清理。
+- [x] `main` 与 `v0.1.67` 标签已推送；GitHub Release 已发布并上传唯一 DMG，旧 Release/旧版本标签
+  已清理。远端只保留 `baseline-20260721` 与 `v0.1.67` 两个标签。
 
 ## 2026-08-04 最新运行健康
 

@@ -2,7 +2,8 @@
 
 ## 当前无发布阻塞项
 
-v0.1.67 已完成配置备份、完整 M4、单副本原子安装、只保留最新 DMG、代码推送和 GitHub Release。
+v0.1.67 已完成配置备份、完整 M4、单副本原子安装、只保留最新 DMG、代码和标签推送、GitHub Release
+及旧 Release/旧版本标签清理。Release 资产 digest 与本地 SHA-256 一致。
 助手真机身份探针确认 `isTrusted = true`，无需重装；系统中只保留 `/Applications/kongshan.app`，程序坞
 也只有这一项。后续构建 App 位于隐藏且忽略的 `.build`，`dist` 只输出最新 DMG。
 

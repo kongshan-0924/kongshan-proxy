@@ -3103,5 +3103,12 @@ AAAA 解析与 Happy Eyeballs 选路，于是每次都撞在 IPv6 上。
   最终全机只枚举到 `/Applications/kongshan.app`，程序坞持久项也只指向该路径。
 - 助手：沙箱外全量测试附带真机身份探针，bundle 路径与 cdhash 均匹配，`isTrusted = true`；此前
   “需重装”不再是当前事实，未点击安装按钮，也未放宽任何安全校验。
-- GitHub：`main` 推送并创建 `v0.1.67` Release，附唯一 DMG；旧 Release/标签按用户“只保留最新版”
-  要求清理。发布地址 `https://github.com/kongshan-0924/kongshan-proxy/releases/tag/v0.1.67`。
+- GitHub：提交 `8f1c4fc`、`main` 与 `v0.1.67` 标签已推送；GitHub CLI 由用户修复本地认证后，以
+  当前 `Ks-Ht` 账号完成发布。`v0.1.67` 为 Latest、非草稿、非预发布，唯一资产
+  `kongshan-0.1.67.dmg` 状态 `uploaded`、大小 24,432,026 字节；GitHub digest 为
+  `sha256:0524eeac9e4149fa95ecf734136fd6fbcc18b02ba62bbab8672110201d068854`，与本地一致。
+- 清理：删除 v0.1.20、v0.1.30、v0.1.43、v0.1.45、v0.1.51、v0.1.52、v0.1.54、v0.1.57、
+  v0.1.58、v0.1.59 共 10 个旧 Release，并用 `--cleanup-tag` 删除对应远端标签；本地旧版本标签
+  v0.1.19/v0.1.20/v0.1.30/v0.1.43 也已删除。最终 Release 只剩 v0.1.67，远端/本地标签只保留
+  `baseline-20260721` 与 `v0.1.67`。发布地址：
+  `https://github.com/kongshan-0924/kongshan-proxy/releases/tag/v0.1.67`。
