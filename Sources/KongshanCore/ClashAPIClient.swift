@@ -98,6 +98,39 @@ public struct ConnectionDetail: Identifiable, Equatable, Sendable {
     }()
 }
 
+public struct ConnectionEndpoint: Equatable, Sendable {
+    public let address: String
+    public let port: Int?
+    public let isIPAddress: Bool
+
+    public init(address: String, port: Int?, isIPAddress: Bool) {
+        self.address = address
+        self.port = port
+        self.isIPAddress = isIPAddress
+    }
+
+    public init(hostAndPort: String) {
+        let raw = hostAndPort.trimmingCharacters(in: .whitespacesAndNewlines)
+        var address = raw
+        var port: Int?
+        if raw.hasPrefix("["), let closing = raw.firstIndex(of: "]") {
+            address = String(raw[raw.index(after: raw.startIndex)..<closing])
+            let suffix = raw[raw.index(after: closing)...]
+            if suffix.first == ":" { port = Int(suffix.dropFirst()) }
+        } else if let colon = raw.lastIndex(of: ":"),
+                  let parsedPort = Int(raw[raw.index(after: colon)...]),
+                  (0...65_535).contains(parsedPort) {
+            address = String(raw[..<colon])
+            port = parsedPort
+        }
+        self.address = address
+        self.port = port
+        isIPAddress = CustomRouteRule.normalizedCIDR(address) != nil
+    }
+
+    public var displayValue: String { address }
+}
+
 public enum CoreLogLevel: String, CaseIterable, Sendable {
     case debug
     case info

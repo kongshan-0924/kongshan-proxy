@@ -772,6 +772,38 @@ private struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                Section("限时诊断") {
+                    if state.isDiagnosticModeActive, let deadline = state.diagnosticModeEndsAt {
+                        LabeledContent("内核日志", value: "Debug（临时）")
+                        HStack {
+                            Text("剩余")
+                            Text(deadline, style: .timer)
+                                .monospacedDigit()
+                            Spacer()
+                            Button("立即恢复") {
+                                Task { await state.disableDiagnosticMode() }
+                            }
+                            .disabled(state.isBusy)
+                        }
+                    } else {
+                        LabeledContent("内核日志", value: "Info（普通）")
+                        HStack {
+                            Text("需要复现疑难网络问题时临时记录更多细节。")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Button("开启 15 分钟") {
+                                Task { await state.enableDiagnosticMode() }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(state.isBusy || state.isTestingAllDelays)
+                        }
+                    }
+                    Text("切换日志级别会重载内核并断开当前连接；到期自动恢复，截止时间会随设置持久化。诊断导出仍会脱敏。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("DNS 高级设置") {
                     TextField("国内 DoH", text: $dnsDraft.domesticDoH)
                     TextField("远程 DoH", text: $dnsDraft.remoteDoH)

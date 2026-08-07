@@ -234,6 +234,42 @@ extension RoutingConfigTests {
 }
 
 extension RoutingConfigTests {
+    func testForcedProxyDomainAndIPPrecedeBypassAndBuiltInDirectRules() throws {
+        var settings = RoutingSettings.defaults
+        settings.customRules = [
+            CustomRouteRule(
+                order: 0,
+                type: .domainSuffix,
+                value: "download.cn",
+                action: .proxy,
+                proxyGroup: "stale-group"
+            ),
+            CustomRouteRule(
+                order: 1,
+                type: .ipCIDR,
+                value: "10.20.30.40",
+                action: .proxy,
+                proxyGroup: "手动选择"
+            )
+        ]
+        let root = try json(try ConfigGenerator.generate(input(
+            settings: settings,
+            ruleSets: PreparedRuleSets(
+                geositeCN: URL(fileURLWithPath: "/tmp/geosite-cn.srs"),
+                geoipCN: URL(fileURLWithPath: "/tmp/geoip-cn.srs"),
+                ads: nil
+            )
+        )))
+        let route = try XCTUnwrap(root["route"] as? [String: Any])
+        let rules = try XCTUnwrap(route["rules"] as? [[String: Any]])
+
+        XCTAssertEqual(rules[0]["action"] as? String, "sniff")
+        assertRule(rules[1], field: "domain_suffix", value: "download.cn", outbound: "手动选择")
+        assertRule(rules[2], field: "ip_cidr", value: "10.20.30.40/32", outbound: "手动选择")
+        XCTAssertEqual(rules[3]["outbound"] as? String, "direct")
+        XCTAssertEqual(rules[4]["ip_is_private"] as? Bool, true)
+    }
+
     func testProcessRuleCanTargetNodeTagAndStaleTargetFallsBackSafely() throws {
         let node = ProxyNode(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000088")!,

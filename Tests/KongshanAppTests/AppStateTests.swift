@@ -71,6 +71,48 @@ final class AppStateTests: XCTestCase {
         XCTAssertTrue(state.processRules.isEmpty)
     }
 
+    func testForcedProxyRuleNormalizesUpsertsAndCanRemove() async {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let state = AppState(
+            storage: Storage(rootDirectory: root),
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            automaticallyInitialize: false
+        )
+
+        let firstDomain = await state.upsertForcedProxyRule(type: .domainSuffix, value: "*.Example.COM.")
+        let replacedDomain = await state.upsertForcedProxyRule(type: .domainSuffix, value: "example.com")
+        let ip = await state.upsertForcedProxyRule(type: .ipCIDR, value: "203.0.113.8")
+        XCTAssertTrue(firstDomain)
+        XCTAssertTrue(replacedDomain)
+        XCTAssertTrue(ip)
+
+        XCTAssertEqual(state.forcedProxyRules.count, 2)
+        XCTAssertEqual(state.forcedProxyRules.map(\.value), ["example.com", "203.0.113.8/32"])
+
+        await state.removeForcedProxyRule(state.forcedProxyRules[0].id)
+        XCTAssertEqual(state.forcedProxyRules.map(\.value), ["203.0.113.8/32"])
+    }
+
+    func testForcedProxyRuleRejectsInvalidAndLoopbackTargets() async {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let state = AppState(
+            storage: Storage(rootDirectory: root),
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            automaticallyInitialize: false
+        )
+
+        let url = await state.upsertForcedProxyRule(type: .domainSuffix, value: "https://example.com/path")
+        let localhost = await state.upsertForcedProxyRule(type: .domainSuffix, value: "localhost")
+        let loopbackIP = await state.upsertForcedProxyRule(type: .ipCIDR, value: "127.0.0.2")
+        XCTAssertFalse(url)
+        XCTAssertFalse(localhost)
+        XCTAssertFalse(loopbackIP)
+        XCTAssertTrue(state.forcedProxyRules.isEmpty)
+        XCTAssertNotNil(state.errorMessage)
+    }
+
     func testTestAndSelectFastestChoosesLowestSuccessfulNode() async {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -193,6 +235,40 @@ final class AppStateTests: XCTestCase {
 
         XCTAssertEqual(state.delays.count, 20)
         XCTAssertEqual(firstBatch.value, 20, "小于发布批次时应一次性合并，不能逐节点刷新")
+    }
+
+    func testAllDelaysCanBeCancelledWithoutDispatchingRemainingNodes() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let state = AppState(
+            storage: Storage(rootDirectory: root),
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            tcpPingProvider: { _, _ in
+                try? await Task.sleep(for: .milliseconds(200))
+                return Task.isCancelled ? .failure("cancelled") : .success(25)
+            },
+            automaticallyInitialize: false
+        )
+        state.nodes = (0..<100).map { index in
+            ProxyNode(
+                name: "node-\(index)",
+                protocolType: .shadowsocks,
+                server: "127.0.0.1",
+                port: 443,
+                password: "secret",
+                method: "aes-128-gcm"
+            )
+        }
+        state.activeConfigID = AppState.localConfigID
+        state.selectedNodeID = state.nodes.first?.id
+
+        state.startAllDelayTests()
+        try await waitUntil { state.isTestingAllDelays }
+        state.cancelDelayTests()
+        try await waitUntil { !state.isTestingAllDelays }
+
+        XCTAssertLessThan(state.speedTestProgress.completed, 100)
+        XCTAssertLessThan(state.delays.count, 100)
     }
 
     func testExitDiagnosticRefreshKeepsLastSuccessWhenNextRequestFails() async {
@@ -875,12 +951,11 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(try dnsURLs(from: attempts[1]), customDNSSettings)
     }
 
-    /// 注意样本数是点数的**两倍**：图表隔一个采样点才入图（见 `receiveTraffic`），
-    /// 因为每次 append 都要整页重排，而趋势图不需要秒级精度。
-    /// 速率数字（`uploadRate`/`downloadRate`）不受此影响，每一帧都要更新。
+    /// 图表每四秒发布一个点，速率数字每两秒发布；原始流仍每秒采样，
+    /// 会话累计量不会因此漏记。
     func testDashboardMonitoringKeepsSixtyPointsAndIsIdempotent() async throws {
-        // 130 个样本 → 偶数下标入图共 65 个点 → 截到 60 个，留下的是样本 10…128。
-        let streams = DashboardStreamFixture(sampleCount: 130)
+        // 250 个样本 → 下标 0、3、7…247 入图共 63 点 → 截到 60 点。
+        let streams = DashboardStreamFixture(sampleCount: 250)
         let fixture = try await makeModeFixture(
             initialMode: .systemProxy,
             clashClientFactory: { controller, secret in
@@ -899,14 +974,13 @@ final class AppStateTests: XCTestCase {
             fixture.state.trafficHistory.count == 60 && fixture.state.activeConnectionCount == 2
         }
 
-        // 最后一个样本是 129：速率读数必须是它，不能停在最后入图的那个点上。
-        XCTAssertEqual(fixture.state.uploadRate, 129)
-        XCTAssertEqual(fixture.state.downloadRate, 258)
-        XCTAssertEqual(fixture.state.trafficHistory.first?.upload, 10)
-        XCTAssertEqual(fixture.state.trafficHistory.last?.download, 256)
-        // 入图的点必须是均匀隔一个取的，不能因为等值判断之类的原因变成不规则采样。
+        // 最后一个样本是 249，速率发布仍要到达它。
+        XCTAssertEqual(fixture.state.uploadRate, 249)
+        XCTAssertEqual(fixture.state.downloadRate, 498)
+        XCTAssertEqual(fixture.state.trafficHistory.first?.upload, 11)
+        XCTAssertEqual(fixture.state.trafficHistory.last?.download, 494)
         let uploads = fixture.state.trafficHistory.map(\.upload)
-        XCTAssertEqual(uploads, Array(stride(from: Int64(10), through: 128, by: 2)))
+        XCTAssertEqual(uploads, Array(stride(from: Int64(11), through: 247, by: 4)))
         XCTAssertEqual(fixture.state.coreMemory, 4_194_304)
         XCTAssertNotNil(fixture.state.runtimeStartedAt)
         XCTAssertEqual(streams.requestCount(path: "/traffic"), 1)

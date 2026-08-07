@@ -3,6 +3,20 @@ import XCTest
 @testable import KongshanCore
 
 final class ClashStreamingTests: XCTestCase {
+    func testConnectionEndpointParsesDomainsIPv4AndIPv6() {
+        XCTAssertEqual(ConnectionEndpoint(hostAndPort: "example.com:443"), ConnectionEndpoint(
+            address: "example.com", port: 443, isIPAddress: false
+        ))
+        XCTAssertEqual(ConnectionEndpoint(hostAndPort: "203.0.113.8:8443"), ConnectionEndpoint(
+            address: "203.0.113.8", port: 8443, isIPAddress: true
+        ))
+        XCTAssertEqual(ConnectionEndpoint(hostAndPort: "[2001:db8::1]:443"), ConnectionEndpoint(
+            address: "2001:db8::1", port: 443, isIPAddress: true
+        ))
+        XCTAssertEqual(ConnectionEndpoint(hostAndPort: "2001:db8::1:443"), ConnectionEndpoint(
+            address: "2001:db8::1", port: 443, isIPAddress: true
+        ))
+    }
     func testTrafficStreamUsesAuthenticatedWebSocketAndDecodesSamples() async throws {
         let fixture = StreamFixture(payloads: [Data(#"{"up":123,"down":456}"#.utf8)])
         let client = makeClient(fixture: fixture)

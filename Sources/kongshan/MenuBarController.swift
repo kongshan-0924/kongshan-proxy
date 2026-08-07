@@ -201,10 +201,12 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         }
 
         let testAll = item(
-            title: state.isTestingAllDelays ? "正在测速…" : "测速全部",
-            action: #selector(testAllDelays)
+            title: state.isTestingAllDelays
+                ? "取消测速（\(state.speedTestProgress.label)）"
+                : "测速全部",
+            action: state.isTestingAllDelays ? #selector(cancelAllDelays) : #selector(testAllDelays)
         )
-        testAll.isEnabled = !state.testableNodes.isEmpty && !state.isTestingAllDelays
+        testAll.isEnabled = !state.testableNodes.isEmpty
         submenu.addItem(testAll)
 
         let fastest = item(title: "测速并自动选最快", action: #selector(testAndSelectFastest))
@@ -297,12 +299,16 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func testAllDelays() {
-        Task { @MainActor [weak self] in await self?.state.testAllDelays() }
+        state.startAllDelayTests()
+    }
+
+    @objc private func cancelAllDelays() {
+        state.cancelDelayTests()
     }
 
     @objc private func testAndSelectFastest(_ sender: NSMenuItem) {
         guard let group = sender.representedObject as? String else { return }
-        Task { @MainActor [weak self] in await self?.state.testAndSelectFastest(in: group) }
+        state.startFastestTest(in: group)
     }
 
     @objc private func toggleLaunchAtLogin() {

@@ -3112,3 +3112,82 @@ AAAA 解析与 Happy Eyeballs 选路，于是每次都撞在 IPv6 上。
   v0.1.19/v0.1.20/v0.1.30/v0.1.43 也已删除。最终 Release 只剩 v0.1.67，远端/本地标签只保留
   `baseline-20260721` 与 `v0.1.67`。发布地址：
   `https://github.com/kongshan-0924/kongshan-proxy/releases/tag/v0.1.67`。
+
+### 阶段 22：v0.1.67 发布后运行健康复查
+
+- 范围：只读检查当前安装/运行版本、系统代理、数据面、进程资源、FD/连接、运行事件、内核日志、崩溃
+  报告、订阅调度、Git/DMG 和线上 Release；未关闭 App、未修改代理或用户配置。
+- 当前状态：v0.1.67/build 167 App/core PID 47578/51711，系统 HTTP/HTTPS/SOCKS 和内核监听均为
+  `127.0.0.1:65495`；经代理访问 GitHub 返回 200，耗时约 0.397 秒。
+- 资源：项目健康脚本 10 次、每两秒一次采样通过；App 平均/峰值 CPU 0.190%/0.9%，最大 RSS
+  62,400 KB，FD 85；core FD 最大 136、ESTABLISHED 最大 102、CLOSE_WAIT 0。
+- 日志：24 小时统一日志无 ERROR/FAULT，近 7 天无 App/core 崩溃报告。运行事件为 61 info/1 error；
+  唯一 error 是 8 月 3 日 00:44 的历史启动失败。16:34 三次连续成功应用配置时，旧连接产生两条
+  `context canceled`，之后代理数据面正常；目前按重载取消旧连接处理，不判定为持续故障。
+- 存储与订阅：Application Support 约 27 MB，三份内核日志约 26 MB，其中停用 TUN 日志约 15.7 MB；
+  四个订阅 `autoUpdate` 均为 false，旧 TAG 自动重试待办关闭。
+- 发布复核：检查前 Git 工作区干净，`main` 与 `origin/main` 一致，`dist` 只有 v0.1.67 DMG；线上
+  Release 非草稿/非预发布，唯一 DMG 状态 uploaded，digest 与本地 SHA-256 一致。
+- 下一步：不需要立即改代码或发版；用户完成菜单鼠标、真实换网和睡眠唤醒终验。全量测速只有再次稳定
+  超过 30 秒或卡住时再加入取消/分组能力；重复配置应用只有确认单次点击可复现时再做任务合并。
+
+### 阶段 23：规则页新增强制代理域名/IP
+
+- 需求：允许用户配置必须走代理的域名或 IP，同时保持现有轻量交互和跨配置安全回落。
+- 实现：复用 `RoutingSettings.customRules`，新增 AppState 域名/IP upsert、删除与校验接口；域名按后缀
+  规则保存，裸 IPv4/IPv6 自动补 `/32`/`/128`，重复目标替换，非法 URL/端口/路径和回环目标拒绝。
+- 路由：自定义强制规则继续排在 bypass、订阅规则、私有网段和中国大陆直连之前；保存的策略组失效时
+  回落当前 `primaryOutbound`。规则模式下过滤冲突的 macOS 系统代理 bypass 和 TUN route exclude；
+  全局/直连模式保留原排除语义，回环保护始终保留。
+- UI：规则页顺序为分应用代理 → 强制代理 → 订阅规则，包含域名/IP 分段选择、输入、添加、错误/空状态、
+  横向目标列表和可访问的删除按钮。740x640 有规则与无规则离屏快照均完整；Impeccable detector 为 `[]`。
+- 测试：13 条定向回归通过；最终全量 422 通过、1 跳过、0 失败，覆盖 bundled sing-box check、系统代理
+  与 DNS 回滚、TUN/helper 信任边界。一次中间全量运行中既有 TUN 崩溃恢复测试发生 5 秒超时，随后单独
+  连续 3 次通过（0.28~0.73 秒），再跑完整 422 项为 0 失败，归类为测试时序抖动。
+- 修改文件：`RoutingModels.swift`、`ConfigGenerator.swift`、`AppState.swift`、`RoutingView.swift`、
+  `RoutingModelsTests.swift`、`RoutingConfigTests.swift`、`TunConfigTests.swift`、`AppStateTests.swift`、
+  `RenderSnapshotTests.swift` 及四份项目记录。
+- 边界：未改版本号、未构建 DMG、未退出或替换当前安装版、未推送和发布；当前安装版仍为 v0.1.67。
+
+### 阶段 24：v0.1.68 安全构建与本地部署
+
+- 版本与测试：`VERSION` 升至 0.1.68；全量 422 通过、1 跳过、0 失败。首次 M4 因 GitHub 拉取
+  Yams 返回空响应而中止，复用锁定的 Yams 6.2.2 本地缓存后构建成功；旧版单实例保护退出前阻止隔离
+  support 目录，正常退出旧版后补跑 M4 通过，五次空闲采样平均 CPU 0.260%、最大 RSS 122,896 KB。
+- 配置备份：只归档 `settings.json`、`rules.json`、`subscriptions.json`、`runtime-events.json` 和
+  `subscriptions/`，排除生成配置、日志、规则集、Fake-IP 缓存和 recovery。归档为
+  `~/Library/Application Support/kongshan-backups/kongshan-config-0.1.68-20260807-112825.tar.gz`，权限
+  0600，tar 校验通过，SHA-256 为 `7d1b17fc5e783371d6bf8a2908de60a965d0e9d3dcc84e56904d10bf2c676df2`。
+- 正常退出：Computer Use 向 v0.1.67 发送 `Command-Q`，未使用 TERM/KILL；随后 App/core 均消失，
+  系统代理与 recovery 为空，直连 Apple HTTPS 返回 200/约 66 ms。
+- 成品：v0.1.68/build 168、arm64、sing-box 1.13.14、deep/strict 签名通过。`dist` 只保留
+  `kongshan-0.1.68.dmg`，`hdiutil verify` 有效，DMG SHA-256 为
+  `009fdf679a767a245491ed48280071d0d39f32be353f1b8de2ae466021e78d78`；主程序 SHA-256 为
+  `fcd062936f9c732fe4b3bcf2753184f1b3d4eed9d2cc1502550531fdbaf625c1`。
+- 安装：先把旧 App 复制到 `/private/tmp/kongshan-v0.1.67-20260807-112825-rollback.app`，候选复制到
+  `/Applications` 隐藏 staging 后验签，再同卷改名替换；被替换旧版另存为
+  `/private/tmp/kongshan-v0.1.67-20260807-112825-replaced.app`。正式路径复验签名和候选主程序哈希一致。
+- 终验：UI 为 v0.1.68/build 168，当前配置“奶昔”、节点 `Taiwan 01`，代理保持关闭，规则页显示域名与
+  IP/CIDR 强制代理控件。设置、规则和订阅元数据与备份哈希一致。安装版五秒空闲平均 CPU 0.08%、最大
+  RSS 108,656 KB；无 sing-box、系统代理或 recovery，直连 HTTPS 返回 200/约 78 ms。
+- 剩余：免密码助手因 App cdhash 更新显示“需重装”，未自动点击或触发管理员授权；用户确认后才能重装并
+  验证 TUN 零弹窗启停。本轮仅本地部署，未提交、推送标签或创建 GitHub Release，线上仍是 v0.1.67。
+
+### 阶段 25：v0.1.70 轻量交互、规则诊断与发布候选
+
+- 仪表盘：连接数、内存和会话累计每 2 秒合并发布，状态栏速度保持 2 秒；图表降为每 4 秒一点，窗口
+  遮挡、最小化或后台时不追加。新增 `DashboardMetricsCoordinator` 与发布节奏回归测试。
+- 测速：代理页和菜单栏显示完成数/总数，可取消同一任务；取消后不派发新节点、保留已完成结果。
+  URL 测速临时启动的无接管内核在完成或取消后自动停止；TCP/URL 并发保持 32/16。
+- 规则：批量强制代理整批校验后只重载一次；连续应用以最新请求为准合并。新增本地可判定的域名/IP/进程
+  命中测试器；连接页右键支持强制代理、始终直连、按 App 分流、复制目标和完整链路。
+- 诊断：普通模式继续 `info`，15 分钟诊断模式临时切 `debug`，截止时间持久化且到期受控重载恢复；
+  配置诊断快照和导出仍脱敏。
+- 发布工程：新增 `scripts/release.sh`，串联提交绑定的 prepare、安全退出/恢复/备份/原子 install 和
+  GitHub publish。M2/M3 改为用随包 sing-box 编译本地最小规则集，修复在线下载无总超时导致验收卡死。
+  M4 候选显式使用 `/tmp/kongshan-verify-*/support`，单实例绕过和 support 覆盖都只接受该规范路径。
+- 验证：首次完整 M4 的 431 项测试、Release 构建与签名通过后，被旧在线规则集下载无限等待，已中止测试
+  脚本且未触碰安装版；去除网络依赖后重跑完整 M4，431 项执行、1 跳过、0 失败，M3 与签名均通过。
+  五次 CPU 0.4/0.0/0.3/0.0/0.4%，平均 0.220%，最大 RSS 123,360 KB，无 socket/子进程/FIFO/recovery。
+- 版本：第一次候选构建生成 0.1.69；修复发布验收后按项目默认自增策略重跑，最终工作区版本为
+  0.1.70/build 170。当前安装版仍是 v0.1.68 且系统代理开启，尚未提交、最终 prepare、安装或发布。

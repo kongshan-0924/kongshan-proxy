@@ -64,8 +64,11 @@ public struct CustomRouteRule: Identifiable, Codable, Hashable, Sendable {
         var rule = self
         rule.value = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !rule.value.isEmpty else { throw RoutingValidationError.emptyRuleValue }
-        if type == .ipCIDR, !Self.isValidCIDR(rule.value) {
-            throw RoutingValidationError.invalidCIDR(rule.value)
+        if type == .ipCIDR {
+            guard let normalized = Self.normalizedCIDR(rule.value) else {
+                throw RoutingValidationError.invalidCIDR(rule.value)
+            }
+            rule.value = normalized
         }
         if action == .proxy {
             let group = proxyGroup?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -78,18 +81,323 @@ public struct CustomRouteRule: Identifiable, Codable, Hashable, Sendable {
     }
 
     static func isValidCIDR(_ value: String) -> Bool {
-        let parts = value.split(separator: "/", omittingEmptySubsequences: false)
-        guard parts.count == 2, let prefix = Int(parts[1]) else { return false }
-        let address = String(parts[0])
-        if address.contains(":") {
-            guard (0...128).contains(prefix) else { return false }
-            var storage = in6_addr()
-            return address.withCString { inet_pton(AF_INET6, $0, &storage) } == 1
-        } else {
-            guard (0...32).contains(prefix) else { return false }
-            var storage = in_addr()
-            return address.withCString { inet_pton(AF_INET, $0, &storage) } == 1
+        IPNetwork(value) != nil && value.contains("/")
+    }
+
+    /// sing-box 的 `ip_cidr` 需要前缀长度；界面允许用户直接输入单个 IP，
+    /// 保存时补成主机 CIDR，避免看似添加成功、内核校验却失败。
+    public static func normalizedCIDR(_ value: String) -> String? {
+        let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.contains("/") {
+            return IPNetwork(value) == nil ? nil : value
         }
+        var ipv4 = in_addr()
+        if value.withCString({ inet_pton(AF_INET, $0, &ipv4) }) == 1 {
+            return "\(value)/32"
+        }
+        var ipv6 = in6_addr()
+        if value.withCString({ inet_pton(AF_INET6, $0, &ipv6) }) == 1 {
+            return "\(value)/128"
+        }
+        return nil
+    }
+
+    /// 规范化用户输入的域名后缀。接受 `*.example.com` 与末尾根域点，
+    /// 但不把 URL、端口或路径悄悄解释成域名。
+    public static func normalizedDomainSuffix(_ value: String) -> String? {
+        var value = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if value.hasPrefix("*.") { value.removeFirst(2) }
+        while value.hasPrefix(".") { value.removeFirst() }
+        while value.hasSuffix(".") { value.removeLast() }
+        guard !value.isEmpty, value.count <= 253,
+              !value.contains("://"), !value.contains("/"), !value.contains(":"),
+              !value.unicodeScalars.contains(where: CharacterSet.whitespacesAndNewlines.contains),
+              normalizedCIDR(value) == nil else {
+            return nil
+        }
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let labels = value.split(separator: ".", omittingEmptySubsequences: false)
+        guard labels.allSatisfy({ label in
+            !label.isEmpty && label.count <= 63
+                && label.first != "-" && label.last != "-"
+                && label.unicodeScalars.allSatisfy(allowed.contains)
+        }) else {
+            return nil
+        }
+        return value
+    }
+
+    public static func isLoopbackCIDR(_ value: String) -> Bool {
+        guard let network = IPNetwork(normalizedCIDR(value) ?? value) else { return false }
+        return [IPNetwork("127.0.0.0/8"), IPNetwork("::1/128")]
+            .compactMap { $0 }
+            .contains { $0.overlaps(network) }
+    }
+
+    /// Returns whether a concrete IP address belongs to a CIDR rule.
+    /// Shared by the configuration UI's rule tester so its IP semantics stay
+    /// identical to validation and TUN-exclusion conflict handling.
+    public static func cidr(_ cidr: String, contains address: String) -> Bool {
+        guard let network = IPNetwork(normalizedCIDR(cidr) ?? cidr),
+              let host = IPNetwork(normalizedCIDR(address) ?? address) else { return false }
+        return network.contains(host)
+    }
+
+}
+
+private struct IPNetwork {
+    let family: Int32
+    let bytes: [UInt8]
+    let prefix: Int
+
+    init?(_ value: String) {
+        let parts = value.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 2, let prefix = Int(parts[1]) else { return nil }
+        let address = String(parts[0])
+        if address.contains(":"), (0...128).contains(prefix) {
+            var storage = in6_addr()
+            guard address.withCString({ inet_pton(AF_INET6, $0, &storage) }) == 1 else { return nil }
+            family = AF_INET6
+            bytes = withUnsafeBytes(of: &storage) { Array($0) }
+            self.prefix = prefix
+        } else if (0...32).contains(prefix) {
+            var storage = in_addr()
+            guard address.withCString({ inet_pton(AF_INET, $0, &storage) }) == 1 else { return nil }
+            family = AF_INET
+            bytes = withUnsafeBytes(of: &storage) { Array($0) }
+            self.prefix = prefix
+        } else {
+            return nil
+        }
+    }
+
+    func overlaps(_ other: IPNetwork) -> Bool {
+        guard family == other.family else { return false }
+        let comparedBits = min(prefix, other.prefix)
+        let fullBytes = comparedBits / 8
+        guard bytes.prefix(fullBytes).elementsEqual(other.bytes.prefix(fullBytes)) else { return false }
+        let remainingBits = comparedBits % 8
+        guard remainingBits > 0 else { return true }
+        let mask = UInt8.max << (8 - remainingBits)
+        return bytes[fullBytes] & mask == other.bytes[fullBytes] & mask
+    }
+
+    func contains(_ other: IPNetwork) -> Bool {
+        guard family == other.family, prefix <= other.prefix else { return false }
+        let fullBytes = prefix / 8
+        guard bytes.prefix(fullBytes).elementsEqual(other.bytes.prefix(fullBytes)) else { return false }
+        let remainingBits = prefix % 8
+        guard remainingBits > 0 else { return true }
+        let mask = UInt8.max << (8 - remainingBits)
+        return bytes[fullBytes] & mask == other.bytes[fullBytes] & mask
+    }
+}
+
+public struct ForcedProxyRuleBatch: Sendable {
+    public let rules: [CustomRouteRule]
+
+    public init(
+        domainInput: String,
+        ipInput: String,
+        existingRules: [CustomRouteRule],
+        proxyGroup: String
+    ) throws {
+        var rules = existingRules
+        var nextOrder = (rules.map(\.order).max() ?? -1) + 1
+
+        let domains = Self.entries(in: domainInput)
+        let cidrs = Self.entries(in: ipInput)
+        for raw in domains {
+            guard let value = CustomRouteRule.normalizedDomainSuffix(raw) else {
+                throw RoutingValidationError.invalidForcedProxyDomain(raw)
+            }
+            guard value != "localhost", !value.hasSuffix(".localhost") else {
+                throw RoutingValidationError.loopbackForcedProxy
+            }
+            rules.removeAll {
+                $0.action == .proxy && $0.type == .domainSuffix
+                    && $0.value.caseInsensitiveCompare(value) == .orderedSame
+            }
+            rules.append(CustomRouteRule(
+                order: nextOrder,
+                type: .domainSuffix,
+                value: value,
+                action: .proxy,
+                proxyGroup: proxyGroup
+            ))
+            nextOrder += 1
+        }
+        for raw in cidrs {
+            guard let value = CustomRouteRule.normalizedCIDR(raw) else {
+                throw RoutingValidationError.invalidCIDR(raw)
+            }
+            guard !CustomRouteRule.isLoopbackCIDR(value) else {
+                throw RoutingValidationError.loopbackForcedProxy
+            }
+            rules.removeAll {
+                $0.action == .proxy && $0.type == .ipCIDR
+                    && $0.value.caseInsensitiveCompare(value) == .orderedSame
+            }
+            rules.append(CustomRouteRule(
+                order: nextOrder,
+                type: .ipCIDR,
+                value: value,
+                action: .proxy,
+                proxyGroup: proxyGroup
+            ))
+            nextOrder += 1
+        }
+        self.rules = rules
+    }
+
+    private static func entries(in input: String) -> [String] {
+        input
+            .components(separatedBy: CharacterSet(charactersIn: ",;\n\r\t "))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+}
+
+public struct RouteTestInput: Equatable, Sendable {
+    public var domain: String?
+    public var ip: String?
+    public var processName: String?
+
+    public init(domain: String? = nil, ip: String? = nil, processName: String? = nil) {
+        self.domain = domain?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        self.ip = ip?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.processName = processName?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+public struct RouteTestResult: Equatable, Sendable {
+    public enum Source: String, Sendable {
+        case custom = "用户规则"
+        case bypass = "绕过列表"
+        case subscription = "订阅规则"
+        case privateNetwork = "私有网络"
+        case final = "最终规则"
+    }
+
+    public let source: Source
+    public let priority: Int
+    public let action: RouteAction
+    public let target: String
+    public let matchedValue: String
+
+    public init(source: Source, priority: Int, action: RouteAction, target: String, matchedValue: String) {
+        self.source = source
+        self.priority = priority
+        self.action = action
+        self.target = target
+        self.matchedValue = matchedValue
+    }
+}
+
+/// Evaluates all locally knowable route layers in the same order used by
+/// ConfigGenerator.route. Geo rule-set contents remain sing-box-owned, so an
+/// unmatched input is reported as the final proxy route instead of guessed.
+public enum RouteRuleEvaluator {
+    public static func evaluate(
+        _ input: RouteTestInput,
+        settings: RoutingSettings,
+        subscriptionRules: [SubscriptionRule],
+        primaryOutbound: String
+    ) -> RouteTestResult {
+        let custom = settings.customRules.filter(\.enabled).sorted { $0.order < $1.order }
+        for (index, rule) in custom.enumerated() where matches(rule.type, value: rule.value, input: input) {
+            return result(
+                source: .custom,
+                priority: index + 1,
+                action: rule.action,
+                target: rule.action == .proxy ? (rule.proxyGroup ?? primaryOutbound) : rule.action.displayName,
+                value: rule.value
+            )
+        }
+
+        let bypassPriority = custom.count + 1
+        if let domain = input.domain,
+           let value = settings.bypassDomains.first(where: { matchesDomainBypass($0, domain: domain) }) {
+            return result(source: .bypass, priority: bypassPriority, action: .direct, target: "DIRECT", value: value)
+        }
+        if let ip = input.ip,
+           let value = settings.bypassCIDRs.first(where: { CustomRouteRule.cidr($0, contains: ip) }) {
+            return result(source: .bypass, priority: bypassPriority, action: .direct, target: "DIRECT", value: value)
+        }
+
+        if settings.useSubscriptionRules {
+            for (index, rule) in subscriptionRules.enumerated()
+                where matches(rule.type, value: rule.value, input: input) {
+                let action: RouteAction = switch rule.target.uppercased() {
+                case "DIRECT": .direct
+                case "REJECT", "REJECT-DROP": .reject
+                default: .proxy
+                }
+                return result(
+                    source: .subscription,
+                    priority: bypassPriority + index + 1,
+                    action: action,
+                    target: rule.target,
+                    value: rule.value
+                )
+            }
+        }
+
+        if let ip = input.ip, Self.privateCIDRs.contains(where: { CustomRouteRule.cidr($0, contains: ip) }) {
+            return result(
+                source: .privateNetwork,
+                priority: bypassPriority + subscriptionRules.count + 1,
+                action: .direct,
+                target: "DIRECT",
+                value: "ip_is_private"
+            )
+        }
+        return result(
+            source: .final,
+            priority: bypassPriority + subscriptionRules.count + 2,
+            action: .proxy,
+            target: primaryOutbound,
+            value: "FINAL"
+        )
+    }
+
+    private static let privateCIDRs = [
+        "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8",
+        "169.254.0.0/16", "::1/128", "fc00::/7", "fe80::/10"
+    ]
+
+    private static func result(
+        source: RouteTestResult.Source,
+        priority: Int,
+        action: RouteAction,
+        target: String,
+        value: String
+    ) -> RouteTestResult {
+        RouteTestResult(source: source, priority: priority, action: action, target: target, matchedValue: value)
+    }
+
+    private static func matches(_ type: CustomRuleType, value: String, input: RouteTestInput) -> Bool {
+        switch type {
+        case .domainSuffix:
+            guard let domain = input.domain else { return false }
+            let suffix = value.lowercased()
+            return domain == suffix || domain.hasSuffix(".\(suffix)")
+        case .domainKeyword:
+            return input.domain?.localizedCaseInsensitiveContains(value) == true
+        case .domain:
+            return input.domain?.caseInsensitiveCompare(value) == .orderedSame
+        case .ipCIDR:
+            return input.ip.map { CustomRouteRule.cidr(value, contains: $0) } == true
+        case .processName:
+            return input.processName?.caseInsensitiveCompare(value) == .orderedSame
+        }
+    }
+
+    private static func matchesDomainBypass(_ raw: String, domain: String) -> Bool {
+        var value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if value.hasPrefix("*.") { value.removeFirst(2) }
+        if value.hasPrefix(".") { value.removeFirst() }
+        return domain == value || domain.hasSuffix(".\(value)")
     }
 }
 
@@ -259,9 +567,73 @@ public struct RoutingSettings: Codable, Equatable, Sendable {
     public static let mandatoryProxyBypass = ["127.0.0.1", "localhost", "::1"]
 
     public var systemProxyBypassEntries: [String] {
+        systemProxyBypassEntries(including: [])
+    }
+
+    /// 强制代理规则必须先让流量进入内核。与规则冲突的 macOS bypass 项会在运行时省略；
+    /// 回环三项始终保留，避免 App 的控制接口请求绕回代理形成自指。
+    public func systemProxyBypassEntries(
+        including additionalDomains: [String],
+        respectingForcedProxyRules: Bool = true
+    ) -> [String] {
+        let allDomains = bypassDomains + additionalDomains
+        let domains = respectingForcedProxyRules
+            ? allDomains.filter { !conflictsWithForcedProxy(domainBypass: $0) }
+            : allDomains
+        let cidrs = respectingForcedProxyRules
+            ? bypassCIDRs.filter { !conflictsWithForcedProxy(cidr: $0) }
+            : bypassCIDRs
         var seen = Set<String>()
-        return (Self.mandatoryProxyBypass + bypassDomains + bypassCIDRs)
+        return (Self.mandatoryProxyBypass + domains + cidrs)
             .filter { seen.insert($0).inserted }
+    }
+
+    /// TUN 的 route exclude 在 sing-box 路由规则之前生效；冲突网段若留在这里，
+    /// “强制代理”规则永远收不到该流量。回环排除仍不可移除。
+    public var effectiveTunExcludeCIDRs: [String] {
+        tunExcludeCIDRs.filter { cidr in
+            CustomRouteRule.isLoopbackCIDR(cidr) || !conflictsWithForcedProxy(cidr: cidr)
+        }
+    }
+
+    private var enabledForcedProxyRules: [CustomRouteRule] {
+        customRules.filter { $0.enabled && $0.action == .proxy }
+    }
+
+    private func conflictsWithForcedProxy(domainBypass entry: String) -> Bool {
+        let trimmed = entry.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let isSuffix = trimmed.hasPrefix("*.") || trimmed.hasPrefix(".")
+        let bypass = trimmed.hasPrefix("*.") ? String(trimmed.dropFirst(2))
+            : trimmed.hasPrefix(".") ? String(trimmed.dropFirst()) : trimmed
+        guard !bypass.isEmpty else { return false }
+
+        return enabledForcedProxyRules.contains { rule in
+            guard rule.type == .domain || rule.type == .domainSuffix,
+                  let forced = CustomRouteRule.normalizedDomainSuffix(rule.value) else { return false }
+            switch rule.type {
+            case .domain:
+                return forced == bypass || (isSuffix && forced.hasSuffix(".\(bypass)"))
+            case .domainSuffix:
+                if isSuffix {
+                    return forced == bypass
+                        || forced.hasSuffix(".\(bypass)")
+                        || bypass.hasSuffix(".\(forced)")
+                }
+                return bypass == forced || bypass.hasSuffix(".\(forced)")
+            default:
+                return false
+            }
+        }
+    }
+
+    private func conflictsWithForcedProxy(cidr: String) -> Bool {
+        guard let bypass = IPNetwork(CustomRouteRule.normalizedCIDR(cidr) ?? cidr) else { return false }
+        return enabledForcedProxyRules.contains { rule in
+            guard rule.type == .ipCIDR,
+                  let forcedValue = CustomRouteRule.normalizedCIDR(rule.value),
+                  let forced = IPNetwork(forcedValue) else { return false }
+            return bypass.overlaps(forced)
+        }
     }
 
     public func validated() throws -> RoutingSettings {
@@ -302,6 +674,9 @@ public enum RoutingValidationError: Error, Equatable, LocalizedError {
     case invalidPolicyGroupName(String)
     case emptyRuleValue
     case invalidCIDR(String)
+    case invalidForcedProxyDomain(String)
+    case loopbackForcedProxy
+    case unsupportedForcedProxyRuleType
     case missingProxyGroup
     case emptyBypassDomain
 
@@ -309,6 +684,9 @@ public enum RoutingValidationError: Error, Equatable, LocalizedError {
         switch self {
         case .emptyRuleValue: "规则匹配值不能为空"
         case let .invalidCIDR(value): "IP CIDR 无效：\(value)"
+        case let .invalidForcedProxyDomain(value): "域名无效：\(value)。请输入域名，不要包含协议、端口或路径"
+        case .loopbackForcedProxy: "回环地址必须保持直连，以免代理控制接口形成自指"
+        case .unsupportedForcedProxyRuleType: "强制代理仅支持域名或 IP / CIDR"
         case .missingProxyGroup: "代理规则必须选择策略组"
         case .emptyBypassDomain: "绕过域名不能为空"
         case .emptyPolicyGroupName: "策略组名称不能为空"

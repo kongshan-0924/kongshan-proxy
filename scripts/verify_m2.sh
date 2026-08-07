@@ -21,6 +21,7 @@ verification_dir=$(mktemp -d /tmp/kongshan-m2-verify.XXXXXX)
 geosite_cn="$verification_dir/geosite-cn.srs"
 geoip_cn="$verification_dir/geoip-cn.srs"
 ads="$verification_dir/geosite-category-ads-all.srs"
+rule_source="$verification_dir/rule-set.json"
 fixture="$verification_dir/routing.json"
 
 cleanup() {
@@ -28,19 +29,21 @@ cleanup() {
     unlink "$geosite_cn" 2>/dev/null || true
     unlink "$geoip_cn" 2>/dev/null || true
     unlink "$ads" 2>/dev/null || true
+    unlink "$rule_source" 2>/dev/null || true
     rmdir "$verification_dir" 2>/dev/null || true
 }
 trap cleanup EXIT
 
-curl --fail --location --retry 2 --connect-timeout 15 --silent --show-error \
-    'https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs' \
-    --output "$geosite_cn"
-curl --fail --location --retry 2 --connect-timeout 15 --silent --show-error \
-    'https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs' \
-    --output "$geoip_cn"
-curl --fail --location --retry 2 --connect-timeout 15 --silent --show-error \
-    'https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ads-all.srs' \
-    --output "$ads"
+compile_rule_set() {
+    local output=$1
+    local rule=$2
+    print -r -- "{\"version\": 3, \"rules\": [$rule]}" > "$rule_source"
+    "$core_binary" rule-set compile "$rule_source" -o "$output"
+}
+
+compile_rule_set "$geosite_cn" '{"domain_suffix": ["cn"]}'
+compile_rule_set "$geoip_cn" '{"ip_cidr": ["1.0.1.0/24"]}'
+compile_rule_set "$ads" '{"domain_suffix": ["ads.example"]}'
 
 for rule_set in "$geosite_cn" "$geoip_cn" "$ads"; do
     [[ -s "$rule_set" ]]

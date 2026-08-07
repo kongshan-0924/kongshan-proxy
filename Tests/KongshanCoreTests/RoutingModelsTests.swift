@@ -2,6 +2,69 @@ import XCTest
 @testable import KongshanCore
 
 final class RoutingModelsTests: XCTestCase {
+    func testForcedProxyBatchNormalizesDeduplicatesAndPreservesOneApplyPayload() throws {
+        let existing = [CustomRouteRule(
+            order: 0,
+            type: .domainSuffix,
+            value: "example.com",
+            action: .proxy,
+            proxyGroup: "手动选择"
+        )]
+
+        let batch = try ForcedProxyRuleBatch(
+            domainInput: "*.Example.com\napi.example.com, example.net",
+            ipInput: "203.0.113.8; 2001:db8::1",
+            existingRules: existing,
+            proxyGroup: "手动选择"
+        )
+
+        XCTAssertEqual(batch.rules.count, 5)
+        XCTAssertEqual(batch.rules.map(\.value), [
+            "example.com", "api.example.com", "example.net", "203.0.113.8/32", "2001:db8::1/128"
+        ])
+    }
+
+    func testRouteEvaluatorUsesGeneratorPriorityOrder() {
+        var settings = RoutingSettings.defaults
+        settings.customRules = [
+            CustomRouteRule(
+                order: 0,
+                type: .domainSuffix,
+                value: "example.com",
+                action: .proxy,
+                proxyGroup: "AI"
+            )
+        ]
+        let subscriptions = [SubscriptionRule(type: .domain, value: "api.example.com", target: "DIRECT")]
+
+        let forced = RouteRuleEvaluator.evaluate(
+            RouteTestInput(domain: "api.example.com"),
+            settings: settings,
+            subscriptionRules: subscriptions,
+            primaryOutbound: "主策略"
+        )
+        XCTAssertEqual(forced.source, .custom)
+        XCTAssertEqual(forced.action, .proxy)
+        XCTAssertEqual(forced.target, "AI")
+
+        let privateIP = RouteRuleEvaluator.evaluate(
+            RouteTestInput(ip: "192.168.2.9"),
+            settings: settings,
+            subscriptionRules: subscriptions,
+            primaryOutbound: "主策略"
+        )
+        XCTAssertEqual(privateIP.source, .bypass)
+        XCTAssertEqual(privateIP.action, .direct)
+
+        let fallback = RouteRuleEvaluator.evaluate(
+            RouteTestInput(domain: "outside.example.net"),
+            settings: settings,
+            subscriptionRules: subscriptions,
+            primaryOutbound: "主策略"
+        )
+        XCTAssertEqual(fallback.source, .final)
+        XCTAssertEqual(fallback.target, "主策略")
+    }
     func testDefaultsContainRequiredBypassEntriesAndAdsAreOff() {
         let settings = RoutingSettings.defaults
 
@@ -69,6 +132,98 @@ final class RoutingModelsTests: XCTestCase {
 
         XCTAssertEqual(validated.value, "example")
         XCTAssertEqual(validated.proxyGroup, "自建")
+    }
+
+    func testValidationNormalizesBareIPAddressToHostCIDR() throws {
+        let ipv4 = try CustomRouteRule(
+            order: 0,
+            type: .ipCIDR,
+            value: " 203.0.113.8 ",
+            action: .proxy,
+            proxyGroup: "手动选择"
+        ).validated()
+        let ipv6 = try CustomRouteRule(
+            order: 1,
+            type: .ipCIDR,
+            value: "2001:db8::8",
+            action: .proxy,
+            proxyGroup: "手动选择"
+        ).validated()
+
+        XCTAssertEqual(ipv4.value, "203.0.113.8/32")
+        XCTAssertEqual(ipv6.value, "2001:db8::8/128")
+    }
+
+    func testForcedProxyRulesRemoveConflictingSystemBypassEntries() {
+        var settings = RoutingSettings.defaults
+        settings.bypassDomains += ["api.example.com", "*.internal.example.com"]
+        settings.bypassCIDRs += ["203.0.113.0/24", "2001:db8::/32"]
+        settings.customRules = [
+            CustomRouteRule(
+                order: 0,
+                type: .domainSuffix,
+                value: "service.cn",
+                action: .proxy,
+                proxyGroup: "手动选择"
+            ),
+            CustomRouteRule(
+                order: 1,
+                type: .domainSuffix,
+                value: "example.com",
+                action: .proxy,
+                proxyGroup: "手动选择"
+            ),
+            CustomRouteRule(
+                order: 2,
+                type: .ipCIDR,
+                value: "203.0.113.8/32",
+                action: .proxy,
+                proxyGroup: "手动选择"
+            ),
+            CustomRouteRule(
+                order: 3,
+                type: .ipCIDR,
+                value: "2001:db8:1::/48",
+                action: .proxy,
+                proxyGroup: "手动选择"
+            )
+        ]
+
+        let entries = settings.systemProxyBypassEntries(including: ["*.corp.example.com", "corp.example.com"])
+
+        XCTAssertEqual(Array(entries.prefix(3)), RoutingSettings.mandatoryProxyBypass)
+        XCTAssertFalse(entries.contains("*.cn"))
+        XCTAssertFalse(entries.contains("api.example.com"))
+        XCTAssertFalse(entries.contains("*.internal.example.com"))
+        XCTAssertFalse(entries.contains("203.0.113.0/24"))
+        XCTAssertFalse(entries.contains("2001:db8::/32"))
+        XCTAssertFalse(entries.contains("*.corp.example.com"))
+        XCTAssertTrue(entries.contains("*.local"))
+
+        let directModeEntries = settings.systemProxyBypassEntries(
+            including: ["*.corp.example.com"],
+            respectingForcedProxyRules: false
+        )
+        XCTAssertTrue(directModeEntries.contains("*.cn"))
+        XCTAssertTrue(directModeEntries.contains("203.0.113.0/24"))
+        XCTAssertTrue(directModeEntries.contains("*.corp.example.com"))
+    }
+
+    func testForcedProxyCIDRRemovesOverlappingTunExclusionButKeepsLoopback() {
+        var settings = RoutingSettings.defaults
+        settings.customRules = [
+            CustomRouteRule(
+                order: 0,
+                type: .ipCIDR,
+                value: "10.20.30.40/32",
+                action: .proxy,
+                proxyGroup: "手动选择"
+            )
+        ]
+
+        XCTAssertFalse(settings.effectiveTunExcludeCIDRs.contains("10.0.0.0/8"))
+        XCTAssertTrue(settings.effectiveTunExcludeCIDRs.contains("127.0.0.0/8"))
+        XCTAssertTrue(settings.effectiveTunExcludeCIDRs.contains("::1/128"))
     }
 
     func testValidationRejectsEmptyValueInvalidCIDRAndMissingProxyGroup() {

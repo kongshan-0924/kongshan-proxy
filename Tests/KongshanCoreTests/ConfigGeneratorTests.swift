@@ -25,6 +25,18 @@ final class ConfigGeneratorTests: XCTestCase {
         XCTAssertEqual(route["final"] as? String, "手动选择")
     }
 
+    func testDiagnosticModeCanTemporarilyRaiseCoreLogLevel() throws {
+        let diagnosticInput = ConfigInput(
+            nodes: nodes,
+            selectedNodeID: nodes[0].id,
+            runtime: runtime,
+            coreLogLevel: "debug"
+        )
+        let root = try json(ConfigGenerator.generate(diagnosticInput))
+        XCTAssertEqual((root["log"] as? [String: Any])?["level"] as? String, "debug")
+        XCTAssertEqual((try json(ConfigGenerator.generate(input))["log"] as? [String: Any])?["level"] as? String, "info")
+    }
+
     func testMapsProtocolSpecificOutboundFields() throws {
         let outbounds = try XCTUnwrap(try json(ConfigGenerator.generate(input))["outbounds"] as? [[String: Any]])
 

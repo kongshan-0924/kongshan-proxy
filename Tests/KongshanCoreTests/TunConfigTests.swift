@@ -82,6 +82,65 @@ final class TunConfigTests: XCTestCase {
         XCTAssertEqual(tun["route_exclude_address"] as? [String], ["10.0.0.0/8"])
     }
 
+    func testForcedProxyCIDRRemovesConflictingTunRouteExclusion() throws {
+        let settings = RoutingSettings(
+            customRules: [
+                CustomRouteRule(
+                    order: 0,
+                    type: .ipCIDR,
+                    value: "10.20.30.40",
+                    action: .proxy,
+                    proxyGroup: "手动选择"
+                )
+            ],
+            bypassDomains: [],
+            bypassCIDRs: [],
+            tunExcludeCIDRs: ["127.0.0.0/8", "10.0.0.0/8", "192.168.0.0/16", "::1/128"],
+            blockAds: false
+        )
+
+        let root = try json(try ConfigGenerator.generate(input(
+            strictRoute: false,
+            routingSettings: settings
+        )))
+        let tun = try XCTUnwrap((root["inbounds"] as? [[String: Any]])?.first)
+        let exclusions = try XCTUnwrap(tun["route_exclude_address"] as? [String])
+
+        XCTAssertEqual(exclusions, ["127.0.0.0/8", "192.168.0.0/16", "::1/128"])
+    }
+
+    func testDirectModeKeepsTunRouteExclusionsDespiteSavedForcedRule() throws {
+        var settings = RoutingSettings.defaults
+        settings.customRules = [
+            CustomRouteRule(
+                order: 0,
+                type: .ipCIDR,
+                value: "10.20.30.40/32",
+                action: .proxy,
+                proxyGroup: "手动选择"
+            )
+        ]
+
+        let root = try json(try ConfigGenerator.generate(ConfigInput(
+            nodes: [node],
+            selectedNodeID: node.id,
+            runtime: runtime,
+            routing: RoutingConfiguration(
+                settings: settings,
+                ruleSets: PreparedRuleSets(
+                    geositeCN: URL(fileURLWithPath: "/tmp/geosite-cn.srs"),
+                    geoipCN: URL(fileURLWithPath: "/tmp/geoip-cn.srs"),
+                    ads: nil
+                )
+            ),
+            enabledModes: [.tun],
+            outboundMode: .direct
+        )))
+        let tun = try XCTUnwrap((root["inbounds"] as? [[String: Any]])?.first)
+
+        XCTAssertEqual(tun["route_exclude_address"] as? [String], settings.tunExcludeCIDRs)
+    }
+
     func testBothModesEnabledProducesMixedAndTunInbounds() throws {
         let root = try json(try ConfigGenerator.generate(ConfigInput(
             nodes: [node],

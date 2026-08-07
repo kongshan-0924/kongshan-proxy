@@ -41,8 +41,9 @@ fi
 max_rss_kb=${KONGSHAN_VERIFY_MAX_RSS_KB:-153600}
 max_average_cpu=${KONGSHAN_VERIFY_MAX_AVERAGE_CPU:-1.0}
 max_sample_cpu=${KONGSHAN_VERIFY_MAX_SAMPLE_CPU:-5.0}
-verification_root=$(mktemp -d /tmp/kongshan-m4-verify.XXXXXX)
+verification_root=$(mktemp -d /tmp/kongshan-verify-m4.XXXXXX)
 verification_home="$verification_root/home"
+support_dir="$verification_root/support"
 app_stdout="$verification_root/app.stdout"
 app_stderr="$verification_root/app.stderr"
 app_pid=""
@@ -69,14 +70,16 @@ terminate_app() {
 
 cleanup() {
     terminate_app >/dev/null 2>&1 || true
-    if [[ "$verification_root" == /tmp/kongshan-m4-verify.* ]]; then
+    if [[ "$verification_root" == /tmp/kongshan-verify-m4.* ]]; then
         rm -rf "$verification_root"
     fi
 }
 trap cleanup EXIT
 
 mkdir -p "$verification_home"
-CFFIXED_USER_HOME="$verification_home" "$app_binary" >"$app_stdout" 2>"$app_stderr" &
+KONGSHAN_TEST_SUPPORT_DIRECTORY="$support_dir" \
+    CFFIXED_USER_HOME="$verification_home" \
+    "$app_binary" >"$app_stdout" 2>"$app_stderr" &
 app_pid=$!
 
 for _ in {1..50}; do
@@ -88,7 +91,6 @@ kill -0 "$app_pid" 2>/dev/null || fail "release app exited during launch"
 # 只等 2 秒会把这段启动开销算进读数。红线针对的是空闲稳态，因此先让它稳定下来。
 sleep ${KONGSHAN_VERIFY_SETTLE_SECONDS:-15}
 
-support_dir="$verification_home/Library/Application Support/kongshan"
 [[ -d "$support_dir" ]] || fail "app did not use the isolated support directory"
 
 if [[ ${KONGSHAN_VERIFY_INJECT_RECOVERY:-0} == 1 ]]; then

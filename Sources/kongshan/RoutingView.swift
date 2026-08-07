@@ -11,6 +11,12 @@ struct RoutingView: View {
     @State private var runningApps: [AppState.RunningApp] = []
     @State private var selectedProcess = ""
     @State private var perAppTarget: PerAppTarget = .proxy
+    @State private var forcedProxyKind: ForcedProxyInputKind = .domain
+    @State private var forcedProxyInput = ""
+    @State private var forcedProxyError: String?
+    @State private var routeTestKind: RouteTestKind = .domain
+    @State private var routeTestInput = ""
+    @State private var routeTestResult: RouteTestResult?
 
     private var activeName: String {
         state.configItems.first { $0.id == state.activeConfigID }?.name ?? "无"
@@ -31,7 +37,7 @@ struct RoutingView: View {
     private func header(hasSubscriptionRules: Bool) -> some View {
         let subtitle = hasSubscriptionRules
             ? "配置「\(activeName)」自带的分流规则（只读）"
-            : "当前配置未提供订阅规则；仍可管理内置分流和分应用代理"
+            : "当前配置未提供订阅规则；仍可管理强制代理和分应用代理"
         return PageHeader(title: "规则", subtitle: subtitle) {
             HStack(spacing: 12) {
                 if state.isApplyingRouting {
@@ -52,6 +58,10 @@ struct RoutingView: View {
     private func content(_ subscriptionRules: [SubscriptionRule]) -> some View {
         VStack(spacing: 0) {
             perAppSection
+            Divider()
+            forcedProxySection
+            Divider()
+            routeTesterSection
             Divider()
             subscriptionRulesContent(subscriptionRules)
         }
@@ -233,6 +243,161 @@ struct RoutingView: View {
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.35))
     }
 
+    private var forcedProxySection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Label("强制代理", systemImage: "arrow.up.forward.app")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("规则模式下优先于订阅规则和中国大陆直连")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+
+            HStack(spacing: 10) {
+                Picker("类型", selection: $forcedProxyKind) {
+                    ForEach(ForcedProxyInputKind.allCases) { kind in
+                        Text(kind.title).tag(kind)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 150)
+
+                TextEditor(text: $forcedProxyInput)
+                    .font(.system(.body, design: .monospaced))
+                    .scrollContentBackground(.hidden)
+                    .frame(minHeight: 44, maxHeight: 58)
+                    .padding(.horizontal, 6)
+                    .background(Theme.cardFill, in: RoundedRectangle(cornerRadius: 6))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color(nsColor: .separatorColor), lineWidth: 0.5)
+                    }
+
+                Button {
+                    addForcedProxyRule()
+                } label: {
+                    Label("批量应用", systemImage: "checkmark.circle")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(
+                    forcedProxyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || state.isApplyingRouting
+                )
+            }
+
+            Text("可用空格、逗号或换行分隔多个目标；整批校验通过后只重载一次内核，现有连接会在重载时断开。")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+
+            if let forcedProxyError {
+                Label(forcedProxyError, systemImage: "exclamationmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            } else if state.forcedProxyRules.isEmpty {
+                Text("暂无强制代理目标")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            } else {
+                ScrollView(.horizontal) {
+                    HStack(spacing: 8) {
+                        ForEach(state.forcedProxyRules) { rule in
+                            HStack(spacing: 6) {
+                                Image(systemName: rule.type == .ipCIDR ? "network" : "globe")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                                Text(rule.value)
+                                    .font(.caption.monospaced())
+                                Button(role: .destructive) {
+                                    Task { await state.removeForcedProxyRule(rule.id) }
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(.secondary)
+                                .disabled(state.isApplyingRouting)
+                                .help("删除强制代理规则")
+                                .accessibilityLabel("删除 \(rule.value)")
+                            }
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(Theme.cardFill, in: Capsule())
+                        }
+                    }
+                }
+                .scrollIndicators(.hidden)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.2))
+        .onChange(of: forcedProxyKind) { _, _ in forcedProxyError = nil }
+        .onChange(of: forcedProxyInput) { _, _ in forcedProxyError = nil }
+    }
+
+    private var routeTesterSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Label("规则命中测试", systemImage: "scope")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("按实际生成顺序解释本地可判定规则")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            HStack(spacing: 10) {
+                Picker("输入类型", selection: $routeTestKind) {
+                    ForEach(RouteTestKind.allCases) { kind in Text(kind.title).tag(kind) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 220)
+                TextField(routeTestKind.placeholder, text: $routeTestInput)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+                    .onSubmit { runRouteTest() }
+                Button {
+                    runRouteTest()
+                } label: {
+                    Label("测试", systemImage: "play.fill")
+                }
+                .disabled(routeTestInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            if let result = routeTestResult {
+                HStack(spacing: 14) {
+                    Label(result.source.rawValue, systemImage: "checkmark.seal.fill")
+                    Text("优先级 \(result.priority)")
+                    Text(result.action.displayName)
+                        .foregroundStyle(result.action == .direct ? .green : result.action == .reject ? .red : .accentColor)
+                    Text("→ \(result.target)")
+                    Text("命中：\(result.matchedValue)")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .font(.caption.monospaced())
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(Theme.cardFill, in: RoundedRectangle(cornerRadius: 6))
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.12))
+        .onChange(of: routeTestKind) { _, _ in routeTestResult = nil }
+        .onChange(of: routeTestInput) { _, _ in routeTestResult = nil }
+    }
+
+    private func runRouteTest() {
+        let value = routeTestInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return }
+        routeTestResult = state.testRoute(
+            domain: routeTestKind == .domain ? value : nil,
+            ip: routeTestKind == .ip ? value : nil,
+            processName: routeTestKind == .process ? value : nil
+        )
+    }
+
     private func refreshRunningApps() {
         runningApps = state.runningApplications
         if !runningApps.contains(where: { $0.processName == selectedProcess }) {
@@ -291,6 +456,20 @@ struct RoutingView: View {
         }
     }
 
+    private func addForcedProxyRule() {
+        let input = forcedProxyInput
+        let kind = forcedProxyKind
+        forcedProxyError = nil
+        Task {
+            let added = await state.upsertForcedProxyRule(type: kind.ruleType, value: input)
+            if added {
+                forcedProxyInput = ""
+            } else {
+                forcedProxyError = state.errorMessage ?? "规则未能添加，请检查输入后重试"
+            }
+        }
+    }
+
     private func targetTint(_ target: String) -> Color {
         switch target.uppercased() {
         case "DIRECT": .green
@@ -326,6 +505,38 @@ private enum PerAppTarget: Hashable {
     case direct
     case proxy
     case node(UUID)
+}
+
+private enum ForcedProxyInputKind: String, CaseIterable, Identifiable {
+    case domain
+    case ip
+
+    var id: Self { self }
+    var title: String { self == .domain ? "域名" : "IP / CIDR" }
+    var placeholder: String { self == .domain ? "example.com" : "203.0.113.8 或 203.0.113.0/24" }
+    var ruleType: CustomRuleType { self == .domain ? .domainSuffix : .ipCIDR }
+}
+
+private enum RouteTestKind: String, CaseIterable, Identifiable {
+    case domain
+    case ip
+    case process
+
+    var id: Self { self }
+    var title: String {
+        switch self {
+        case .domain: "域名"
+        case .ip: "IP"
+        case .process: "进程"
+        }
+    }
+    var placeholder: String {
+        switch self {
+        case .domain: "api.example.com"
+        case .ip: "203.0.113.8"
+        case .process: "Safari"
+        }
+    }
 }
 
 /// 可增删的字符串列表（绕过域名 / IP / 跳过 TUN 网段）。设置页的隧道分区复用。

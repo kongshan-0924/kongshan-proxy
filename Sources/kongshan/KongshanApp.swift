@@ -1,4 +1,5 @@
 import AppKit
+import KongshanCore
 import SwiftUI
 
 @main
@@ -45,6 +46,10 @@ final class KongshanAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     /// 真机遇到过：`/Applications` 与工作区 `dist/` 两个副本同时在跑
     /// （构建产物被 Launch Services 记着，任何一次误启动就会拉起第二个）。
     func applicationWillFinishLaunching(_ notification: Notification) {
+        // M4 launches a second, fully isolated no-node candidate while the
+        // installed app keeps the user's network online. Only the tightly
+        // scoped verifier directory may bypass single-instance protection.
+        if AppIdentity.releaseVerificationSupportDirectory() != nil { return }
         guard let existing = otherRunningInstances.first else { return }
         existing.activate(options: [.activateAllWindows])
         // 用 exit 而不是 NSApp.terminate：terminate 会走 applicationShouldTerminate，

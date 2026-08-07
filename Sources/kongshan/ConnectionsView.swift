@@ -1,3 +1,4 @@
+import AppKit
 import KongshanCore
 import SwiftUI
 
@@ -7,6 +8,7 @@ struct ConnectionsView: View {
     @Environment(AppState.self) private var state
     @State private var searchText = ""
     @State private var sortOption: ConnectionSortOption = .defaultOrder
+    @State private var inspectedConnection: ConnectionLiveDetail?
 
     private var filteredConnections: [ConnectionLiveDetail] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -81,6 +83,9 @@ struct ConnectionsView: View {
         .navigationTitle("连接")
         .onAppear { state.startConnectionsMonitoring() }
         .onDisappear { state.stopConnectionsMonitoring() }
+        .sheet(item: $inspectedConnection) { connection in
+            ConnectionRouteDetail(connection: connection, nodeNames: nodeNames)
+        }
     }
 
     private var header: some View {
@@ -194,6 +199,54 @@ struct ConnectionsView: View {
             .help("关闭此连接")
         }
         .padding(.vertical, 7)
+        .contextMenu {
+            let endpoint = ConnectionEndpoint(hostAndPort: conn.host)
+            Button {
+                Task {
+                    _ = await state.upsertForcedProxyRule(
+                        type: endpoint.isIPAddress ? .ipCIDR : .domainSuffix,
+                        value: endpoint.address
+                    )
+                }
+            } label: {
+                Label("强制走代理", systemImage: "arrow.up.forward.app")
+            }
+            Button {
+                Task {
+                    _ = await state.upsertDirectRule(
+                        type: endpoint.isIPAddress ? .ipCIDR : .domainSuffix,
+                        value: endpoint.address
+                    )
+                }
+            } label: {
+                Label("始终直连", systemImage: "arrow.right.circle")
+            }
+            if let process = conn.process, !process.isEmpty {
+                Button {
+                    Task {
+                        await state.upsertProcessRule(
+                            processName: process,
+                            action: .proxy,
+                            proxyTarget: state.primaryGroupName ?? "手动选择"
+                        )
+                    }
+                } label: {
+                    Label("按该 App 分流", systemImage: "app.badge.checkmark")
+                }
+            }
+            Divider()
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(endpoint.displayValue, forType: .string)
+            } label: {
+                Label("复制域名或 IP", systemImage: "doc.on.doc")
+            }
+            Button {
+                inspectedConnection = conn
+            } label: {
+                Label("查看完整命中链路", systemImage: "point.3.connected.trianglepath.dotted")
+            }
+        }
     }
 
     private func chainText(_ conn: ConnectionLiveDetail, nodeNames: [String: String]) -> String {
@@ -212,6 +265,49 @@ struct ConnectionsView: View {
 
     static func bytesOrDash(_ value: Int64) -> String {
         Theme.bytesOrDash(value)
+    }
+}
+
+private struct ConnectionRouteDetail: View {
+    let connection: ConnectionLiveDetail
+    let nodeNames: [String: String]
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("命中链路")
+                    .font(.headline)
+                Spacer()
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.plain)
+                .help("关闭")
+            }
+            LabeledContent("目标", value: connection.host)
+            if let process = connection.process { LabeledContent("进程", value: process) }
+            LabeledContent("命中规则", value: connection.rule.isEmpty ? "未报告" : connection.rule)
+            Divider()
+            VStack(alignment: .leading, spacing: 8) {
+                Text("出站链路").font(.caption).foregroundStyle(.secondary)
+                ForEach(Array(connection.chains.enumerated()), id: \.offset) { index, tag in
+                    HStack(spacing: 8) {
+                        Text("\(index + 1)")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.tertiary)
+                            .frame(width: 18)
+                        Text(nodeNames[tag] ?? tag)
+                            .font(.system(.body, design: .monospaced))
+                    }
+                }
+            }
+            Spacer()
+        }
+        .padding(20)
+        .frame(minWidth: 460, minHeight: 260)
     }
 }
 

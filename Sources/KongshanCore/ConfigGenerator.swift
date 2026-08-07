@@ -45,6 +45,9 @@ public struct ConfigInput: Sendable {
     public let groupDefaults: [String: String]
     /// TUN 接管系统 DNS **之前**探测到的内网 DNS 与搜索域。空则不生成内网分流。
     public let lanResolver: LANResolverSnapshot
+    /// sing-box runtime log level. Normal operation uses info; the app may
+    /// temporarily request debug for its bounded diagnostic mode.
+    public let coreLogLevel: String
 
     public var usesSystemProxy: Bool { enabledModes.contains(.systemProxy) }
     public var usesTun: Bool { enabledModes.contains(.tun) }
@@ -60,7 +63,8 @@ public struct ConfigInput: Sendable {
         tunSettings: TunSettings = .defaults,
         dnsSettings: DNSSettings = .defaults,
         groupDefaults: [String: String] = [:],
-        lanResolver: LANResolverSnapshot = .empty
+        lanResolver: LANResolverSnapshot = .empty,
+        coreLogLevel: String = "info"
     ) {
         self.outboundMode = outboundMode
         self.nodes = nodes
@@ -73,6 +77,7 @@ public struct ConfigInput: Sendable {
         self.dnsSettings = dnsSettings
         self.groupDefaults = groupDefaults
         self.lanResolver = lanResolver
+        self.coreLogLevel = coreLogLevel
     }
 
     /// 单一模式的便捷入口。
@@ -321,7 +326,7 @@ public enum ConfigGenerator {
         }
 
         let root: [String: Any] = [
-            "log": ["level": "info", "timestamp": true],
+            "log": ["level": input.coreLogLevel, "timestamp": true],
             "dns": try dns(for: input, primaryOutbound: primaryOutbound),
             "inbounds": try inbounds(for: input),
             "outbounds": outbounds,
@@ -495,7 +500,10 @@ public enum ConfigGenerator {
                 "stack": "gvisor"
             ]
             if let routing = input.routing {
-                inbound["route_exclude_address"] = try routing.settings.validated().tunExcludeCIDRs
+                let settings = try routing.settings.validated()
+                inbound["route_exclude_address"] = input.outboundMode == .rule
+                    ? settings.effectiveTunExcludeCIDRs
+                    : settings.tunExcludeCIDRs
             }
             result.append(inbound)
         }

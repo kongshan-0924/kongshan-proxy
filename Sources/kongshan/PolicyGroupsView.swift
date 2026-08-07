@@ -55,15 +55,22 @@ struct PolicyGroupsView: View {
                 .disabled(state.isBusy || !state.isReady)
 
                 Button {
-                    Task { await state.testAllDelays() }
+                    if state.isTestingAllDelays {
+                        state.cancelDelayTests()
+                    } else {
+                        state.startAllDelayTests()
+                    }
                 } label: {
-                    Label(state.isTestingAllDelays ? "测速中…" : "测速全部", systemImage: "gauge.with.dots.needle.67percent")
+                    Label(
+                        state.isTestingAllDelays ? "取消 \(state.speedTestProgress.label)" : "测速全部",
+                        systemImage: state.isTestingAllDelays ? "xmark.circle" : "gauge.with.dots.needle.67percent"
+                    )
                 }
                 .fixedSize(horizontal: true, vertical: false)
-                .disabled(state.testableNodes.isEmpty || state.isTestingAllDelays)
+                .disabled(state.testableNodes.isEmpty)
 
                 Button {
-                    Task { await state.testAndSelectFastest(in: currentGroup.name) }
+                    state.startFastestTest(in: currentGroup.name)
                 } label: {
                     Label("测速并选最快", systemImage: "bolt.badge.checkmark")
                 }

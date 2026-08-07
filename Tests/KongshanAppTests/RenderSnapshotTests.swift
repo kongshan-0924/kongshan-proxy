@@ -184,6 +184,22 @@ final class RenderSnapshotTests: XCTestCase {
             SubscriptionRule(type: .domainKeyword, value: "ad", target: "REJECT"),
             SubscriptionRule(type: .ipCIDR, value: "8.8.8.8/32", target: "DIRECT")
         ]
+        state.routingSettings.customRules = [
+            CustomRouteRule(
+                order: 0,
+                type: .domainSuffix,
+                value: "opencode.ai",
+                action: .proxy,
+                proxyGroup: "节点选择"
+            ),
+            CustomRouteRule(
+                order: 1,
+                type: .ipCIDR,
+                value: "203.0.113.8/32",
+                action: .proxy,
+                proxyGroup: "节点选择"
+            )
+        ]
         state.delays = [
             nodes[3].id: 48,
             nodes[4].id: 132,

@@ -104,6 +104,12 @@ final class AppState {
         case fallback
     }
 
+    private struct PendingRoutingApplication {
+        var settings: RoutingSettings
+        var operation: String
+        var continuations: [CheckedContinuation<Bool, Never>]
+    }
+
     var status: Status = .off
     var nodes: [ProxyNode] = []
     var subscriptions: [SubscriptionSource] = []
@@ -146,8 +152,7 @@ final class AppState {
     @ObservationIgnored private var connectionRateTracker = ConnectionRateTracker()
     private(set) var runtimeStartedAt: Date?
     private(set) var trafficHistory: [TrafficPoint] = []
-    /// 只让一半的流量采样点进图表，见 receiveTraffic。
-    @ObservationIgnored private var trafficSampleParity = false
+    @ObservationIgnored private var dashboardMetrics = DashboardMetricsCoordinator()
     /// 本次接管会话的累计流量。跨内核重启连续，停止接管时归零。
     /// 见 `SessionTrafficAccumulator` —— 数据源必须是内核的权威累计量，不能靠速率积分。
     private(set) var sessionUpload: Int64 = 0
@@ -156,11 +161,15 @@ final class AppState {
     @ObservationIgnored private var sessionTraffic = SessionTrafficAccumulator()
     private(set) var liveLogs: [LiveLogEntry] = []
     private(set) var logLevel: CoreLogLevel = .info
+    private(set) var diagnosticModeEndsAt: Date?
+    @ObservationIgnored private var diagnosticModeTask: Task<Void, Never>?
     private(set) var isApplyingRouting = false
     private(set) var exitDiagnostics: ExitDiagnosticsReport?
     private(set) var exitDiagnosticsError: String?
     private(set) var isRefreshingExitDiagnostics = false
     private(set) var isTestingAllDelays = false
+    private(set) var speedTestProgress = SpeedTestProgress()
+    @ObservationIgnored private var speedTestTask: Task<Void, Never>?
     /// 各订阅自带的策略组（来自 Clash 的 proxy-groups），键为订阅 ID。
     var discoveredPolicyGroups: [UUID: [PolicyGroup]] = [:]
     /// 各订阅自带的分流规则（Clash 的 rules:），键为订阅 ID。
@@ -246,6 +255,12 @@ final class AppState {
 
     var processRules: [CustomRouteRule] {
         routingSettings.customRules.filter { $0.type == .processName }
+    }
+
+    var forcedProxyRules: [CustomRouteRule] {
+        routingSettings.customRules
+            .filter { $0.action == .proxy && ($0.type == .domainSuffix || $0.type == .ipCIDR) }
+            .sorted { $0.order < $1.order }
     }
 
     /// 全部配置：每个订阅一项，另有自建节点时追加「本地节点」。
@@ -387,6 +402,7 @@ final class AppState {
     /// 避免连续点选节点时每次都同步落盘 settings.json。退出前 flush 确保最后一次选择不丢。
     @ObservationIgnored private var persistSettingsTask: Task<Void, Never>?
     @ObservationIgnored private var persistRuntimeEventsTask: Task<Void, Never>?
+    @ObservationIgnored private var pendingRoutingApplication: PendingRoutingApplication?
 
     /// 特权助手客户端（零弹窗 TUN）。助手不可达时回退 `privilegedLauncher`（osascript）。
     @ObservationIgnored private let helperClient: PrivilegedHelperClient
@@ -524,6 +540,11 @@ final class AppState {
 
     var isOn: Bool {
         status == .on
+    }
+
+    var isDiagnosticModeActive: Bool {
+        guard let diagnosticModeEndsAt else { return false }
+        return diagnosticModeEndsAt > now()
     }
 
     /// 启动后的一次出口自检。内核起得来、控制接口健康，不代表**节点**通——
@@ -1632,11 +1653,51 @@ final class AppState {
         await testDelays(testable)
     }
 
+    /// UI-owned speed-test lifecycle. Keeping the task here lets the proxy page
+    /// and menu bar cancel the same run without retaining view-local Tasks.
+    func startAllDelayTests() {
+        guard speedTestTask == nil, !isTestingAllDelays else { return }
+        speedTestTask = Task { [weak self] in
+            await self?.testAllDelays()
+            guard let self else { return }
+            self.speedTestTask = nil
+        }
+    }
+
+    func startFastestTest(in group: String) {
+        guard speedTestTask == nil, !isTestingAllDelays else { return }
+        speedTestTask = Task { [weak self] in
+            await self?.testAndSelectFastest(in: group)
+            guard let self else { return }
+            self.speedTestTask = nil
+        }
+    }
+
+    func cancelDelayTests() {
+        guard isTestingAllDelays else { return }
+        speedTestTask?.cancel()
+    }
+
     @discardableResult
     private func testDelays(_ testable: [ProxyNode]) async -> Bool {
         guard !isTestingAllDelays, !testable.isEmpty else { return false }
         isTestingAllDelays = true
-        defer { isTestingAllDelays = false }
+        speedTestProgress = SpeedTestProgress(completed: 0, total: testable.count)
+        defer {
+            isTestingAllDelays = false
+            if Task.isCancelled {
+                appendWarning("测速已取消，已保留 \(speedTestProgress.completed) 个结果")
+            }
+        }
+
+        var completed = 0
+        let progressStep = max(1, min(8, testable.count / 20))
+        func publishProgress(force: Bool = false) {
+            guard force || completed.isMultiple(of: progressStep) else { return }
+            if speedTestProgress.completed != completed {
+                speedTestProgress = SpeedTestProgress(completed: completed, total: testable.count)
+            }
+        }
 
         // TCP 方式：直连握手，不需要内核。32 个有界并发让大订阅不会被 3 秒超时
         // 拖成几十秒；结果按大批次合并发布，避免每个节点都让整张代理页重新布局。
@@ -1647,6 +1708,7 @@ final class AppState {
                 var pending: [(UUID, DelayResult)] = []
                 let seed = min(32, nodes.count)
                 while next < seed {
+                    guard !Task.isCancelled else { break }
                     let node = nodes[next]; next += 1
                     group.addTask { [tcpPingProvider] in
                         (node.id, await tcpPingProvider(node.server, node.port))
@@ -1654,11 +1716,16 @@ final class AppState {
                 }
                 while let (id, result) = await group.next() {
                     pending.append((id, result))
+                    completed += 1
+                    publishProgress()
                     if pending.count == Self.delayPublishBatchSize {
                         publishDelayResults(pending)
                         pending.removeAll(keepingCapacity: true)
                     }
-                    if next < nodes.count {
+                    if Task.isCancelled {
+                        group.cancelAll()
+                        break
+                    } else if next < nodes.count {
                         let node = nodes[next]; next += 1
                         group.addTask { [tcpPingProvider] in
                             (node.id, await tcpPingProvider(node.server, node.port))
@@ -1667,13 +1734,16 @@ final class AppState {
                 }
                 publishDelayResults(pending)
             }
-            return true
+            publishProgress(force: true)
+            return !Task.isCancelled
         }
 
         // URL 方式：需要内核在跑，之后同样有界并发 + 逐个回填。
+        let startedTemporaryCore = status != .on
         guard await startCoreForTestingIfNeeded() else { return false }
         guard let client = clashAPIClient, let testURL = URL(string: testURLString) else {
             errorMessage = "内核控制接口不可用"
+            if startedTemporaryCore, status == .on, activeModes.isEmpty { await stop() }
             return false
         }
         let targets: [(id: UUID, tag: String)] = testable.map {
@@ -1700,21 +1770,29 @@ final class AppState {
                 }
             }
             while next < seed {
+                guard !Task.isCancelled else { break }
                 group.addTask(operation: delayTask(targets[next])); next += 1
             }
             while let (id, result) = await group.next() {
                 pending.append((id, result))
+                completed += 1
+                publishProgress()
                 if pending.count == Self.delayPublishBatchSize {
                     publishDelayResults(pending)
                     pending.removeAll(keepingCapacity: true)
                 }
-                if next < targets.count {
+                if Task.isCancelled {
+                    group.cancelAll()
+                    break
+                } else if next < targets.count {
                     group.addTask(operation: delayTask(targets[next])); next += 1
                 }
             }
             publishDelayResults(pending)
         }
-        return true
+        publishProgress(force: true)
+        if startedTemporaryCore, status == .on, activeModes.isEmpty { await stop() }
+        return !Task.isCancelled
     }
 
     private func publishDelayResults(_ results: [(UUID, DelayResult)]) {
@@ -1801,10 +1879,35 @@ final class AppState {
 
     @discardableResult
     func applyRoutingSettings(_ requestedSettings: RoutingSettings, operation: String = "分流规则") async -> Bool {
-        guard !isBusy else { return false }
+        guard status != .starting, status != .stopping else { return false }
+        if isApplyingRouting {
+            return await withCheckedContinuation { continuation in
+                if var pending = pendingRoutingApplication {
+                    pending.settings = requestedSettings
+                    pending.operation = operation
+                    pending.continuations.append(continuation)
+                    pendingRoutingApplication = pending
+                } else {
+                    pendingRoutingApplication = PendingRoutingApplication(
+                        settings: requestedSettings,
+                        operation: operation,
+                        continuations: [continuation]
+                    )
+                }
+            }
+        }
         isApplyingRouting = true
-        defer { isApplyingRouting = false }
+        let result = await performRoutingApplication(requestedSettings, operation: operation)
+        while let pending = pendingRoutingApplication {
+            pendingRoutingApplication = nil
+            let pendingResult = await performRoutingApplication(pending.settings, operation: pending.operation)
+            pending.continuations.forEach { $0.resume(returning: pendingResult) }
+        }
+        isApplyingRouting = false
+        return result
+    }
 
+    private func performRoutingApplication(_ requestedSettings: RoutingSettings, operation: String) async -> Bool {
         do {
             let settings = try requestedSettings.validated()
             guard status == .on else {
@@ -1940,6 +2043,83 @@ final class AppState {
         await applyRoutingSettings(settings)
     }
 
+    @discardableResult
+    func upsertForcedProxyRule(type: CustomRuleType, value rawValue: String) async -> Bool {
+        switch type {
+        case .domainSuffix:
+            return await upsertForcedProxyRules(domainInput: rawValue, ipInput: "")
+        case .ipCIDR:
+            return await upsertForcedProxyRules(domainInput: "", ipInput: rawValue)
+        default:
+            errorMessage = "无法添加强制代理规则：\(RoutingValidationError.unsupportedForcedProxyRuleType.localizedDescription)"
+            return false
+        }
+    }
+
+    /// Validates every pasted target before mutating settings, then performs a
+    /// single configuration reload. A bad item leaves the complete batch intact.
+    @discardableResult
+    func upsertForcedProxyRules(domainInput: String, ipInput: String) async -> Bool {
+        do {
+            var settings = routingSettings
+            let batch = try ForcedProxyRuleBatch(
+                domainInput: domainInput,
+                ipInput: ipInput,
+                existingRules: settings.customRules,
+                proxyGroup: primaryGroupName ?? "手动选择"
+            )
+            guard batch.rules != settings.customRules else { return true }
+            settings.customRules = batch.rules
+            return await applyRoutingSettings(settings, operation: "强制代理规则")
+        } catch {
+            errorMessage = "无法添加强制代理规则：\(error.localizedDescription)"
+            return false
+        }
+    }
+
+    func removeForcedProxyRule(_ id: UUID) async {
+        var settings = routingSettings
+        settings.customRules.removeAll {
+            $0.id == id && $0.action == .proxy && ($0.type == .domainSuffix || $0.type == .ipCIDR)
+        }
+        await applyRoutingSettings(settings, operation: "强制代理规则")
+    }
+
+    @discardableResult
+    func upsertDirectRule(type: CustomRuleType, value rawValue: String) async -> Bool {
+        do {
+            let value: String
+            switch type {
+            case .domainSuffix:
+                guard let normalized = CustomRouteRule.normalizedDomainSuffix(rawValue) else {
+                    throw RoutingValidationError.invalidForcedProxyDomain(rawValue)
+                }
+                value = normalized
+            case .ipCIDR:
+                guard let normalized = CustomRouteRule.normalizedCIDR(rawValue) else {
+                    throw RoutingValidationError.invalidCIDR(rawValue)
+                }
+                value = normalized
+            default:
+                throw RoutingValidationError.unsupportedForcedProxyRuleType
+            }
+            var settings = routingSettings
+            settings.customRules.removeAll {
+                $0.type == type && $0.value.caseInsensitiveCompare(value) == .orderedSame
+            }
+            settings.customRules.append(CustomRouteRule(
+                order: (settings.customRules.map(\.order).max() ?? -1) + 1,
+                type: type,
+                value: value,
+                action: .direct
+            ))
+            return await applyRoutingSettings(settings, operation: "连接快捷规则")
+        } catch {
+            errorMessage = "无法添加直连规则：\(error.localizedDescription)"
+            return false
+        }
+    }
+
     func processRuleTargetName(_ rule: CustomRouteRule) -> String {
         switch rule.action {
         case .direct: return "直连"
@@ -1951,6 +2131,15 @@ final class AppState {
             }
             return target == (primaryGroupName ?? "手动选择") ? "默认代理" : target
         }
+    }
+
+    func testRoute(domain: String?, ip: String?, processName: String?) -> RouteTestResult {
+        RouteRuleEvaluator.evaluate(
+            RouteTestInput(domain: domain, ip: ip, processName: processName),
+            settings: routingSettings,
+            subscriptionRules: subscriptionRules,
+            primaryOutbound: primaryGroupName ?? "手动选择"
+        )
     }
 
     func applyTunSettings(_ requestedSettings: TunSettings, operation: String = "TUN 设置") async {
@@ -2152,6 +2341,59 @@ final class AppState {
         discardPendingLogs()
         suspendLogMonitoring()
         resumeLogMonitoringIfNeeded()
+    }
+
+    func enableDiagnosticMode(duration: TimeInterval = 15 * 60) async {
+        guard !isBusy, !isTestingAllDelays else { return }
+        await setDiagnosticModeEndsAt(now().addingTimeInterval(duration), operation: "诊断模式")
+    }
+
+    func disableDiagnosticMode() async {
+        guard !isBusy else { return }
+        await setDiagnosticModeEndsAt(nil, operation: "恢复普通日志")
+    }
+
+    private func setDiagnosticModeEndsAt(_ deadline: Date?, operation: String) async {
+        let previous = diagnosticModeEndsAt
+        diagnosticModeEndsAt = deadline
+        diagnosticModeTask?.cancel()
+        diagnosticModeTask = nil
+
+        if status == .on, !activeModes.isEmpty {
+            guard await applyRoutingSettings(routingSettings, operation: operation) else {
+                diagnosticModeEndsAt = previous
+                scheduleDiagnosticModeExpiry()
+                try? await persistSettings()
+                return
+            }
+        }
+        do {
+            try await persistSettings()
+            errorMessage = nil
+        } catch {
+            diagnosticModeEndsAt = previous
+            errorMessage = "保存诊断模式失败：\(error.localizedDescription)"
+        }
+        scheduleDiagnosticModeExpiry()
+    }
+
+    private func scheduleDiagnosticModeExpiry() {
+        diagnosticModeTask?.cancel()
+        guard let deadline = diagnosticModeEndsAt, deadline > now() else {
+            diagnosticModeTask = nil
+            return
+        }
+        let delay = deadline.timeIntervalSince(now())
+        diagnosticModeTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(delay))
+            } catch {
+                return
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.diagnosticModeTask = nil
+            await self.disableDiagnosticMode()
+        }
     }
 
     func clearLiveLogs() {
@@ -2433,6 +2675,12 @@ final class AppState {
             activeConfigID = settings.activeConfigID
             preferredMixedPort = settings.mixedPort
             menuBarIconStyle = settings.menuBarIconStyle ?? .peak
+            if let deadline = settings.diagnosticModeEndsAt, deadline > now() {
+                diagnosticModeEndsAt = deadline
+                scheduleDiagnosticModeExpiry()
+            } else {
+                diagnosticModeEndsAt = nil
+            }
         }
         if let data = try await storage.readIfPresent(from: rulesURL) {
             routingSettings = try JSONDecoder().decode(RoutingSettings.self, from: data).validated()
@@ -2546,7 +2794,8 @@ final class AppState {
                 activeConfigID: activeConfigID,
                 speedTestMethod: speedTestMethod,
                 menuBarIconStyle: menuBarIconStyle,
-                mixedPort: preferredMixedPort
+                mixedPort: preferredMixedPort,
+                diagnosticModeEndsAt: diagnosticModeEndsAt
             )),
             to: settingsURL
         )
@@ -2875,17 +3124,17 @@ final class AppState {
     }
 
     private func receiveConnectionSnapshot(_ snapshot: ConnectionSnapshot) {
-        if activeConnectionCount != snapshot.connectionCount {
-            activeConnectionCount = snapshot.connectionCount
-        }
-        if coreMemory != snapshot.memory { coreMemory = snapshot.memory }
-
         // 会话累计流量。这条流是唯一的权威来源，无论仪表盘是否可见都要喂——
         // 断一秒就永久少一秒的量，不像速率那样只是显示滞后。
         sessionTraffic.record(
             uploadTotal: snapshot.uploadTotal,
             downloadTotal: snapshot.downloadTotal
         )
+        guard dashboardMetrics.shouldPublishConnectionSnapshot(snapshot) else { return }
+        if activeConnectionCount != snapshot.connectionCount {
+            activeConnectionCount = snapshot.connectionCount
+        }
+        if coreMemory != snapshot.memory { coreMemory = snapshot.memory }
         if sessionUpload != sessionTraffic.upload { sessionUpload = sessionTraffic.upload }
         if sessionDownload != sessionTraffic.download { sessionDownload = sessionTraffic.download }
     }
@@ -2894,17 +3143,16 @@ final class AppState {
         dashboardRetryDelay = 2
         // `@Observable` 赋同样的值也会通知观察者 → 失效整棵视图图。空闲时速率长时间是 0，
         // 无条件写就是每秒一次纯白工的全量重排。等值判断在这里几乎总是命中。
-        if uploadRate != sample.up { uploadRate = sample.up }
-        if downloadRate != sample.down { downloadRate = sample.down }
+        if dashboardMetrics.shouldPublishTrafficRates() {
+            if uploadRate != sample.up { uploadRate = sample.up }
+            if downloadRate != sample.down { downloadRate = sample.down }
+        }
         // trafficHistory 只有仪表盘的折线图在读，且每个点的时间戳都不同、等值判断救不了。
         // 会话累计量订阅的是同一条流但不看历史 → 仪表盘不在屏幕上时继续 append，
         // 等于每秒白白失效一次视图图。代价是重开仪表盘时折线从空开始画（有占位态）。
-        guard windowContentIsVisible, dashboardMonitorConsumers.contains(.dashboard) else { return }
-        // 隔一个采样点才入图。图表是这一页最贵的部件（60 个点 + 面积/折线双系列），
-        // 每次 append 都要整页重排；实测仪表盘开着时它占了三成以上的 CPU。
-        // 曲线是看趋势的，2 秒一个点足够，而代价直接减半。
-        trafficSampleParity.toggle()
-        guard trafficSampleParity else { return }
+        let chartVisible = windowContentIsVisible && dashboardMonitorConsumers.contains(.dashboard)
+        // 四秒一个趋势点；状态栏和速率数字仍按两秒发布，不影响可读性。
+        guard dashboardMetrics.shouldPublishTrafficPoint(isDashboardVisible: chartVisible) else { return }
         trafficHistory.append(TrafficPoint(
             timestamp: now(),
             upload: sample.up,
@@ -2948,6 +3196,7 @@ final class AppState {
 
     private func clearDashboardRuntime() {
         suspendDashboardMonitoring()
+        dashboardMetrics.reset()
         uploadRate = 0
         downloadRate = 0
         activeConnectionCount = 0
@@ -2969,15 +3218,24 @@ final class AppState {
     /// 去问 `dns-remote`（经代理的公共 DoH），公共 DNS 当然不知道你的内网主机。
     private func bypassEntries(for settings: RoutingSettings) -> [String] {
         let lan = LANResolver.effective(settings: tunSettings, detected: lanResolverSnapshot)
-        guard lan.isUsable else { return settings.systemProxyBypassEntries }
-        var entries = settings.systemProxyBypassEntries
+        let respectsForcedRules = outboundMode == .rule
+        guard lan.isUsable else {
+            return settings.systemProxyBypassEntries(
+                including: [],
+                respectingForcedProxyRules: respectsForcedRules
+            )
+        }
+        var additionalDomains: [String] = []
         for suffix in lan.searchDomains {
             // 同时给通配和裸后缀：macOS 的 `*.corp.com` 不匹配 `corp.com` 本身。
-            for entry in ["*.\(suffix)", suffix] where !entries.contains(entry) {
-                entries.append(entry)
+            for entry in ["*.\(suffix)", suffix] where !additionalDomains.contains(entry) {
+                additionalDomains.append(entry)
             }
         }
-        return entries
+        return settings.systemProxyBypassEntries(
+            including: additionalDomains,
+            respectingForcedProxyRules: respectsForcedRules
+        )
     }
 
     /// 探测内网 DNS。只在能读到有效结果时才覆盖已有快照——TUN 接管期间读到的
@@ -3040,7 +3298,8 @@ final class AppState {
             tunSettings: effectiveTun,
             dnsSettings: dnsSettings,
             groupDefaults: resolvedGroupDefaults(),
-            lanResolver: lanResolverSnapshot
+            lanResolver: lanResolverSnapshot,
+            coreLogLevel: isDiagnosticModeActive ? "debug" : "info"
         )
         // 生成 + JSON 编码大配置（几百出站、上千规则）很吃 CPU，放后台线程，别卡住主线程 UI。
         let result = try await Task.detached { try ConfigGenerator.generateWithWarnings(input) }.value
@@ -3705,6 +3964,7 @@ private struct PersistedSettings: Codable {
     /// 上次用过的本地 mixed 端口。旧版设置文件没有该字段（nil = 首次分配）。
     /// 属于本机运行时状态，**不进备份**：换台机器该端口未必空闲。
     var mixedPort: UInt16?
+    var diagnosticModeEndsAt: Date? = nil
 }
 
 private struct FileSnapshot {
