@@ -57,7 +57,7 @@ public enum RuntimeSecrets {
         return try randomAvailableListeningPort()
     }
 
-    /// 首选端口撞占用时的重试退避。总预算 ~1.5 秒，且只有真撞上才付这个代价。
+    /// 稳定 relay 首选端口撞占用时的重试退避。总预算 ~1.5 秒，且只有真撞上才付代价。
     public static let defaultPreferredPortRetryDelays: [Duration] = [
         .milliseconds(100),
         .milliseconds(200),
@@ -66,12 +66,10 @@ public enum RuntimeSecrets {
     ]
 
     /// 和 `availableHighPort(preferred:)` 同样的语义，但首选端口撞占用时**带退避重试**。
-    /// 只给需要跨启动稳定的 mixed 端口用；clash_api 端口每次随机，没有复用需求。
+    /// 只给 App 持有的公开 relay 端口用；sing-box mixed/clash 端口每代随机。
     ///
-    /// 旧版本曾从 macOS 临时端口池 `49152...65535` 分配长期监听端口；客户端出站连接
-    /// 会自动使用同一池，TUN/系统代理切换时就可能在旧监听释放后短暂抢占首选端口。
-    /// 新分配已移出临时池，但升级前的旧首选端口仍可能传进来，所以保留有限退避，
-    /// 给旧内核 pcb 正常回收的机会；仍不可用时迁移到新的监听端口范围。
+    /// 新版公开端口始终由普通用户 App 持有，不再交给 root/user sing-box 来回切换。
+    /// 有界退避只处理 App 重开时的短暂回收；遇到真实占用仍及时迁移，不能卡住网络切换。
     public static func stableHighPort(
         preferred: UInt16?,
         retryDelays: [Duration] = defaultPreferredPortRetryDelays

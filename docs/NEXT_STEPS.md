@@ -1,19 +1,19 @@
 # 下一步
 
-## 2026-08-08 v0.1.71 发布候选收口
+## 2026-08-08 v0.1.72 发布候选收口
 
-v0.1.70 已安装并完成大部分真机验收，但 TUN 切回系统代理时暴露出监听端口与 macOS 临时端口池重叠。
-v0.1.71 已完成根因修复与完整 M4。当前按顺序收口：提交候选；运行 `scripts/release.sh prepare` 以最终
-提交重建、验证 DMG 并写验证戳；运行 `install` 请求 v0.1.70 正常退出，确认系统代理/TUN DNS/recovery/
-直连网络恢复并备份配置后原子安装 v0.1.71；重装 helper；再做 TUN → 系统代理端口稳定性终验。
+v0.1.71 的避开临时端口池方案不能解决 root/user sing-box 跨 UID 交接具体回环端口。v0.1.72 已改为
+App 用户态稳定 relay 持有系统代理公开端口，每代 sing-box 使用独立内部 mixed 端口，并完成 435/1/0
+XCTest 与 M4 资源门禁。当前按顺序收口：修正 `swift test` 包装进程退出问题；重跑全量门禁并提交；执行
+`scripts/release.sh prepare` 生成提交绑定的唯一 DMG；采集用户配置哈希、代理/DNS/进程/recovery 与网络
+基线；只通过正常 Quit 退出旧版，确认代理/DNS/recovery 和直连网络恢复后备份并原子替换；重装 helper；
+完成多轮系统代理/TUN 切换终验。
 
-更新后 ad-hoc App 的 cdhash 会变化，免密码 TUN helper 预期提示重装。不得放宽 helper 校验；实际点击
-“重新安装”并触发管理员授权前再次由用户确认，之后验证 TUN 启停、DNS、出口和正常退出恢复。
-
-当前安装版仍在接管系统代理，任何替换都不得使用 TERM/KILL。终验应确认新 mixed 端口位于
-`20000...49151`，TUN 与系统代理往返后保持不变且不再出现端口漂移警告。通过后恢复配置“奶昔”和原节点，
-运行 `publish` 推送 main/v0.1.71 并创建 GitHub Release，核对 digest，删除旧 v0.1.67 Release/标签。
-最终 `dist` 只允许保留 `kongshan-0.1.71.dmg`；用户 Application Support 不删除、不覆盖。
+终验必须确认：系统代理公开端口始终不变且由 App listener 持有；root/user sing-box 只监听不同的内部
+端口；HTTP、HTTPS、SOCKS 数据面都可用；关闭 TUN 后 root 内核退出、DNS 恢复、网络不中断；无新增
+端口漂移警告；App/core CPU、RSS、FD 与连接数符合轻量目标。最终恢复“奶昔”与 `Japan 03`，更新记录
+并重新 `prepare` 后运行 `publish` 推送 main/v0.1.72、创建 GitHub Release，删除 v0.1.67 Release/标签。
+最终 `dist` 只允许保留 `kongshan-0.1.72.dmg`；用户 Application Support 不删除、不覆盖。
 
 ## 2026-08-07 v0.1.68 本地部署边界
 

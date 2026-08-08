@@ -30,12 +30,26 @@ plutil -lint "$app_path/Contents/Info.plist"
 "$core_binary" version | grep -q 'sing-box version 1.13.14' || fail "unexpected sing-box version"
 
 if [[ ${KONGSHAN_VERIFY_SKIP_TESTS:-0} != 1 ]]; then
-    swift test --skip-build --filter DNSConfigTests/testSystemAndTUNDefaultAndCustomDNSPassBundledCoreCheck
-    swift test --skip-build --filter ClashStreamingTests/testConsumerCancellationClosesUnderlyingDataStream
-    swift test --skip-build --filter CrashRestartTests
-    swift test --skip-build --filter AppStateTests/testDashboardMonitoringKeepsSixtyPointsAndIsIdempotent
-    swift test --skip-build --filter AppStateTests/testLogMonitoringKeepsTwoThousandEntriesAndIsIdempotent
-    swift test --skip-build --filter AppStateTests/testInitializeOnlyReadsLoginItemStatusWithoutRegistering
+    typeset -a test_bundles
+    test_bundles=("$project_dir"/.build/*/debug/kongshanPackageTests.xctest(N))
+    (( ${#test_bundles[@]} == 1 )) || fail "expected one XCTest bundle, found ${#test_bundles[@]}"
+    test_bundle=$test_bundles[1]
+    xcrun xctest -XCTest \
+        KongshanCoreTests.DNSConfigTests/testSystemAndTUNDefaultAndCustomDNSPassBundledCoreCheck \
+        "$test_bundle"
+    xcrun xctest -XCTest \
+        KongshanCoreTests.ClashStreamingTests/testConsumerCancellationClosesUnderlyingDataStream \
+        "$test_bundle"
+    xcrun xctest -XCTest KongshanCoreTests.CrashRestartTests "$test_bundle"
+    xcrun xctest -XCTest \
+        KongshanAppTests.AppStateTests/testDashboardMonitoringKeepsSixtyPointsAndIsIdempotent \
+        "$test_bundle"
+    xcrun xctest -XCTest \
+        KongshanAppTests.AppStateTests/testLogMonitoringKeepsTwoThousandEntriesAndIsIdempotent \
+        "$test_bundle"
+    xcrun xctest -XCTest \
+        KongshanAppTests.AppStateTests/testInitializeOnlyReadsLoginItemStatusWithoutRegistering \
+        "$test_bundle"
 fi
 
 max_rss_kb=${KONGSHAN_VERIFY_MAX_RSS_KB:-153600}

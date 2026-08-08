@@ -3214,3 +3214,26 @@ AAAA 解析与 Happy Eyeballs 选路，于是每次都撞在 IPv6 上。
   候选 App CDHash 为 `dfbc3949cce126a55280aa85f2fe55a036bb3c2c`。
 - 当前边界：尚未提交 v0.1.71、生成提交绑定的 DMG、安装或发布。下一步按 release 门禁正常退出 v0.1.70、
   备份和原子安装；新 cdhash 需重装 helper，再做 TUN → 系统代理端口稳定性终验。
+
+### 阶段 27：v0.1.72 稳定用户态代理入口候选
+
+- 进一步 socket 复现推翻阶段 26 的最终根因表述：普通 `CLOSE_WAIT`、`FIN_WAIT_2`、`TIME_WAIT` 不会
+  阻塞相同回环端口立即重绑；能稳定阻塞的是仍由活跃 FD 持有的 `BOUND/CLOSED` PCB。XNU 对具体
+  `127.0.0.1` 地址会在 `SO_REUSEPORT` 复用检查前拒绝不同 UID，因此 root/user sing-box 无法可靠
+  交接同一个 listener。避开临时端口池仍有价值，但不是完整修复。
+- 已验证并撤销 `reuse_addr` 方案：sing-box 1.13.14 会在 Darwin 同时设置 `SO_REUSEADDR` 与
+  `SO_REUSEPORT`，同 UID 可加入监听组；它既不能解决跨 UID 拒绝，又会让同 UID 进程分走无鉴权代理
+  请求，不能作为安全方案。
+- v0.1.72 新增 `LocalTCPRelay`：App 用户态稳定持有公开回环端口，系统代理始终指向该端口；root/user
+  sing-box 每代使用独立随机 mixed 端口，切换只更新 relay 目标。新增 `proxyRelayPort` 持久化，旧
+  `mixedPort` 仅兼容解码且不再写入。
+- 自动覆盖双向转发、half-close、背压、后端切换、空目标、停止重绑、accept/切换竞态，以及 AppState
+  公开端口与内部端口隔离。直接执行 XCTest bundle 为 435 项执行、1 跳过、0 失败。
+- 候选 v0.1.72/build 172 已通过 M4：五次 CPU 1.2/0.0/0.4/0.0/0.7%，平均 0.460%，最大 RSS
+  118,064 KB；arm64、deep/strict、sing-box 1.13.14、候选启动与无 socket/子进程/FIFO/recovery 均通过。
+- 当前边界：安装版仍是 v0.1.71，未替换、未重装 helper、未发布。Codex 终端中的 `swift test` 包装
+  进程在 XCTest 完成后未及时收尸，发布门禁改为先 `swift build --build-tests`，再用 `xcrun xctest`
+  直接执行测试 bundle；修改后必须重新跑完整 M4。
+- 发布门禁修正后已在本机环境完整重跑：435 项执行、1 跳过、0 失败；六组 M4 定向 XCTest 直接运行
+  均返回 0；五次 CPU 0.4/0.0/0.4/0.0/0.4%，平均 0.240%，最大 RSS 115,712 KB，最终输出
+  `M4 automated verification passed`。当前可进入候选提交与提交绑定的 `prepare`。

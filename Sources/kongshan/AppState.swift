@@ -72,8 +72,7 @@ private final class AppWarningRelay: @unchecked Sendable {
 @MainActor
 @Observable
 final class AppState {
-    /// 入参是上次用过的 mixed 端口，可用就复用（见 `RuntimeSecrets.stableHighPort(preferred:)`）。
-    /// 是 `async` 的：首选端口撞占用时要退避重试，不能同步 sleep 卡住主线程。
+    /// mixed 与 Clash API 都是 sing-box 内部端口；公开稳定端口由 `LocalTCPRelay` 持有。
     typealias RuntimeFactory = @Sendable (UInt16?) async throws -> RuntimeParameters
     typealias HealthVerifier = @Sendable (ClashAPIClient) async throws -> Void
     typealias ClashClientFactory = @Sendable (URL, String) -> ClashAPIClient
@@ -334,6 +333,7 @@ final class AppState {
     @ObservationIgnored private let subscriptionService: SubscriptionService
     @ObservationIgnored private let ruleSetService: RuleSetService
     @ObservationIgnored private let systemProxyManager: SystemProxyManager
+    @ObservationIgnored private let proxyRelay: any LocalTCPRelaying
     @ObservationIgnored private let systemDNSManager: SystemDNSManager
     /// 网络路径监听（切 Wi-Fi / 插网线 / 新服务出现时补挂代理与 DNS）。事件驱动，非轮询。
     @ObservationIgnored private var pathMonitor: NWPathMonitor?
@@ -376,9 +376,8 @@ final class AppState {
     @ObservationIgnored private(set) var lanResolverSnapshot: LANResolverSnapshot = .empty
     /// 菜单栏图标样式，用户可在设置里切换。
     private(set) var menuBarIconStyle: MenuBarIconStyle = .peak
-    /// 上次实际用过的 mixed 端口，落盘复用。系统代理的地址会被 Chromium 系客户端缓存，
-    /// 每次启动换端口会让它们打死端口、反复「正在重新连接」。nil 表示还没分配过。
-    @ObservationIgnored private var preferredMixedPort: UInt16?
+    /// 系统代理公开入口端口。只由普通用户 App 持有，绝不交给 root sing-box。
+    @ObservationIgnored private var preferredRelayPort: UInt16?
     @ObservationIgnored private var currentConfig: Data?
     @ObservationIgnored private var dashboardTasks: [Task<Void, Never>] = []
     @ObservationIgnored private var dashboardMonitorConsumers: Set<DashboardMonitorConsumer> = []
@@ -427,6 +426,7 @@ final class AppState {
         notificationSender: (any NotificationSending)? = nil,
         loginItemManager: (any LoginItemManaging)? = nil,
         privilegedLauncher: (any PrivilegedLaunching)? = nil,
+        proxyRelay: (any LocalTCPRelaying)? = nil,
         runtimeFactory: RuntimeFactory? = nil,
         healthVerifier: HealthVerifier? = nil,
         clashClientFactory: ClashClientFactory? = nil,
@@ -446,6 +446,7 @@ final class AppState {
         self.subscriptionService = subscriptionService ?? SubscriptionService(storage: storage)
         self.ruleSetService = ruleSetService ?? RuleSetService(storage: storage, binaryURL: binaryURL)
         self.systemProxyManager = systemProxyManager ?? SystemProxyManager(storage: storage)
+        self.proxyRelay = proxyRelay ?? LocalTCPRelay()
         self.systemDNSManager = systemDNSManager ?? SystemDNSManager(storage: storage)
         self.singBoxProcess = singBoxProcess ?? SingBoxProcess(
             binaryURL: binaryURL,
@@ -666,17 +667,24 @@ final class AppState {
         do {
             let prepared = try await ruleSetService.prepare(includeAds: routingSettings.blockAds, mirror: ruleSetSettings.mirror, allowsNetwork: ruleSetSettings.autoUpdate)
             appendWarnings(prepared.warnings)
-            let runtime = try await runtimeFactory(preferredMixedPort)
-            // 端口只在首次分配或旧端口被占时才变；变了立刻落盘，否则下次启动又是新端口。
-            if preferredMixedPort != runtime.mixedPort {
-                // 退避重试都没等到首选端口才会走到这里（见 `RuntimeSecrets.stableHighPort`）。
-                // 端口一变系统代理设置也跟着变，缓存了旧端口的客户端会重连一次——
-                // 不说一声用户只会看到"某个 App 又开始转圈"，无从判断原因。
-                if let previous = preferredMixedPort {
-                    appendWarning("本地代理端口 \(previous) 被占用，已改用 \(runtime.mixedPort)；缓存了旧端口的客户端可能需要重连一次")
+            let relayPort = usesSystemProxy
+                ? try await proxyRelay.start(preferredPort: preferredRelayPort)
+                : nil
+            if preferredRelayPort != relayPort, let relayPort {
+                if let previous = preferredRelayPort {
+                    appendWarning("系统代理入口端口 \(previous) 被占用，已改用 \(relayPort)；缓存了旧端口的客户端可能需要重连一次")
                 }
-                preferredMixedPort = runtime.mixedPort
+                preferredRelayPort = relayPort
                 try? await persistSettings()
+            }
+            var runtime = try await runtimeFactory(nil)
+            if let relayPort {
+                for _ in 0..<7 where runtime.mixedPort == relayPort {
+                    runtime = try await runtimeFactory(nil)
+                }
+                guard runtime.mixedPort != relayPort else {
+                    throw AppStateError.localPortCollision
+                }
             }
             let (config, configWarnings) = try await generateConfiguration(
                 runtime: runtime,
@@ -715,8 +723,10 @@ final class AppState {
             }
             try await healthVerifier(client)
             if usesSystemProxy {
+                guard let relayPort else { throw AppStateError.missingRuntimeState }
+                proxyRelay.setTarget(port: runtime.mixedPort)
                 try await systemProxyManager.enable(
-                    port: Int(runtime.mixedPort),
+                    port: Int(relayPort),
                     bypassDomains: bypassEntries(for: routingSettings)
                 )
             }
@@ -729,7 +739,7 @@ final class AppState {
             self.runtime = runtime
             clashAPIClient = client
             currentConfig = config
-            mixedPort = usesSystemProxy ? runtime.mixedPort : nil
+            mixedPort = relayPort
             activeModes = modes
             status = .on
             do {
@@ -832,6 +842,8 @@ final class AppState {
             } catch {
                 restoreFailures.append("系统代理（系统设置 → 网络 → 详细信息 → 代理）：\(error.localizedDescription)")
             }
+            // 系统设置已不再送新连接后，切断旧桥接；稳定 listener 保持到 App 正常退出。
+            proxyRelay.setTarget(port: nil)
         }
 
         if stoppingModes.contains(.tun) {
@@ -906,6 +918,7 @@ final class AppState {
         if !activeModes.isEmpty || runtime != nil {
             await stop()
             await flushRuntimeEventsIfNeeded()
+            if status == .off { proxyRelay.stop() }
             return status == .off
         } else {
             do {
@@ -915,6 +928,7 @@ final class AppState {
                 try await systemDNSManager.recoverIfNeeded()
                 clearRuntimeState()
                 status = .off
+                proxyRelay.stop()
                 await flushRuntimeEventsIfNeeded()
                 return true
             } catch {
@@ -2506,7 +2520,7 @@ final class AppState {
                 speedTestMethod: settings.speedTestMethod,
                 menuBarIconStyle: menuBarIconStyle,
                 // 备份不含端口：那是本机运行时状态，导入别的机器的备份不该顶掉本机端口。
-                mixedPort: preferredMixedPort
+                proxyRelayPort: preferredRelayPort
             )
 
             var importedNodes = backup.manualNodes
@@ -2673,7 +2687,7 @@ final class AppState {
             outboundMode = settings.outboundMode ?? .rule
             groupSelections = settings.groupSelections ?? [:]
             activeConfigID = settings.activeConfigID
-            preferredMixedPort = settings.mixedPort
+            preferredRelayPort = settings.proxyRelayPort
             menuBarIconStyle = settings.menuBarIconStyle ?? .peak
             if let deadline = settings.diagnosticModeEndsAt, deadline > now() {
                 diagnosticModeEndsAt = deadline
@@ -2794,7 +2808,7 @@ final class AppState {
                 activeConfigID: activeConfigID,
                 speedTestMethod: speedTestMethod,
                 menuBarIconStyle: menuBarIconStyle,
-                mixedPort: preferredMixedPort,
+                proxyRelayPort: preferredRelayPort,
                 diagnosticModeEndsAt: diagnosticModeEndsAt
             )),
             to: settingsURL
@@ -3331,11 +3345,10 @@ final class AppState {
         }
     }
 
-    /// mixed 端口跨启动保持稳定（缓存了代理地址的客户端不会被换端口甩掉）；
-    /// clash_api 端口与 secret 仍然每次随机——它们只在进程内使用，没有外部缓存问题，
-    /// 而 secret 随机是真正的安全边界。
-    nonisolated private static func makeRuntimeParameters(preferredMixedPort: UInt16?) async throws -> RuntimeParameters {
-        let mixedPort = try await RuntimeSecrets.stableHighPort(preferred: preferredMixedPort)
+    /// sing-box 的 mixed 与 Clash API 都是每代随机的内部端口。系统代理公开端口由
+    /// `LocalTCPRelay` 跨内核重启稳定持有，避免 root/user 之间交接同一个 TCP PCB。
+    nonisolated private static func makeRuntimeParameters(_: UInt16?) async throws -> RuntimeParameters {
+        let mixedPort = try RuntimeSecrets.availableHighPort()
         var clashPort = try RuntimeSecrets.availableHighPort()
         while clashPort == mixedPort {
             clashPort = try RuntimeSecrets.availableHighPort()
@@ -3564,10 +3577,11 @@ final class AppState {
             }
             guard status == .on else { return }
         }
-        if activeModes.contains(.systemProxy), let runtime {
+        if activeModes.contains(.systemProxy), runtime != nil {
             do {
+                guard let relayPort = mixedPort else { throw AppStateError.missingRuntimeState }
                 try await systemProxyManager.reassert(
-                    port: Int(runtime.mixedPort),
+                    port: Int(relayPort),
                     bypassDomains: bypassEntries(for: routingSettings)
                 )
             } catch {
@@ -3707,6 +3721,7 @@ final class AppState {
     }
 
     private func clearRuntimeState() {
+        proxyRelay.setTarget(port: nil)
         stopNetworkPathMonitoring()
         monitoredCorePID = nil
         clearDashboardRuntime()
@@ -3961,9 +3976,11 @@ private struct PersistedSettings: Codable {
     var speedTestMethod: SpeedTestMethod?
     /// 菜单栏图标样式。旧版设置文件没有该字段。
     var menuBarIconStyle: MenuBarIconStyle?
-    /// 上次用过的本地 mixed 端口。旧版设置文件没有该字段（nil = 首次分配）。
-    /// 属于本机运行时状态，**不进备份**：换台机器该端口未必空闲。
-    var mixedPort: UInt16?
+    /// 旧版 sing-box mixed 端口。保留仅为向后解码；新版不再写入，避免回滚版本把稳定
+    /// 用户态入口重新交给 root 内核。
+    var mixedPort: UInt16? = nil
+    /// App 用户态 TCP relay 的公开端口。属于本机运行时状态，不进备份。
+    var proxyRelayPort: UInt16? = nil
     var diagnosticModeEndsAt: Date? = nil
 }
 
@@ -3978,6 +3995,7 @@ private enum AppStateError: Error, LocalizedError {
     case invalidTestURL
     case missingRuntimeState
     case tunCleanupFailed(String)
+    case localPortCollision
 
     var errorDescription: String? {
         switch self {
@@ -3991,6 +4009,8 @@ private enum AppStateError: Error, LocalizedError {
             "运行时状态不完整，无法更新分流规则"
         case let .tunCleanupFailed(message):
             "清理旧 TUN 失败：\(message)"
+        case .localPortCollision:
+            "无法为系统代理入口和 sing-box 后端分配不同的本地端口"
         }
     }
 }

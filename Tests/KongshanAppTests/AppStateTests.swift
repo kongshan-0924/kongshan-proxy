@@ -421,7 +421,7 @@ final class AppStateTests: XCTestCase {
 
         XCTAssertEqual(fixture.state.status, .on)
         XCTAssertEqual(fixture.state.routingSettings, updated)
-        XCTAssertEqual(fixture.state.mixedPort, fixture.runtime.mixedPort)
+        XCTAssertEqual(fixture.state.mixedPort, fixture.relayPort)
         XCTAssertNil(fixture.state.errorMessage)
         XCTAssertLessThan(elapsed, .seconds(2))
         try await ClashAPIClient(
@@ -442,6 +442,29 @@ final class AppStateTests: XCTestCase {
         )
         await fixture.state.stop()
         XCTAssertEqual(fixture.state.status, .off)
+    }
+
+    func testSystemProxyUsesRelayPortWhileCoreUsesPrivateBackendPort() async throws {
+        let fixture = try await makeRunningFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        XCTAssertNotEqual(fixture.relayPort, fixture.runtime.mixedPort)
+        XCTAssertEqual(fixture.state.mixedPort, fixture.relayPort)
+        XCTAssertEqual(fixture.relay.currentTarget, fixture.runtime.mixedPort)
+
+        let commands = await fixture.network.arguments
+        XCTAssertTrue(commands.contains(["-setwebproxy", "Wi-Fi", "127.0.0.1", "\(fixture.relayPort)"]))
+        XCTAssertFalse(commands.contains(["-setwebproxy", "Wi-Fi", "127.0.0.1", "\(fixture.runtime.mixedPort)"]))
+
+        let snapshot = try JSONSerialization.jsonObject(
+            with: Data(contentsOf: fixture.root.appending(path: "config.json"))
+        ) as? [String: Any]
+        let inbound = try XCTUnwrap((snapshot?["inbounds"] as? [[String: Any]])?.first)
+        XCTAssertEqual(inbound["listen_port"] as? Int, Int(fixture.runtime.mixedPort))
+        XCTAssertNotEqual(inbound["listen_port"] as? Int, Int(fixture.relayPort))
+
+        await fixture.state.stop()
+        XCTAssertNil(fixture.relay.currentTarget)
     }
 
     func testCoreHealthFailureRestartsOldConfigurationAndKeepsProxyOn() async throws {
@@ -1752,8 +1775,11 @@ final class AppStateTests: XCTestCase {
             failOnceFor: failOnceFor
         )
         let runtime = try runtimeParameters()
+        var relayPort = try RuntimeSecrets.availableHighPort()
+        while relayPort == runtime.mixedPort { relayPort = try RuntimeSecrets.availableHighPort() }
         let core = SingBoxProcess(binaryURL: singBoxURL)
         let health = HealthGate(failures: healthFailures)
+        let relay = FakeLocalTCPRelay(port: relayPort)
         let state = AppState(
             storage: storage,
             subscriptionService: SubscriptionService(storage: storage) { _ in
@@ -1769,6 +1795,7 @@ final class AppStateTests: XCTestCase {
             singBoxProcess: core,
             processExitMonitor: processExitMonitor,
             notificationSender: notificationSender,
+            proxyRelay: relay,
             runtimeFactory: { _ in runtime },
             healthVerifier: health.verify(client:),
             lanResolverProbe: lanResolverProbe,
@@ -1791,7 +1818,9 @@ final class AppStateTests: XCTestCase {
             core: core,
             network: network,
             health: health,
-            runtime: runtime
+            runtime: runtime,
+            relayPort: relayPort,
+            relay: relay
         )
     }
 
@@ -1821,6 +1850,8 @@ final class AppStateTests: XCTestCase {
             takeoverEvents: events
         )
         let runtime = try runtimeParameters()
+        var relayPort = try RuntimeSecrets.availableHighPort()
+        while relayPort == runtime.mixedPort { relayPort = try RuntimeSecrets.availableHighPort() }
         let core = SingBoxProcess(binaryURL: try safeCoreExecutable(in: root))
         let privileged = FakePrivilegedLauncher(
             root: root,
@@ -1845,6 +1876,7 @@ final class AppStateTests: XCTestCase {
             processExitMonitor: processExitMonitor,
             notificationSender: notificationSender,
             privilegedLauncher: privileged,
+            proxyRelay: FakeLocalTCPRelay(port: relayPort),
             runtimeFactory: { _ in runtime },
             healthVerifier: { _ in },
             clashClientFactory: clashClientFactory,
@@ -1946,9 +1978,7 @@ final class AppStateTests: XCTestCase {
         return try DNSSettings(domesticDoH: url(from: domestic), remoteDoH: url(from: remote))
     }
 
-    /// mixed 端口必须跨启动稳定：系统代理的地址会被 Chromium 系客户端（ChatGPT.app 内嵌的
-    /// codex 服务、Chrome）缓存，每次启动换端口会让它们打死端口、反复「正在重新连接」。
-    /// 这里钉死两端——第一次分配后落盘，第二次启动把它原样喂回 runtimeFactory。
+    /// 系统代理公开 relay 端口必须跨启动稳定；sing-box mixed 后端不能复用这个公开端口。
     func testMixedPortPersistsAndIsFedBackOnNextLaunch() async throws {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1956,7 +1986,10 @@ final class AppStateTests: XCTestCase {
         try await storage.prepare()
 
         let runtime = try runtimeParameters()
-        let recorder = PreferredPortRecorder()
+        var relayPort = try RuntimeSecrets.availableHighPort()
+        while relayPort == runtime.mixedPort { relayPort = try RuntimeSecrets.availableHighPort() }
+        let runtimeRecorder = PreferredPortRecorder()
+        let relayRecorder = PreferredPortRecorder()
         let privileged = FakePrivilegedLauncher(root: root)
 
         func makeState() -> AppState {
@@ -1968,8 +2001,9 @@ final class AppStateTests: XCTestCase {
                 // 内核起不来无所谓：runtimeFactory 在配置校验之前就被调用过了。
                 singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
                 privilegedLauncher: privileged,
+                proxyRelay: FakeLocalTCPRelay(port: relayPort, preferredRecorder: relayRecorder),
                 runtimeFactory: { preferred in
-                    recorder.record(preferred)
+                    runtimeRecorder.record(preferred)
                     return runtime
                 },
                 automaticallyInitialize: false
@@ -1994,23 +2028,23 @@ final class AppStateTests: XCTestCase {
         prepare(first)
         await first.startSystemProxy()
 
-        // 首次启动没有历史端口，必须传 nil 让它随机分配。
-        XCTAssertEqual(recorder.values.count, 1)
-        XCTAssertNil(recorder.values[0])
+        XCTAssertEqual(relayRecorder.values, [nil])
+        XCTAssertEqual(runtimeRecorder.values, [nil])
 
         let persisted = try XCTUnwrap(
             JSONSerialization.jsonObject(with: Data(contentsOf: root.appending(path: "settings.json")))
                 as? [String: Any]
         )
-        XCTAssertEqual(persisted["mixedPort"] as? Int, Int(runtime.mixedPort))
+        XCTAssertNil(persisted["mixedPort"])
+        XCTAssertEqual(persisted["proxyRelayPort"] as? Int, Int(relayPort))
 
         let second = makeState()
         await second.initialize()
         prepare(second)
         await second.startSystemProxy()
 
-        XCTAssertEqual(recorder.values.count, 2)
-        XCTAssertEqual(recorder.values[1], runtime.mixedPort)
+        XCTAssertEqual(relayRecorder.values, [nil, relayPort])
+        XCTAssertEqual(runtimeRecorder.values, [nil, nil])
     }
 
     /// 端口真的换掉时必须说一声。换端口意味着系统代理设置也跟着变，缓存了旧端口的客户端
@@ -2022,10 +2056,14 @@ final class AppStateTests: XCTestCase {
         let storage = Storage(rootDirectory: root)
         try await storage.prepare()
 
-        let first = try runtimeParameters()
-        var second = try runtimeParameters()
-        while second.mixedPort == first.mixedPort { second = try runtimeParameters() }
-        let handout = RuntimeHandout(values: [first, second])
+        let runtime = try runtimeParameters()
+        var firstPort = try RuntimeSecrets.availableHighPort()
+        while firstPort == runtime.mixedPort { firstPort = try RuntimeSecrets.availableHighPort() }
+        var secondPort = try RuntimeSecrets.availableHighPort()
+        while secondPort == firstPort || secondPort == runtime.mixedPort {
+            secondPort = try RuntimeSecrets.availableHighPort()
+        }
+        let relayHandout = RelayPortHandout(values: [firstPort, secondPort])
         let privileged = FakePrivilegedLauncher(root: root)
 
         func makeState() -> AppState {
@@ -2036,7 +2074,8 @@ final class AppStateTests: XCTestCase {
                 },
                 singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
                 privilegedLauncher: privileged,
-                runtimeFactory: { _ in handout.next() },
+                proxyRelay: FakeLocalTCPRelay(port: relayHandout.next()),
+                runtimeFactory: { _ in runtime },
                 automaticallyInitialize: false
             )
         }
@@ -2072,8 +2111,8 @@ final class AppStateTests: XCTestCase {
             relaunched.warnings.first { $0.contains("被占用") },
             "端口被迫改变时必须给出可诊断的提示"
         )
-        XCTAssertTrue(notice.contains("\(first.mixedPort)"))
-        XCTAssertTrue(notice.contains("\(second.mixedPort)"))
+        XCTAssertTrue(notice.contains("\(firstPort)"))
+        XCTAssertTrue(notice.contains("\(secondPort)"))
     }
 
     /// `@Observable` 的写入不做等值判断：赋一模一样的值也会通知观察者、失效整棵视图图。
@@ -2206,6 +2245,8 @@ private struct RunningFixture {
     let network: AppNetworkSetupRecorder
     let health: HealthGate
     let runtime: RuntimeParameters
+    let relayPort: UInt16
+    let relay: FakeLocalTCPRelay
 }
 
 @MainActor
@@ -2691,6 +2732,52 @@ private final class PreferredPortRecorder: @unchecked Sendable {
 
     func record(_ port: UInt16?) {
         lock.withLock { storage.append(port) }
+    }
+}
+
+private final class RelayPortHandout: @unchecked Sendable {
+    private let lock = NSLock()
+    private let values: [UInt16]
+    private var index = 0
+
+    init(values: [UInt16]) {
+        precondition(!values.isEmpty)
+        self.values = values
+    }
+
+    func next() -> UInt16 {
+        lock.withLock {
+            let value = values[min(index, values.count - 1)]
+            index += 1
+            return value
+        }
+    }
+}
+
+private final class FakeLocalTCPRelay: LocalTCPRelaying, @unchecked Sendable {
+    private let port: UInt16
+    private let preferredRecorder: PreferredPortRecorder?
+    private let lock = NSLock()
+    private var target: UInt16?
+
+    init(port: UInt16, preferredRecorder: PreferredPortRecorder? = nil) {
+        self.port = port
+        self.preferredRecorder = preferredRecorder
+    }
+
+    var currentTarget: UInt16? { lock.withLock { target } }
+
+    func start(preferredPort: UInt16?) async throws -> UInt16 {
+        preferredRecorder?.record(preferredPort)
+        return port
+    }
+
+    func setTarget(port: UInt16?) {
+        lock.withLock { target = port }
+    }
+
+    func stop() {
+        setTarget(port: nil)
     }
 }
 

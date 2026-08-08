@@ -4,7 +4,14 @@ set -euo pipefail
 project_dir=${0:A:h:h}
 cd "$project_dir"
 
-swift test
+swift build --build-tests
+typeset -a test_bundles
+test_bundles=("$project_dir"/.build/*/debug/kongshanPackageTests.xctest(N))
+(( ${#test_bundles[@]} == 1 )) || {
+    print -u2 -- "预期唯一 XCTest bundle，实际找到 ${#test_bundles[@]} 个"
+    exit 1
+}
+xcrun xctest "$test_bundles[1]"
 zsh scripts/build_app.sh
 
 app_path=${KONGSHAN_APP_PATH:-"$project_dir/.build/kongshan.app"}

@@ -3,7 +3,7 @@ import HelperProtocol
 import XCTest
 @testable import KongshanCore
 
-/// mixed 端口跨启动复用的回归测试。
+/// App 用户态 relay 公开端口跨启动复用的回归测试。
 ///
 /// 背景：端口原本每次启动都随机。系统代理模式下它会写进系统代理设置，而 Chromium 系
 /// 客户端（ChatGPT.app 内嵌的 codex 服务、Chrome）会缓存解析到的代理地址——内核一重启
@@ -11,7 +11,7 @@ import XCTest
 final class RuntimeSecretsPortTests: XCTestCase {
     private struct SocketFailure: Error { let stage: String }
 
-    /// mixed/clash 是长期监听端口，不能从 macOS 默认临时源端口池分配。
+    /// relay 是长期监听端口，不能从 macOS 默认临时源端口池分配。
     /// 否则 TUN/系统代理切换时，旧监听刚释放就可能被任意客户端的出站连接抢占，
     /// 最终导致持久端口漂移和缓存旧代理地址的客户端断线重连。
     func testAllocatedPortsAvoidMacOSDefaultEphemeralRange() throws {
