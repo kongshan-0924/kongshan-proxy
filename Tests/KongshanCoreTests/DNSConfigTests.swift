@@ -442,8 +442,8 @@ extension DNSConfigTests {
             selectedNodeID: node.id,
             // 助手白名单要求 clash_api secret ≥16 字符（真机上是 32 字节随机的 base64）。
             runtime: RuntimeParameters(
-                mixedPort: 51_080,
-                clashPort: 51_909,
+                mixedPort: 31_080,
+                clashPort: 31_909,
                 secret: "0123456789abcdef0123456789abcdef"
             ),
             routing: RoutingConfiguration(settings: routingSettings, ruleSets: ruleSets),

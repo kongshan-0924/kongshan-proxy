@@ -3191,3 +3191,26 @@ AAAA 解析与 Happy Eyeballs 选路，于是每次都撞在 IPv6 上。
   五次 CPU 0.4/0.0/0.3/0.0/0.4%，平均 0.220%，最大 RSS 123,360 KB，无 socket/子进程/FIFO/recovery。
 - 版本：第一次候选构建生成 0.1.69；修复发布验收后按项目默认自增策略重跑，最终工作区版本为
   0.1.70/build 170。当前安装版仍是 v0.1.68 且系统代理开启，尚未提交、最终 prepare、安装或发布。
+
+### 阶段 26：v0.1.70 真机验收与 v0.1.71 端口池根因修复
+
+- v0.1.70 已正常退出旧版、备份配置并原子安装；备份归档为
+  `~/Library/Application Support/kongshan-backups/kongshan-config-0.1.70-20260808-011602.tar.gz`，SHA-256
+  `c5cff9f3c820228bcdae9d50c5b031f5d86ea0d43b8814fea70873e988675833`。设置、规则、订阅元数据和六份
+  订阅文件逐项一致；配置“奶昔”保留。UI、全量测速、配置往返、helper 重装与 TUN 数据面均通过。
+- TUN 关闭已实测 root 内核退出、DNS 和默认网关恢复 `192.168.2.1`、直连 Apple HTTPS 200；当前
+  v0.1.70 系统代理运行在 `127.0.0.1:55996`，网络正常。但切换时首选 mixed 端口从 `56758` 漂移，
+  UI 给出端口占用警告，因此阻止 v0.1.70 发布。
+- 调查推翻“helper 提前回复”的初始假设：`stopSingBox` 使用 SIGINT→SIGTERM→SIGKILL，并由 `waitpid`
+  确认子进程消失后才回复。`sysctl` 证明本机临时源端口池正是 `49152...65535`，与 App/helper 的长期
+  监听范围完全重叠；旧监听释放后可被任意客户端临时连接抢占，这是端口漂移根因。
+- 先新增 `testAllocatedPortsAvoidMacOSDefaultEphemeralRange`；旧实现连续 32 次全部失败。修复将共用白名单
+  改为 `20000...49151`，不能再用 `bind(port: 0)`，而是在允许范围内随机选择并真实 bind 探测；旧高位
+  首选端口升级时直接迁移。helper 的 loopback、secret、配置白名单等安全边界未放宽。
+- 定向回归：端口 8 项、helper 白名单 13 项、两种 TUN 信任组合、LAN DNS 白名单与配置生成均通过。
+  完整 `swift test` 为 432 执行、1 跳过、0 失败。
+- v0.1.71/build 171 M4 通过：五次 CPU 1.6/0.0/0.0/0.0/0.0%，平均 0.320%，最大 RSS 114,016 KB；
+  arm64、deep/strict、sing-box 1.13.14、M2/M3、隔离 support、无 socket/子进程/FIFO/recovery 均通过。
+  候选 App CDHash 为 `dfbc3949cce126a55280aa85f2fe55a036bb3c2c`。
+- 当前边界：尚未提交 v0.1.71、生成提交绑定的 DMG、安装或发布。下一步按 release 门禁正常退出 v0.1.70、
+  备份和原子安装；新 cdhash 需重装 helper，再做 TUN → 系统代理端口稳定性终验。

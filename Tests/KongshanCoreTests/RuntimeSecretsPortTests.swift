@@ -11,6 +11,19 @@ import XCTest
 final class RuntimeSecretsPortTests: XCTestCase {
     private struct SocketFailure: Error { let stage: String }
 
+    /// mixed/clash 是长期监听端口，不能从 macOS 默认临时源端口池分配。
+    /// 否则 TUN/系统代理切换时，旧监听刚释放就可能被任意客户端的出站连接抢占，
+    /// 最终导致持久端口漂移和缓存旧代理地址的客户端断线重连。
+    func testAllocatedPortsAvoidMacOSDefaultEphemeralRange() throws {
+        for _ in 0..<32 {
+            let port = try RuntimeSecrets.availableHighPort()
+            XCTAssertFalse(
+                (49_152...65_535).contains(Int(port)),
+                "长期监听端口 \(port) 落入 macOS 默认临时端口池"
+            )
+        }
+    }
+
     func testReusesPreferredPortWhenFree() throws {
         let first = try RuntimeSecrets.availableHighPort()
 
@@ -32,9 +45,9 @@ final class RuntimeSecretsPortTests: XCTestCase {
     }
 
     func testIgnoresPreferredPortOutsideHelperWhitelist() throws {
-        // helper 只放行 49152~65535 的回环端口。低位端口即使空闲也不能复用，
+        // helper 只放行约定的非特权回环服务端口。范围外端口即使空闲也不能复用，
         // 否则单测全绿、真机上助手直接拒掉这份配置。
-        for candidate in [UInt16(80), UInt16(8080), UInt16(1080)] {
+        for candidate in [UInt16(80), UInt16(8080), UInt16(1080), UInt16(55_996)] {
             let allocated = try RuntimeSecrets.availableHighPort(preferred: candidate)
             XCTAssertNotEqual(allocated, candidate)
             XCTAssertTrue(HelperConstants.loopbackHighPorts.contains(Int(allocated)))
@@ -83,7 +96,7 @@ final class RuntimeSecretsPortTests: XCTestCase {
 
     /// 真机事故的回归测试：2026-07-30 一次完整重启后 mixed 端口从 49609 掉到 65408，
     /// 而事后 49609 是空闲的——说明只是**瞬时**占用（旧内核尚未回收的 pcb / 别的进程的
-    /// 临时连接，端口池 49152~65535 就是 macOS 临时端口范围本身）。原实现只探一次，
+    /// 临时连接）。原实现只探一次，
     /// 于是一次瞬时冲突永久改写了落盘端口，系统代理端口跟着变，
     /// Chromium 系客户端又开始反复「正在重新连接」。这里钉死"宁可多等也别换端口"。
     func testStableHighPortWaitsForPreferredPortToBeReleased() async throws {

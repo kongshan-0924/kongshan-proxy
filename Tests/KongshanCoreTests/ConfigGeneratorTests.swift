@@ -1,3 +1,4 @@
+import HelperProtocol
 import XCTest
 @testable import KongshanCore
 
@@ -9,11 +10,11 @@ final class ConfigGeneratorTests: XCTestCase {
         let inbound = try XCTUnwrap((root["inbounds"] as? [[String: Any]])?.first)
         XCTAssertEqual(inbound["type"] as? String, "mixed")
         XCTAssertEqual(inbound["listen"] as? String, "127.0.0.1")
-        XCTAssertEqual(inbound["listen_port"] as? Int, 51_080)
+        XCTAssertEqual(inbound["listen_port"] as? Int, 31_080)
 
         let experimental = try XCTUnwrap(root["experimental"] as? [String: Any])
         let clashAPI = try XCTUnwrap(experimental["clash_api"] as? [String: Any])
-        XCTAssertEqual(clashAPI["external_controller"] as? String, "127.0.0.1:51909")
+        XCTAssertEqual(clashAPI["external_controller"] as? String, "127.0.0.1:31909")
         XCTAssertEqual(clashAPI["secret"] as? String, "runtime-secret")
 
         let outbounds = try XCTUnwrap(root["outbounds"] as? [[String: Any]])
@@ -74,9 +75,9 @@ final class ConfigGeneratorTests: XCTestCase {
         let root = try json(snapshot)
 
         XCTAssertFalse(text.contains("runtime-secret"))
-        XCTAssertFalse(text.contains("51909"))
+        XCTAssertFalse(text.contains("31909"))
         XCTAssertNil((root["experimental"] as? [String: Any])?["clash_api"])
-        XCTAssertEqual(((root["inbounds"] as? [[String: Any]])?.first)?["listen_port"] as? Int, 51_080)
+        XCTAssertEqual(((root["inbounds"] as? [[String: Any]])?.first)?["listen_port"] as? Int, 31_080)
 
         // 节点凭据同样必须脱敏：用户把 config.json 贴群/发 issue 时不能泄漏。
         // nodes 里各协议的密码 / uuid / obfs-password 必须替换为 <redacted>。
@@ -115,14 +116,14 @@ final class ConfigGeneratorTests: XCTestCase {
         }
     }
 
-    func testRuntimeSecretsAreRandomAndPortsAreHigh() throws {
+    func testRuntimeSecretsAreRandomAndPortsUseServiceRange() throws {
         let first = try RuntimeSecrets.secret()
         let second = try RuntimeSecrets.secret()
 
         XCTAssertNotEqual(first, second)
         XCTAssertEqual(Data(base64Encoded: first)?.count, 32)
         for _ in 0..<4 {
-            XCTAssertTrue((49_152...65_535).contains(Int(try RuntimeSecrets.availableHighPort())))
+            XCTAssertTrue(HelperConstants.loopbackHighPorts.contains(Int(try RuntimeSecrets.availableHighPort())))
         }
     }
 
@@ -140,7 +141,7 @@ final class ConfigGeneratorTests: XCTestCase {
         let config = try ConfigGenerator.generate(ConfigInput(
             nodes: [node],
             selectedNodeID: node.id,
-            runtime: RuntimeParameters(mixedPort: 51_180, clashPort: 51_181, secret: "test-secret")
+            runtime: RuntimeParameters(mixedPort: 31_180, clashPort: 31_181, secret: "test-secret")
         ))
         let binary = packageRoot.appending(path: "Vendor/sing-box/sing-box")
         let result = try await SingBoxProcess(binaryURL: binary).check(config: config)
@@ -152,7 +153,7 @@ final class ConfigGeneratorTests: XCTestCase {
     }
 
     private var runtime: RuntimeParameters {
-        RuntimeParameters(mixedPort: 51_080, clashPort: 51_909, secret: "runtime-secret")
+        RuntimeParameters(mixedPort: 31_080, clashPort: 31_909, secret: "runtime-secret")
     }
 
     private var packageRoot: URL {

@@ -24,7 +24,7 @@ public enum RuntimeSecretsError: Error, Equatable, LocalizedError {
         switch self {
         case let .randomGenerationFailed(status): "生成运行时 secret 失败（\(status)）"
         case let .socketCreationFailed(code): "创建本地端口探测 socket 失败（errno \(code)）"
-        case .noHighPortAvailable: "无法分配 49152 到 65535 范围内的本地端口"
+        case .noHighPortAvailable: "无法分配 20000 到 49151 范围内的本地监听端口"
         }
     }
 }
@@ -39,7 +39,7 @@ public enum RuntimeSecrets {
         return Data(bytes).base64EncodedString()
     }
 
-    /// 分配一个本地高位端口。给了 `preferred` 且它仍可绑定时原样复用。
+    /// 分配一个本地非特权监听端口。给了 `preferred` 且它仍可绑定时原样复用。
     ///
     /// 复用的理由：系统代理模式下这个端口会写进系统代理设置，而 Chromium 系客户端
     /// （ChatGPT.app 内嵌的 codex 服务、Chrome）会**缓存**解析到的代理地址。内核一重启
@@ -54,7 +54,7 @@ public enum RuntimeSecrets {
            bindLoopback(port: preferred) != nil {
             return preferred
         }
-        return try kernelChosenHighPort()
+        return try randomAvailableListeningPort()
     }
 
     /// 首选端口撞占用时的重试退避。总预算 ~1.5 秒，且只有真撞上才付这个代价。
@@ -68,12 +68,10 @@ public enum RuntimeSecrets {
     /// 和 `availableHighPort(preferred:)` 同样的语义，但首选端口撞占用时**带退避重试**。
     /// 只给需要跨启动稳定的 mixed 端口用；clash_api 端口每次随机，没有复用需求。
     ///
-    /// 为什么必须重试：端口池 `49152...65535` 就是 macOS 的临时端口范围本身，首选端口
-    /// 随时可能被别的进程的临时连接、或上一个内核尚未回收完的 pcb 短暂占住。只探一次
-    /// 就换端口的话，一次**瞬时**冲突会**永久**改写落盘端口——2026-07-30 实机就这样从
-    /// 49609 掉到 65408，而事后 49609 是空闲的。端口一变系统代理设置跟着变，
-    /// 缓存了代理地址的 Chromium 系客户端又开始反复「正在重新连接」，
-    /// 正是复用首选端口本来要根治的症状。所以这里宁可多等一秒也别换端口。
+    /// 旧版本曾从 macOS 临时端口池 `49152...65535` 分配长期监听端口；客户端出站连接
+    /// 会自动使用同一池，TUN/系统代理切换时就可能在旧监听释放后短暂抢占首选端口。
+    /// 新分配已移出临时池，但升级前的旧首选端口仍可能传进来，所以保留有限退避，
+    /// 给旧内核 pcb 正常回收的机会；仍不可用时迁移到新的监听端口范围。
     public static func stableHighPort(
         preferred: UInt16?,
         retryDelays: [Duration] = defaultPreferredPortRetryDelays
@@ -85,15 +83,16 @@ public enum RuntimeSecrets {
                 if bindLoopback(port: preferred) != nil { return preferred }
             }
         }
-        return try kernelChosenHighPort()
+        return try randomAvailableListeningPort()
     }
 
-    private static func kernelChosenHighPort() throws -> UInt16 {
-        for _ in 0..<16 {
-            // 范围与 helper 白名单同源（HelperConstants）：helper 只放行这个区间的
-            // mixed/clash_api 端口，两处各自硬编码会漂移成"测试全绿、真机被拒"。
-            guard let port = bindLoopback(port: 0) else { continue }
-            if HelperConstants.loopbackHighPorts.contains(Int(port)) { return port }
+    private static func randomAvailableListeningPort() throws -> UInt16 {
+        let allowed = HelperConstants.loopbackHighPorts
+        for _ in 0..<64 {
+            // bind(port: 0) 只能让 macOS 从临时源端口池分配，正是持久监听端口必须避开的
+            // 范围。因此在 helper 白名单内随机选候选，再用真实 bind 验证是否空闲。
+            let candidate = UInt16(Int.random(in: allowed))
+            if bindLoopback(port: candidate) != nil { return candidate }
         }
         throw RuntimeSecretsError.noHighPortAvailable
     }

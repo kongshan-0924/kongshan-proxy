@@ -1,17 +1,19 @@
 # 下一步
 
-## 2026-08-08 v0.1.70 发布候选收口
+## 2026-08-08 v0.1.71 发布候选收口
 
-实现与完整 M4 已通过，当前必须按以下顺序收口：提交全部 v0.1.68-v0.1.70 改动；运行
-`scripts/release.sh prepare` 以最终提交重建、验证 DMG 并写验证戳；运行 `install` 请求 v0.1.68 正常退出，
-确认系统代理/TUN DNS/recovery/直连网络恢复并备份配置后原子安装 v0.1.70；完成 UI、配置与运行资源验收；
-最后运行 `publish` 推送 main/tag 和 GitHub Release，核对线上资产 digest。
+v0.1.70 已安装并完成大部分真机验收，但 TUN 切回系统代理时暴露出监听端口与 macOS 临时端口池重叠。
+v0.1.71 已完成根因修复与完整 M4。当前按顺序收口：提交候选；运行 `scripts/release.sh prepare` 以最终
+提交重建、验证 DMG 并写验证戳；运行 `install` 请求 v0.1.70 正常退出，确认系统代理/TUN DNS/recovery/
+直连网络恢复并备份配置后原子安装 v0.1.71；重装 helper；再做 TUN → 系统代理端口稳定性终验。
 
 更新后 ad-hoc App 的 cdhash 会变化，免密码 TUN helper 预期提示重装。不得放宽 helper 校验；实际点击
 “重新安装”并触发管理员授权前再次由用户确认，之后验证 TUN 启停、DNS、出口和正常退出恢复。
 
-当前安装版仍在接管系统代理，任何替换都不得使用 TERM/KILL。最终发布前 `dist` 只允许保留
-`kongshan-0.1.70.dmg`，用户 Application Support 不删除、不覆盖，配置另做 0600 白名单归档。
+当前安装版仍在接管系统代理，任何替换都不得使用 TERM/KILL。终验应确认新 mixed 端口位于
+`20000...49151`，TUN 与系统代理往返后保持不变且不再出现端口漂移警告。通过后恢复配置“奶昔”和原节点，
+运行 `publish` 推送 main/v0.1.71 并创建 GitHub Release，核对 digest，删除旧 v0.1.67 Release/标签。
+最终 `dist` 只允许保留 `kongshan-0.1.71.dmg`；用户 Application Support 不删除、不覆盖。
 
 ## 2026-08-07 v0.1.68 本地部署边界
 

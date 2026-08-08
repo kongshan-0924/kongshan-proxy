@@ -185,8 +185,8 @@ final class TunConfigTests: XCTestCase {
             nodes: [node],
             selectedNodeID: node.id,
             runtime: RuntimeParameters(
-                mixedPort: 51_080,
-                clashPort: 51_909,
+                mixedPort: 31_080,
+                clashPort: 31_909,
                 secret: "0123456789abcdef"
             ),
             routing: nil,
@@ -207,12 +207,12 @@ final class TunConfigTests: XCTestCase {
     }
 
     /// 白名单回归必须覆盖真机会出现的每种组合，不能只测 TUN-only：
-    /// TUN+系统代理是最常见的（多一个 mixed 入站，走白名单的 loopback/高位端口分支），
+    /// TUN+系统代理是最常见的（多一个 mixed 入站，走白名单的 loopback/服务端口分支），
     /// TUN+直连不生成 cache_file（走 cache_file 缺省分支）。生成器一改监听地址、端口范围
     /// 或 experimental 形状，这里立刻红——否则测试全绿而真机报 "config rejected"。
     func testEveryGeneratedTUNModeCombinationPassesHelperTrustBoundary() throws {
         // 白名单要求 clash_api secret ≥ 16 字符（真机是 32 字节随机 base64）。
-        let secureRuntime = RuntimeParameters(mixedPort: 51_080, clashPort: 51_909, secret: "0123456789abcdef")
+        let secureRuntime = RuntimeParameters(mixedPort: 31_080, clashPort: 31_909, secret: "0123456789abcdef")
         let combinations: [(name: String, modes: Set<ProxyMode>, outbound: OutboundMode, expectsCache: Bool)] = [
             ("TUN", [.tun], .rule, true),
             ("TUN+系统代理", [.systemProxy, .tun], .rule, true),
@@ -318,7 +318,7 @@ final class TunConfigTests: XCTestCase {
         let config = try ConfigGenerator.generate(ConfigInput(
             nodes: [hy2],
             selectedNodeID: hy2.id,
-            runtime: RuntimeParameters(mixedPort: 51080, clashPort: 51909, secret: "verify-secret"),
+            runtime: RuntimeParameters(mixedPort: 31080, clashPort: 31909, secret: "verify-secret"),
             routing: RoutingConfiguration(
                 settings: .defaults,
                 ruleSets: ruleSets,
@@ -405,7 +405,7 @@ final class TunConfigTests: XCTestCase {
     }
 
     private var runtime: RuntimeParameters {
-        RuntimeParameters(mixedPort: 51_080, clashPort: 51_909, secret: "runtime-secret")
+        RuntimeParameters(mixedPort: 31_080, clashPort: 31_909, secret: "runtime-secret")
     }
 
     private func compileRuleSets(in directory: URL) async throws -> PreparedRuleSets {

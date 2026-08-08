@@ -28,10 +28,14 @@ public enum HelperConstants {
     public static let trustConfigVersion: Int = 3
     /// root 内核允许监听的回环地址。
     public static let loopbackAddress = "127.0.0.1"
-    /// root 内核允许监听的高位端口区间（= macOS 默认临时端口范围）。
+    /// root 内核允许监听的非特权服务端口区间。
+    ///
+    /// 必须避开 macOS 默认临时源端口池 49152...65535。mixed 端口需要跨内核重启
+    /// 稳定复用；若放在临时池里，旧监听刚释放就可能被任意客户端出站连接短暂抢占，
+    /// 导致 TUN/系统代理切换时端口漂移。
     /// App 侧 `RuntimeSecrets.availableHighPort()` 与 helper 侧 `HelperConfigWhitelist`
     /// 都读这里：两处各自硬编码会漂移，真机上表现为 helper 拒配置、TUN 起不来。
-    public static let loopbackHighPorts: ClosedRange<Int> = 49_152...65_535
+    public static let loopbackHighPorts: ClosedRange<Int> = 20_000...49_151
 }
 
 /// App → helper 的请求。**刻意不含任意路径/命令字段**——只有固定几个动作，
@@ -527,7 +531,7 @@ public enum HelperConfigWhitelist {
                 guard inbound["listen"] as? String == HelperConstants.loopbackAddress,
                       let port = inbound["listen_port"] as? Int,
                       HelperConstants.loopbackHighPorts.contains(port) else {
-                    return reject("mixed inbound must use loopback high port")
+                    return reject("mixed inbound must use loopback service port")
                 }
             }
         }
@@ -541,7 +545,7 @@ public enum HelperConfigWhitelist {
               isLoopbackHighPort(controller),
               let secret = clashAPI["secret"] as? String,
               secret.count >= 16 else {
-            return reject("clash_api must use authenticated loopback high port")
+            return reject("clash_api must use authenticated loopback service port")
         }
 
         if experimental["cache_file"] != nil {

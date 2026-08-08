@@ -16,7 +16,7 @@ final class HelperConfigWhitelistTests: XCTestCase {
         ]],
         experimental: [String: Any] = [
             "clash_api": [
-                "external_controller": "127.0.0.1:51909",
+                "external_controller": "127.0.0.1:31909",
                 "secret": "0123456789abcdef"
             ]
         ]
@@ -120,7 +120,7 @@ final class HelperConfigWhitelistTests: XCTestCase {
     func testRejectsClashAPIWithoutSecretEvenOnLoopback() {
         let config = validConfig(
             experimental: [
-                "clash_api": ["external_controller": "127.0.0.1:51909"]
+                "clash_api": ["external_controller": "127.0.0.1:31909"]
             ]
         )
         let result = HelperConfigWhitelist.validate(json(config))
@@ -142,7 +142,7 @@ final class HelperConfigWhitelistTests: XCTestCase {
     func testSanitizesCachePathIntoRootOwnedDirectory() throws {
         let config = validConfig(experimental: [
             "clash_api": [
-                "external_controller": "127.0.0.1:51909",
+                "external_controller": "127.0.0.1:31909",
                 "secret": "0123456789abcdef"
             ],
             "cache_file": [
@@ -176,7 +176,7 @@ final class HelperConfigWhitelistTests: XCTestCase {
                 ]
             ],
             "inbounds": [
-                ["type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": 51080],
+                ["type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": 31080],
                 ["type": "tun", "tag": "tun-in", "address": ["172.19.0.1/30"], "auto_route": true]
             ],
             "outbounds": [
@@ -193,7 +193,7 @@ final class HelperConfigWhitelistTests: XCTestCase {
             ],
             "experimental": [
                 "clash_api": [
-                    "external_controller": "127.0.0.1:51909",
+                    "external_controller": "127.0.0.1:31909",
                     "secret": "0123456789abcdef"
                 ],
                 "cache_file": [
