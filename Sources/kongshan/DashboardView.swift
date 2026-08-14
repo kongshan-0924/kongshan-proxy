@@ -101,7 +101,8 @@ struct DashboardView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .controlSize(.small)
-                .frame(width: 220)
+                // 弹性宽度：窄窗口下让位给开关与断开按钮，宽窗口下最多 240。
+                .frame(minWidth: 150, maxWidth: 240)
                 .help(state.outboundMode.detail)
                 .disabled(state.isBusy || !state.isReady)
 
@@ -172,8 +173,9 @@ struct DashboardView: View {
 
     /// 接管方式、当前节点与出站模式已并入 Hero 卡，这里只保留观测类指标。
     private var metrics: some View {
+        // 自适应列数：窗口拉宽时 4 列，拖窄时自动收成 3/2 列，卡片不再被压扁。
         LazyVGrid(
-            columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 4),
+            columns: [GridItem(.adaptive(minimum: 150), spacing: 10)],
             spacing: 10
         ) {
             MetricCard(symbol: "network", tint: .orange, caption: "当前出口 IP") {

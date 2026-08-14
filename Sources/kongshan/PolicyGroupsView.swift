@@ -32,6 +32,7 @@ struct PolicyGroupsView: View {
                     delays: delays,
                     isSelectable: isSelectable
                 )
+                .frame(maxWidth: .infinity)
             }
         }
         .pageBackground()
@@ -95,7 +96,8 @@ struct PolicyGroupsView: View {
         }
         .listStyle(.sidebar)
         .scrollContentBackground(.hidden)
-        .frame(width: 230)
+        // 弹性列宽：窗口拖宽时让位给右侧节点网格，拖窄时收缩但不低于 190。
+        .frame(minWidth: 190, idealWidth: 220, maxWidth: 260)
     }
 
     private func groupRow(_ group: PolicyGroup) -> some View {

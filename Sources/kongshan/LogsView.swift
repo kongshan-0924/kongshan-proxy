@@ -72,23 +72,55 @@ struct LogsView: View {
     }
 
     private var toolbar: some View {
-        HStack(spacing: 12) {
-            // 这个选择器只是"过滤内核推来的日志"，不改内核自己的 log.level（那要重启内核）。
-            // 内核按 info 输出，因此没有「调试」这一档可选——放上去只会是个点了没反应的死控件。
-            Picker("日志等级", selection: logLevelBinding) {
-                Text("信息").tag(CoreLogLevel.info)
-                Text("警告").tag(CoreLogLevel.warning)
-                Text("错误").tag(CoreLogLevel.error)
+        // 一行摆不下所有控件时自动退成两行：先量单行版，超宽就用双行版，
+        // 窗口拖窄不再把右侧开关截掉。
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                levelPicker
+                searchField
+                filterToggles
+                Spacer()
+                counter
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .controlSize(.small)
-            .frame(width: 180)
-            .disabled(!state.isOn)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    levelPicker
+                    searchField
+                    Spacer()
+                    counter
+                }
+                HStack(spacing: 12) {
+                    filterToggles
+                    Spacer()
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 12)
+    }
 
-            SearchField(text: $filterText, placeholder: "搜索日志关键词…")
-                .frame(maxWidth: 220)
+    private var levelPicker: some View {
+        // 这个选择器只是"过滤内核推来的日志"，不改内核自己的 log.level（那要重启内核）。
+        // 内核按 info 输出，因此没有「调试」这一档可选——放上去只会是个点了没反应的死控件。
+        Picker("日志等级", selection: logLevelBinding) {
+            Text("信息").tag(CoreLogLevel.info)
+            Text("警告").tag(CoreLogLevel.warning)
+            Text("错误").tag(CoreLogLevel.error)
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .controlSize(.small)
+        .frame(width: 180)
+        .disabled(!state.isOn)
+    }
 
+    private var searchField: some View {
+        SearchField(text: $filterText, placeholder: "搜索日志关键词…")
+            .frame(maxWidth: 220)
+    }
+
+    private var filterToggles: some View {
+        HStack(spacing: 12) {
             Toggle("只看问题", isOn: $showsProblemsOnly)
                 .toggleStyle(.checkbox)
                 .font(.caption)
@@ -102,15 +134,16 @@ struct LogsView: View {
             Toggle("暂停自动滚动", isOn: $pausesAutomaticScroll)
                 .toggleStyle(.checkbox)
                 .font(.caption)
-
-            Spacer()
-
-            Text("\(filteredLogs.count) / \(state.liveLogs.count)")
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.tertiary)
         }
-        .padding(.horizontal, 16)
-        .padding(.bottom, 12)
+        // 锁定理想尺寸：文字不被挤压换行，也让 ViewThatFits 量出真实宽度，
+        // 放不下时整体折成两行而不是把开关挤变形。
+        .fixedSize()
+    }
+
+    private var counter: some View {
+        Text("\(filteredLogs.count) / \(state.liveLogs.count)")
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.tertiary)
     }
 
     private var logList: some View {

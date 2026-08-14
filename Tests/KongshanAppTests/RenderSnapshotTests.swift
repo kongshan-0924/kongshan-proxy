@@ -114,6 +114,28 @@ final class RenderSnapshotTests: XCTestCase {
             size: CGSize(width: 328, height: 460),
             dark: true
         )
+
+        // 自适应对照：同一页面窄/宽各渲染一张，核对网格列数与工具条折行是否随宽度变化。
+        render(
+            DashboardView().environment(running),
+            name: "dashboard-narrow",
+            size: CGSize(width: 600, height: 700)
+        )
+        render(
+            DashboardView().environment(running),
+            name: "dashboard-wide",
+            size: CGSize(width: 1240, height: 700)
+        )
+        render(
+            LogsView().environment(state),
+            name: "logs-narrow",
+            size: CGSize(width: 560, height: 420)
+        )
+        render(
+            PolicyGroupsView().environment(state),
+            name: "policy-groups-narrow",
+            size: CGSize(width: 600, height: 640)
+        )
     }
 
     private struct BypassListsPreview: View {

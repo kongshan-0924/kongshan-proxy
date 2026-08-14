@@ -188,6 +188,10 @@ struct PageHeader<Trailing: View>: View {
                     Text(subtitle)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        // 窄窗口下右侧工具控件会挤压标题区，副标题截断成一行，
+                        // 不再折成三四行把页头撑得很高。
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                 }
             }
             Spacer(minLength: 12)

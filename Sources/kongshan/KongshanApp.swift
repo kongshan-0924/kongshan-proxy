@@ -152,7 +152,9 @@ final class KongshanAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         window.title = "kongshan"
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
-        window.minSize = NSSize(width: 820, height: 540)
+        // 各页布局已做自适应（仪表盘自适应网格、代理页弹性列、日志工具条折行），
+        // 最小尺寸可以再放小一档，小屏/分屏也能用。
+        window.minSize = NSSize(width: 760, height: 500)
         // 菜单栏应用关闭窗口后仍需常驻，窗口对象必须留存以便再次打开。
         window.isReleasedWhenClosed = false
         // 不做跨会话位置记忆：既不用 frameAutosaveName，也关掉 macOS 的窗口状态还原（Resume）。
