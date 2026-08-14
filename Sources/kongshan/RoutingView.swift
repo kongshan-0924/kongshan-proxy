@@ -20,6 +20,12 @@ struct RoutingView: View {
     @State private var routeTestKind: RouteTestKind = .domain
     @State private var routeTestInput = ""
     @State private var routeTestResult: RouteTestResult?
+    // 分区折叠状态跨会话记忆：SSH / 命中测试低频，默认收起，
+    // 把纵向空间让给下面真正常看的规则浏览器。
+    @AppStorage("routing.perApp.expanded") private var perAppExpanded = true
+    @AppStorage("routing.forcedProxy.expanded") private var forcedProxyExpanded = true
+    @AppStorage("routing.sshProxy.expanded") private var sshProxyExpanded = false
+    @AppStorage("routing.routeTester.expanded") private var routeTesterExpanded = false
 
     private var activeName: String {
         state.configItems.first { $0.id == state.activeConfigID }?.name ?? "无"
@@ -59,16 +65,26 @@ struct RoutingView: View {
 
     @ViewBuilder
     private func content(_ subscriptionRules: [SubscriptionRule]) -> some View {
-        VStack(spacing: 0) {
-            perAppSection
-            Divider()
-            forcedProxySection
-            Divider()
-            sshProxySection
-            Divider()
-            routeTesterSection
-            Divider()
-            subscriptionRulesContent(subscriptionRules)
+        GeometryReader { proxy in
+            VStack(spacing: 0) {
+                // 上半部分是低频配置表单：包一层滚动区并封顶 52% 高度。
+                // 四个分区全展开也不会把规则浏览器挤没；折叠后规则列表自动长大。
+                ScrollView {
+                    VStack(spacing: 0) {
+                        perAppSection
+                        Divider()
+                        forcedProxySection
+                        Divider()
+                        sshProxySection
+                        Divider()
+                        routeTesterSection
+                    }
+                }
+                .scrollIndicators(.hidden)
+                .frame(maxHeight: proxy.size.height * 0.52)
+                Divider()
+                subscriptionRulesContent(subscriptionRules)
+            }
         }
     }
 
@@ -80,6 +96,7 @@ struct RoutingView: View {
             } description: {
                 Text("仍会套用内置兜底：私有网段与中国大陆直连、其余走代理。切换到带规则的配置可在此查看。")
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             let keyword = ruleSearch.trimmingCharacters(in: .whitespaces).lowercased()
             let matched = keyword.isEmpty
@@ -152,28 +169,13 @@ struct RoutingView: View {
     }
 
     private var perAppSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Label("分应用代理", systemImage: "app.badge.checkmark")
-                    .font(.system(size: 13, weight: .semibold))
-                Text("按可执行进程名优先分流")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button {
-                    refreshRunningApps()
-                } label: {
-                    Label("刷新 App", systemImage: "arrow.clockwise")
-                }
-                .controlSize(.small)
-                Button {
-                    chooseInstalledApp()
-                } label: {
-                    Label("选择已安装 App", systemImage: "folder")
-                }
-                .controlSize(.small)
-            }
-
+        RoutingSection(
+            title: "分应用代理",
+            symbol: "app.badge.checkmark",
+            hint: "按可执行进程名优先分流",
+            badge: state.processRules.isEmpty ? nil : "\(state.processRules.count) 条",
+            isExpanded: $perAppExpanded
+        ) {
             HStack(spacing: 10) {
                 Picker("App", selection: $selectedProcess) {
                     if runningApps.isEmpty {
@@ -242,23 +244,33 @@ struct RoutingView: View {
                 }
                 .scrollIndicators(.hidden)
             }
+        } trailing: {
+            HStack(spacing: 8) {
+                Button {
+                    refreshRunningApps()
+                } label: {
+                    Label("刷新 App", systemImage: "arrow.clockwise")
+                }
+                .controlSize(.small)
+                Button {
+                    chooseInstalledApp()
+                } label: {
+                    Label("选择已安装 App", systemImage: "folder")
+                }
+                .controlSize(.small)
+            }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.35))
     }
 
     private var forcedProxySection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Label("强制代理", systemImage: "arrow.up.forward.app")
-                    .font(.system(size: 13, weight: .semibold))
-                Text("规则模式下优先于订阅规则和中国大陆直连")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-
+        RoutingSection(
+            title: "强制代理",
+            symbol: "arrow.up.forward.app",
+            hint: "规则模式下优先于订阅规则和中国大陆直连",
+            badge: state.forcedProxyRules.isEmpty ? nil : "\(state.forcedProxyRules.count) 条",
+            isExpanded: $forcedProxyExpanded
+        ) {
             HStack(spacing: 10) {
                 Picker("类型", selection: $forcedProxyKind) {
                     ForEach(ForcedProxyInputKind.allCases) { kind in
@@ -334,24 +346,19 @@ struct RoutingView: View {
                 .scrollIndicators(.hidden)
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.2))
         .onChange(of: forcedProxyKind) { _, _ in forcedProxyError = nil }
         .onChange(of: forcedProxyInput) { _, _ in forcedProxyError = nil }
     }
 
     private var sshProxySection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Label("SSH 走代理", systemImage: "terminal")
-                    .font(.system(size: 13, weight: .semibold))
-                Text("指定 IP 的 OpenSSH 连接通过当前节点")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-
+        RoutingSection(
+            title: "SSH 走代理",
+            symbol: "terminal",
+            hint: "指定 IP 的 OpenSSH 连接通过当前节点",
+            badge: state.sshProxyTargets.isEmpty ? nil : "\(state.sshProxyTargets.count) 条",
+            isExpanded: $sshProxyExpanded
+        ) {
             HStack(spacing: 10) {
                 TextField("IP 地址", text: $sshProxyAddress)
                     .textFieldStyle(.roundedBorder)
@@ -416,23 +423,18 @@ struct RoutingView: View {
                 .scrollIndicators(.hidden)
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.16))
         .onChange(of: sshProxyAddress) { _, _ in sshProxyError = nil }
         .onChange(of: sshProxyPort) { _, _ in sshProxyError = nil }
     }
 
     private var routeTesterSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Label("规则命中测试", systemImage: "scope")
-                    .font(.system(size: 13, weight: .semibold))
-                Text("按实际生成顺序解释本地可判定规则")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
+        RoutingSection(
+            title: "规则命中测试",
+            symbol: "scope",
+            hint: "按实际生成顺序解释本地可判定规则",
+            isExpanded: $routeTesterExpanded
+        ) {
             HStack(spacing: 10) {
                 Picker("输入类型", selection: $routeTestKind) {
                     ForEach(RouteTestKind.allCases) { kind in Text(kind.title).tag(kind) }
@@ -468,8 +470,6 @@ struct RoutingView: View {
                 .background(Theme.cardFill, in: RoundedRectangle(cornerRadius: 6))
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.12))
         .onChange(of: routeTestKind) { _, _ in routeTestResult = nil }
         .onChange(of: routeTestInput) { _, _ in routeTestResult = nil }
@@ -636,6 +636,81 @@ private enum RouteTestKind: String, CaseIterable, Identifiable {
         case .ip: "203.0.113.8"
         case .process: "Safari"
         }
+    }
+}
+
+/// 可折叠分区：标题行整行可点。规则页上半部分是低频配置表单，
+/// 收起后各占一行，把纵向空间让给下面真正常看的规则浏览器。
+/// 折叠时条目数以徽标形式留在标题行，不用展开也能看到有多少条。
+private struct RoutingSection<Content: View, Trailing: View>: View {
+    let title: String
+    let symbol: String
+    let hint: String
+    var badge: String? = nil
+    @Binding var isExpanded: Bool
+    @ViewBuilder var content: Content
+    @ViewBuilder var trailing: Trailing
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Button {
+                    withAnimation(.smooth(duration: 0.2)) { isExpanded.toggle() }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.tertiary)
+                            .frame(width: 10)
+                        Label(title, systemImage: symbol)
+                            .font(.system(size: 13, weight: .semibold))
+                        Text(hint)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        if let badge, !isExpanded {
+                            Text(badge)
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 1)
+                                .background(Color.secondary.opacity(0.12), in: Capsule())
+                        }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(isExpanded ? "折叠\(title)" : "展开\(title)")
+                Spacer(minLength: 8)
+                if isExpanded { trailing }
+            }
+            if isExpanded {
+                content
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+    }
+}
+
+extension RoutingSection where Trailing == EmptyView {
+    init(
+        title: String,
+        symbol: String,
+        hint: String,
+        badge: String? = nil,
+        isExpanded: Binding<Bool>,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.init(
+            title: title,
+            symbol: symbol,
+            hint: hint,
+            badge: badge,
+            isExpanded: isExpanded,
+            content: content
+        ) { EmptyView() }
     }
 }
 
