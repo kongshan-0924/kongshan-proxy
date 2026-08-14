@@ -1,6 +1,24 @@
 # 项目交接
 
-## 当前状态：指定 IP + SSH 端口走代理已完成源码与回归（2026-08-13）
+## 当前状态：v0.1.73 已发布 GitHub（2026-08-14）
+
+- SSH 指定目标走代理已随 **v0.1.73** 发布：提交 `70c21c9`（功能）、`88c0517`（测试修复）、
+  `9ac0e79`（版本）。没有复用 v0.1.72 版本号——v0.1.72 已先行发布到 GitHub，同一版本号下
+  替换已发布二进制会破坏校验，故升级为 v0.1.73。
+- 发布前审计中发现并修复两个既有测试的负载相关偶发：
+  `testDashboardMonitoringKeepsSixtyPointsAndIsIdempotent` 只等 60 点不等流尾，
+  断言与缓冲样本消费赛跑（xctest 单独重跑稳定复现），已改为等到最后一个样本；
+  `testTUNRestartsThreeTimesThenFourthCrashCleansUpAndNotifies` 依赖 10 秒限流窗口的
+  wall-clock，高负载下偶发超时，空闲复跑通过，未改动。
+- 发布结果：XCTest 450 项执行、1 跳过、0 失败；M4 平均 CPU 0.080%、最大 RSS 118,048 KB。
+  DMG SHA-256 `650db2d17c4d234be6d5017a600ff526c5487c202cddb4695466bdb709ade7fc`，
+  与 GitHub Release 资产 digest 一致；App CDHash `94b469bfe4723c26d93534e55a8e3fd268b8ab5f`。
+  远端只剩 v0.1.73 一个 Release（v0.1.72 Release 与标签已按惯例清理），`dist` 只有最新 DMG。
+- 当前边界：**未安装** v0.1.73 到 `/Applications`，未修改真实 `~/.ssh/config`；
+  当前安装版仍是 v0.1.72/build 172。安装走 `scripts/release.sh install`（正常退出旧版、
+  确认网络恢复、备份配置、原子替换）。App 更新后 cdhash 变化，TUN 助手会提示重装一次。
+
+## 历史：指定 IP + SSH 端口走代理已完成源码与回归（2026-08-13）
 
 - 规则页新增“SSH 走代理”，按精确 `IP + TCP 端口` 保存；支持 IPv4/IPv6、同 IP 多端口，拒绝 CIDR、
   回环地址和非法端口。`118.69.52.186:22235` 可配置，端口 22 等同 IP 其他连接不受影响。
@@ -16,7 +34,7 @@
   回滚旧特权内核，不会再错误启动第二个用户态 sing-box。系统代理路径继续使用普通进程回滚。
 - 新鲜验证：定向回归 14/14；最终 XCTest 449 项执行、1 项按预期跳过、0 失败；`swift build` 与
   `git diff --check` 通过。临时 OpenSSH `ssh -G` 验证 22235 命中 ProxyCommand、22 不命中。
-- 当前边界：尚未提交、推送、构建 DMG、安装或修改真实 `~/.ssh/config`；当前安装版和网络状态未变。
+- 已随 v0.1.73 提交、构建 DMG 并发布；未安装到本机、未修改真实 `~/.ssh/config`。
 
 ## 当前状态：v0.1.72 已安装并完成稳定端口真机验收（2026-08-09）
 
