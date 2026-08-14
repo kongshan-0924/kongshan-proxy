@@ -22,8 +22,8 @@ struct MenuBarPopoverView: View {
             Divider()
             footerSection
         }
-        .padding(14)
-        .frame(width: 300)
+        .padding(12)
+        .frame(width: 280)
     }
 
     // MARK: - 状态与节点

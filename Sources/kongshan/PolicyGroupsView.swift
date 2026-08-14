@@ -297,10 +297,10 @@ struct PolicyGroupsView: View {
         } else {
             nil
         }
-        return Button {
+        return HoverButton(isEnabled: isSelectable && !state.isBusy) {
             Task { await state.select(optionName: option.name, in: groupName) }
-        } label: {
-            VStack(alignment: .leading, spacing: 10) {
+        } label: { isHovering in
+            VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
                     Image(systemName: symbol(for: option, selected: isSelected))
                         .font(.system(size: 12))
@@ -309,7 +309,7 @@ struct PolicyGroupsView: View {
                        let flag = metadata?.flag,
                        !node.name.contains(flag) {
                         Text(flag)
-                            .font(.system(size: 15))
+                            .font(.system(size: 14))
                     }
                     Text(option.name)
                         .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
@@ -343,23 +343,28 @@ struct PolicyGroupsView: View {
                     Spacer(minLength: 0)
                 }
             }
-            .frame(maxWidth: .infinity, minHeight: 72, alignment: .topLeading)
-            .padding(12)
+            .frame(maxWidth: .infinity, minHeight: 60, alignment: .topLeading)
+            .padding(10)
             .background(
-                isSelected ? AnyShapeStyle(Color.accentColor.opacity(0.09)) : AnyShapeStyle(Theme.cardFill),
-                in: RoundedRectangle(cornerRadius: 8)
+                isSelected
+                    ? AnyShapeStyle(Color.accentColor.opacity(0.09))
+                    : AnyShapeStyle(Theme.cardFill),
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 8)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .strokeBorder(
-                        isSelected ? Color.accentColor.opacity(0.8) : Color.secondary.opacity(0.18),
+                        isSelected
+                            ? Color.accentColor.opacity(0.8)
+                            : Color.secondary.opacity(isHovering ? 0.4 : 0.18),
                         lineWidth: isSelected ? 1.5 : 0.5
                     )
             )
-            .contentShape(RoundedRectangle(cornerRadius: 8))
+            // 悬停微抬：一点点阴影和描边加深，让整卡可点这件事能被"摸"出来。
+            .shadow(color: .black.opacity(isHovering ? 0.12 : 0), radius: 4, y: 2)
+            .animation(.smooth(duration: 0.15), value: isHovering)
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
-        .buttonStyle(.plain)
-        .disabled(state.isBusy || !isSelectable)
         .help(helpText(for: option, isSelectable: isSelectable))
     }
 

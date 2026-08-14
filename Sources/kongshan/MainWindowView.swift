@@ -25,7 +25,7 @@ struct MainWindowView: View {
                 }
             }
             .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(min: 186, ideal: 200, max: 250)
+            .navigationSplitViewColumnWidth(min: 168, ideal: 184, max: 230)
             .toolbar(removing: .sidebarToggle)
             .safeAreaInset(edge: .bottom, spacing: 0) { sidebarStatus }
         } detail: {
@@ -65,6 +65,20 @@ struct MainWindowView: View {
                 .help(columnVisibility == .detailOnly ? "显示侧边栏" : "隐藏侧边栏")
                 .accessibilityLabel(columnVisibility == .detailOnly ? "显示侧边栏" : "隐藏侧边栏")
             }
+        }
+        // ⌘1~⌘8 直接切页，与侧栏顺序一致。零尺寸透明按钮藏在背景里，
+        // 只提供快捷键，不参与布局与渲染。
+        .background {
+            HStack(spacing: 0) {
+                ForEach(Array(SidebarPage.allCases.enumerated()), id: \.element) { index, page in
+                    Button(page.title) { selection = page }
+                        .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: .command)
+                }
+            }
+            .frame(width: 0, height: 0)
+            .opacity(0)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
         }
         .navigationTitle("kongshan")
     }
@@ -106,32 +120,37 @@ private struct GlobalNoticeBar: View {
     @Binding var selection: SidebarPage?
 
     var body: some View {
-        if let notice = latestNotice {
-            HStack(spacing: 8) {
-                Image(systemName: notice.symbol)
-                    .font(.system(size: 11))
-                    .foregroundStyle(notice.tint)
-                Text(notice.text)
-                    .font(.caption)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .textSelection(.enabled)
-                if notice.count > 1 {
-                    Text("共 \(notice.count) 条")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+        // 出现/消失用 0.2 秒滑入滑出，避免硬切；动画挂在容器上才能驱动插入/移除过渡。
+        VStack(spacing: 0) {
+            if let notice = latestNotice {
+                HStack(spacing: 8) {
+                    Image(systemName: notice.symbol)
+                        .font(.system(size: 11))
+                        .foregroundStyle(notice.tint)
+                    Text(notice.text)
+                        .font(.caption)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                    if notice.count > 1 {
+                        Text("共 \(notice.count) 条")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 8)
+                    Button("查看") { selection = .messages }
+                        .controlSize(.small)
+                    Button(notice.dismissTitle, action: notice.dismiss)
+                        .controlSize(.small)
                 }
-                Spacer(minLength: 8)
-                Button("查看") { selection = .messages }
-                    .controlSize(.small)
-                Button(notice.dismissTitle, action: notice.dismiss)
-                    .controlSize(.small)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                .background(notice.tint.opacity(0.09))
+                .overlay(alignment: .bottom) { Divider() }
+                .transition(.move(edge: .top).combined(with: .opacity))
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 6)
-            .background(notice.tint.opacity(0.09))
-            .overlay(alignment: .bottom) { Divider() }
         }
+        .animation(.smooth(duration: 0.2), value: latestNotice != nil)
     }
 
     private var latestNotice: NoticeData? {
@@ -401,8 +420,8 @@ struct NodesView: View {
         .padding(.vertical, 8)
         .background(Theme.cardFill, in: RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary.opacity(0.6), lineWidth: 0.5))
-        .padding(.horizontal, 22)
-        .padding(.bottom, 12)
+        .padding(.horizontal, 16)
+        .padding(.bottom, 10)
     }
 
     private var configSummary: String {

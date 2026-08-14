@@ -144,7 +144,7 @@ final class KongshanAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     private func makeMainWindowController() -> NSWindowController {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 960, height: 640),
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -152,7 +152,7 @@ final class KongshanAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         window.title = "kongshan"
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
-        window.minSize = NSSize(width: 880, height: 560)
+        window.minSize = NSSize(width: 820, height: 540)
         // 菜单栏应用关闭窗口后仍需常驻，窗口对象必须留存以便再次打开。
         window.isReleasedWhenClosed = false
         // 不做跨会话位置记忆：既不用 frameAutosaveName，也关掉 macOS 的窗口状态还原（Resume）。

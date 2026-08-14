@@ -109,7 +109,7 @@ struct LogsView: View {
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.tertiary)
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, 16)
         .padding(.bottom, 12)
     }
 
@@ -137,7 +137,7 @@ struct LogsView: View {
                         }
                     }
                 }
-                .padding(.horizontal, 20)
+                .padding(.horizontal, 16)
             }
             .scrollIndicators(.hidden)
             .background(Color(nsColor: .textBackgroundColor))

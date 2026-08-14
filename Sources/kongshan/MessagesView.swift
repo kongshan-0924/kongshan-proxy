@@ -55,7 +55,7 @@ struct MessagesView: View {
                     .padding(.top, 80)
                 }
             }
-            .padding(.horizontal, 20)
+            .padding(.horizontal, 16)
         }
         .scrollIndicators(.hidden)
     }
@@ -72,7 +72,7 @@ struct MessagesView: View {
                         .padding(.top, 80)
                 }
             }
-            .padding(.horizontal, 20)
+            .padding(.horizontal, 16)
         }
         .scrollIndicators(.hidden)
     }

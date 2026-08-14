@@ -9,6 +9,7 @@ struct ConnectionsView: View {
     @State private var searchText = ""
     @State private var sortOption: ConnectionSortOption = .defaultOrder
     @State private var inspectedConnection: ConnectionLiveDetail?
+    @State private var confirmsCloseAll = false
 
     private var filteredConnections: [ConnectionLiveDetail] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -102,11 +103,24 @@ struct ConnectionsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Button(role: .destructive) {
-                    Task { await state.closeAllActiveConnections() }
+                    confirmsCloseAll = true
                 } label: {
                     Label("全部关闭", systemImage: "xmark.circle")
                 }
                 .disabled(state.connections.isEmpty)
+                // 误点一下会掐掉所有进行中的下载和长连接，必须有确认。
+                .confirmationDialog(
+                    "关闭全部 \(state.connections.count) 条活跃连接？",
+                    isPresented: $confirmsCloseAll,
+                    titleVisibility: .visible
+                ) {
+                    Button("全部关闭", role: .destructive) {
+                        Task { await state.closeAllActiveConnections() }
+                    }
+                    Button("取消", role: .cancel) {}
+                } message: {
+                    Text("进行中的下载和长连接会立即断开，应用通常会自行重连。")
+                }
             }
         }
     }

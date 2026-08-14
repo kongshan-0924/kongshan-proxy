@@ -3,7 +3,7 @@ import SwiftUI
 
 /// 全局视觉常量与格式化工具。风格参考 Surge / Stash：克制配色、圆角卡片、等宽数字，无动效。
 enum Theme {
-    static let cardRadius: CGFloat = 14
+    static let cardRadius: CGFloat = 10
     static let cardFill = Color(nsColor: .controlBackgroundColor)
     static let pageFill = Color(nsColor: .windowBackgroundColor)
 
@@ -77,12 +77,13 @@ extension AppState {
 extension View {
     /// 卡片容器：卡面用 controlBackgroundColor（浅色下为白），配柔和投影浮在页面灰底上。
     /// 不用 `.background` / `.background.secondary`——这两者在浅色下几乎同色，分不出层次。
-    func card(padding: CGFloat = 16) -> some View {
+    /// 连续圆角更贴合 macOS 原生观感。
+    func card(padding: CGFloat = 12) -> some View {
         self
             .padding(padding)
-            .background(Theme.cardFill, in: RoundedRectangle(cornerRadius: Theme.cardRadius))
+            .background(Theme.cardFill, in: RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: Theme.cardRadius)
+                RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
                     .strokeBorder(.quaternary.opacity(0.45), lineWidth: 0.5)
             )
             .shadow(color: .black.opacity(0.07), radius: 3, y: 1)
@@ -180,9 +181,9 @@ struct PageHeader<Trailing: View>: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.system(size: 17, weight: .semibold))
+                    .font(.system(size: 15, weight: .semibold))
                 if let subtitle {
                     Text(subtitle)
                         .font(.caption)
@@ -192,9 +193,9 @@ struct PageHeader<Trailing: View>: View {
             Spacer(minLength: 12)
             trailing
         }
-        .padding(.horizontal, 20)
-        .padding(.top, 16)
-        .padding(.bottom, 12)
+        .padding(.horizontal, 16)
+        .padding(.top, 12)
+        .padding(.bottom, 10)
     }
 }
 
@@ -254,3 +255,27 @@ struct SearchField: View {
     }
 }
 
+
+/// 带悬停状态的 plain 按钮：label 收到当前悬停标志，用于卡片/行的悬浮反馈。
+/// 悬停追踪只有进入/离开两次事件，不参与高频刷新，开销可忽略。
+struct HoverButton<Label: View>: View {
+    let isEnabled: Bool
+    let action: () -> Void
+    @ViewBuilder let label: (Bool) -> Label
+    @State private var isHovering = false
+
+    init(isEnabled: Bool = true, action: @escaping () -> Void, @ViewBuilder label: @escaping (Bool) -> Label) {
+        self.isEnabled = isEnabled
+        self.action = action
+        self.label = label
+    }
+
+    var body: some View {
+        Button(action: action) {
+            label(isHovering)
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .onHover { isHovering = $0 }
+    }
+}

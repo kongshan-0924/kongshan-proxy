@@ -243,7 +243,7 @@ struct RoutingView: View {
                 .scrollIndicators(.hidden)
             }
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.35))
     }
@@ -334,7 +334,7 @@ struct RoutingView: View {
                 .scrollIndicators(.hidden)
             }
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.2))
         .onChange(of: forcedProxyKind) { _, _ in forcedProxyError = nil }
@@ -416,7 +416,7 @@ struct RoutingView: View {
                 .scrollIndicators(.hidden)
             }
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.16))
         .onChange(of: sshProxyAddress) { _, _ in sshProxyError = nil }
@@ -468,7 +468,7 @@ struct RoutingView: View {
                 .background(Theme.cardFill, in: RoundedRectangle(cornerRadius: 6))
             }
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.12))
         .onChange(of: routeTestKind) { _, _ in routeTestResult = nil }

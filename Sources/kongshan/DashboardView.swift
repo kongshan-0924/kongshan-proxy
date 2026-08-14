@@ -10,7 +10,7 @@ struct DashboardView: View {
             PageHeader(title: "仪表盘", subtitle: "系统状态与实时网络流量监控")
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 12) {
                     heroControlCard
                     coreOnlyBanner
                     metrics
@@ -25,8 +25,8 @@ struct DashboardView: View {
                         .frame(maxWidth: .infinity, minHeight: 150)
                     }
                 }
-                .padding(.horizontal, 22)
-                .padding(.bottom, 22)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 16)
             }
             .scrollIndicators(.hidden)
         }
@@ -124,7 +124,7 @@ struct DashboardView: View {
                 }
             }
         }
-        .card(padding: 16)
+        .card()
     }
 
     private func heroRate(symbol: String, tint: Color, title: String, value: Int64) -> some View {
@@ -150,7 +150,7 @@ struct DashboardView: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .frame(width: 118, alignment: .leading)
+        .frame(width: 108, alignment: .leading)
     }
 
     private func modeToggle(title: String, mode: ProxyMode) -> some View {
@@ -173,8 +173,8 @@ struct DashboardView: View {
     /// 接管方式、当前节点与出站模式已并入 Hero 卡，这里只保留观测类指标。
     private var metrics: some View {
         LazyVGrid(
-            columns: Array(repeating: GridItem(.flexible(), spacing: 14), count: 4),
-            spacing: 14
+            columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 4),
+            spacing: 10
         ) {
             MetricCard(symbol: "network", tint: .orange, caption: "当前出口 IP") {
                 exitDiagnosticsValue
@@ -294,12 +294,12 @@ struct DashboardView: View {
     /// 三块各自跟踪 Observation：速率每秒变，只更新标题；累计量和图表互不牵连。
     private struct DashboardTrafficCard: View {
         var body: some View {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 10) {
                 TrafficHeader()
                 SessionTrafficRow()
                 TrafficPlot()
             }
-            .card(padding: 18)
+            .card()
         }
     }
 
@@ -444,7 +444,7 @@ struct DashboardView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            .frame(height: 200)
+            .frame(height: 170)
             .transaction { transaction in transaction.animation = nil }
             .overlay {
                 if state.trafficHistory.isEmpty {
@@ -516,8 +516,8 @@ private struct MetricCard<Value: View, Corner: View>: View {
                 .truncationMode(.middle)
                 .accessibilityLabel(Text(caption))
         }
-        .frame(maxWidth: .infinity, minHeight: 104, alignment: .leading)
-        .card(padding: 16)
+        .frame(maxWidth: .infinity, minHeight: 88, alignment: .leading)
+        .card()
     }
 }
 
