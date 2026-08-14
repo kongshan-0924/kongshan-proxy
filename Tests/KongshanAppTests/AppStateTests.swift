@@ -1086,8 +1086,12 @@ final class AppStateTests: XCTestCase {
 
         fixture.state.startDashboardMonitoring()
         fixture.state.startDashboardMonitoring()
+        // 60 点在第 240 个样本左右就凑齐了，此时流里还有约 10 个缓冲样本没被消费；
+        // 只等点数会让断言和剩余样本的消费赛跑（xctest 单独重跑时稳定复现）。
+        // 必须等到速率到达最后一个样本 249，曲线截断后的序列才是确定的。
         try await waitUntil {
             fixture.state.trafficHistory.count == 60 && fixture.state.activeConnectionCount == 2
+                && fixture.state.uploadRate == 249
         }
 
         // 最后一个样本是 249，速率发布仍要到达它。
