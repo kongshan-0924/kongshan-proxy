@@ -3,6 +3,62 @@ import XCTest
 @testable import KongshanCore
 
 final class RoutingConfigTests: XCTestCase {
+    func testDirectModeStillValidatesSSHProxyTargets() throws {
+        var settings = RoutingSettings.defaults
+        settings.sshProxyTargets = [SSHProxyTarget(address: "not-an-ip", port: 22)]
+        let baseInput = input(
+            settings: settings,
+            ruleSets: PreparedRuleSets(
+                geositeCN: URL(fileURLWithPath: "/tmp/geosite-cn.srs"),
+                geoipCN: URL(fileURLWithPath: "/tmp/geoip-cn.srs"),
+                ads: nil
+            )
+        )
+        let configInput = ConfigInput(
+            nodes: baseInput.nodes,
+            selectedNodeID: baseInput.selectedNodeID,
+            runtime: baseInput.runtime,
+            routing: baseInput.routing,
+            enabledModes: [.tun],
+            outboundMode: .direct
+        )
+
+        XCTAssertThrowsError(try ConfigGenerator.generate(configInput))
+    }
+
+    func testSSHProxyTargetCreatesPortScopedRuleAndMixedInboundForTun() throws {
+        var settings = RoutingSettings.defaults
+        settings.sshProxyTargets = [SSHProxyTarget(address: "118.69.52.186", port: 22_235)]
+        var configInput = input(
+            settings: settings,
+            ruleSets: PreparedRuleSets(
+                geositeCN: URL(fileURLWithPath: "/tmp/geosite-cn.srs"),
+                geoipCN: URL(fileURLWithPath: "/tmp/geoip-cn.srs"),
+                ads: nil
+            )
+        )
+        configInput = ConfigInput(
+            nodes: configInput.nodes,
+            selectedNodeID: configInput.selectedNodeID,
+            runtime: configInput.runtime,
+            routing: configInput.routing,
+            enabledModes: [.tun],
+            outboundMode: .direct
+        )
+        let root = try json(try ConfigGenerator.generate(configInput))
+
+        let inbounds = try XCTUnwrap(root["inbounds"] as? [[String: Any]])
+        XCTAssertEqual(inbounds.map { $0["type"] as? String }, ["mixed", "tun"])
+        let route = try XCTUnwrap(root["route"] as? [String: Any])
+        let rules = try XCTUnwrap(route["rules"] as? [[String: Any]])
+        XCTAssertEqual(rules.count, 2, "sniff 加一条 SSH 规则")
+        XCTAssertEqual(rules[1]["ip_cidr"] as? [String], ["118.69.52.186/32"])
+        XCTAssertEqual(rules[1]["port"] as? [Int], [22_235])
+        XCTAssertEqual(rules[1]["network"] as? [String], ["tcp"])
+        XCTAssertNotEqual(rules[1]["outbound"] as? String, "direct")
+        XCTAssertEqual(route["final"] as? String, "direct")
+    }
+
     func testGeneratesPrioritizedRouteRulesAndLocalRuleSets() throws {
         let rules = [
             CustomRouteRule(order: 4, type: .processName, value: "backup", action: .proxy, proxyGroup: "手动选择"),

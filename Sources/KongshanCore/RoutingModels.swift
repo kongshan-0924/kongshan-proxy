@@ -91,13 +91,26 @@ public struct CustomRouteRule: Identifiable, Codable, Hashable, Sendable {
         if value.contains("/") {
             return IPNetwork(value) == nil ? nil : value
         }
+        guard let address = normalizedIPAddress(value) else { return nil }
+        return address.contains(":") ? "\(address)/128" : "\(address)/32"
+    }
+
+    /// OpenSSH 的 Host 规则只接受单个主机地址，不能把 CIDR 伪装成可用的匹配。
+    /// 同时用 inet_ntop 统一 IPv6 写法，避免同一地址被重复添加。
+    public static func normalizedIPAddress(_ value: String) -> String? {
+        let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.contains("/") else { return nil }
         var ipv4 = in_addr()
         if value.withCString({ inet_pton(AF_INET, $0, &ipv4) }) == 1 {
-            return "\(value)/32"
+            var buffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+            guard inet_ntop(AF_INET, &ipv4, &buffer, socklen_t(buffer.count)) != nil else { return nil }
+            return String(decoding: buffer.prefix { $0 != 0 }.map(UInt8.init(bitPattern:)), as: UTF8.self)
         }
         var ipv6 = in6_addr()
         if value.withCString({ inet_pton(AF_INET6, $0, &ipv6) }) == 1 {
-            return "\(value)/128"
+            var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+            guard inet_ntop(AF_INET6, &ipv6, &buffer, socklen_t(buffer.count)) != nil else { return nil }
+            return String(decoding: buffer.prefix { $0 != 0 }.map(UInt8.init(bitPattern:)), as: UTF8.self)
         }
         return nil
     }
@@ -143,6 +156,32 @@ public struct CustomRouteRule: Identifiable, Codable, Hashable, Sendable {
         return network.contains(host)
     }
 
+}
+
+public struct SSHProxyTarget: Identifiable, Codable, Equatable, Hashable, Sendable {
+    public var id: String { "\(address):\(port)" }
+    public var address: String
+    public var port: UInt16
+
+    public init(address: String, port: UInt16 = 22) {
+        self.address = address
+        self.port = port
+    }
+
+    public func validated() throws -> SSHProxyTarget {
+        guard let address = CustomRouteRule.normalizedIPAddress(address) else {
+            throw RoutingValidationError.invalidSSHProxyAddress(address)
+        }
+        guard !CustomRouteRule.isLoopbackCIDR(address) else {
+            throw RoutingValidationError.loopbackForcedProxy
+        }
+        guard port > 0 else { throw RoutingValidationError.invalidSSHProxyPort(Int(port)) }
+        return SSHProxyTarget(address: address, port: port)
+    }
+
+    public var hostCIDR: String {
+        address.contains(":") ? "\(address)/128" : "\(address)/32"
+    }
 }
 
 private struct IPNetwork {
@@ -496,6 +535,9 @@ public struct RoutingSettings: Codable, Equatable, Sendable {
     /// 用户自定义策略组，按服务分流时使用（对应 Stash 的 Netflix / YouTube 等分组）。
     public var policyGroups: [PolicyGroup] = []
     public var customRules: [CustomRouteRule]
+    /// 使用 OpenSSH ProxyCommand 送入本地 mixed 入口的精确 IP。
+    /// 与 customRules 分开，避免把“仅 SSH”误表达为整个 IP 的 TUN 流量规则。
+    public var sshProxyTargets: [SSHProxyTarget]
     public var bypassDomains: [String]
     public var bypassCIDRs: [String]
     /// 强制跳过 TUN 的网段（写入 tun inbound 的 `route_exclude_address`）。
@@ -509,10 +551,12 @@ public struct RoutingSettings: Codable, Equatable, Sendable {
         bypassCIDRs: [String],
         tunExcludeCIDRs: [String] = RoutingSettings.defaultTunExcludeCIDRs,
         policyGroups: [PolicyGroup] = [],
+        sshProxyTargets: [SSHProxyTarget] = [],
         blockAds: Bool
     ) {
         self.policyGroups = policyGroups
         self.customRules = customRules
+        self.sshProxyTargets = sshProxyTargets
         self.bypassDomains = bypassDomains
         self.bypassCIDRs = bypassCIDRs
         self.tunExcludeCIDRs = tunExcludeCIDRs
@@ -523,6 +567,7 @@ public struct RoutingSettings: Codable, Equatable, Sendable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         customRules = try container.decode([CustomRouteRule].self, forKey: .customRules)
+        sshProxyTargets = try container.decodeIfPresent([SSHProxyTarget].self, forKey: .sshProxyTargets) ?? []
         bypassDomains = try container.decode([String].self, forKey: .bypassDomains)
         bypassCIDRs = try container.decode([String].self, forKey: .bypassCIDRs)
         tunExcludeCIDRs = try container.decodeIfPresent([String].self, forKey: .tunExcludeCIDRs)
@@ -644,6 +689,9 @@ public struct RoutingSettings: Codable, Equatable, Sendable {
             throw RoutingValidationError.duplicatePolicyGroupName
         }
         settings.customRules = try customRules.map { try $0.validated() }.sorted { $0.order < $1.order }
+        settings.sshProxyTargets = try sshProxyTargets.map { try $0.validated() }
+        var seenSSHTargets = Set<SSHProxyTarget>()
+        settings.sshProxyTargets = settings.sshProxyTargets.filter { seenSSHTargets.insert($0).inserted }
         settings.bypassDomains = try bypassDomains.map { domain in
             let value = domain.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !value.isEmpty else { throw RoutingValidationError.emptyBypassDomain }
@@ -677,6 +725,8 @@ public enum RoutingValidationError: Error, Equatable, LocalizedError {
     case invalidForcedProxyDomain(String)
     case loopbackForcedProxy
     case unsupportedForcedProxyRuleType
+    case invalidSSHProxyAddress(String)
+    case invalidSSHProxyPort(Int)
     case missingProxyGroup
     case emptyBypassDomain
 
@@ -687,6 +737,8 @@ public enum RoutingValidationError: Error, Equatable, LocalizedError {
         case let .invalidForcedProxyDomain(value): "域名无效：\(value)。请输入域名，不要包含协议、端口或路径"
         case .loopbackForcedProxy: "回环地址必须保持直连，以免代理控制接口形成自指"
         case .unsupportedForcedProxyRuleType: "强制代理仅支持域名或 IP / CIDR"
+        case let .invalidSSHProxyAddress(value): "SSH 代理目标必须是单个 IPv4 或 IPv6 地址：\(value)"
+        case let .invalidSSHProxyPort(port): "SSH 端口无效：\(port)"
         case .missingProxyGroup: "代理规则必须选择策略组"
         case .emptyBypassDomain: "绕过域名不能为空"
         case .emptyPolicyGroupName: "策略组名称不能为空"

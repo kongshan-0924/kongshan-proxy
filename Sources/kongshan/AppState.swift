@@ -262,6 +262,10 @@ final class AppState {
             .sorted { $0.order < $1.order }
     }
 
+    var sshProxyTargets: [SSHProxyTarget] {
+        routingSettings.sshProxyTargets
+    }
+
     /// 全部配置：每个订阅一项，另有自建节点时追加「本地节点」。
     var configItems: [ConfigItem] {
         var items = subscriptions.map { source in
@@ -334,6 +338,7 @@ final class AppState {
     @ObservationIgnored private let ruleSetService: RuleSetService
     @ObservationIgnored private let systemProxyManager: SystemProxyManager
     @ObservationIgnored private let proxyRelay: any LocalTCPRelaying
+    @ObservationIgnored private let sshProxyConfigManager: any SSHProxyConfigManaging
     @ObservationIgnored private let systemDNSManager: SystemDNSManager
     /// 网络路径监听（切 Wi-Fi / 插网线 / 新服务出现时补挂代理与 DNS）。事件驱动，非轮询。
     @ObservationIgnored private var pathMonitor: NWPathMonitor?
@@ -427,6 +432,7 @@ final class AppState {
         loginItemManager: (any LoginItemManaging)? = nil,
         privilegedLauncher: (any PrivilegedLaunching)? = nil,
         proxyRelay: (any LocalTCPRelaying)? = nil,
+        sshProxyConfigManager: (any SSHProxyConfigManaging)? = nil,
         runtimeFactory: RuntimeFactory? = nil,
         healthVerifier: HealthVerifier? = nil,
         clashClientFactory: ClashClientFactory? = nil,
@@ -447,6 +453,8 @@ final class AppState {
         self.ruleSetService = ruleSetService ?? RuleSetService(storage: storage, binaryURL: binaryURL)
         self.systemProxyManager = systemProxyManager ?? SystemProxyManager(storage: storage)
         self.proxyRelay = proxyRelay ?? LocalTCPRelay()
+        self.sshProxyConfigManager = sshProxyConfigManager
+            ?? (automaticallyInitialize ? SSHProxyConfigManager() : InertSSHProxyConfigManager())
         self.systemDNSManager = systemDNSManager ?? SystemDNSManager(storage: storage)
         self.singBoxProcess = singBoxProcess ?? SingBoxProcess(
             binaryURL: binaryURL,
@@ -610,6 +618,11 @@ final class AppState {
             try await storage.prepare()
             // 大订阅 YAML 的解析已挪到后台线程（见 loadPersistedState），不再卡住启动。
             try await loadPersistedState()
+            do {
+                try await syncSSHProxyConfiguration()
+            } catch {
+                appendWarning("SSH 代理配置同步失败：\(error.localizedDescription)")
+            }
             isReady = true
             loginItemStatus = await loginItemManager.currentStatus()
             await rescheduleSubscriptionUpdates()
@@ -667,7 +680,8 @@ final class AppState {
         do {
             let prepared = try await ruleSetService.prepare(includeAds: routingSettings.blockAds, mirror: ruleSetSettings.mirror, allowsNetwork: ruleSetSettings.autoUpdate)
             appendWarnings(prepared.warnings)
-            let relayPort = usesSystemProxy
+            let needsRelay = usesSystemProxy || !routingSettings.sshProxyTargets.isEmpty
+            let relayPort = needsRelay
                 ? try await proxyRelay.start(preferredPort: preferredRelayPort)
                 : nil
             if preferredRelayPort != relayPort, let relayPort {
@@ -722,9 +736,16 @@ final class AppState {
                 startedPID = await singBoxProcess.currentPID
             }
             try await healthVerifier(client)
-            if usesSystemProxy {
+            if needsRelay {
                 guard let relayPort else { throw AppStateError.missingRuntimeState }
                 proxyRelay.setTarget(port: runtime.mixedPort)
+                try await sshProxyConfigManager.apply(
+                    targets: routingSettings.sshProxyTargets,
+                    relayPort: relayPort
+                )
+            }
+            if usesSystemProxy {
+                guard let relayPort else { throw AppStateError.missingRuntimeState }
                 try await systemProxyManager.enable(
                     port: Int(relayPort),
                     bypassDomains: bypassEntries(for: routingSettings)
@@ -779,6 +800,11 @@ final class AppState {
                 try await systemDNSManager.restore()
             } catch {
                 restoreFailures.append("系统 DNS（系统设置 → 网络 → 详细信息 → DNS）")
+            }
+            do {
+                try await sshProxyConfigManager.apply(targets: [], relayPort: nil)
+            } catch {
+                restoreFailures.append("SSH 代理配置（~/.ssh/config）")
             }
             let restoreNote = restoreFailures.isEmpty
                 ? ""
@@ -836,6 +862,12 @@ final class AppState {
         // TUN 地址，到下次启动 recoverIfNeeded 重试之前，用户是实打实的断网/解析瘫痪。
         // 这里只收集失败项，停完内核后统一升成 errorMessage + 手工恢复指引。
         var restoreFailures: [String] = []
+        do {
+            // 规则仍保存在 rules.json；这里只撤下会指向即将停止内核的 ProxyCommand。
+            try await sshProxyConfigManager.apply(targets: [], relayPort: nil)
+        } catch {
+            restoreFailures.append("SSH 代理配置（~/.ssh/config）：\(error.localizedDescription)")
+        }
         if stoppingModes.contains(.systemProxy) {
             do {
                 try await systemProxyManager.restore()
@@ -856,6 +888,16 @@ final class AppState {
             do {
                 try await stopTUN()
             } catch {
+                if let relayPort = mixedPort, !routingSettings.sshProxyTargets.isEmpty {
+                    do {
+                        try await sshProxyConfigManager.apply(
+                            targets: routingSettings.sshProxyTargets,
+                            relayPort: relayPort
+                        )
+                    } catch {
+                        restoreFailures.append("SSH 代理配置恢复失败：\(error.localizedDescription)")
+                    }
+                }
                 // 这条早退路径原来会把已收集的还原失败一起丢掉——而"TUN 停不掉"恰恰是
                 // 最需要同时告知"系统 DNS 也没还原"的场景（否则用户完全不知道网为什么全废）。
                 let restoreNote = restoreFailures.isEmpty
@@ -926,6 +968,7 @@ final class AppState {
                 try await recoverTUNIfNeeded()
                 try await systemProxyManager.recoverIfNeeded()
                 try await systemDNSManager.recoverIfNeeded()
+                try await sshProxyConfigManager.apply(targets: [], relayPort: nil)
                 clearRuntimeState()
                 status = .off
                 proxyRelay.stop()
@@ -1925,8 +1968,15 @@ final class AppState {
         do {
             let settings = try requestedSettings.validated()
             guard status == .on else {
+                let oldSettings = routingSettings
+                try await syncSSHProxyConfiguration(for: settings)
+                do {
+                    try await persistRoutingSettings(settings)
+                } catch {
+                    try? await syncSSHProxyConfiguration(for: oldSettings)
+                    throw error
+                }
                 routingSettings = settings
-                try await persistRoutingSettings()
                 errorMessage = nil
                 return true
             }
@@ -1938,6 +1988,15 @@ final class AppState {
             }
 
             let oldSettings = routingSettings
+            let needsRelay = activeModes.contains(.systemProxy) || !settings.sshProxyTargets.isEmpty
+            let previouslyNeededRelay = activeModes.contains(.systemProxy) || !oldSettings.sshProxyTargets.isEmpty
+            let relayPort = needsRelay
+                ? try await proxyRelay.start(preferredPort: preferredRelayPort)
+                : nil
+            if preferredRelayPort != relayPort, let relayPort {
+                preferredRelayPort = relayPort
+                try? await persistSettings()
+            }
             let prepared = try await ruleSetService.prepare(includeAds: settings.blockAds, mirror: ruleSetSettings.mirror, allowsNetwork: ruleSetSettings.autoUpdate)
             appendWarnings(prepared.warnings)
             let (newConfig, configWarnings) = try await generateConfiguration(
@@ -1963,6 +2022,7 @@ final class AppState {
                     client: client,
                     operation: operation
                 ) else {
+                    if !previouslyNeededRelay { proxyRelay.stop() }
                     return false
                 }
             } else {
@@ -1979,8 +2039,52 @@ final class AppState {
                         updateError: error,
                         operation: operation
                     )
+                    if status == .on {
+                        try? await sshProxyConfigManager.apply(
+                            targets: oldSettings.sshProxyTargets,
+                            relayPort: preferredRelayPort
+                        )
+                    }
+                    if !previouslyNeededRelay { proxyRelay.stop() }
                     return false
                 }
+            }
+
+
+            if needsRelay, let relayPort {
+                proxyRelay.setTarget(port: runtime.mixedPort)
+                do {
+                    try await sshProxyConfigManager.apply(targets: settings.sshProxyTargets, relayPort: relayPort)
+                } catch {
+                    await restoreOldSystemConfiguration(
+                        config: oldConfig,
+                        client: client,
+                        updateError: error,
+                        operation: operation
+                    )
+                    if status == .on {
+                        proxyRelay.setTarget(port: runtime.mixedPort)
+                        try? await sshProxyConfigManager.apply(
+                            targets: oldSettings.sshProxyTargets,
+                            relayPort: preferredRelayPort
+                        )
+                    }
+                    if !previouslyNeededRelay { proxyRelay.stop() }
+                    return false
+                }
+            } else {
+                do {
+                    try await sshProxyConfigManager.apply(targets: [], relayPort: nil)
+                } catch {
+                    // 走到这里内核已经接受了新配置。为“SSH 片段没撤下来”整体判失败，会让
+                    // currentConfig / routingSettings 与真正运行的内核脱节，下次回滚就用错基准。
+                    // 按既有约定：非前置条件的副作用失败只告警，不推翻已经健康的代理。
+                    appendWarning(
+                        "SSH 代理配置未能撤下，经代理的 SSH 规则可能仍指向已停止的入口，"
+                            + "请检查 ~/.ssh/config：\(error.localizedDescription)"
+                    )
+                }
+                if !activeModes.contains(.systemProxy) { proxyRelay.stop() }
             }
 
             if activeModes.contains(.systemProxy) {
@@ -1996,6 +2100,13 @@ final class AppState {
                         updateError: error,
                         operation: operation
                     )
+                    if status == .on {
+                        try? await sshProxyConfigManager.apply(
+                            targets: oldSettings.sshProxyTargets,
+                            relayPort: preferredRelayPort
+                        )
+                    }
+                    if !previouslyNeededRelay { proxyRelay.stop() }
                     return false
                 }
             }
@@ -2024,6 +2135,11 @@ final class AppState {
             }
             return true
         } catch {
+            if status == .on,
+               !activeModes.contains(.systemProxy),
+               routingSettings.sshProxyTargets.isEmpty {
+                proxyRelay.stop()
+            }
             errorMessage = "应用分流规则失败：\(error.localizedDescription)"
             recordRuntimeEvent(level: .error, title: "\(operation)应用失败")
             return false
@@ -2097,6 +2213,29 @@ final class AppState {
             $0.id == id && $0.action == .proxy && ($0.type == .domainSuffix || $0.type == .ipCIDR)
         }
         await applyRoutingSettings(settings, operation: "强制代理规则")
+    }
+
+    @discardableResult
+    func upsertSSHProxyTarget(address rawAddress: String, port: Int) async -> Bool {
+        do {
+            guard (1...65_535).contains(port) else {
+                throw RoutingValidationError.invalidSSHProxyPort(port)
+            }
+            let target = try SSHProxyTarget(address: rawAddress, port: UInt16(port)).validated()
+            var settings = routingSettings
+            settings.sshProxyTargets.removeAll { $0.address == target.address && $0.port == target.port }
+            settings.sshProxyTargets.append(target)
+            return await applyRoutingSettings(settings, operation: "SSH 代理规则")
+        } catch {
+            errorMessage = "无法添加 SSH 代理规则：\(error.localizedDescription)"
+            return false
+        }
+    }
+
+    func removeSSHProxyTarget(_ target: SSHProxyTarget) async {
+        var settings = routingSettings
+        settings.sshProxyTargets.removeAll { $0 == target }
+        await applyRoutingSettings(settings, operation: "SSH 代理规则")
     }
 
     @discardableResult
@@ -2551,10 +2690,12 @@ final class AppState {
                     data: try await storage.readIfPresent(from: item.0)
                 ))
             }
+            let oldRoutingSettings = routingSettings
             do {
                 for (url, payload) in filePayloads {
                     try await storage.writeAtomically(payload, to: url)
                 }
+                try await syncSSHProxyConfiguration(for: backup.routingSettings)
             } catch {
                 for snapshot in snapshots {
                     if let old = snapshot.data {
@@ -2563,6 +2704,7 @@ final class AppState {
                         try? FileManager.default.removeItem(at: snapshot.url)
                     }
                 }
+                try? await syncSSHProxyConfiguration(for: oldRoutingSettings)
                 throw error
             }
 
@@ -2837,10 +2979,33 @@ final class AppState {
     }
 
     private func persistRoutingSettings() async throws {
+        try await persistRoutingSettings(routingSettings)
+    }
+
+    private func persistRoutingSettings(_ settings: RoutingSettings) async throws {
         try await storage.writeAtomically(
-            try JSONEncoder.sorted.encode(routingSettings),
+            try JSONEncoder.sorted.encode(settings),
             to: rulesURL
         )
+    }
+
+    private func syncSSHProxyConfiguration() async throws {
+        try await syncSSHProxyConfiguration(for: routingSettings)
+    }
+
+    private func syncSSHProxyConfiguration(for settings: RoutingSettings) async throws {
+        let targets = settings.sshProxyTargets
+        guard status == .on, runtime != nil, !targets.isEmpty else {
+            try await sshProxyConfigManager.apply(targets: [], relayPort: nil)
+            if status != .on || !activeModes.contains(.systemProxy) { proxyRelay.stop() }
+            return
+        }
+        let relayPort = try await proxyRelay.start(preferredPort: preferredRelayPort)
+        if preferredRelayPort != relayPort {
+            preferredRelayPort = relayPort
+            try? await persistSettings()
+        }
+        try await sshProxyConfigManager.apply(targets: targets, relayPort: relayPort)
     }
 
     private func restoreOldSystemConfiguration(
@@ -2849,6 +3014,15 @@ final class AppState {
         updateError: Error,
         operation: String
     ) async {
+        if activeModes.contains(.tun) {
+            await restoreOldTUNConfiguration(
+                config: config,
+                client: client,
+                updateError: updateError,
+                operation: operation
+            )
+            return
+        }
         do {
             try await singBoxProcess.restart(config: config)
             try await healthVerifier(client)
@@ -2870,11 +3044,55 @@ final class AppState {
                 restoreMessage = "系统代理恢复失败：\(proxyError.localizedDescription)"
             }
             try? await systemDNSManager.restore()
+            try? await sshProxyConfigManager.apply(targets: [], relayPort: nil)
             clearRuntimeState()
             setFailure(
                 "\(operation)更新失败且旧配置无法恢复：\(updateError.localizedDescription)；\(error.localizedDescription)；\(restoreMessage)"
             )
             recordRuntimeEvent(level: .error, title: "\(operation)应用与回滚均失败")
+        }
+    }
+
+    private func restoreOldTUNConfiguration(
+        config: Data,
+        client: ClashAPIClient,
+        updateError: Error,
+        operation: String
+    ) async {
+        let modes = activeModes
+        let previousPID = monitoredCorePID
+        await cancelCoreExitMonitoring()
+        suspendDashboardMonitoring()
+        suspendLogMonitoring()
+        do {
+            try await stopTUN()
+            activeModes = []
+            let record = try await startTUN(config: config)
+            activeModes = modes
+            try await healthVerifier(client)
+            currentConfig = config
+            status = .on
+            errorMessage = "应用\(operation)失败，已恢复旧配置：\(updateError.localizedDescription)"
+            markRuntimeStarted()
+            await armCoreExitMonitoring(pid: record.pid)
+            resumeDashboardMonitoringIfNeeded()
+            resumeLogMonitoringIfNeeded()
+            recordRuntimeEvent(
+                level: .warning,
+                title: "\(operation)应用失败，已回滚",
+                previousPID: previousPID,
+                currentPID: record.pid
+            )
+        } catch {
+            try? await stopTUN()
+            try? await systemProxyManager.restore()
+            try? await systemDNSManager.restore()
+            try? await sshProxyConfigManager.apply(targets: [], relayPort: nil)
+            clearRuntimeState()
+            setFailure(
+                "\(operation)更新失败且旧 TUN 配置无法恢复：\(updateError.localizedDescription)；\(error.localizedDescription)"
+            )
+            recordRuntimeEvent(level: .error, title: "\(operation)应用与 TUN 回滚均失败")
         }
     }
 
@@ -2961,6 +3179,7 @@ final class AppState {
                 }
                 // TUN 已经起不来了，接管的系统 DNS 不还原会导致全网解析瘫痪。
                 try? await systemDNSManager.restore()
+                try? await sshProxyConfigManager.apply(targets: [], relayPort: nil)
                 clearRuntimeState()
                 setFailure(
                     "\(operation)更新失败且旧 TUN 配置无法恢复：\(updateError.localizedDescription)；\(rollbackError.localizedDescription)"
@@ -3510,6 +3729,11 @@ final class AppState {
             if await singBoxProcess.currentPID != nil {
                 await singBoxProcess.stop()
             }
+        }
+        do {
+            try await sshProxyConfigManager.apply(targets: [], relayPort: nil)
+        } catch {
+            cleanupMessages.append("SSH 代理配置清理失败：\(error.localizedDescription)")
         }
         let cleanupMessage = cleanupMessages.isEmpty ? nil : cleanupMessages.joined(separator: "；")
 

@@ -404,6 +404,73 @@ final class AppStateTests: XCTestCase {
         XCTAssertTrue(commandCalls.isEmpty)
     }
 
+    func testOfflineSSHProxyTargetPersistsWithoutLeavingActiveProxyCommand() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        let sshManager = RecordingSSHProxyConfigManager()
+        let relay = FakeLocalTCPRelay(port: 36_815)
+        let state = AppState(
+            storage: storage,
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            proxyRelay: relay,
+            sshProxyConfigManager: sshManager,
+            automaticallyInitialize: false
+        )
+
+        let added = await state.upsertSSHProxyTarget(address: "118.69.52.186", port: 22_235)
+        XCTAssertTrue(added)
+
+        XCTAssertEqual(state.sshProxyTargets, [SSHProxyTarget(address: "118.69.52.186", port: 22_235)])
+        let calls = await sshManager.values()
+        XCTAssertEqual(calls.last?.targets, [])
+        XCTAssertNil(calls.last?.relayPort)
+        XCTAssertNil(relay.currentTarget)
+        let persisted = try JSONDecoder().decode(
+            RoutingSettings.self,
+            from: Data(contentsOf: root.appending(path: "rules.json"))
+        )
+        XCTAssertEqual(persisted.sshProxyTargets, state.sshProxyTargets)
+    }
+
+    func testRunningSSHProxyTargetInstallsAfterReloadAndRemovesOnStop() async throws {
+        let sshManager = RecordingSSHProxyConfigManager()
+        let fixture = try await makeRunningFixture(sshProxyConfigManager: sshManager)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let added = await fixture.state.upsertSSHProxyTarget(address: "118.69.52.186", port: 22_235)
+        XCTAssertTrue(added)
+        var calls = await sshManager.values()
+        XCTAssertEqual(calls.last?.targets, [SSHProxyTarget(address: "118.69.52.186", port: 22_235)])
+        XCTAssertEqual(calls.last?.relayPort, fixture.relayPort)
+
+        await fixture.state.stop()
+
+        calls = await sshManager.values()
+        XCTAssertEqual(calls.last?.targets, [])
+        XCTAssertNil(calls.last?.relayPort)
+        XCTAssertEqual(fixture.state.status, .off)
+    }
+
+    func testTUNSSHProxyConfigFailureRollsBackThroughPrivilegedRuntime() async throws {
+        let sshManager = RecordingSSHProxyConfigManager(failOnNonEmpty: true)
+        let fixture = try await makeModeFixture(
+            initialMode: .tun,
+            sshProxyConfigManager: sshManager
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let added = await fixture.state.upsertSSHProxyTarget(address: "118.69.52.186", port: 22_235)
+
+        XCTAssertFalse(added)
+        XCTAssertTrue(fixture.state.sshProxyTargets.isEmpty)
+        XCTAssertEqual(fixture.state.status, .on)
+        let tunIsActive = await fixture.privileged.isActive()
+        let userCorePID = await fixture.core.currentPID
+        XCTAssertTrue(tunIsActive)
+        XCTAssertNil(userCorePID)
+    }
+
     func testRunningRoutingUpdateReusesRuntimeAndKeepsSystemProxyEnabled() async throws {
         let fixture = try await makeRunningFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -522,7 +589,13 @@ final class AppStateTests: XCTestCase {
     }
 
     func testFailureToRestoreOldCoreRestoresSystemProxyAndMarksFailed() async throws {
-        let fixture = try await makeRunningFixture(healthFailures: [2, 3])
+        let sshManager = RecordingSSHProxyConfigManager()
+        let sshTarget = SSHProxyTarget(address: "118.69.52.186", port: 22_235)
+        let fixture = try await makeRunningFixture(
+            healthFailures: [2, 3],
+            sshProxyTargets: [sshTarget],
+            sshProxyConfigManager: sshManager
+        )
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         var updated = fixture.state.routingSettings
         updated.bypassDomains = ["new.local"]
@@ -539,6 +612,9 @@ final class AppStateTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.root.appending(path: "proxy-recovery.json").path))
         let isRunning = await fixture.core.isRunning
         XCTAssertFalse(isRunning)
+        let sshCalls = await sshManager.values()
+        XCTAssertEqual(sshCalls.last?.targets, [])
+        XCTAssertNil(sshCalls.last?.relayPort)
     }
 
     func testOldSettingsDefaultToSystemModeAndNewModePersists() async throws {
@@ -699,9 +775,13 @@ final class AppStateTests: XCTestCase {
             XCTFail("Expected failed initialization")
         }
 
+        let sshManager = RecordingSSHProxyConfigManager()
+        let sshTarget = SSHProxyTarget(address: "118.69.52.186", port: 22_235)
         let fixture = try await makeModeFixture(
             initialMode: .tun,
-            tunStopError: ModeTestError.stopFailed
+            tunStopError: ModeTestError.stopFailed,
+            sshProxyTargets: [sshTarget],
+            sshProxyConfigManager: sshManager
         )
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let canTerminate = await fixture.state.prepareForTermination()
@@ -709,6 +789,9 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(fixture.state.activeMode, .tun)
         let tunIsActive = await fixture.privileged.isActive()
         XCTAssertTrue(tunIsActive)
+        let sshCalls = await sshManager.values()
+        XCTAssertEqual(sshCalls.last?.targets, [sshTarget])
+        XCTAssertNotNil(sshCalls.last?.relayPort)
     }
 
     func testTUNRoutingUpdateReusesRuntimeAndNeverCallsNetworkSetup() async throws {
@@ -769,7 +852,14 @@ final class AppStateTests: XCTestCase {
     }
 
     func testTUNRoutingDoubleStartFailureLeavesNoTakeoverOrRuntime() async throws {
-        let fixture = try await makeModeFixture(initialMode: .tun, tunStartFailureCalls: [2, 3])
+        let sshManager = RecordingSSHProxyConfigManager()
+        let sshTarget = SSHProxyTarget(address: "118.69.52.186", port: 22_235)
+        let fixture = try await makeModeFixture(
+            initialMode: .tun,
+            tunStartFailureCalls: [2, 3],
+            sshProxyTargets: [sshTarget],
+            sshProxyConfigManager: sshManager
+        )
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         var updated = fixture.state.routingSettings
         updated.bypassCIDRs = ["10.99.0.0/16"]
@@ -788,6 +878,9 @@ final class AppStateTests: XCTestCase {
         let networkArguments = await fixture.network.arguments
         XCTAssertFalse(tunIsActive)
         XCTAssertFalse(coreIsRunning)
+        let sshCalls = await sshManager.values()
+        XCTAssertEqual(sshCalls.last?.targets, [])
+        XCTAssertNil(sshCalls.last?.relayPort)
         // TUN 流程只允许出现 DNS 接管相关命令，绝不允许改系统代理。
         XCTAssertTrue(networkArguments.allSatisfy(Self.isDNSTakeoverCommand))
     }
@@ -1764,7 +1857,9 @@ final class AppStateTests: XCTestCase {
         healthFailures: Set<Int> = [],
         processExitMonitor: (any ProcessExitMonitoring)? = nil,
         notificationSender: (any NotificationSending)? = nil,
-        lanResolverProbe: AppState.LANResolverProbing? = nil
+        lanResolverProbe: AppState.LANResolverProbing? = nil,
+        sshProxyTargets: [SSHProxyTarget] = [],
+        sshProxyConfigManager: (any SSHProxyConfigManaging)? = nil
     ) async throws -> RunningFixture {
         let root = temporaryDirectory()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1796,6 +1891,7 @@ final class AppStateTests: XCTestCase {
             processExitMonitor: processExitMonitor,
             notificationSender: notificationSender,
             proxyRelay: relay,
+            sshProxyConfigManager: sshProxyConfigManager,
             runtimeFactory: { _ in runtime },
             healthVerifier: health.verify(client:),
             lanResolverProbe: lanResolverProbe,
@@ -1811,6 +1907,7 @@ final class AppStateTests: XCTestCase {
         )]
         state.selectedNodeID = state.nodes[0].id
         state.activeConfigID = AppState.localConfigID
+        state.routingSettings.sshProxyTargets = sshProxyTargets
         await state.startSystemProxy()
         return RunningFixture(
             root: root,
@@ -1833,6 +1930,8 @@ final class AppStateTests: XCTestCase {
         processExitMonitor: (any ProcessExitMonitoring)? = nil,
         notificationSender: (any NotificationSending)? = nil,
         lanResolverProbe: AppState.LANResolverProbing? = nil,
+        sshProxyTargets: [SSHProxyTarget] = [],
+        sshProxyConfigManager: (any SSHProxyConfigManaging)? = nil,
         subscriptionLoader: @escaping SubscriptionService.Loader = { _ in
             HTTPDownload(data: Data(), statusCode: 500)
         }
@@ -1877,6 +1976,7 @@ final class AppStateTests: XCTestCase {
             notificationSender: notificationSender,
             privilegedLauncher: privileged,
             proxyRelay: FakeLocalTCPRelay(port: relayPort),
+            sshProxyConfigManager: sshProxyConfigManager,
             runtimeFactory: { _ in runtime },
             healthVerifier: { _ in },
             clashClientFactory: clashClientFactory,
@@ -1893,6 +1993,7 @@ final class AppStateTests: XCTestCase {
         )]
         state.selectedNodeID = state.nodes[0].id
         state.activeConfigID = AppState.localConfigID
+        state.routingSettings.sshProxyTargets = sshProxyTargets
         if initialMode != .systemProxy {
             await state.switchMode(to: initialMode)
         }
@@ -2779,6 +2880,29 @@ private final class FakeLocalTCPRelay: LocalTCPRelaying, @unchecked Sendable {
     func stop() {
         setTarget(port: nil)
     }
+}
+
+private actor RecordingSSHProxyConfigManager: SSHProxyConfigManaging {
+    struct Call: Sendable {
+        let targets: [SSHProxyTarget]
+        let relayPort: UInt16?
+    }
+
+    private var calls: [Call] = []
+    private let failOnNonEmpty: Bool
+
+    init(failOnNonEmpty: Bool = false) {
+        self.failOnNonEmpty = failOnNonEmpty
+    }
+
+    func apply(targets: [SSHProxyTarget], relayPort: UInt16?) async throws {
+        calls.append(Call(targets: targets, relayPort: relayPort))
+        if failOnNonEmpty, !targets.isEmpty {
+            throw SSHProxyConfigError.missingRelayPort
+        }
+    }
+
+    func values() -> [Call] { calls }
 }
 
 // MARK: - 内网 DNS 分流在 AppState 层的贯通

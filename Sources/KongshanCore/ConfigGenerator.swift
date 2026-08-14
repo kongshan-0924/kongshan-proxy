@@ -49,7 +49,10 @@ public struct ConfigInput: Sendable {
     /// temporarily request debug for its bounded diagnostic mode.
     public let coreLogLevel: String
 
-    public var usesSystemProxy: Bool { enabledModes.contains(.systemProxy) }
+    /// SSH ProxyCommand 同样需要 mixed 入站，但不代表要修改 macOS 系统代理。
+    public var usesSystemProxy: Bool {
+        enabledModes.contains(.systemProxy) || routing?.settings.sshProxyTargets.isEmpty == false
+    }
     public var usesTun: Bool { enabledModes.contains(.tun) }
 
     public init(
@@ -563,24 +566,37 @@ public enum ConfigGenerator {
         availableGroups: Set<String> = [],
         lanDomainSuffixes: [String] = []
     ) throws -> [String: Any] {
-        // 全局 / 直连不参与分流：不加载任何规则集，直接给一个兜底出口。
+        let settings = try routing?.settings.validated()
+        let sshRules = settings.map { settings in
+            settings.sshProxyTargets.map { target in
+                [
+                    "ip_cidr": [target.hostCIDR],
+                    "port": [Int(target.port)],
+                    "network": ["tcp"],
+                    "action": "route",
+                    "outbound": primaryOutbound
+                ] as [String: Any]
+            }
+        } ?? []
+
+        // SSH 显式规则始终优先；全局/直连只决定其他流量的兜底出口。
         switch outboundMode {
         case .global:
-            return ["rules": [], "final": primaryOutbound]
+            return ["rules": sshRules, "final": primaryOutbound]
         case .direct:
-            return ["rules": [], "final": "direct"]
+            return ["rules": sshRules, "final": "direct"]
         case .rule:
             break
         }
 
-        guard let routing else {
+        guard let routing, let settings else {
             return ["rules": [], "final": primaryOutbound]
         }
 
-        let settings = try routing.settings.validated()
-        var rules = settings.customRules
+        var rules = sshRules
+        rules.append(contentsOf: settings.customRules
             .filter(\.enabled)
-            .map { customRouteRule($0, fallback: primaryOutbound, available: availableGroups) }
+            .map { customRouteRule($0, fallback: primaryOutbound, available: availableGroups) })
 
         if let bypass = bypassRule(for: settings, extraDomainSuffixes: lanDomainSuffixes) {
             rules.append(bypass)

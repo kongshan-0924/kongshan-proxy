@@ -3265,3 +3265,18 @@ AAAA 解析与 Happy Eyeballs 选路，于是每次都撞在 IPv6 上。
   relay 与状态栏绘制各仅命中一个活跃样本，没有持续忙循环或 RSS 单向增长证据。
 - 当前只剩：提交本验收记录、重新 `prepare`、推送/发布 v0.1.72、删除 v0.1.67 Release/标签并核对
   本地/远端 DMG digest。当前代理模式和用户配置无需再次变更。
+
+### 阶段 29：指定 IP + SSH 端口走代理
+
+- 新增精确 `IP + TCP 端口` 的 SSH 代理目标模型和规则页操作；支持 IPv4/IPv6、同 IP 多端口，拒绝
+  CIDR、回环与非法端口。旧配置无字段时兼容为空。
+- OpenSSH 通过稳定 relay 的 SOCKS5 `ProxyCommand` 接入；仅管理主配置顶部的标记 Include 和
+  `kongshan-proxy.conf`，原子写入、0600/0700 权限，异常标记和所有相关符号链接均 fail-closed。
+- sing-box 在三种接管组合中生成 mixed inbound 与精确 `IP + port + tcp` 优先规则；直连模式下 SSH
+  规则仍走代理，不改变相同 IP 其他端口或普通 TUN 排除语义。
+- App 生命周期改为离线只保存规则，代理健康后挂接，停止/退出/失败/终止时撤下；TUN 停止失败恢复
+  规则。审计并修复 TUN 后置失败错误调用用户态回滚器导致 root/user 双内核并存的问题。
+- 测试先复现双内核错误（用户态 PID 非空），修复后 TUN/系统代理回滚定向 11/11、最终 SSH 定向
+  14/14 通过。最终 XCTest 449 项执行、1 跳过、0 失败；`swift build`、`git diff --check` 通过。
+- 临时 OpenSSH 配置的 `ssh -G` 证明 `118.69.52.186:22235` 命中 SOCKS5 ProxyCommand，同 IP 的 22
+  不命中。未触碰真实 `~/.ssh/config`，未安装、提交、推送或发布。

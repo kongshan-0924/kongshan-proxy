@@ -154,6 +154,34 @@ final class RoutingModelsTests: XCTestCase {
         XCTAssertEqual(ipv6.value, "2001:db8::8/128")
     }
 
+    func testSSHProxyTargetsValidateExactAddressesPortsAndDeduplicate() throws {
+        var settings = RoutingSettings.defaults
+        settings.sshProxyTargets = [
+            SSHProxyTarget(address: " 118.69.52.186 ", port: 22_235),
+            SSHProxyTarget(address: "118.69.52.186", port: 22_235),
+            SSHProxyTarget(address: "118.69.52.186", port: 22),
+            SSHProxyTarget(address: "2001:0db8::1", port: 22)
+        ]
+
+        let validated = try settings.validated()
+
+        XCTAssertEqual(validated.sshProxyTargets, [
+            SSHProxyTarget(address: "118.69.52.186", port: 22_235),
+            SSHProxyTarget(address: "118.69.52.186", port: 22),
+            SSHProxyTarget(address: "2001:db8::1", port: 22)
+        ])
+        XCTAssertThrowsError(try SSHProxyTarget(address: "118.69.52.0/24").validated())
+        XCTAssertThrowsError(try SSHProxyTarget(address: "127.0.0.1").validated())
+    }
+
+    func testSSHProxyTargetDoesNotChangeTunExclusionsForOtherTraffic() throws {
+        var settings = RoutingSettings.defaults
+        settings.tunExcludeCIDRs = ["192.168.0.0/16"]
+        settings.sshProxyTargets = [SSHProxyTarget(address: "192.168.1.20", port: 22)]
+
+        XCTAssertEqual(try settings.validated().effectiveTunExcludeCIDRs, ["192.168.0.0/16"])
+    }
+
     func testForcedProxyRulesRemoveConflictingSystemBypassEntries() {
         var settings = RoutingSettings.defaults
         settings.bypassDomains += ["api.example.com", "*.internal.example.com"]

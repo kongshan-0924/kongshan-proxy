@@ -14,6 +14,9 @@ struct RoutingView: View {
     @State private var forcedProxyKind: ForcedProxyInputKind = .domain
     @State private var forcedProxyInput = ""
     @State private var forcedProxyError: String?
+    @State private var sshProxyAddress = ""
+    @State private var sshProxyPort = 22
+    @State private var sshProxyError: String?
     @State private var routeTestKind: RouteTestKind = .domain
     @State private var routeTestInput = ""
     @State private var routeTestResult: RouteTestResult?
@@ -60,6 +63,8 @@ struct RoutingView: View {
             perAppSection
             Divider()
             forcedProxySection
+            Divider()
+            sshProxySection
             Divider()
             routeTesterSection
             Divider()
@@ -336,6 +341,88 @@ struct RoutingView: View {
         .onChange(of: forcedProxyInput) { _, _ in forcedProxyError = nil }
     }
 
+    private var sshProxySection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Label("SSH 走代理", systemImage: "terminal")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("指定 IP 的 OpenSSH 连接通过当前节点")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+
+            HStack(spacing: 10) {
+                TextField("IP 地址", text: $sshProxyAddress)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+                    .onSubmit { addSSHProxyTarget() }
+                TextField("端口", value: $sshProxyPort, format: .number.grouping(.never))
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(.body, design: .monospaced))
+                    .frame(width: 92)
+                    .onSubmit { addSSHProxyTarget() }
+                Button {
+                    addSSHProxyTarget()
+                } label: {
+                    Label("添加", systemImage: "plus")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(
+                    sshProxyAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || state.isApplyingRouting
+                )
+            }
+
+            Text("规则保存在本机，开启代理后生效；只修改空山托管的 SSH 配置片段，不会读取或保存 SSH 密码、私钥。")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+
+            if let sshProxyError {
+                Label(sshProxyError, systemImage: "exclamationmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            } else if state.sshProxyTargets.isEmpty {
+                Text("暂无 SSH 代理目标")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            } else {
+                ScrollView(.horizontal) {
+                    HStack(spacing: 8) {
+                        ForEach(state.sshProxyTargets) { target in
+                            HStack(spacing: 6) {
+                                Image(systemName: "network")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                                Text("\(target.address):\(target.port)")
+                                    .font(.caption.monospaced())
+                                Button(role: .destructive) {
+                                    Task { await state.removeSSHProxyTarget(target) }
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(.secondary)
+                                .disabled(state.isApplyingRouting)
+                                .help("删除 SSH 代理目标")
+                                .accessibilityLabel("删除 \(target.address):\(target.port)")
+                            }
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(Theme.cardFill, in: Capsule())
+                        }
+                    }
+                }
+                .scrollIndicators(.hidden)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.16))
+        .onChange(of: sshProxyAddress) { _, _ in sshProxyError = nil }
+        .onChange(of: sshProxyPort) { _, _ in sshProxyError = nil }
+    }
+
     private var routeTesterSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
@@ -466,6 +553,19 @@ struct RoutingView: View {
                 forcedProxyInput = ""
             } else {
                 forcedProxyError = state.errorMessage ?? "规则未能添加，请检查输入后重试"
+            }
+        }
+    }
+
+    private func addSSHProxyTarget() {
+        let address = sshProxyAddress
+        let port = sshProxyPort
+        sshProxyError = nil
+        Task {
+            if await state.upsertSSHProxyTarget(address: address, port: port) {
+                sshProxyAddress = ""
+            } else {
+                sshProxyError = state.errorMessage ?? "SSH 代理目标未能添加"
             }
         }
     }
