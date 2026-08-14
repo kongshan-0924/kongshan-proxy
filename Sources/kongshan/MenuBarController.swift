@@ -1,5 +1,6 @@
 import AppKit
 import KongshanCore
+import SwiftUI
 
 /// 原生状态项与菜单。
 ///
@@ -20,6 +21,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     private var uploadText = "—"
     private var downloadText = "—"
     private var renderedStatusKey: String?
+    /// 左键弹出的迷你仪表盘。懒创建一次后复用；SwiftUI 内容只更新变化的文本节点。
+    private var popover: NSPopover?
 
     init(
         state: AppState,
@@ -34,6 +37,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.autoenablesItems = false
         menu.delegate = self
         self.statusItem.menu = menu
+        // 左键 → 弹出面板；右键维持原生 NSMenu 的默认行为。
+        // 只拦截 leftMouseDown：若连右键也拦截，就得用 performClick 手工弹菜单，
+        // 而 performClick 模拟的是左键，会再次触发 action 形成递归。
+        if let button = self.statusItem.button {
+            button.target = self
+            button.action = #selector(statusItemLeftClicked)
+            button.sendAction(on: .leftMouseDown)
+        }
         updateStatusButton(uploadText: uploadText, downloadText: downloadText)
     }
 
@@ -55,8 +66,51 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     func stop() {
         throughputTask?.cancel()
         throughputTask = nil
+        popover?.performClose(nil)
+        popover = nil
+        popoverOpen = false
         statusItem.menu = nil
         NSStatusBar.system.removeStatusItem(statusItem)
+    }
+
+    /// 左键：弹出/收起迷你仪表盘。菜单对象与跟踪逻辑完全不受影响。
+    @objc private func statusItemLeftClicked() {
+        togglePopover()
+    }
+
+    /// 自维护的开合意图标志，不直接读 `popover.isShown`：performClose 的关闭动画
+    /// 要约 0.6 秒后才把 isShown 落为 false，期间用户再点一次会被误判成"已打开"
+    /// 而变成又关一次。transient 关闭（点到别处）经 popoverDidClose 复位。
+    private var popoverOpen = false
+
+    func togglePopover() {
+        guard let button = statusItem.button else { return }
+        if popoverOpen, let popover {
+            popover.performClose(nil)
+            popoverOpen = false
+            return
+        }
+        let popover = self.popover ?? makePopover()
+        self.popover = popover
+        // .accessory 策略下应用不活跃，popover 不激活会吃掉第一次点击。
+        NSApp.activate(ignoringOtherApps: true)
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        popoverOpen = true
+    }
+
+    var isPopoverShown: Bool {
+        popoverOpen
+    }
+
+    private func makePopover() -> NSPopover {
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.animates = true
+        popover.delegate = self
+        popover.contentViewController = NSHostingController(
+            rootView: MenuBarPopoverView(openMainWindow: openMainWindow).environment(state)
+        )
+        return popover
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -322,6 +376,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
     @objc private func quit() {
         NSApplication.shared.terminate(nil)
+    }
+}
+
+extension MenuBarController: NSPopoverDelegate {
+    /// transient 面板点到别处自动关闭时复位开合标志，否则下次左键会被当成"再关一次"。
+    func popoverDidClose(_ notification: Notification) {
+        popoverOpen = false
     }
 }
 

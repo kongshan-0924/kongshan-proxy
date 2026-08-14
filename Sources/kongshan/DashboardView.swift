@@ -49,23 +49,30 @@ struct DashboardView: View {
     private var heroControlCard: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .center, spacing: 14) {
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 5) {
                     HStack(spacing: 8) {
                         Circle()
                             .fill(state.statusTint)
                             .frame(width: 9, height: 9)
+                            .shadow(
+                                color: state.statusTint.opacity(state.isOn ? 0.55 : 0),
+                                radius: 3
+                            )
                         Text(state.statusText)
                             .font(.system(size: 16, weight: .bold))
+                        if state.isOn {
+                            StatusBadge(text: "出站 · \(state.outboundMode.displayName)", tint: state.statusTint)
+                        }
                     }
                     if let selected = state.selectedNode {
                         HStack(spacing: 6) {
-                            Text("节点:")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
                             Text(selected.name)
                                 .font(.caption.weight(.medium))
                                 .lineLimit(1)
                             ProtocolTag(value: selected.protocolType)
+                            if let delay = state.delays[selected.id] {
+                                DelayLabel(milliseconds: delay)
+                            }
                         }
                     } else {
                         Text("未启用或未选择节点")
@@ -76,31 +83,16 @@ struct DashboardView: View {
 
                 Spacer()
 
-                HStack(spacing: 10) {
-                    ModePill(
-                        title: ProxyMode.systemProxy.displayName,
-                        isActive: state.activeModes.contains(.systemProxy),
-                        isBusy: state.isBusy || !state.isReady
-                    ) {
-                        toggle(.systemProxy)
-                    }
-                    ModePill(
-                        title: ProxyMode.tun.displayName,
-                        isActive: state.activeModes.contains(.tun),
-                        isBusy: state.isBusy || !state.isReady
-                    ) {
-                        toggle(.tun)
-                    }
+                // 实时速率并入 Hero：原来单独的「网络流量」卡标题行不再重复占用一层。
+                HStack(spacing: 16) {
+                    heroRate(symbol: "arrow.up", tint: .blue, title: "上传", value: state.uploadRate)
+                    heroRate(symbol: "arrow.down", tint: .green, title: "下载", value: state.downloadRate)
                 }
             }
 
             Divider()
 
-            HStack(spacing: 12) {
-                Text("分流模式:")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
+            HStack(spacing: 14) {
                 Picker("出站模式", selection: outboundModeBinding) {
                     ForEach(OutboundMode.allCases, id: \.self) { mode in
                         Text(mode.displayName).tag(mode)
@@ -114,6 +106,9 @@ struct DashboardView: View {
                 .disabled(state.isBusy || !state.isReady)
 
                 Spacer()
+
+                modeToggle(title: ProxyMode.systemProxy.displayName, mode: .systemProxy)
+                modeToggle(title: ProxyMode.tun.displayName, mode: .tun)
 
                 if state.isOn {
                     Button {
@@ -132,27 +127,55 @@ struct DashboardView: View {
         .card(padding: 16)
     }
 
+    private func heroRate(symbol: String, tint: Color, title: String, value: Int64) -> some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(tint)
+                .frame(width: 24, height: 24)
+                .overlay(
+                    Image(systemName: symbol)
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.white)
+                )
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(Theme.rateOrDash(value))
+                    .font(.system(size: 18, weight: .bold).monospacedDigit())
+                    .contentTransition(.numericText())
+                    .animation(.smooth(duration: 0.25), value: value)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Text(title)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: 118, alignment: .leading)
+    }
+
+    private func modeToggle(title: String, mode: ProxyMode) -> some View {
+        Toggle(title, isOn: modeBinding(mode))
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .font(.system(size: 12, weight: .medium))
+            .disabled(state.isBusy || !state.isReady)
+    }
+
+    private func modeBinding(_ mode: ProxyMode) -> Binding<Bool> {
+        Binding(
+            get: { state.activeModes.contains(mode) },
+            set: { enabled in Task { await state.setMode(mode, enabled: enabled) } }
+        )
+    }
+
     // MARK: - 指标卡
 
+    /// 接管方式、当前节点与出站模式已并入 Hero 卡，这里只保留观测类指标。
     private var metrics: some View {
         LazyVGrid(
-            columns: Array(repeating: GridItem(.flexible(), spacing: 14), count: 3),
+            columns: Array(repeating: GridItem(.flexible(), spacing: 14), count: 4),
             spacing: 14
         ) {
-            MetricCard(symbol: "shield.lefthalf.filled", tint: .blue, caption: "接管方式") {
-                Text(activeModesText)
-            } corner: {
-                StatusBadge(text: "出站 · \(state.outboundMode.displayName)", tint: state.statusTint)
-            }
-
-            MetricCard(symbol: "point.3.connected.trianglepath.dotted", tint: .green, caption: "当前节点") {
-                Text(state.selectedNode?.name ?? "未选择")
-            } corner: {
-                if let node = state.selectedNode {
-                    ProtocolTag(value: node.protocolType)
-                }
-            }
-
             MetricCard(symbol: "network", tint: .orange, caption: "当前出口 IP") {
                 exitDiagnosticsValue
             } corner: {
@@ -180,10 +203,14 @@ struct DashboardView: View {
 
             MetricCard(symbol: "link", tint: .purple, caption: "活跃连接") {
                 Text("\(state.activeConnectionCount)")
+                    .contentTransition(.numericText())
+                    .animation(.smooth(duration: 0.25), value: state.activeConnectionCount)
             }
 
             MetricCard(symbol: "memorychip", tint: .pink, caption: "内核内存") {
                 Text(Theme.bytesOrDash(Int64(clamping: state.coreMemory)))
+                    .contentTransition(.numericText())
+                    .animation(.smooth(duration: 0.25), value: state.coreMemory)
             } corner: {
                 if state.coreVersion != "—" {
                     // 内核的 /version 返回的就带名字（`sing-box 1.13.14`），
@@ -211,12 +238,6 @@ struct DashboardView: View {
             get: { state.outboundMode },
             set: { mode in Task { await state.setOutboundMode(mode) } }
         )
-    }
-
-    private var activeModesText: String {
-        let ordered: [ProxyMode] = [.systemProxy, .tun]
-        let names = ordered.filter(state.activeModes.contains).map(\.displayName)
-        return names.isEmpty ? "未开启" : names.joined(separator: " + ")
     }
 
     @ViewBuilder
@@ -286,45 +307,16 @@ struct DashboardView: View {
         @Environment(AppState.self) private var state
 
         var body: some View {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("网络流量")
-                        .font(.system(size: 15, weight: .semibold))
-                    HStack(spacing: 12) {
-                        legendDot(color: .blue, title: "上传")
-                        legendDot(color: .green, title: "下载")
-                    }
-                }
+            // 实时速率已上移到 Hero 卡，这里只保留图例，避免同一数据三处展示。
+            HStack(alignment: .center) {
+                Text("网络流量")
+                    .font(.system(size: 15, weight: .semibold))
                 Spacer()
                 HStack(spacing: 12) {
-                    rateSummary(symbol: "arrow.up", tint: .blue, value: state.uploadRate, title: "上传")
-                    rateSummary(symbol: "arrow.down", tint: .green, value: state.downloadRate, title: "下载")
+                    legendDot(color: .blue, title: "上传")
+                    legendDot(color: .green, title: "下载")
                 }
             }
-        }
-
-        private func rateSummary(symbol: String, tint: Color, value: Int64, title: String) -> some View {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(tint)
-                    .frame(width: 22, height: 22)
-                    .overlay(
-                        Image(systemName: symbol)
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(.white)
-                    )
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(Theme.rateOrDash(value))
-                        .font(.system(size: 13, weight: .semibold).monospacedDigit())
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                    Text(title)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .frame(width: 112, alignment: .leading)
         }
 
         private func legendDot(color: Color, title: String) -> some View {
@@ -469,7 +461,7 @@ struct DashboardView: View {
         }
     }
 
-    /// 「只跑内核」是测速拉起的临时状态：两个接管胶囊都是灰的，但内核在计时。
+    /// 「只跑内核」是测速拉起的临时状态：两个接管开关都是关的，但内核在计时。
     /// 不给出口的话，主窗口里没有任何办法停掉它（此前只在托盘有入口）。
     @ViewBuilder
     private var coreOnlyBanner: some View {
@@ -491,11 +483,6 @@ struct DashboardView: View {
                     .strokeBorder(.blue.opacity(0.25), lineWidth: 0.5)
             )
         }
-    }
-
-    /// 胶囊点击：独立开关该接管方式，两者可同时生效。
-    private func toggle(_ mode: ProxyMode) {
-        Task { await state.setMode(mode, enabled: !state.activeModes.contains(mode)) }
     }
 }
 

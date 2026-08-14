@@ -113,35 +113,6 @@ struct IconBadge: View {
     }
 }
 
-/// 页头上的接管方式胶囊开关：色点表示是否生效，点击直接切换。
-struct ModePill: View {
-    let title: String
-    let isActive: Bool
-    let isBusy: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(isActive ? Color.green : Color.secondary.opacity(0.45))
-                    .frame(width: 7, height: 7)
-                Text(title)
-                    .font(.system(size: 12, weight: .medium))
-            }
-            .padding(.horizontal, 11)
-            .padding(.vertical, 6)
-            .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .background(Theme.cardFill, in: Capsule())
-        .overlay(Capsule().strokeBorder(.quaternary.opacity(0.7), lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.05), radius: 2, y: 1)
-        .disabled(isBusy)
-        .help(isActive ? "点击关闭\(title)" : "点击切换到\(title)")
-    }
-}
-
 /// 带色点的状态徽标，颜色之外同时保留文字，不单靠颜色表达状态。
 struct StatusBadge: View {
     let text: String

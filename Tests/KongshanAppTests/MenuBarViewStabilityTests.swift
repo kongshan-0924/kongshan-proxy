@@ -78,6 +78,55 @@ final class MenuBarViewStabilityTests: XCTestCase {
         XCTAssertEqual(MenuRateFormatter.compact(2 * 1_073_741_824), "2.0G")
     }
 
+    /// 左键走 action 弹面板，原生菜单保持挂载给右键；两者互不替换。
+    func testLeftClickPopoverCoexistsWithPersistentMenu() {
+        let controller = makeController()
+        defer { controller.stop() }
+        let originalMenu = controller.menu
+
+        let button = controller.statusItem.button
+        XCTAssertNotNil(button?.action)
+        XCTAssertTrue(button?.target === controller)
+        XCTAssertTrue(controller.statusItem.menu === originalMenu)
+
+        activateForPopover()
+        controller.togglePopover()
+        XCTAssertTrue(controller.isPopoverShown)
+        XCTAssertTrue(controller.menu === originalMenu)
+        XCTAssertTrue(controller.statusItem.menu === originalMenu)
+
+        controller.togglePopover()
+        spin() // performClose 带动画，isShown 要过一个 runloop 才落为 false
+        XCTAssertFalse(controller.isPopoverShown)
+        XCTAssertTrue(controller.statusItem.menu === originalMenu)
+    }
+
+    /// 面板关闭后必须能再次打开同一实例；stop 必须释放面板。
+    func testPopoverReopensAndStopReleasesIt() {
+        let controller = makeController()
+        activateForPopover()
+        controller.togglePopover()
+        controller.togglePopover()
+        spin()
+        controller.togglePopover()
+        XCTAssertTrue(controller.isPopoverShown)
+        controller.stop()
+        spin()
+        XCTAssertFalse(controller.isPopoverShown)
+    }
+
+    /// NSPopover.show 要求进程已激活且过一个 runloop（真机 App 本来就满足）；
+    /// xctest  runner 默认不激活，不补这一步 isShown 恒为 false。
+    private func activateForPopover() {
+        NSApp.setActivationPolicy(.accessory)
+        NSApp.activate(ignoringOtherApps: true)
+        spin()
+    }
+
+    private func spin() {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+    }
+
     private func makeController(openMainWindow: @escaping () -> Void = {}) -> MenuBarController {
         let state = AppState(automaticallyInitialize: false)
         let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)

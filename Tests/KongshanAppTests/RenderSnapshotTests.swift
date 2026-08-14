@@ -101,6 +101,19 @@ final class RenderSnapshotTests: XCTestCase {
             size: CGSize(width: 1000, height: 680),
             dark: true
         )
+
+        // 菜单栏左键迷你面板：浅色空闲态与深色运行态各一张。
+        render(
+            MenuBarPopoverView(openMainWindow: {}).environment(state),
+            name: "menubar-popover",
+            size: CGSize(width: 328, height: 460)
+        )
+        render(
+            MenuBarPopoverView(openMainWindow: {}).environment(running),
+            name: "menubar-popover-dark",
+            size: CGSize(width: 328, height: 460),
+            dark: true
+        )
     }
 
     private struct BypassListsPreview: View {
