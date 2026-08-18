@@ -406,6 +406,12 @@ final class AppState {
     /// 避免连续点选节点时每次都同步落盘 settings.json。退出前 flush 确保最后一次选择不丢。
     @ObservationIgnored private var persistSettingsTask: Task<Void, Never>?
     @ObservationIgnored private var persistRuntimeEventsTask: Task<Void, Never>?
+    @ObservationIgnored private var selfDiagnosticsTask: Task<Void, Never>?
+    @ObservationIgnored private var cpuAnomalyDetector = CPUAnomalyDetector()
+    @ObservationIgnored private var dnsStallDetector = DNSStallDetector()
+    /// 两次自诊断采样之间流入的内核日志行数。异常时段的归因线索之一：
+    /// 日志洪峰是本项目历史上实测的最高负载来源（v0.1.61：平均 6.36%、峰值 15.9%）。
+    @ObservationIgnored private var logLinesSinceDiagnosticsTick = 0
     @ObservationIgnored private var pendingRoutingApplication: PendingRoutingApplication?
 
     /// 特权助手客户端（零弹窗 TUN）。助手不可达时回退 `privilegedLauncher`（osascript）。
@@ -528,6 +534,7 @@ final class AppState {
 
         if automaticallyInitialize {
             Task { await initialize() }
+            startSelfDiagnostics()
         }
     }
 
@@ -957,6 +964,7 @@ final class AppState {
     func prepareForTermination() async -> Bool {
         // 退出前先冲掉未完成的防抖落盘（用户切节点后 500ms 内退出会丢最后一次选择）。
         await flushPersistSettingsIfNeeded()
+        finishSelfDiagnostics()
         if !activeModes.isEmpty || runtime != nil {
             await stop()
             await flushRuntimeEventsIfNeeded()
@@ -3301,7 +3309,10 @@ final class AppState {
 
     private func receiveLog(_ entry: CoreLogEntry) {
         logRetryDelay = 2
-        pendingLogs.append(LiveLogEntry(entry: entry))
+        let live = LiveLogEntry(entry: entry)
+        logLinesSinceDiagnosticsTick += 1
+        inspectForDNSStall(live.parsed)
+        pendingLogs.append(live)
         // 单次爆发也不能无限攒：超过上限的部分横竖会被 trim 掉，留着只是白占内存。
         if pendingLogs.count > KernelLogStore.defaultBufferedLineLimit {
             pendingLogs.removeFirst(pendingLogs.count - KernelLogStore.defaultBufferedLineLimit)
@@ -3975,6 +3986,109 @@ final class AppState {
 
     private var runtimeEventsURL: URL {
         storage.rootDirectory.appending(path: "runtime-events.json")
+    }
+
+    // MARK: - 运行期自诊断
+
+    /// 采样间隔。取 15 秒是权衡：足够短到能把「持续异常」和「测速那种十几秒的正常尖峰」
+    /// 分开，又足够长到自诊断本身的开销可以忽略（一次 getrusage + 两次 mach 调用）。
+    private static let selfDiagnosticsInterval = Duration.seconds(15)
+
+    /// 全程运行，**不跟随代理开关**。2026-08-18 复盘中那 929 分钟累计 CPU 是 App 侧的，
+    /// 与内核是否在跑无关；只在代理开启时采样会正好错过这类异常。
+    private func startSelfDiagnostics() {
+        guard selfDiagnosticsTask == nil else { return }
+        selfDiagnosticsTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: Self.selfDiagnosticsInterval)
+                guard !Task.isCancelled else { return }
+                await MainActor.run { self?.tickSelfDiagnostics() }
+                guard self != nil else { return }
+            }
+        }
+    }
+
+    private func tickSelfDiagnostics() {
+        let logLines = logLinesSinceDiagnosticsTick
+        logLinesSinceDiagnosticsTick = 0
+
+        if let sample = ProcessResourceSampler.current(now: now()),
+           let report = cpuAnomalyDetector.ingest(sample) {
+            record(report, logLinesInWindow: logLines)
+        }
+        if let report = dnsStallDetector.flush(
+            at: now(),
+            physicalBytes: Self.physicalByteTotal()
+        ) {
+            record(report)
+        }
+    }
+
+    /// 退出前把仍开着的异常段落盘。没有这一步，「一直烧到用户退出」的那类异常
+    /// 会一条记录都不留——这正是上一次无法归因的原因。
+    private func finishSelfDiagnostics() {
+        selfDiagnosticsTask?.cancel()
+        selfDiagnosticsTask = nil
+        if let report = cpuAnomalyDetector.finish(at: now()) {
+            record(report, logLinesInWindow: logLinesSinceDiagnosticsTick)
+        }
+    }
+
+    /// internal 而非 private：接线本身需要回归覆盖（日志行 → 聚合 → 脱敏事件），
+    /// 这条链路一旦断掉不会有任何报错，只会安静地不再留证。
+    func inspectForDNSStall(_ line: CoreLogLine) {
+        guard DNSStallDetector.isResolutionStall(line) else { return }
+        if let report = dnsStallDetector.ingest(
+            line,
+            at: now(),
+            physicalBytes: Self.physicalByteTotal()
+        ) {
+            record(report)
+        }
+    }
+
+    private static func physicalByteTotal() -> UInt64? {
+        guard let counters = NetworkThroughput.physicalCounters() else { return nil }
+        return counters.inputBytes &+ counters.outputBytes
+    }
+
+    private func record(_ report: CPUAnomalyReport, logLinesInWindow: Int) {
+        let title = report.phase == .ongoing ? "CPU 占用持续偏高" : "CPU 占用已回落"
+        // 归因线索一次性写全：下次复现时不必再回头猜。域名、节点名一律不进这里。
+        let detail = [
+            String(format: "平均 %.1f%%，峰值 %.1f%%，持续 %.0f 秒",
+                   report.averagePercent, report.peakPercent, report.duration),
+            String(format: "消耗 CPU %.1f 秒，user 占比 %.0f%%（接近 100%% 为纯计算，偏低为 I/O 密集）",
+                   report.cpuSecondsConsumed, report.userShare * 100),
+            String(format: "峰值内存 %.0f MB，峰值线程 %d",
+                   Double(report.peakResidentBytes) / 1_048_576, report.peakThreadCount),
+            String(format: "主线程占本段 CPU 的 %.0f%%（高=界面渲染，低=后台并发线程）",
+                   report.mainThreadShare * 100),
+            "窗口可见 \(windowContentIsVisible ? "是" : "否")，活跃连接 \(connections.count)，"
+                + "本段日志流入 \(logLinesInWindow) 行",
+            "代理状态 \(status == .on ? "开启" : "非开启")，接管方式 \(activeModes.count) 项"
+        ].joined(separator: "；")
+        recordRuntimeEvent(level: .warning, title: title, detail: detail)
+    }
+
+    private func record(_ report: DNSStallReport) {
+        // 网卡增量是区分「解析器出问题」与「整机断网」的判据。
+        let throughput: String
+        if let delta = report.physicalBytesDelta {
+            throughput = delta > 0
+                ? String(format: "期间网卡仍收发 %.1f MB，链路正常，问题在被查询的解析器",
+                         Double(delta) / 1_048_576)
+                : "期间网卡收发为 0，更像整机链路中断而非解析器故障"
+        } else {
+            throughput = "网卡计数不可用"
+        }
+        let detail = [
+            "节点域名解析超时 \(report.outboundServerDomainStalls) 次"
+                + "（这类会让整条代理停摆），普通域名 \(report.generalStalls) 次",
+            "涉及 \(report.distinctTargetCount) 个不同目标（目标本身不记录）",
+            throughput
+        ].joined(separator: "；")
+        recordRuntimeEvent(level: .warning, title: "DNS 解析持续超时", detail: detail)
     }
 
     // MARK: - 特权助手（零弹窗 TUN）
