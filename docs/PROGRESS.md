@@ -11,7 +11,10 @@
 - [x] KernelLogStore、ClashAPIClient、LocalTCPRelay、ObserverBag 释放路径复核，无问题。
 - [x] CHANGELOG 补齐 0.1.74~0.1.80。
 - [x] 全量 477 执行 / 1 跳过 / 0 失败。
-- [ ] prepare、安装、发布；发布后清理旧 Release/标签与旧配置备份，收敛到一版。
+- [x] prepare 通过（M4 平均 0.120%）、已安装 v0.1.80/build 180、已发布 GitHub 并标记 Latest。
+- [x] 孤儿清理端到端验证：首启移除 5 个，`subscriptions` 28 MB → 932 KB，事件已记录。
+- [x] 本机收敛：单实例、单副本、dist 只留最新、备份 8→3 份；用户数据 54 MB → 12 MB。
+- [ ] 旧 Release/标签（v0.1.73/v0.1.77/v0.1.79）待修复经数日真实使用确认后再清理。
 
 
 ## 2026-08-20 v0.1.79 CPU 燃烧修复与自诊断优化（待门禁与部署）
