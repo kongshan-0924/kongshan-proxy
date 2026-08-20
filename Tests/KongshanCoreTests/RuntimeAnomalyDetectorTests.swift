@@ -184,6 +184,35 @@ final class RuntimeAnomalyDetectorTests: XCTestCase {
         XCTAssertNil(detector.ingest(rewound))
     }
 
+    // MARK: - 采样器资源纪律
+
+    /// `task_threads` 返回的每条线程 send right 必须逐一归还。不还的话，同一线程的
+    /// right 合并计数（urefs）每采样 +1——本测试用调用线程自己的端口做精确判据：
+    /// 300 次采样后 urefs 只允许零星波动，线性增长即视为泄漏回归。
+    /// （`pthread_mach_thread_np` 只读名字不取新引用，测试本身不干扰计数。）
+    func testSamplerReturnsEveryThreadPortRight() {
+        let selfPort = pthread_mach_thread_np(pthread_self())
+        var before: mach_port_urefs_t = 0
+        XCTAssertEqual(
+            mach_port_get_refs(mach_task_self_, selfPort, MACH_PORT_RIGHT_SEND, &before),
+            KERN_SUCCESS
+        )
+
+        for _ in 0..<300 {
+            XCTAssertNotNil(ProcessResourceSampler.current())
+        }
+
+        var after: mach_port_urefs_t = 0
+        XCTAssertEqual(
+            mach_port_get_refs(mach_task_self_, selfPort, MACH_PORT_RIGHT_SEND, &after),
+            KERN_SUCCESS
+        )
+        XCTAssertLessThanOrEqual(
+            Int(after) - Int(before), 8,
+            "300 次采样后本线程端口 send urefs 增长 \(Int(after) - Int(before))：任何线性增长都表示 task_threads 的线程 right 没有归还"
+        )
+    }
+
     // MARK: - DNS 停摆
 
     private func stallLine(destination: String, lookup: String) -> CoreLogLine {

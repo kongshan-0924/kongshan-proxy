@@ -3,6 +3,67 @@ import XCTest
 @testable import KongshanCore
 
 final class StorageTests: XCTestCase {
+    /// 孤儿清理只动「UUID.yaml」形态的文件：在册缓存、非 UUID 文件名、其他扩展名一概不碰。
+    func testOrphanSweepRemovesOnlyUnregisteredUUIDCaches() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "storage-orphan-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        try await storage.prepare()
+
+        let kept = SubscriptionSource(
+            id: UUID(), name: "kept", url: URL(string: "https://example.invalid/sub")!
+        )
+        let orphanID = UUID()
+        let dir = storage.subscriptionsDirectory
+        try "kept".data(using: .utf8)!.write(to: storage.cacheURL(for: kept))
+        try "orphan".data(using: .utf8)!.write(
+            to: dir.appending(path: "\(orphanID.uuidString.lowercased()).yaml"))
+        try "not-uuid".data(using: .utf8)!.write(to: dir.appending(path: "notes.yaml"))
+        try "wrong-ext".data(using: .utf8)!.write(
+            to: dir.appending(path: "\(UUID().uuidString.lowercased()).json"))
+
+        let removed = await storage.removeOrphanSubscriptionCaches(keeping: [kept])
+
+        XCTAssertEqual(removed, ["\(orphanID.uuidString.lowercased()).yaml"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: storage.cacheURL(for: kept).path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dir.appending(path: "notes.yaml").path))
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: dir.appending(path: "\(orphanID.uuidString.lowercased()).yaml").path))
+    }
+
+    /// 大写 UUID 在册时也不能误删（cacheURL 落盘用小写，在册比对必须不区分大小写）。
+    func testOrphanSweepMatchesRegisteredIDsCaseInsensitively() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "storage-orphan-case-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        try await storage.prepare()
+        let sub = SubscriptionSource(
+            id: UUID(), name: "s", url: URL(string: "https://example.invalid/sub")!
+        )
+        try "data".data(using: .utf8)!.write(to: storage.cacheURL(for: sub))
+        let removed = await storage.removeOrphanSubscriptionCaches(keeping: [sub])
+        XCTAssertTrue(removed.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: storage.cacheURL(for: sub).path))
+    }
+
+    /// removeSubscriptionCache 幂等：文件不存在不抛错。
+    func testRemoveSubscriptionCacheIsIdempotent() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "storage-remove-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        try await storage.prepare()
+        let sub = SubscriptionSource(
+            id: UUID(), name: "s", url: URL(string: "https://example.invalid/sub")!
+        )
+        try "data".data(using: .utf8)!.write(to: storage.cacheURL(for: sub))
+        try await storage.removeSubscriptionCache(for: sub)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: storage.cacheURL(for: sub).path))
+        try await storage.removeSubscriptionCache(for: sub)
+    }
+
     func testPreparesDirectoriesAndReplacesFileAtomically() async throws {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

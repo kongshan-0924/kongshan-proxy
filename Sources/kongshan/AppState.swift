@@ -1055,6 +1055,7 @@ final class AppState {
     func removeSubscription(id: UUID) async {
         guard !isBusy, let index = subscriptions.firstIndex(where: { $0.id == id }) else { return }
         let previousActiveContent = activeRuntimeContent
+        let removedSource = subscriptions[index]
         subscriptions.remove(at: index)
         nodes.removeAll { $0.sourceID == id }
         discoveredPolicyGroups[id] = nil
@@ -1070,6 +1071,14 @@ final class AppState {
         } catch {
             errorMessage = "删除订阅失败：\(error.localizedDescription)"
             return
+        }
+        // 缓存 YAML 一并删掉（含节点凭据，属敏感数据，不该在删除订阅后残留）。
+        // 删失败只告警：订阅本身已成功移除，不能因为清缓存失败把状态回滚出岔子；
+        // 残留会被下次启动的孤儿清理兜住。
+        do {
+            try await storage.removeSubscriptionCache(for: removedSource)
+        } catch {
+            appendWarning("订阅缓存清理失败：\(error.localizedDescription)")
         }
         await reloadAfterActiveContentChange(from: previousActiveContent)
     }
@@ -2802,6 +2811,14 @@ final class AppState {
         Task { await loadBundledCoreVersionIfNeeded() }   // 后台读内核版本，不阻塞加载
         if let data = try await storage.readIfPresent(from: subscriptionsURL) {
             subscriptions = try JSONDecoder().decode([SubscriptionSource].self, from: data)
+        }
+        // 在册清单已就绪、还没去读任何缓存——这是清孤儿的唯一安全时点。
+        let orphans = await storage.removeOrphanSubscriptionCaches(keeping: subscriptions)
+        if !orphans.isEmpty {
+            recordRuntimeEvent(
+                title: "已清理订阅缓存孤儿",
+                detail: "移除 \(orphans.count) 个不再对应任何订阅的缓存文件"
+            )
         }
         if let data = try await storage.readIfPresent(from: manualNodesURL) {
             nodes = try JSONDecoder().decode([ProxyNode].self, from: data)

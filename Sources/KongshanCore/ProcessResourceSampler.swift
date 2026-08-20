@@ -101,14 +101,21 @@ public enum ProcessResourceSampler {
         return info.resident_size
     }
 
-    /// 线程数要自己释放 `task_threads` 分配的数组，否则每次采样泄漏一块 vm——
-    /// 诊断代码把被诊断的进程拖垮就本末倒置了。
+    /// `task_threads` 交出**两种**要还的东西：数组本身的 vm，和数组里**每条线程的
+    /// send right**。首版只还了前者——短期看不出来（同一线程的 right 合并进同一个
+    /// 名字，端口表不涨，只涨引用计数），但每天 5,760 次采样会在 ~11 天后把 urefs
+    /// 顶到溢出，`task_threads` 开始报错，线程数指标静默变 0；而 dispatch 线程池的
+    /// 短命线程退出后，漏掉的 right 变成死名字在端口表里永久堆积。
+    /// 诊断代码把被诊断的进程拖垮就本末倒置了，两种都必须逐一归还。
     private static func threadCount() -> Int? {
         var threads: thread_act_array_t?
         var count = mach_msg_type_number_t(0)
         guard task_threads(mach_task_self_, &threads, &count) == KERN_SUCCESS,
               let threads else { return nil }
         defer {
+            for index in 0..<Int(count) {
+                mach_port_deallocate(mach_task_self_, threads[index])
+            }
             vm_deallocate(
                 mach_task_self_,
                 vm_address_t(UInt(bitPattern: threads)),

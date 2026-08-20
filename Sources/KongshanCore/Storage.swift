@@ -84,6 +84,48 @@ public actor Storage {
         )
     }
 
+    /// 删除某个订阅的缓存 YAML。文件不存在视为成功（幂等）。
+    public func removeSubscriptionCache(for subscription: SubscriptionSource) throws {
+        do {
+            try FileManager.default.removeItem(at: cacheURL(for: subscription))
+        } catch {
+            let nsError = error as NSError
+            guard nsError.domain == NSCocoaErrorDomain, nsError.code == NSFileNoSuchFileError else {
+                throw error
+            }
+        }
+    }
+
+    /// 清掉不再对应任何在册订阅的缓存文件，返回删除的文件名。
+    ///
+    /// 历史版本删除订阅时不删缓存，真机上曾积累 5 个孤儿共 27 MB（其中两个各 13 MB）；
+    /// 即便删除路径修好，删除与落盘之间进程终止也仍会留孤儿，所以启动时兜底清一次。
+    /// 只动本目录里「UUID.yaml」形态的文件：目录中若出现别的东西（用户手放的备份、
+    /// 未来版本的新文件），一概不碰。
+    public func removeOrphanSubscriptionCaches(keeping subscriptions: [SubscriptionSource]) -> [String] {
+        let registered = Set(subscriptions.map { $0.id.uuidString.lowercased() })
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: subscriptionsDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+
+        var removed: [String] = []
+        for entry in entries {
+            let name = entry.lastPathComponent
+            guard name.hasSuffix(".yaml"),
+                  let id = UUID(uuidString: String(name.dropLast(".yaml".count))),
+                  !registered.contains(id.uuidString.lowercased()) else { continue }
+            do {
+                try FileManager.default.removeItem(at: entry)
+                removed.append(name)
+            } catch {
+                continue
+            }
+        }
+        return removed
+    }
+
     public func readIfPresent(from url: URL) throws -> Data? {
         // 直接 try? Data(contentsOf:)：消除 fileExists → Data 之间的 TOCTOU 窗口，
         // 文件被并发删除时返回 nil 而不是抛错，与原语义一致。

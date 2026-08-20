@@ -3578,3 +3578,48 @@ popover 之后**，这个 hosting controller 永久存活并持续观察 `@Obser
   机制层验证，完整场景（代理开启 + popover + 长时间运行）要靠接下来几天的真实使用确认；
   确认消息页不再出现「CPU 占用持续偏高」后，再按「只保留最新」惯例清理两个旧 Release
   与标签。
+
+## 2026-08-21 00:30 — 深度资源排查 + v0.1.80
+
+### 本轮问题
+
+用户要求：只保留一版运行；彻底排查资源占用/内存泄漏；顺带修小问题。
+
+### 运行面确认（v0.1.79 装后 ~80 分钟）
+
+- 单实例、单副本（仅 /Applications 一份，废纸篓已被用户清空）。
+- 安装后零「CPU 占用持续偏高」事件；生命周期平均 CPU 0.46%，RSS 64 MB（idle）。
+- `leaks` 实测（开发者模式可附加）：**总泄漏 14.4 KB / 288 处**，全部为系统框架的
+  `NSXPCConnection`（launchd 登录项接口）环，数量恒为 3、不随时间累积，非应用代码。
+- FD 67、端口 267、线程 5，均在正常水位。
+
+### 真问题一：自诊断采样器泄漏 mach port 引用（v0.1.78 引入，本人代码）
+
+- `task_threads` 返回数组内存**和每条线程的 send right** 两种资源，首版只归还了前者。
+- 短期不可见：同线程 right 合并进同一名字，端口表不涨（top 实测 267/273），只涨
+  urefs——每天 5,760 次采样，约 **11 天后 urefs 溢出**，`task_threads` 开始失败，
+  线程数指标静默变 0；且 dispatch 线程池短命线程退出后，漏掉的 right 变成死名字堆积。
+- 修复：defer 里逐一 `mach_port_deallocate` 再 `vm_deallocate`。
+- 回归 `testSamplerReturnsEveryThreadPortRight` 用调用线程自身端口的 send urefs 做精确
+  判据；**反向验证**：注释掉归还后测试确切失败（300 次采样 urefs 恰增 300），恢复后通过。
+
+### 真问题二：删除订阅不删缓存 YAML（历史缺陷）
+
+- 实测 8 个缓存对 3 个在册订阅：**5 个孤儿共 27.2 MB**（两个各 13 MB），来自用户删除
+  vmiss/profile/Pro 等订阅后残留；缓存含节点凭据，属敏感数据不该残留。
+- 修复：`removeSubscription` 成功落盘后删缓存（失败仅告警，下次启动兜底）；
+  `Storage.removeOrphanSubscriptionCaches` 启动清孤儿——只动「UUID.yaml」形态文件，
+  在册比对不区分大小写，清理结果记运行事件。
+- 测试 4 条：孤儿限定清理、大小写不误删、幂等删除、AppState 删除路径连带删缓存。
+
+### 其余排查均未见问题
+
+KernelLogStore（O_EVTONLY 描述符在 cancel handler 关闭、写句柄缓存有意为之）、
+ClashAPIClient（socket 所有退出路径显式 cancel）、LocalTCPRelay（pairs 字典配对清理）、
+NotificationObserverBag、各 Task 取消路径——逐一复核通过。
+
+### 小问题一并处理
+
+- CHANGELOG 断档补齐：新增 v0.1.79、v0.1.80 条目，中间版本 0.1.74~0.1.78 归档说明。
+- 发布收敛到一版：v0.1.80 发布后清理 v0.1.73/v0.1.77/v0.1.79 的 Release 与标签（执行记录见后）。
+- 配置备份收敛到最近 3 份（执行记录见后）。
