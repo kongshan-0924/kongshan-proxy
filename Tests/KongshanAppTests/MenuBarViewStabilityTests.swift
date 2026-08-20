@@ -115,6 +115,53 @@ final class MenuBarViewStabilityTests: XCTestCase {
         XCTAssertFalse(controller.isPopoverShown)
     }
 
+    /// 关闭后必须释放面板与其 NSHostingController。缓存的 hosting controller 会永久观察
+    /// AppState，速率每 1~2 秒的变化持续驱动它求值——真机上烧过 8 小时 ~57% CPU。
+    func testPopoverIsReleasedAfterClose() {
+        let controller = makeController()
+        defer { controller.stop() }
+        activateForPopover()
+
+        controller.togglePopover()
+        XCTAssertTrue(controller.isPopoverLoaded)
+
+        controller.togglePopover()
+        // 真实显示过的面板要等 ~0.6s 关闭动画后由 popoverDidClose 释放；
+        // 从未真正显示的（headless）在 toggle 里就地释放。两种路径都轮询兜住。
+        for _ in 0..<15 where controller.isPopoverLoaded { spin() }
+        XCTAssertFalse(controller.isPopoverShown)
+        XCTAssertFalse(controller.isPopoverLoaded, "关闭后面板与 hosting controller 必须释放")
+    }
+
+    /// 过期实例的关闭回调（快速重开时才会出现）不得动当前面板的状态。
+    func testStaleCloseNotificationDoesNotDropCurrentPopover() {
+        let controller = makeController()
+        defer { controller.stop() }
+        activateForPopover()
+
+        controller.togglePopover()
+        XCTAssertTrue(controller.isPopoverLoaded)
+
+        let stale = controller.makePopover()
+        controller.popoverDidClose(Notification(name: NSPopover.didCloseNotification, object: stale))
+        XCTAssertNil(stale.contentViewController, "过期实例自己的内容要释放")
+        XCTAssertTrue(controller.isPopoverLoaded, "当前面板不受过期回调影响")
+        XCTAssertTrue(controller.isPopoverShown)
+    }
+
+    /// 源码守卫：高频数值视图不得挂动画修饰符。`.smooth` 弹簧在下一次采样到来时仍未收敛，
+    /// SwiftUI 会按屏幕刷新率持续插值字形；这两个文件里的数值全部每 1~2 秒变化。
+    /// 低频动画（如 MainWindowView 的通知条）不受此限制。
+    func testHighFrequencyValueViewsCarryNoAnimationModifiers() throws {
+        let root = projectRoot()
+        for file in ["Sources/kongshan/DashboardView.swift", "Sources/kongshan/MenuBarPopoverView.swift"] {
+            let source = try String(contentsOf: root.appending(path: file), encoding: .utf8)
+            XCTAssertFalse(source.contains(".animation("), "\(file) 不得使用 .animation(")
+            XCTAssertFalse(source.contains(".contentTransition("), "\(file) 不得使用 .contentTransition(")
+            XCTAssertFalse(source.contains("TimelineView"), "\(file) 不得使用 TimelineView")
+        }
+    }
+
     /// NSPopover.show 要求进程已激活且过一个 runloop（真机 App 本来就满足）；
     /// xctest  runner 默认不激活，不补这一步 isShown 恒为 false。
     private func activateForPopover() {

@@ -3455,3 +3455,100 @@ GitHub Release 元数据与当前运行进程；这四个版本当时没有留�
   验证戳已绑定提交，用户可直接运行 `scripts/release.sh publish`。
 - App cdhash 已变，免密码助手会显示「需重装」，属既有安全设计，需用户在设置 → 隧道手动重装一次。
 - 自诊断仍未捕获过真实异常；阈值仍是首版估计值。
+
+## 2026-08-20 16:10 — 只读复查：自诊断捕获异常并定位根因
+
+### 本轮问题
+
+用户要求检查 v0.1.78 上线后的运行情况。全程只读，未改配置、未启停 App。
+
+### 自诊断生效，且证据直接指向根因
+
+- 200 条事件里 **182 条是「CPU 占用持续偏高」**，8 条「已回落」。最新一段
+  **已连续 29,709 秒（8.25 小时）未结束**：平均 57.4%、峰值 103.5%、
+  消耗 CPU 17,051 秒（4.7 核·小时）、峰值内存 602 MB、峰值线程 11。
+- 决定性字段：**主线程占本段 CPU 的 99%**、**user 占比 97%**、**窗口可见 否**、活跃连接 0。
+- 现场 `sample` 复现（当时实测 39.5%）：主线程 9,439 个采样，其中 4,208 为 `mach_msg` 空等，
+  2,531 落在 `stepIdle → CA::Transaction::commit → CALayer _display →
+  CGDrawingLayer.draw(in:)[SwiftUICore] → RB::DisplayList::render → 字形绘制`，
+  并伴随 `RBInterpolatedDisplayListContents` / `RBMovedDisplayListContents`（动画插值显示列表）
+  与 `NSHostingView.minSize/updateConstraints/_willUpdateConstraintsForSubtree` 及
+  深层 `NSView _layoutSubtreeWithOldSize` 递归。
+
+### 根因
+
+`MenuBarController.makePopover()` 创建的 `NSPopover` 与其
+`NSHostingController(rootView: MenuBarPopoverView(...).environment(state))` **被缓存后不再释放**：
+`popoverDidClose` 只把 `popoverOpen` 复位，只有 `stop()` 才置空。于是用户**开过一次菜单栏
+popover 之后**，这个 hosting controller 永久存活并持续观察 `@Observable` 的 `state`。
+
+`MenuBarPopoverView.swift:81-82` 与 `DashboardView.swift:145-146/208-209/214-215` 把
+`.contentTransition(.numericText())` + `.animation(.smooth(duration: 0.25))` 挂在
+**每 1~2 秒都在变**的速率、活跃连接数与内核内存上。`.smooth` 是弹簧动画，新值在上一段尚未收敛
+时就到达，SwiftUI 于是按屏幕刷新率持续插值字形并重排布局——**即使 popover 并未显示、
+主窗口也已关闭**。这与「窗口可见 否 + 主线程 99% + 纯字形绘制」完全吻合。
+
+版本相关性成立：`MenuBarPopoverView` 是 **v0.1.74** 新增的，正是四轮未过门禁的界面改动之首；
+最早观测到的 929 分钟燃烧发生在 v0.1.77 上，而 v0.1.73（最后一个过门禁的版本）没有这个 popover。
+
+### 更正两处上一轮的错误结论
+
+1. **时区**：`runtime-events.json` 的时间戳是 Apple 参考日期（UTC），上一轮当作本地时间读，
+   差 8 小时。因此「代理 14:35 起就关闭」是错的——实际是 **22:35 本地**，那段燃烧期内代理
+   大部分时间是**开着**的。「异常与代理开关无关」这一条据此撤回；现有证据反而支持
+   「内核在跑 → 速率/内存持续变化 → 动画持续触发」。
+2. **主线程判据**：上一轮据 `ps -M` 断言「不是 SwiftUI/主线程」。本轮实测 `ps -M` 在该进程上
+   **根本没有枚举全部线程**（只列 4 条、合计 2.6 秒，却同时报进程 38.2% CPU），该结论不成立。
+   进程内 `thread_info` 的 96~99% 才是可信值。**「排除 SwiftUI 渲染」的结论撤回。**
+
+### 本轮同时暴露的自诊断缺陷
+
+中途报告固定 10 分钟一条，长时间爆发会刷爆 200 条事件环：本次 182/200 被 CPU 告警占满，
+把 DNS 停摆与换网事件全部挤出。需要改成指数退避或同段去重。
+
+### 其他健康面
+
+- 近 7 天 0 崩溃。内核日志 41 次 10 秒解析超时（与上轮同量级，未恶化）。
+- 用户数据 36MB，日志轮转正常（5MB × 2）。
+- 两个提交仍未推送，线上最新仍是 v0.1.77。
+
+### 未验证部分
+
+- 「必须开过一次 popover 才会触发」尚未做开/未开的对照实验，是依据代码生命周期与栈帧推断。
+- 修复方案尚未实施（本轮只读）。
+
+## 2026-08-20 22:50 — v0.1.79：修复 popover 常驻观察燃烧 + 自诊断优化
+
+### 修复（根因链）
+
+1. **`MenuBarController` 的 popover 关闭即释放**。原实现把 `NSPopover` 连同
+   `NSHostingController` 缓存到 `stop()` 才释放；hosting controller 因此永久观察
+   `@Observable` AppState，速率/内存每 1~2 秒的变化持续驱动它求值与布局。
+   现改为：每次打开建新实例；`popoverDidClose` 按对象身份释放（快速重开时过期实例
+   只释放自己，不动新面板）；`show` 从未成功时（进程未获激活）没有 didClose 回调，
+   在 toggle 关闭分支就地释放。
+2. **摘掉高频值上的 `.contentTransition(.numericText()) + .animation(.smooth)`**，
+   共 4 处（DashboardView 3 处：速率、活跃连接、内核内存；MenuBarPopoverView 1 处）。
+   `.smooth` 弹簧在下一次采样到来时仍未收敛，SwiftUI 按屏幕刷新率持续插值字形。
+   monospacedDigit 保证宽度稳定，数字直接跳变。低频动画（MainWindowView 通知条、
+   PolicyGroups hover、Routing 折叠）保留。
+
+### 额外优化
+
+3. **CPU 中途报告指数退避**：10 分钟固定节律改为 10→20→40→…封顶 2 小时。
+   2026-08-20 的 8 小时爆发按旧节律产出 182 条告警占满 200 条事件环；退避后同样时长
+   只产出 5~6 条，每条都是累计口径，环里留得住 DNS 与换网事件。
+4. **诊断详情改读 `activeConnectionCount`**：原来读的 `connections.count` 是连接页
+   明细列表，只有该页在订阅时才有数据，导致爆发事件里代理开着却记“活跃连接 0”。
+
+### 新增回归
+
+- `testPopoverIsReleasedAfterClose`（真实开合，轮询等关闭动画）
+- `testStaleCloseNotificationDoesNotDropCurrentPopover`（快速重开的过期回调）
+- `testHighFrequencyValueViewsCarryNoAnimationModifiers`（源码守卫：这两个文件禁
+  `.animation(`/`.contentTransition(`/`TimelineView`）
+- `testInterimReportsBackOffExponentially`（600 秒爆发 ≤6 条中途报告）
+
+### 验证
+
+- 定向 27/27 通过；全量与 M4 见下一条记录。

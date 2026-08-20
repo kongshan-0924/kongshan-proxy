@@ -140,10 +140,11 @@ struct DashboardView: View {
                 )
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 1) {
+                // 高频数值不做动画：.smooth 弹簧在下一次采样到来时仍未收敛，SwiftUI 会按
+                // 屏幕刷新率持续插值字形——真机上曾以 ~57% CPU 连烧 8 小时（2026-08-20）。
+                // monospacedDigit 已保证宽度稳定，数字直接跳变即可。
                 Text(Theme.rateOrDash(value))
                     .font(.system(size: 18, weight: .bold).monospacedDigit())
-                    .contentTransition(.numericText())
-                    .animation(.smooth(duration: 0.25), value: value)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                 Text(title)
@@ -204,15 +205,13 @@ struct DashboardView: View {
             }
 
             MetricCard(symbol: "link", tint: .purple, caption: "活跃连接") {
+                // 同上：高频数值不做动画（见 heroRate 的说明）。
                 Text("\(state.activeConnectionCount)")
-                    .contentTransition(.numericText())
-                    .animation(.smooth(duration: 0.25), value: state.activeConnectionCount)
             }
 
             MetricCard(symbol: "memorychip", tint: .pink, caption: "内核内存") {
+                // 同上：高频数值不做动画（见 heroRate 的说明）。
                 Text(Theme.bytesOrDash(Int64(clamping: state.coreMemory)))
-                    .contentTransition(.numericText())
-                    .animation(.smooth(duration: 0.25), value: state.coreMemory)
             } corner: {
                 if state.coreVersion != "—" {
                     // 内核的 /version 返回的就带名字（`sing-box 1.13.14`），

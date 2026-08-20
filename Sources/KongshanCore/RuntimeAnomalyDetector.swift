@@ -9,19 +9,31 @@ public struct CPUAnomalyPolicy: Equatable, Sendable {
     public var breachesToOpen: Int
     /// 连续多少次回落才收一段。
     public var recoveriesToClose: Int
-    /// 一段异常持续多久出一次中途报告。
+    /// 首次中途报告的等待时长。
     public var interimInterval: TimeInterval
+    /// 每报一次中途报告，下一次的等待翻这个倍数。
+    ///
+    /// 固定节律在真机上已经翻过车：2026-08-20 一段 8 小时的爆发按 10 分钟一条产出了
+    /// 182 条告警，占满 200 条事件环，把 DNS 停摆与换网事件全部挤出。指数退避下同样
+    /// 8 小时只产出 5~6 条，信息量不减（每条都带完整累计数据），环里留得住别的事件。
+    public var interimBackoff: Double
+    /// 退避的上限，避免超长爆发彻底沉默。
+    public var maxInterimInterval: TimeInterval
 
     public init(
         sustainedPercent: Double = 12,
         breachesToOpen: Int = 3,
         recoveriesToClose: Int = 3,
-        interimInterval: TimeInterval = 600
+        interimInterval: TimeInterval = 600,
+        interimBackoff: Double = 2,
+        maxInterimInterval: TimeInterval = 3600 * 2
     ) {
         self.sustainedPercent = sustainedPercent
         self.breachesToOpen = breachesToOpen
         self.recoveriesToClose = recoveriesToClose
         self.interimInterval = interimInterval
+        self.interimBackoff = interimBackoff
+        self.maxInterimInterval = maxInterimInterval
     }
 
     public static let `default` = CPUAnomalyPolicy()
@@ -57,6 +69,7 @@ public struct CPUAnomalyDetector: Sendable {
     private struct Window {
         var startedAt: Date
         var lastReportedAt: Date
+        var nextInterimGap: TimeInterval
         var startUser: Double
         var startSystem: Double
         var startMainThread: Double
@@ -129,6 +142,7 @@ public struct CPUAnomalyDetector: Sendable {
         window = Window(
             startedAt: anchor.capturedAt,
             lastReportedAt: sample.capturedAt,
+            nextInterimGap: policy.interimInterval,
             startUser: anchor.userSeconds,
             startSystem: anchor.systemSeconds,
             startMainThread: anchor.mainThreadSeconds,
@@ -151,8 +165,9 @@ public struct CPUAnomalyDetector: Sendable {
 
     private mutating func interimReport(at date: Date) -> CPUAnomalyReport? {
         guard var current = window,
-              date.timeIntervalSince(current.lastReportedAt) >= policy.interimInterval else { return nil }
+              date.timeIntervalSince(current.lastReportedAt) >= current.nextInterimGap else { return nil }
         current.lastReportedAt = date
+        current.nextInterimGap = min(current.nextInterimGap * policy.interimBackoff, policy.maxInterimInterval)
         window = current
         return report(from: current, phase: .ongoing, until: date)
     }

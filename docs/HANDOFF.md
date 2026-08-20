@@ -1,6 +1,28 @@
 # 项目交接
 
-## 当前状态：v0.1.78 已安装运行，含运行期自诊断（2026-08-18）
+## 当前状态：v0.1.79 修复 CPU 燃烧根因（2026-08-20）
+
+自诊断上线两天后捕获了完整证据并定位根因，v0.1.79 已修复：
+
+- **根因**：`MenuBarController` 缓存的 popover `NSHostingController` 永不释放，持续观察
+  `@Observable` AppState；叠加 Dashboard/Popover 四处把 `.contentTransition(.numericText())
+  + .animation(.smooth)` 挂在每 1~2 秒变化的速率/连接数/内存上——弹簧动画在下一次采样
+  到来时仍未收敛，SwiftUI 按屏幕刷新率持续插值字形。真机代价：一段爆发平均 57.4%、
+  峰值 103.5%，连烧 8.25 小时、17,051 CPU 秒（4.7 核·小时）、峰值内存 602 MB。
+- **证据链**：自诊断事件「主线程 99% + user 97% + 窗口可见 否」+ 现场 `sample` 栈
+  （`stepIdle → CA::Transaction::commit → CGDrawingLayer.draw → RB::DisplayList` 字形绘制、
+  `RBInterpolatedDisplayListContents` 动画插值、`NSHostingView` 反复布局）。
+  版本相关性：popover 是 v0.1.74（未过门禁的四轮界面改动之首）引入的，v0.1.73 没有。
+- **修复**：popover 关闭即释放（含快速重开与 show 未成功两个边界）；摘掉四处高频值动画；
+  另有源码守卫禁止这两个文件再挂 `.animation(`/`.contentTransition(`/`TimelineView`。
+- **额外优化**：CPU 中途报告指数退避（10 分钟固定节律在 8 小时爆发中产出 182 条告警
+  占满 200 条事件环，退避后同时长只产出 5~6 条）；诊断详情改读 `activeConnectionCount`
+  （原读连接页明细列表，页面不开恒为 0，丢归因线索）。
+- **两处上轮结论更正**已记入 SESSION_LOG：runtime-events 时间戳是 UTC（上轮当本地时间
+  读，差 8 小时，「与代理开关无关」撤回）；`ps -M` 在本进程上枚举不全线程（「排除
+  SwiftUI」撤回，进程内 `thread_info` 的读数才可信）。
+
+## 历史状态：v0.1.78 已安装运行，含运行期自诊断（2026-08-18）
 
 - **安装与线上均为 v0.1.77/build 177**，GitHub Release 发布于 `2026-08-14T16:50:18Z`，
   唯一资产 `kongshan-0.1.77.dmg`。此前 `HANDOFF`/`PROGRESS`/`NEXT_STEPS` 三份文档都停在

@@ -4064,7 +4064,10 @@ final class AppState {
                    Double(report.peakResidentBytes) / 1_048_576, report.peakThreadCount),
             String(format: "主线程占本段 CPU 的 %.0f%%（高=界面渲染，低=后台并发线程）",
                    report.mainThreadShare * 100),
-            "窗口可见 \(windowContentIsVisible ? "是" : "否")，活跃连接 \(connections.count)，"
+            // 用 activeConnectionCount 而不是 connections.count：后者是连接页的明细列表，
+            // 只有该页在流式订阅时才有数据。2026-08-20 的爆发事件里代理明明开着却记成
+            // "活跃连接 0"，正是读错了这个字段，白丢一条归因线索。
+            "窗口可见 \(windowContentIsVisible ? "是" : "否")，活跃连接 \(activeConnectionCount)，"
                 + "本段日志流入 \(logLinesInWindow) 行",
             "代理状态 \(status == .on ? "开启" : "非开启")，接管方式 \(activeModes.count) 项"
         ].joined(separator: "；")

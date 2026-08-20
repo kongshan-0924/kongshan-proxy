@@ -76,10 +76,10 @@ struct MenuBarPopoverView: View {
                         .foregroundStyle(tint)
                 )
             VStack(alignment: .leading, spacing: 1) {
+                // 高频数值不做动画：弹簧插值会让本视图在每次速率采样后按刷新率持续重绘
+                //（DashboardView.heroRate 有完整说明与真机代价）。
                 Text(Theme.rateOrDash(value))
                     .font(.system(size: 15, weight: .bold).monospacedDigit())
-                    .contentTransition(.numericText())
-                    .animation(.smooth(duration: 0.25), value: value)
                 Text(title)
                     .font(.caption2)
                     .foregroundStyle(.secondary)

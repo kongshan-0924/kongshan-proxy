@@ -88,9 +88,18 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         if popoverOpen, let popover {
             popover.performClose(nil)
             popoverOpen = false
+            if !popover.isShown {
+                // show 从未成功（进程未获激活，xctest 或激活被系统拒绝时会发生）：
+                // 不会有 popoverDidClose 回调，必须就地释放，否则 hosting controller
+                // 永久存活并持续观察 AppState——正是 2026-08-20 那次 8 小时燃烧的机制。
+                popover.contentViewController = nil
+                self.popover = nil
+            }
             return
         }
-        let popover = self.popover ?? makePopover()
+        // 每次打开都建新实例，不复用：快速重开时旧实例的关闭回调（带 ~0.6s 动画延迟）
+        // 才能按对象身份识别为“过期”，不会误释放正在显示的新面板。
+        let popover = makePopover()
         self.popover = popover
         // .accessory 策略下应用不活跃，popover 不激活会吃掉第一次点击。
         NSApp.activate(ignoringOtherApps: true)
@@ -102,7 +111,13 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         popoverOpen
     }
 
-    private func makePopover() -> NSPopover {
+    /// 测试用：面板（连同其 NSHostingController）是否仍被持有。
+    var isPopoverLoaded: Bool {
+        popover != nil
+    }
+
+    /// internal 而非 private：释放回归需要在不真正 show 的情况下拿到实例。
+    func makePopover() -> NSPopover {
         let popover = NSPopover()
         popover.behavior = .transient
         popover.animates = true
@@ -380,9 +395,21 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 }
 
 extension MenuBarController: NSPopoverDelegate {
-    /// transient 面板点到别处自动关闭时复位开合标志，否则下次左键会被当成"再关一次"。
+    /// 关闭即释放，不缓存。缓存的 `NSHostingController` 会带着它的 SwiftUI 视图**永久**
+    /// 观察 `@Observable` 的 AppState：面板不在屏幕上，速率/内存每 1~2 秒的变化仍持续
+    /// 驱动它求值与布局。真机上这曾表现为主线程 ~57% CPU 连烧 8 小时（2026-08-20，
+    /// 自诊断事件「主线程 99% + 窗口可见 否」与采样栈共同定位）。面板本身极轻，
+    /// 重建成本远低于常驻观察。
     func popoverDidClose(_ notification: Notification) {
+        guard let closed = notification.object as? NSPopover else { return }
+        guard closed === popover else {
+            // 快速重开产生的过期实例：只释放它自己的内容，不动当前面板的状态。
+            closed.contentViewController = nil
+            return
+        }
         popoverOpen = false
+        closed.contentViewController = nil
+        popover = nil
     }
 }
 

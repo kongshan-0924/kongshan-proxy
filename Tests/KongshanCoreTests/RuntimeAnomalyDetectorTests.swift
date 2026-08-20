@@ -136,6 +136,30 @@ final class RuntimeAnomalyDetectorTests: XCTestCase {
         XCTAssertTrue(reports.allSatisfy { $0.phase == .ongoing })
     }
 
+    /// 中途报告必须指数退避：固定节律在 2026-08-20 的 8 小时爆发中产出 182 条告警，
+    /// 占满 200 条事件环，把 DNS 与换网事件全部挤出。
+    func testInterimReportsBackOffExponentially() {
+        var detector = CPUAnomalyDetector(
+            policy: CPUAnomalyPolicy(
+                sustainedPercent: 12,
+                breachesToOpen: 2,
+                recoveriesToClose: 3,
+                interimInterval: 10,
+                interimBackoff: 2,
+                maxInterimInterval: 3600
+            )
+        )
+        // 600 秒持续爆发，1 秒一采样。固定 10 秒节律会出 ~59 条；退避应只出 ~5 条。
+        let reports = drain(&detector, samples(percents: Array(repeating: 40.0, count: 600)))
+        XCTAssertFalse(reports.isEmpty, "长爆发必须有中途报告")
+        XCTAssertLessThanOrEqual(reports.count, 6, "600 秒爆发按 10/20/40/80/160/320 退避，不该超过 6 条")
+        XCTAssertTrue(reports.allSatisfy { $0.phase == .ongoing })
+        // 每条都是累计口径：最后一条覆盖的窗口必须比第一条长。
+        if let first = reports.first, let last = reports.last {
+            XCTAssertGreaterThan(last.duration, first.duration)
+        }
+    }
+
     func testFinishFlushesStillOpenWindow() {
         var detector = CPUAnomalyDetector(
             policy: CPUAnomalyPolicy(sustainedPercent: 12, breachesToOpen: 2, interimInterval: 3600)
