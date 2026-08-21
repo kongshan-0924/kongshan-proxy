@@ -3665,3 +3665,46 @@ NotificationObserverBag、各 Task 取消路径——逐一复核通过。
 单实例、单副本（仅 `/Applications`）、`dist` 只留最新 DMG；用户数据 54 MB → **12 MB**，
 配置备份 8 份 → 3 份（22 MB → 13 MB）。v0.1.80 已发布 GitHub 并标记 Latest，
 `main` 与远端同步。
+
+## 2026-08-21 08:20 — 只读问答：ChatGPT 单独分流到指定节点
+
+### 本轮问题
+
+用户反馈当前节点访问 ChatGPT 慢，且测试页显示走 IPv6；希望在不影响其他规则的前提下，
+把 ChatGPT 及相关域名单独指到自选节点。
+
+### 检查范围与关键证据
+
+- 当前为系统代理模式（inbounds 仅 `mixed`），`route.final = Proxies`，共 123 条规则。
+- 订阅自带 **`AI` 策略组**（selector，143 成员，`default: Proxies`）；
+  规则 `[19]`（7 条完整域名）、`[20]`（22 条域名后缀，含 `chatgpt.com`/`openai.com`/
+  `oaistatic.com`/`oaiusercontent.com`）、`[21]`（`domain_keyword: openai`）全部指向 `AI`。
+  规则 `[95]` 的 `openai.com → Proxies` 因排在后面永不命中。
+- `settings.json` 的 `groupSelections` 为空 ⇒ `AI` 组当前沿用默认值 `Proxies`，
+  即跟随主组，与其他流量同一个出口。**这就是"改不动"的原因，而非缺少规则。**
+
+### 结论（无需改代码）
+
+在「代理」页把 `AI` 策略组选成目标节点即可：上述 29 个域名会整体改走该节点，
+其余流量继续走主组。作用域由订阅规则界定，不影响其他规则。
+
+### 关于 IPv6
+
+系统代理模式下内核把域名原样交给节点，由**节点出口**解析并选择地址族；
+截图中 ChatGPT 走 IPv6(Cyberjet)、OpenAI 走 IPv4(Prime Security) 是同一节点的
+v6/v4 两条上游通道，非本应用决定。
+
+### 已确认的能力边界（未实施）
+
+- 用 bundled 内核验证：`route.rules[].outbound` 可直接指向**节点 tag**（✅ 接受）；
+  `action:"resolve" + strategy:"ipv4_only"` 可强制 IPv4（✅ 接受）；
+  出站级 `domain_strategy` 在 1.12 起已废弃（报 deprecated）。
+- 现状缺口：「强制代理」规则的目标在 `AppState.upsertForcedProxyRules` 中硬编码为
+  `primaryGroupName ?? "手动选择"`，**UI 无法为域名规则指定具体节点**；
+  而「分应用代理」已有节点选择器（`PerAppTarget.node`）。生成器侧
+  `availableGroups = generatedNames.union(nodeTags)` 本就允许节点 tag，只差 UI 与模型透传。
+- 若订阅没有 AI 组，或想强制 IPv4，需要上述两项改动；本轮只读，未实施。
+
+### 未验证部分
+
+切换 `AI` 组后的真实延迟改善需用户在真机操作确认。
