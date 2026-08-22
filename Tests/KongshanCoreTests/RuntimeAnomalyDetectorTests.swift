@@ -289,6 +289,18 @@ final class RuntimeAnomalyDetectorTests: XCTestCase {
         XCTAssertEqual(report.windowEnd, origin.addingTimeInterval(2))
     }
 
+    /// DNS 停摆统计同样要能在内核重启时清空，否则"重启前后各两次"会被并成一簇持续故障。
+    func testDNSStallResetClearsWindow() {
+        var detector = DNSStallDetector(windowDuration: 60, minimumStalls: 1)
+        _ = detector.ingest(
+            directStallLine(destination: "shop.example.invalid:443"),
+            at: origin,
+            physicalBytes: 0
+        )
+        detector.reset()
+        XCTAssertNil(detector.flush(at: origin.addingTimeInterval(61), physicalBytes: 0))
+    }
+
     func testBelowMinimumStallsProducesNoReport() {
         var detector = DNSStallDetector(windowDuration: 60, minimumStalls: 3)
         _ = detector.ingest(
@@ -322,5 +334,131 @@ final class RuntimeAnomalyDetectorTests: XCTestCase {
             strings.allSatisfy { !$0.localizedCaseInsensitiveContains("placeholder") && !$0.contains(".invalid") },
             "解析目标不得出现在报告的任何字段里，实际字符串：\(strings)"
         )
+    }
+
+    // MARK: - 出站失败率
+
+    private func successLine(tag: String, host: String) -> CoreLogLine {
+        CoreLogLine.parse("[100 2ms] outbound/anytls[\(tag)]: outbound connection to \(host):443")
+    }
+
+    private func failureLine(tag: String, host: String, reason: String = "failed to create session: dial tcp 203.0.113.9:8030: i/o timeout") -> CoreLogLine {
+        CoreLogLine.parse(
+            "[101 1.8s] connection: open connection to \(host):443 using outbound/anytls[\(tag)]: \(reason)"
+        )
+    }
+
+    func testOutboundFailureReportsWorstNodeWithRateAndReason() throws {
+        var detector = OutboundFailureDetector(
+            windowDuration: 60, minimumAttempts: 10, minimumFailures: 3, minimumFailureRate: 0.1
+        )
+        for i in 0..<20 {
+            _ = detector.ingest(successLine(tag: "node-aaa", host: "s\(i).example.invalid"),
+                                at: origin.addingTimeInterval(Double(i)))
+        }
+        for i in 0..<5 {
+            _ = detector.ingest(failureLine(tag: "node-aaa", host: "f\(i).example.invalid"),
+                                at: origin.addingTimeInterval(Double(20 + i)))
+        }
+        let report = try XCTUnwrap(detector.flush(at: origin.addingTimeInterval(61)))
+        XCTAssertEqual(report.outboundTag, "node-aaa")
+        XCTAssertEqual(report.failures, 5)
+        XCTAssertEqual(report.attempts, 25)
+        XCTAssertEqual(report.failureRate, 0.2, accuracy: 0.001)
+        XCTAssertEqual(report.dominantReason, "i/o timeout")
+    }
+
+    /// 归因要落到真实日志的四种形态上，且**任何形态都不得残留地址**。
+    func testNormalizedReasonMatchesRealWorldShapes() {
+        let cases: [(String, String)] = [
+            ("failed to create session: dial tcp 212.87.192.23:8030: connect: connection refused", "connection refused"),
+            ("failed to create session: EOF", "EOF"),
+            ("failed to create session: read tcp 192.168.2.7:5010->203.0.113.9:8030: read: connection reset by peer", "connection reset by peer"),
+            ("failed to create session: dial tcp 45.89.235.185:18081: i/o timeout", "i/o timeout")
+        ]
+        for (tail, expected) in cases {
+            let message = "connection: open connection to x.example.invalid:443 using outbound/anytls[node-aaa]: \(tail)"
+            let reason = OutboundFailureDetector.normalizedReason(from: message)
+            XCTAssertEqual(reason, expected, "原始：\(tail)")
+            XCTAssertFalse(reason.contains("212.87"), "原因不得残留地址：\(reason)")
+            XCTAssertFalse(reason.contains("8030"), "原因不得残留端口：\(reason)")
+        }
+    }
+
+    /// `context canceled` 是配置重载时主动取消旧连接，不是节点故障。
+    func testContextCanceledIsNotCountedAsFailure() {
+        let line = CoreLogLine.parse(
+            "[104 1ms] connection: open connection to x.example.invalid:443 using outbound/anytls[node-aaa]: failed to create session: context canceled"
+        )
+        XCTAssertFalse(OutboundFailureDetector.isFailedAttempt(line),
+                       "重载取消不得算成节点故障，否则每改一次设置都会误报")
+    }
+
+    /// **不得把规则主动拒绝算成节点故障。** 广告拦截每命中一次就写一条
+    /// `operation not permitted`，误报会让开着拦截的用户天天收到"节点故障"。
+    func testRuleRejectionsAndDirectAreNeverCountedAsNodeFailures() {
+        var detector = OutboundFailureDetector(
+            windowDuration: 60, minimumAttempts: 1, minimumFailures: 1, minimumFailureRate: 0.0
+        )
+        let reject = CoreLogLine.parse(
+            "[102 8ms] connection: open connection to ads.example.invalid:443 using outbound/block[reject]: operation not permitted"
+        )
+        let direct = CoreLogLine.parse(
+            "[103 5.7s] connection: open connection to a.example.invalid:443 using outbound/direct[direct]: dial tcp 198.51.100.7:18081: i/o timeout"
+        )
+        for i in 0..<10 {
+            _ = detector.ingest(reject, at: origin.addingTimeInterval(Double(i)))
+            _ = detector.ingest(direct, at: origin.addingTimeInterval(Double(i)))
+        }
+        XCTAssertNil(detector.flush(at: origin.addingTimeInterval(61)),
+                     "reject 与 direct 都不该产生节点故障报告")
+        XCTAssertNil(OutboundFailureDetector.outboundTag(in: reject.message))
+        XCTAssertNil(OutboundFailureDetector.outboundTag(in: direct.message))
+    }
+
+    /// 偶发失败不报：低于阈值时保持安静，否则消息页会被正常抖动刷满。
+    func testOccasionalFailuresStayBelowThreshold() {
+        var detector = OutboundFailureDetector(
+            windowDuration: 60, minimumAttempts: 20, minimumFailures: 5, minimumFailureRate: 0.1
+        )
+        for i in 0..<60 {
+            _ = detector.ingest(successLine(tag: "node-bbb", host: "s\(i).example.invalid"),
+                                at: origin.addingTimeInterval(Double(i) * 0.5))
+        }
+        for i in 0..<2 {
+            _ = detector.ingest(failureLine(tag: "node-bbb", host: "f\(i).example.invalid"),
+                                at: origin.addingTimeInterval(Double(31 + i)))
+        }
+        XCTAssertNil(detector.flush(at: origin.addingTimeInterval(61)))
+    }
+
+    /// 报告里不得出现服务器地址：那是用户的机场/自建服务器。
+    func testReportCarriesNoServerAddress() throws {
+        var detector = OutboundFailureDetector(
+            windowDuration: 1, minimumAttempts: 1, minimumFailures: 1, minimumFailureRate: 0.0
+        )
+        _ = detector.ingest(failureLine(tag: "node-ccc", host: "x.example.invalid"),
+                            at: origin)
+        let report = try XCTUnwrap(detector.flush(at: origin.addingTimeInterval(2)))
+        var strings: [String] = []
+        func collect(_ m: Mirror) {
+            for c in m.children {
+                if let t = c.value as? String { strings.append(t) }
+                collect(Mirror(reflecting: c.value))
+            }
+        }
+        collect(Mirror(reflecting: report))
+        XCTAssertTrue(strings.allSatisfy { !$0.contains("203.0.113.9") && !$0.contains("8030") },
+                      "报告不得包含服务器地址或端口：\(strings)")
+    }
+
+    /// 内核重启要清空统计，否则两代内核的数据会被混进同一个窗口。
+    func testResetClearsAccumulatedWindow() {
+        var detector = OutboundFailureDetector(
+            windowDuration: 60, minimumAttempts: 1, minimumFailures: 1, minimumFailureRate: 0.0
+        )
+        _ = detector.ingest(failureLine(tag: "node-ddd", host: "x.example.invalid"), at: origin)
+        detector.reset()
+        XCTAssertNil(detector.flush(at: origin.addingTimeInterval(61)))
     }
 }

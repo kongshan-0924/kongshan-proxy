@@ -58,4 +58,18 @@ private final class ExitPIDRecorder: @unchecked Sendable {
     func append(_ pid: Int32) {
         lock.withLock { storedValues.append(pid) }
     }
+
+    /// 窗口内的重启计数要能被读出来，运行事件靠它说明"第几次自愈"。
+    func testRecentRestartCountTracksWindow() {
+        var limiter = CrashRestartLimiter(maxRestarts: 3, window: 10)
+        let t0 = Date(timeIntervalSince1970: 1_760_000_000)
+        XCTAssertEqual(limiter.recentRestartCount, 0)
+        XCTAssertTrue(limiter.allowsRestart(at: t0))
+        XCTAssertEqual(limiter.recentRestartCount, 1)
+        XCTAssertTrue(limiter.allowsRestart(at: t0.addingTimeInterval(1)))
+        XCTAssertEqual(limiter.recentRestartCount, 2)
+        // 超出窗口的旧记录被清掉后计数回落
+        XCTAssertTrue(limiter.allowsRestart(at: t0.addingTimeInterval(60)))
+        XCTAssertEqual(limiter.recentRestartCount, 1)
+    }
 }

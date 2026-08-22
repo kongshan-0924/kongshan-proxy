@@ -5,6 +5,9 @@ import SwiftUI
 struct MessagesView: View {
     @Environment(AppState.self) private var state
     @State private var tab: Tab = .warnings
+    /// 运行事件里绝大多数是 info（启动/停止/换网）。排查时真正要看的是 warning 与 error，
+    /// 200 条里往往只有几条。与内核日志页的「只看问题」同一个用意。
+    @AppStorage("messages.events.problemsOnly") private var eventProblemsOnly = false
 
     private enum Tab: String, CaseIterable {
         case warnings = "警告"
@@ -28,6 +31,20 @@ struct MessagesView: View {
             .labelsHidden()
             .frame(width: 240)
             .padding(.vertical, 10)
+            if tab == .events {
+                HStack(spacing: 8) {
+                    Toggle("只看问题", isOn: $eventProblemsOnly)
+                        .toggleStyle(.checkbox)
+                    if eventProblemsOnly {
+                        Text("\(visibleEvents.count) / \(state.runtimeEvents.count) 条")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
+            }
             Divider()
             if tab == .warnings { warningList } else { eventList }
         }
@@ -60,15 +77,26 @@ struct MessagesView: View {
         .scrollIndicators(.hidden)
     }
 
+    /// 一次算好再交给列表：`ForEach` 在 body 里过滤等于每次重绘都重算一遍。
+    private var visibleEvents: [RuntimeEvent] {
+        eventProblemsOnly ? state.runtimeEvents.filter { $0.level != .info } : state.runtimeEvents
+    }
+
     private var eventList: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(state.runtimeEvents.reversed()) { event in
+                ForEach(visibleEvents.reversed()) { event in
                     eventRow(event)
                     Divider().opacity(0.4)
                 }
-                if state.runtimeEvents.isEmpty {
-                    ContentUnavailableView("暂无运行事件", systemImage: "clock.arrow.circlepath")
+                if visibleEvents.isEmpty {
+                    ContentUnavailableView(
+                        eventProblemsOnly ? "没有问题事件" : "暂无运行事件",
+                        systemImage: eventProblemsOnly ? "checkmark.circle" : "clock.arrow.circlepath",
+                        description: eventProblemsOnly
+                            ? Text("当前 \(state.runtimeEvents.count) 条记录里没有警告或错误。")
+                            : nil
+                    )
                         .padding(.top, 80)
                 }
             }

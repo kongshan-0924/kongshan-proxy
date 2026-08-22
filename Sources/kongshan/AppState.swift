@@ -409,6 +409,7 @@ final class AppState {
     @ObservationIgnored private var selfDiagnosticsTask: Task<Void, Never>?
     @ObservationIgnored private var cpuAnomalyDetector = CPUAnomalyDetector()
     @ObservationIgnored private var dnsStallDetector = DNSStallDetector()
+    @ObservationIgnored private var outboundFailureDetector = OutboundFailureDetector()
     /// 两次自诊断采样之间流入的内核日志行数。异常时段的归因线索之一：
     /// 日志洪峰是本项目历史上实测的最高负载来源（v0.1.61：平均 6.36%、峰值 15.9%）。
     @ObservationIgnored private var logLinesSinceDiagnosticsTick = 0
@@ -655,7 +656,7 @@ final class AppState {
         guard target != activeModes else { return }
 
         if status == .on {
-            await stop()
+            await stop(reason: enabled ? "切换接管方式（开启\(mode.displayName)）" : "用户关闭\(mode.displayName)")
             guard status == .off, activeModes.isEmpty else { return }
         }
         guard !target.isEmpty else { return }
@@ -836,11 +837,18 @@ final class AppState {
             }
             clearRuntimeState()
             setFailure(error.localizedDescription + restoreNote)
-            recordRuntimeEvent(level: .error, title: "内核启动失败")
+            recordRuntimeEvent(
+                level: .error,
+                title: "内核启动失败",
+                detail: error.localizedDescription
+            )
         }
     }
 
-    func stop() async {
+    /// - Parameter reason: 触发这次停止的动作。**必须落进运行事件**：
+    ///   「内核已停止」不带原因时，事后无法区分用户主动关闭、切换模式、退出应用与异常停止。
+    ///   2026-08-23 01:55 那次停止就是这样成了无头案。
+    func stop(reason: String = "用户停止接管") async {
         // 崩溃自愈期间 isBusy 包含 .starting，旧实现的 guard 会直接 return，用户点停止无响应。
         // 这里特殊放行：置位 stopRequestedDuringCrashHandling 让 handleUnexpectedCoreExit 中止，
         // 然后继续走正常 stop 流程（还原系统代理 / DNS、停内核）。
@@ -921,7 +929,11 @@ final class AppState {
         }
         clearRuntimeState()
         status = .off
-        recordRuntimeEvent(title: "内核已停止", previousPID: previousPID)
+        // 两代内核的统计不能混在同一个窗口里。DNS 停摆同理：跨重启累计会把
+        // "重启前后各两次"误判成一簇持续故障。
+        outboundFailureDetector.reset()
+        dnsStallDetector.reset()
+        recordRuntimeEvent(title: "内核已停止", detail: reason, previousPID: previousPID)
         if !restoreFailures.isEmpty {
             // 快照已保留，重开 App 会自动重试；但在那之前网络是坏的，必须明确告知怎么手工恢复。
             errorMessage = "以下系统设置未能还原，网络可能不通，请手工清空或重开 kongshan 自动重试——"
@@ -944,7 +956,7 @@ final class AppState {
 
         let shouldRestart = status == .on && !activeModes.isEmpty
         if !activeModes.isEmpty {
-            await stop()
+            await stop(reason: "切换配置")
             guard status == .off, activeModes.isEmpty else { return }
         }
 
@@ -966,7 +978,7 @@ final class AppState {
         await flushPersistSettingsIfNeeded()
         finishSelfDiagnostics()
         if !activeModes.isEmpty || runtime != nil {
-            await stop()
+            await stop(reason: "应用退出")
             await flushRuntimeEventsIfNeeded()
             if status == .off { proxyRelay.stop() }
             return status == .off
@@ -1437,7 +1449,7 @@ final class AppState {
         if activeConfigNodes.isEmpty || activeModes.isEmpty {
             // 节点删光后配置生成必然失败；「只跑内核」的测速态也没有回滚需求。
             // 两种情况都直接停掉，而不是让热重载报错回滚到含幽灵节点的旧配置。
-            await stop()
+            await stop(reason: activeConfigNodes.isEmpty ? "当前配置已无可用节点" : "已取消全部接管")
             return status == .off
         }
         return await applyRoutingSettings(routingSettings, operation: "当前配置")
@@ -1817,7 +1829,7 @@ final class AppState {
         guard await startCoreForTestingIfNeeded() else { return false }
         guard let client = clashAPIClient, let testURL = URL(string: testURLString) else {
             errorMessage = "内核控制接口不可用"
-            if startedTemporaryCore, status == .on, activeModes.isEmpty { await stop() }
+            if startedTemporaryCore, status == .on, activeModes.isEmpty { await stop(reason: "测速结束") }
             return false
         }
         let targets: [(id: UUID, tag: String)] = testable.map {
@@ -1865,7 +1877,7 @@ final class AppState {
             publishDelayResults(pending)
         }
         publishProgress(force: true)
-        if startedTemporaryCore, status == .on, activeModes.isEmpty { await stop() }
+        if startedTemporaryCore, status == .on, activeModes.isEmpty { await stop(reason: "测速结束") }
         return !Task.isCancelled
     }
 
@@ -2158,7 +2170,11 @@ final class AppState {
                 proxyRelay.stop()
             }
             errorMessage = "应用分流规则失败：\(error.localizedDescription)"
-            recordRuntimeEvent(level: .error, title: "\(operation)应用失败")
+            recordRuntimeEvent(
+                level: .error,
+                title: "\(operation)应用失败",
+                detail: error.localizedDescription
+            )
             return false
         }
     }
@@ -2375,7 +2391,11 @@ final class AppState {
         } catch {
             tunSettings = oldTunSettings
             errorMessage = "应用 TUN 设置失败：\(error.localizedDescription)"
-            recordRuntimeEvent(level: .error, title: "\(operation)应用失败")
+            recordRuntimeEvent(
+                level: .error,
+                title: "\(operation)应用失败",
+                detail: error.localizedDescription
+            )
         }
     }
 
@@ -2469,7 +2489,11 @@ final class AppState {
         } catch {
             dnsSettings = oldDNSSettings
             errorMessage = "应用 DNS 设置失败：\(error.localizedDescription)"
-            recordRuntimeEvent(level: .error, title: "\(operation)应用失败")
+            recordRuntimeEvent(
+                level: .error,
+                title: "\(operation)应用失败",
+                detail: error.localizedDescription
+            )
         }
     }
 
@@ -3058,7 +3082,12 @@ final class AppState {
             await armRunningSystemCoreIfAvailable()
             resumeDashboardMonitoringIfNeeded()
             resumeLogMonitoringIfNeeded()
-            recordRuntimeEvent(level: .warning, title: "\(operation)应用失败，已回滚", currentPID: monitoredCorePID)
+            recordRuntimeEvent(
+                level: .warning,
+                title: "\(operation)应用失败，已回滚",
+                detail: updateError.localizedDescription,
+                currentPID: monitoredCorePID
+            )
         } catch {
             await singBoxProcess.stop()
             let restoreMessage: String
@@ -3074,7 +3103,11 @@ final class AppState {
             setFailure(
                 "\(operation)更新失败且旧配置无法恢复：\(updateError.localizedDescription)；\(error.localizedDescription)；\(restoreMessage)"
             )
-            recordRuntimeEvent(level: .error, title: "\(operation)应用与回滚均失败")
+            recordRuntimeEvent(
+                level: .error,
+                title: "\(operation)应用与回滚均失败",
+                detail: "更新失败：\(updateError.localizedDescription)；回滚失败：\(error.localizedDescription)；\(restoreMessage)"
+            )
         }
     }
 
@@ -3105,6 +3138,7 @@ final class AppState {
             recordRuntimeEvent(
                 level: .warning,
                 title: "\(operation)应用失败，已回滚",
+                detail: updateError.localizedDescription,
                 previousPID: previousPID,
                 currentPID: record.pid
             )
@@ -3117,7 +3151,11 @@ final class AppState {
             setFailure(
                 "\(operation)更新失败且旧 TUN 配置无法恢复：\(updateError.localizedDescription)；\(error.localizedDescription)"
             )
-            recordRuntimeEvent(level: .error, title: "\(operation)应用与 TUN 回滚均失败")
+            recordRuntimeEvent(
+                level: .error,
+                title: "\(operation)应用与 TUN 回滚均失败",
+                detail: "更新失败：\(updateError.localizedDescription)；回滚失败：\(error.localizedDescription)"
+            )
         }
     }
 
@@ -3191,6 +3229,7 @@ final class AppState {
                 recordRuntimeEvent(
                     level: .warning,
                     title: "\(operation)重载失败，已回滚",
+                    detail: updateError.localizedDescription,
                     previousPID: previousPID,
                     currentPID: record.pid
                 )
@@ -3209,7 +3248,12 @@ final class AppState {
                 setFailure(
                     "\(operation)更新失败且旧 TUN 配置无法恢复：\(updateError.localizedDescription)；\(rollbackError.localizedDescription)"
                 )
-                recordRuntimeEvent(level: .error, title: "\(operation)重载与回滚均失败", previousPID: previousPID)
+                recordRuntimeEvent(
+                    level: .error,
+                    title: "\(operation)重载与回滚均失败",
+                    detail: "更新失败：\(updateError.localizedDescription)；回滚失败：\(rollbackError.localizedDescription)",
+                    previousPID: previousPID
+                )
                 return false
             }
         }
@@ -3329,6 +3373,7 @@ final class AppState {
         let live = LiveLogEntry(entry: entry)
         logLinesSinceDiagnosticsTick += 1
         inspectForDNSStall(live.parsed)
+        inspectForOutboundFailure(live.parsed)
         pendingLogs.append(live)
         // 单次爆发也不能无限攒：超过上限的部分横竖会被 trim 掉，留着只是白占内存。
         if pendingLogs.count > KernelLogStore.defaultBufferedLineLimit {
@@ -3681,7 +3726,12 @@ final class AppState {
         }
 
         appendWarning("检测到内核意外退出（PID \(pid)），正在自动重启")
-        recordRuntimeEvent(level: .warning, title: "检测到内核意外退出", previousPID: pid)
+        recordRuntimeEvent(
+            level: .warning,
+            title: "检测到内核意外退出",
+            detail: "正在自动重启（第 \(crashRestartLimiter.recentRestartCount) 次，10 秒窗口内最多 3 次）",
+            previousPID: pid
+        )
         status = .starting
         errorMessage = nil
         do {
@@ -3768,7 +3818,7 @@ final class AppState {
         clearRuntimeState()
         let failureMessage = [message, cleanupMessage].compactMap { $0 }.joined(separator: "；")
         setFailure(failureMessage)
-        recordRuntimeEvent(level: .error, title: "内核自动恢复失败")
+        recordRuntimeEvent(level: .error, title: "内核自动恢复失败", detail: failureMessage)
         do {
             try await notificationSender.send(
                 title: "kongshan 内核已停止",
@@ -4062,6 +4112,34 @@ final class AppState {
         ) {
             record(report)
         }
+    }
+
+    /// internal 同 `inspectForDNSStall`：接线断掉不会报错，只会安静地不再留证，需回归覆盖。
+    func inspectForOutboundFailure(_ line: CoreLogLine) {
+        if let report = outboundFailureDetector.ingest(line, at: now()) {
+            record(report)
+        }
+    }
+
+    /// 出站 tag → 用户看得懂的节点名。翻不出来时退回 tag 尾号，不暴露完整 UUID。
+    private func displayName(forOutboundTag tag: String) -> String {
+        if let node = nodes.first(where: { ConfigGenerator.outboundTag(for: $0) == tag }) {
+            return node.name
+        }
+        return "节点 …\(tag.suffix(6))"
+    }
+
+    private func record(_ report: OutboundFailureReport) {
+        let name = displayName(forOutboundTag: report.outboundTag)
+        let detail = [
+            String(format: "%@ 在 %.0f 分钟内 %d/%d 次建连失败（%.0f%%）",
+                   name,
+                   max(report.windowEnd.timeIntervalSince(report.windowStart), 1) / 60,
+                   report.failures, report.attempts, report.failureRate * 100),
+            "主要原因：\(report.dominantReason)（共 \(report.distinctReasonCount) 类）",
+            "多为节点或线路问题，可到代理页测速后换一个节点"
+        ].joined(separator: "；")
+        recordRuntimeEvent(level: .warning, title: "节点建连失败偏多", detail: detail)
     }
 
     private static func physicalByteTotal() -> UInt64? {

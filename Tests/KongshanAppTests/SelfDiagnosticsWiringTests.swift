@@ -103,4 +103,49 @@ final class SelfDiagnosticsWiringTests: XCTestCase {
         )
         XCTAssertTrue(state.runtimeEvents.isEmpty)
     }
+
+    /// 出站失败要能聚合成一条运行事件，并且**用节点名而不是 tag/地址**呈现。
+    func testOutboundFailuresSurfaceAsRuntimeEventWithNodeName() throws {
+        let clock = TestClock(Date(timeIntervalSince1970: 1_760_000_000))
+        let state = makeState(clock: clock)
+        let node = ProxyNode(
+            sourceID: UUID(),
+            name: "东京 01",
+            protocolType: .shadowsocks,
+            server: "node.example.invalid",
+            port: 443,
+            password: "secret",
+            method: "aes-128-gcm"
+        )
+        state.nodes = [node]
+        let tag = ConfigGenerator.outboundTag(for: node)
+
+        for i in 0..<30 {
+            state.inspectForOutboundFailure(
+                CoreLogLine.parse("[1 2ms] outbound/anytls[\(tag)]: outbound connection to s\(i).example.invalid:443")
+            )
+            clock.advance(1)
+        }
+        for i in 0..<10 {
+            state.inspectForOutboundFailure(CoreLogLine.parse(
+                "[2 1.8s] connection: open connection to f\(i).example.invalid:443 using outbound/anytls[\(tag)]: failed to create session: dial tcp 203.0.113.9:8030: connect: connection refused"
+            ))
+            clock.advance(1)
+        }
+        XCTAssertFalse(state.runtimeEvents.contains { $0.title == "节点建连失败偏多" },
+                       "窗口未到期不该出事件")
+
+        clock.advance(700)
+        state.inspectForOutboundFailure(
+            CoreLogLine.parse("[3 2ms] outbound/anytls[\(tag)]: outbound connection to tail.example.invalid:443")
+        )
+
+        let event = try XCTUnwrap(state.runtimeEvents.last { $0.title == "节点建连失败偏多" })
+        XCTAssertEqual(event.level, .warning)
+        let detail = try XCTUnwrap(event.detail)
+        XCTAssertTrue(detail.contains("东京 01"), "要显示节点名，实际：\(detail)")
+        XCTAssertTrue(detail.contains("connection refused"), "要给出主要原因，实际：\(detail)")
+        XCTAssertFalse(detail.contains("203.0.113.9"), "不得暴露服务器地址：\(detail)")
+        XCTAssertFalse(detail.contains(tag), "不得暴露原始出站 tag：\(detail)")
+    }
 }

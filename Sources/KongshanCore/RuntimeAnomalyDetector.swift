@@ -302,6 +302,11 @@ public struct DNSStallDetector: Sendable {
         return expired
     }
 
+    /// 内核重启/停止时清空，避免把两代内核的统计混在一个窗口里。
+    public mutating func reset() {
+        window = nil
+    }
+
     /// 窗口到期就出报告。没有新日志行时也要由调用方周期性调用，否则最后一段永远不落盘。
     public mutating func flush(at date: Date, physicalBytes: UInt64?) -> DNSStallReport? {
         guard let current = window,
@@ -321,5 +326,181 @@ public struct DNSStallDetector: Sendable {
             distinctTargetCount: current.targets.count,
             physicalBytesDelta: delta
         )
+    }
+}
+
+// MARK: - 出站失败率
+
+public struct OutboundFailureReport: Equatable, Sendable {
+    public let windowStart: Date
+    public let windowEnd: Date
+    /// 出站 tag（`node-<uuid>`）。调用方负责翻成用户看得懂的节点名再展示。
+    public let outboundTag: String
+    public let failures: Int
+    public let attempts: Int
+    /// 失败原因的去重条数。同一原因反复出现说明是稳定故障，多种原因混杂更像链路整体不稳。
+    public let distinctReasonCount: Int
+    /// 出现次数最多的失败原因（已去掉地址与端口）。
+    public let dominantReason: String
+
+    public var failureRate: Double {
+        attempts > 0 ? Double(failures) / Double(attempts) : 0
+    }
+}
+
+/// 按出站 tag 聚合会话建立失败。纯逻辑，日志行由调用方喂入。
+///
+/// 存在的理由：节点间歇性故障此前只能靠翻内核日志发现。真机 2026-08-22~23 的样本里，
+/// 当前主节点 8,198 次尝试失败 476 次（5.8%），且呈簇状（单小时 251 次），
+/// 用户侧表现为"时好时坏"，但界面上没有任何地方说得出是节点在掉。
+public struct OutboundFailureDetector: Sendable {
+    private struct Window {
+        var startedAt: Date
+        var lastAt: Date
+        var attempts: [String: Int] = [:]
+        var failures: [String: Int] = [:]
+        var reasons: [String: [String: Int]] = [:]
+    }
+
+    private let windowDuration: TimeInterval
+    private let minimumAttempts: Int
+    private let minimumFailures: Int
+    private let minimumFailureRate: Double
+    private var window: Window?
+
+    public init(
+        windowDuration: TimeInterval = 600,
+        minimumAttempts: Int = 20,
+        minimumFailures: Int = 5,
+        minimumFailureRate: Double = 0.1
+    ) {
+        self.windowDuration = windowDuration
+        self.minimumAttempts = minimumAttempts
+        self.minimumFailures = minimumFailures
+        self.minimumFailureRate = minimumFailureRate
+    }
+
+    /// 抽 `outbound/anytls[node-xxx]` 里方括号中的 tag。
+    ///
+    /// `direct` 与 `reject` 一律不计：前者是直连、不代表节点健康，后者是**规则主动拒绝**
+    /// （广告拦截每命中一次就是一条 `operation not permitted`），把它算成失败会让
+    /// 开着广告拦截的用户天天收到"节点故障"误报。
+    public static func outboundTag(in message: String) -> String? {
+        guard let range = message.range(of: "outbound/") else { return nil }
+        let tail = message[range.upperBound...]
+        guard let open = tail.firstIndex(of: "["), let close = tail[open...].firstIndex(of: "]") else {
+            return nil
+        }
+        let tag = String(tail[tail.index(after: open)..<close])
+        guard !tag.isEmpty, tag != "direct", tag != "reject", tag != "block" else { return nil }
+        return tag
+    }
+
+    /// 成功建连。内核对每条成功的出站连接都写一行 `outbound connection to <host>`。
+    public static func isSuccessfulAttempt(_ line: CoreLogLine) -> Bool {
+        line.message.contains("outbound connection to")
+    }
+
+    /// 会话建立失败。只认**建连阶段**的失败；连接建成后再断开是另一回事，
+    /// 不该算进"节点连不上"的口径。
+    public static func isFailedAttempt(_ line: CoreLogLine) -> Bool {
+        let text = line.message
+        guard text.contains("open connection to"), text.contains(" using outbound/") else { return false }
+        // `context canceled` 是**配置重载时主动取消旧连接**，不是节点故障。
+        // 真机样本里它占 30 条；算进去的话用户每改一次设置就会收到一次"节点故障"误报。
+        guard !text.contains("context canceled") else { return false }
+        return failureMarkers.contains { text.contains($0) }
+    }
+
+    private static let failureMarkers = [
+        "failed to create session",
+        "i/o timeout",
+        "connection refused",
+        "connection reset by peer",
+        "network is unreachable",
+        "no route to host"
+    ]
+
+    /// 归一化失败原因，用于聚类展示。
+    ///
+    /// 先把地址整体抹掉再取尾段，**保证 IP 与端口不可能残留**——那是用户机场/自建服务器
+    /// 的地址，不该进持久化且可导出的运行事件。真机样本的四种形态都会落到有意义的尾段：
+    /// `dial tcp <addr>: connect: connection refused` → `connection refused`；
+    /// `failed to create session: EOF` → `EOF`；
+    /// `read tcp <addr>-><addr>: read: connection reset by peer` → `connection reset by peer`。
+    static func normalizedReason(from message: String) -> String {
+        var text = message
+        if let range = text.range(of: "using outbound/") {
+            text = String(text[range.upperBound...])
+            if let colon = text.range(of: "]: ") { text = String(text[colon.upperBound...]) }
+        }
+        text = text.replacingOccurrences(
+            of: "[0-9a-fA-F.:]+:[0-9]+",
+            with: "<addr>",
+            options: .regularExpression
+        )
+        let segments = text.components(separatedBy: ": ")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && $0 != "<addr>" && !$0.hasPrefix("dial tcp") && !$0.hasPrefix("read tcp") }
+        guard let last = segments.last, !last.isEmpty else { return "未知原因" }
+        return last
+    }
+
+    public mutating func ingest(_ line: CoreLogLine, at date: Date) -> OutboundFailureReport? {
+        let success = Self.isSuccessfulAttempt(line)
+        let failure = Self.isFailedAttempt(line)
+        guard success || failure, let tag = Self.outboundTag(in: line.message) else {
+            return flush(at: date)
+        }
+
+        let expired = flush(at: date)
+        var current = window ?? Window(startedAt: date, lastAt: date)
+        current.attempts[tag, default: 0] += 1
+        if failure {
+            current.failures[tag, default: 0] += 1
+            let reason = Self.normalizedReason(from: line.message)
+            current.reasons[tag, default: [:]][reason, default: 0] += 1
+        }
+        current.lastAt = date
+        window = current
+        return expired
+    }
+
+    /// 窗口到期就结算。没有新日志时也要由调用方周期性调用。
+    public mutating func flush(at date: Date) -> OutboundFailureReport? {
+        guard let current = window,
+              date.timeIntervalSince(current.startedAt) >= windowDuration else { return nil }
+        window = nil
+
+        // 只报最糟的那个出站：一次弹一条，用户才看得下去。
+        let worst = current.failures
+            .filter { tag, failures in
+                let attempts = current.attempts[tag] ?? 0
+                return attempts >= minimumAttempts
+                    && failures >= minimumFailures
+                    && Double(failures) / Double(attempts) >= minimumFailureRate
+            }
+            .max { lhs, rhs in
+                let l = Double(lhs.value) / Double(current.attempts[lhs.key] ?? 1)
+                let r = Double(rhs.value) / Double(current.attempts[rhs.key] ?? 1)
+                return l < r
+            }
+        guard let worst else { return nil }
+
+        let reasons = current.reasons[worst.key] ?? [:]
+        return OutboundFailureReport(
+            windowStart: current.startedAt,
+            windowEnd: current.lastAt,
+            outboundTag: worst.key,
+            failures: worst.value,
+            attempts: current.attempts[worst.key] ?? worst.value,
+            distinctReasonCount: reasons.count,
+            dominantReason: reasons.max { $0.value < $1.value }?.key ?? "未知原因"
+        )
+    }
+
+    /// 内核重启/停止时清空，避免把两代内核的统计混在一个窗口里。
+    public mutating func reset() {
+        window = nil
     }
 }
