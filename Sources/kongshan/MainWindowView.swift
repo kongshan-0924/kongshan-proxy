@@ -29,24 +29,34 @@ struct MainWindowView: View {
             .toolbar(removing: .sidebarToggle)
             .safeAreaInset(edge: .bottom, spacing: 0) { sidebarStatus }
         } detail: {
-            Group {
-                switch selection ?? .dashboard {
-                case .dashboard:
-                    DashboardView()
-                case .nodes:
-                    NodesView()
-                case .policyGroups:
-                    PolicyGroupsView()
-                case .routing:
-                    RoutingView()
-                case .connections:
-                    ConnectionsView()
-                case .logs:
-                    LogsView()
-                case .messages:
-                    MessagesView()
-                case .settings:
-                    SettingsView()
+            ZStack(alignment: .topTrailing) {
+                Group {
+                    switch selection ?? .dashboard {
+                    case .dashboard:
+                        DashboardView()
+                    case .nodes:
+                        NodesView()
+                    case .policyGroups:
+                        PolicyGroupsView()
+                    case .routing:
+                        RoutingView()
+                    case .connections:
+                        ConnectionsView()
+                    case .logs:
+                        LogsView()
+                    case .messages:
+                        MessagesView()
+                    case .settings:
+                        SettingsView()
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                // 真正的 Detail 右上角通知胶囊（只在非消息页且有未读警告/错误时展示）
+                if (selection ?? .dashboard) != .messages {
+                    DetailTopRightNoticeBadge(selection: $selection)
+                        .padding(.trailing, 20)
+                        .padding(.top, 16)
                 }
             }
         }
@@ -59,10 +69,6 @@ struct MainWindowView: View {
                 }
                 .help(columnVisibility == .detailOnly ? "显示侧边栏" : "隐藏侧边栏")
                 .accessibilityLabel(columnVisibility == .detailOnly ? "显示侧边栏" : "隐藏侧边栏")
-            }
-
-            ToolbarItem(placement: .primaryAction) {
-                NotificationToolbarButton(selection: $selection)
             }
         }
         // ⌘1~⌘8 直接切页，与侧栏顺序一致。零尺寸透明按钮藏在背景里，
@@ -128,9 +134,9 @@ struct MainWindowView: View {
     }
 }
 
-/// 顶部工具栏右上角通知组件。
-/// 采用紧凑的右上角微型药丸胶囊与轻量即时弹窗，无多余动效，简洁流畅。
-private struct NotificationToolbarButton: View {
+/// 页面 Detail 区域右上角微型通知胶囊组件。
+/// 精准定位在主内容区右上角（与 PageHeader 平齐），胶囊造型轻巧克制，即点即开。
+private struct DetailTopRightNoticeBadge: View {
     @Environment(AppState.self) private var state
     @Binding var selection: SidebarPage?
     @State private var showingPopover = false
@@ -150,54 +156,51 @@ private struct NotificationToolbarButton: View {
     }
 
     var body: some View {
-        Button {
-            showingPopover.toggle()
-        } label: {
-            if hasNotice {
+        if hasNotice {
+            HoverButton {
+                showingPopover.toggle()
+            } label: { isHovering in
                 HStack(spacing: 5) {
                     Image(systemName: state.errorMessage != nil ? "exclamationmark.octagon.fill" : "exclamationmark.triangle.fill")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(noticeColor)
-                    Text("\(totalCount) 条通知")
-                        .font(.system(size: 11, weight: .medium).monospacedDigit())
+                    Text("\(totalCount) 条提醒")
+                        .font(.system(size: 11, weight: .semibold).monospacedDigit())
                         .foregroundStyle(noticeColor)
                     Image(systemName: "chevron.down")
                         .font(.system(size: 8, weight: .bold))
                         .foregroundStyle(noticeColor.opacity(0.7))
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(noticeColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .strokeBorder(noticeColor.opacity(0.25), lineWidth: 0.5)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4.5)
+                .background(
+                    isHovering
+                        ? AnyShapeStyle(noticeColor.opacity(0.18))
+                        : AnyShapeStyle(Theme.cardFill),
+                    in: Capsule()
                 )
-            } else {
-                Image(systemName: "bell")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 24, height: 24)
-                    .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .overlay(
+                    Capsule()
+                        .strokeBorder(
+                            isHovering ? noticeColor.opacity(0.5) : noticeColor.opacity(0.3),
+                            lineWidth: 0.8
+                        )
+                )
+                .shadow(color: Color.black.opacity(isHovering ? 0.08 : 0.04), radius: 3, y: 1)
             }
-        }
-        .buttonStyle(.plain)
-        .help(hasNotice ? "点击查看 \(totalCount) 条通知" : "暂无新通知")
-        .popover(isPresented: $showingPopover, arrowEdge: .bottom) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("通知提醒")
-                        .font(.system(size: 12, weight: .semibold))
-                    if totalCount > 0 {
+            .popover(isPresented: $showingPopover, arrowEdge: .bottom) {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("通知提醒")
+                            .font(.system(size: 12, weight: .semibold))
                         Text("\(totalCount)")
                             .font(.system(size: 10, weight: .bold).monospacedDigit())
                             .foregroundStyle(.white)
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1)
                             .background(noticeColor, in: Capsule())
-                    }
-                    Spacer()
-                    if hasNotice {
-                        Button("清除") {
+                        Spacer()
+                        Button("全部清除") {
                             state.dismissError()
                             state.clearWarnings()
                             showingPopover = false
@@ -206,44 +209,39 @@ private struct NotificationToolbarButton: View {
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                     }
-                }
 
-                Divider()
+                    Divider()
 
-                if let error = state.errorMessage {
-                    noticeRow(text: error, symbol: "exclamationmark.octagon.fill", tint: .red)
-                }
-                if let warning = state.warnings.last {
-                    noticeRow(text: warning, symbol: "exclamationmark.triangle.fill", tint: .orange)
-                }
-                if !hasNotice {
-                    Text("暂无任何错误或警告")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .padding(.vertical, 4)
-                }
-
-                Divider()
-
-                Button {
-                    showingPopover = false
-                    selection = .messages
-                } label: {
-                    HStack {
-                        Text("进入消息中心查看全部")
-                            .font(.system(size: 11, weight: .medium))
-                        Spacer()
-                        Image(systemName: "arrow.right")
-                            .font(.system(size: 9, weight: .semibold))
+                    if let error = state.errorMessage {
+                        noticeRow(text: error, symbol: "exclamationmark.octagon.fill", tint: .red)
                     }
-                    .foregroundStyle(Color.accentColor)
-                    .padding(.vertical, 2)
-                    .contentShape(Rectangle())
+                    if let warning = state.warnings.last {
+                        noticeRow(text: warning, symbol: "exclamationmark.triangle.fill", tint: .orange)
+                    }
+
+                    Divider()
+
+                    Button {
+                        showingPopover = false
+                        selection = .messages
+                    } label: {
+                        HStack {
+                            Text("前往消息中心查看全部")
+                                .font(.system(size: 11, weight: .medium))
+                            Spacer()
+                            Image(systemName: "arrow.right")
+                                .font(.system(size: 9, weight: .semibold))
+                        }
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.vertical, 2)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
+                .padding(12)
+                .frame(width: 280)
             }
-            .padding(12)
-            .frame(width: 280)
+            .accessibilityLabel("有 \(totalCount) 条通知提醒，点击查看")
         }
     }
 
@@ -259,9 +257,9 @@ private struct NotificationToolbarButton: View {
                 .foregroundStyle(.primary)
                 .textSelection(.enabled)
         }
-        .padding(6)
+        .padding(7)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(tint.opacity(0.06), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+        .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
     }
 }
 
