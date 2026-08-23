@@ -260,7 +260,7 @@ struct RoutingView: View {
                 .controlSize(.small)
             }
         }
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.35))
+        .background(Theme.cardFill.opacity(0.25))
     }
 
     private var forcedProxySection: some View {
@@ -286,9 +286,9 @@ struct RoutingView: View {
                     .scrollContentBackground(.hidden)
                     .frame(minHeight: 44, maxHeight: 58)
                     .padding(.horizontal, 6)
-                    .background(Theme.cardFill, in: RoundedRectangle(cornerRadius: 6))
+                    .background(Theme.cardFill, in: RoundedRectangle(cornerRadius: Theme.inputRadius))
                     .overlay {
-                        RoundedRectangle(cornerRadius: 6)
+                        RoundedRectangle(cornerRadius: Theme.inputRadius)
                             .stroke(Color(nsColor: .separatorColor), lineWidth: 0.5)
                     }
 
@@ -346,7 +346,7 @@ struct RoutingView: View {
                 .scrollIndicators(.hidden)
             }
         }
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.2))
+        .background(Theme.cardFill.opacity(0.25))
         .onChange(of: forcedProxyKind) { _, _ in forcedProxyError = nil }
         .onChange(of: forcedProxyInput) { _, _ in forcedProxyError = nil }
     }
@@ -423,7 +423,7 @@ struct RoutingView: View {
                 .scrollIndicators(.hidden)
             }
         }
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.16))
+        .background(Theme.cardFill.opacity(0.25))
         .onChange(of: sshProxyAddress) { _, _ in sshProxyError = nil }
         .onChange(of: sshProxyPort) { _, _ in sshProxyError = nil }
     }
@@ -470,7 +470,7 @@ struct RoutingView: View {
                 .background(Theme.cardFill, in: RoundedRectangle(cornerRadius: 6))
             }
         }
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.12))
+        .background(Theme.cardFill.opacity(0.25))
         .onChange(of: routeTestKind) { _, _ in routeTestResult = nil }
         .onChange(of: routeTestInput) { _, _ in routeTestResult = nil }
     }

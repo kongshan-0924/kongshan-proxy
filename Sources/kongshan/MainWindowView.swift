@@ -418,8 +418,8 @@ struct NodesView: View {
         }
         .padding(.horizontal, 11)
         .padding(.vertical, 8)
-        .background(Theme.cardFill, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary.opacity(0.6), lineWidth: 0.5))
+        .background(Theme.cardFill, in: RoundedRectangle(cornerRadius: Theme.subcardRadius))
+        .overlay(RoundedRectangle(cornerRadius: Theme.subcardRadius).strokeBorder(.quaternary.opacity(0.6), lineWidth: 0.5))
         .padding(.horizontal, 16)
         .padding(.bottom, 10)
     }

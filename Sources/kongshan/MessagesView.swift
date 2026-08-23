@@ -69,7 +69,7 @@ struct MessagesView: View {
                         systemImage: "checkmark.circle",
                         description: Text("代理运行中出现错误或警告时会显示在这里。")
                     )
-                    .padding(.top, 80)
+                    .frame(maxWidth: .infinity, minHeight: 220)
                 }
             }
             .padding(.horizontal, 16)
@@ -97,7 +97,7 @@ struct MessagesView: View {
                             ? Text("当前 \(state.runtimeEvents.count) 条记录里没有警告或错误。")
                             : nil
                     )
-                        .padding(.top, 80)
+                    .frame(maxWidth: .infinity, minHeight: 220)
                 }
             }
             .padding(.horizontal, 16)

@@ -4,7 +4,12 @@ import SwiftUI
 /// 全局视觉常量与格式化工具。风格参考 Surge / Stash：克制配色、圆角卡片、等宽数字，无动效。
 enum Theme {
     static let cardRadius: CGFloat = 10
+    static let subcardRadius: CGFloat = 8
+    static let inputRadius: CGFloat = 7
+    static let tagRadius: CGFloat = 4
+
     static let cardFill = Color(nsColor: .controlBackgroundColor)
+    static let subcardFill = Color(nsColor: .controlBackgroundColor).opacity(0.7)
     static let pageFill = Color(nsColor: .windowBackgroundColor)
 
     static func delayColor(_ milliseconds: Int) -> Color {
@@ -87,6 +92,27 @@ extension View {
                     .strokeBorder(.quaternary.opacity(0.45), lineWidth: 0.5)
             )
             .shadow(color: .black.opacity(0.07), radius: 3, y: 1)
+    }
+
+    /// 次级卡片容器：用于嵌套卡片、内部选项块。
+    func subcard(padding: CGFloat = 10, isHighlighted: Bool = false) -> some View {
+        self
+            .padding(padding)
+            .background(
+                isHighlighted
+                    ? AnyShapeStyle(Color.accentColor.opacity(0.09))
+                    : AnyShapeStyle(Theme.subcardFill),
+                in: RoundedRectangle(cornerRadius: Theme.subcardRadius, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.subcardRadius, style: .continuous)
+                    .strokeBorder(
+                        isHighlighted
+                            ? Color.accentColor.opacity(0.75)
+                            : Color.secondary.opacity(0.2),
+                        lineWidth: isHighlighted ? 1.5 : 0.5
+                    )
+            )
     }
 
     /// 页面底色：比卡片低一级，让卡片浮起来。
@@ -251,9 +277,9 @@ struct SearchField: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
-        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
+        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: Theme.inputRadius))
         .overlay(
-            RoundedRectangle(cornerRadius: 7)
+            RoundedRectangle(cornerRadius: Theme.inputRadius)
                 .strokeBorder(.quaternary.opacity(0.7), lineWidth: 0.5)
         )
     }

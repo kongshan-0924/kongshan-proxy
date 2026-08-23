@@ -244,18 +244,18 @@ struct DashboardView: View {
     @ViewBuilder
     private var exitDiagnosticsValue: some View {
         if let report = state.exitDiagnostics {
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(report.exit.ip)
                     .font(.system(size: 15, weight: .bold).monospacedDigit())
                     .textSelection(.enabled)
-                Text(report.exit.location)
+                let locationOrg = [report.exit.location, report.exit.organization]
+                    .filter { !$0.isEmpty }
+                    .joined(separator: " · ")
+                Text(locationOrg.isEmpty ? "—" : locationOrg)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
-                Text(report.exit.organization)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
+                    .truncationMode(.middle)
                 HStack(spacing: 5) {
                     Circle()
                         .fill(dnsStatusTint(report.dns.status))
@@ -355,7 +355,7 @@ struct DashboardView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .background(Theme.cardFill.opacity(0.6), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .background(Theme.cardFill.opacity(0.6), in: RoundedRectangle(cornerRadius: Theme.subcardRadius, style: .continuous))
         }
 
         private func sessionLeg(symbol: String, tint: Color, value: Int64) -> some View {

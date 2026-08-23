@@ -173,7 +173,7 @@ struct ConnectionsView: View {
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 4)
                         .padding(.vertical, 1)
-                        .background(Theme.cardFill, in: RoundedRectangle(cornerRadius: 4))
+                        .background(Theme.cardFill, in: RoundedRectangle(cornerRadius: Theme.tagRadius))
                     Text(conn.host)
                         .font(.system(size: 12, weight: .medium))
                         .lineLimit(1)

@@ -303,10 +303,11 @@ struct PolicyGroupsView: View {
             Task { await state.select(optionName: option.name, in: groupName) }
         } label: { isHovering in
             VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
+                HStack(alignment: .top, spacing: 8) {
                     Image(systemName: symbol(for: option, selected: isSelected))
                         .font(.system(size: 12))
                         .foregroundStyle(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
+                        .padding(.top, 2)
                     if case let .node(node) = option,
                        let flag = metadata?.flag,
                        !node.name.contains(flag) {
@@ -318,13 +319,8 @@ struct PolicyGroupsView: View {
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
                     Spacer(minLength: 4)
-                    // 延迟提到右上角。这是用户扫一屏节点时唯一要找的数字，
-                    // 原本挤在下面一排小标签的末尾，得逐张卡片看过去才能比较。
-                    if case .node = option {
-                        delayBadge(delay)
-                    }
                 }
-                HStack(spacing: 6) {
+                HStack(alignment: .center, spacing: 6) {
                     switch option {
                     case let .node(node):
                         ProtocolTag(value: node.protocolType)
@@ -343,18 +339,21 @@ struct PolicyGroupsView: View {
                             .foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 0)
+                    if case .node = option {
+                        delayBadge(delay)
+                    }
                 }
             }
-            .frame(maxWidth: .infinity, minHeight: 60, alignment: .topLeading)
+            .frame(maxWidth: .infinity, minHeight: 62, alignment: .topLeading)
             .padding(10)
             .background(
                 isSelected
                     ? AnyShapeStyle(Color.accentColor.opacity(0.09))
                     : AnyShapeStyle(Theme.cardFill),
-                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                in: RoundedRectangle(cornerRadius: Theme.subcardRadius, style: .continuous)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                RoundedRectangle(cornerRadius: Theme.subcardRadius, style: .continuous)
                     .strokeBorder(
                         isSelected
                             ? Color.accentColor.opacity(0.8)
@@ -365,7 +364,7 @@ struct PolicyGroupsView: View {
             // 悬停微抬：一点点阴影和描边加深，让整卡可点这件事能被"摸"出来。
             .shadow(color: .black.opacity(isHovering ? 0.12 : 0), radius: 4, y: 2)
             .animation(.smooth(duration: 0.15), value: isHovering)
-            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: Theme.subcardRadius, style: .continuous))
         }
         .help(helpText(for: option, isSelectable: isSelectable))
     }
