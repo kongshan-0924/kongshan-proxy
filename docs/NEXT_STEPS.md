@@ -193,6 +193,9 @@ KONGSHAN_HEALTH_SAMPLE_COUNT=360 KONGSHAN_HEALTH_INTERVAL_SECONDS=10 scripts/ver
 
 ## 需要用户参与才能推进
 
+**可执行的验收步骤见 [`docs/REAL_MACHINE_CHECKLIST.md`](REAL_MACHINE_CHECKLIST.md)**
+（每项含前置条件、操作步骤、判定标准、排查入口），按顺序逐项做：
+
 - **睡眠唤醒的隧道自动重建**：合盖休眠 → 唤醒，看是否自动恢复；没恢复时关掉再开也应正常。
 - **真实换网恢复**：代理运行中切公司网 / 家庭网 / 手机热点，核对运行事件、内网域名和外网访问。
 - **经代理的出口 IP**：需换一个没有透明代理的网络（手机热点最省事）。当前家庭网络在做
