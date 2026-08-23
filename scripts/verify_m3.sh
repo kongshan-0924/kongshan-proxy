@@ -4,7 +4,8 @@ set -euo pipefail
 project_dir=${0:A:h:h}
 cd "$project_dir"
 
-swift build --build-tests
+# 本机环境沙盒被禁用（sandbox-exec: Operation not permitted），必须显式 --disable-sandbox。
+SWIFTPM_ENABLE_SANDBOX=NO swift build --build-tests --disable-sandbox
 typeset -a test_bundles
 test_bundles=("$project_dir"/.build/*/debug/kongshanPackageTests.xctest(N))
 (( ${#test_bundles[@]} == 1 )) || {

@@ -4,7 +4,8 @@ set -euo pipefail
 project_dir=${0:A:h:h}
 cd "$project_dir"
 
-swift test
+# 本机环境沙盒被禁用（sandbox-exec: Operation not permitted），必须显式 --disable-sandbox。
+SWIFTPM_ENABLE_SANDBOX=NO swift test --disable-sandbox
 zsh scripts/build_app.sh
 
 app_path=${KONGSHAN_APP_PATH:-"$project_dir/.build/kongshan.app"}
