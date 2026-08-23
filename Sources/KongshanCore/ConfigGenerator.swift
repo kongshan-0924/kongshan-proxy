@@ -358,10 +358,18 @@ public enum ConfigGenerator {
         //
         // 安全上可接受：节点域名若被投毒，客户端会连到错误 IP，在 TLS/Reality 校验处
         // 失败关闭，不会把凭据送出去。国内网站的解析仍走 DoH，隐私与抗投毒不受影响。
+        //
+        // 上游选址：默认跟随国内 DoH 的 IP（用户换掉阿里后，节点域名也不再问阿里）；
+        // 用户显式指定 `bootstrapResolver` 时使用独立上游，与国内 DoH 解耦，
+        // 一台上游抖动不会同时打掉两类解析。
+        let bootstrap = input.dnsSettings.bootstrapResolver
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         servers.append([
             "type": "udp",
             "tag": "dns-bootstrap",
-            "server": endpoints.domestic.hostIsIPAddress ? endpoints.domestic.host : "223.5.5.5",
+            "server": bootstrap.isEmpty
+                ? (endpoints.domestic.hostIsIPAddress ? endpoints.domestic.host : "223.5.5.5")
+                : bootstrap,
             "server_port": 53
         ])
 

@@ -826,7 +826,11 @@ private struct SettingsView: View {
                 Section("DNS 高级设置") {
                     TextField("国内 DoH", text: $dnsDraft.domesticDoH)
                     TextField("远程 DoH", text: $dnsDraft.remoteDoH)
+                    TextField("引导解析器（可选）", text: $dnsDraft.bootstrapResolver)
                     Text("geosite-cn 使用国内 DoH 直连解析，其余域名走当前代理的远程 DoH。兼容性优先，默认不启用 fake-ip。系统代理模式只管理进入本地 mixed 代理的解析，不等同于接管 macOS 全局 DNS。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("引导解析器负责解析出站节点自身的域名，必须是无连接的 UDP。留空时跟随国内 DoH 的地址；填入独立 IP（如 114.114.114.114）可与国内 DoH 解耦，避免一台上游抖动同时影响节点域名与国内域名解析。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     HStack {

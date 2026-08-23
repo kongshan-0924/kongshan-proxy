@@ -3845,3 +3845,47 @@ v6/v4 两条上游通道，非本应用决定。
 
 `dist` 仅 `kongshan-0.1.81.dmg`；用户数据 7.6 MB；配置备份 4 份 13 MB
 （比设定的保留 3 份多一份，为本次安装新增，非必须处理）。
+
+## 2026-08-23 17:00 — DNS 引导解析器可配置（v0.1.82 源码）
+
+### 背景
+
+`dns-bootstrap`（UDP 53，解析出站节点自身域名 + 国内 DoH 的域名）与 `dns-cn`（国内 DoH）
+默认共享 `223.5.5.5`。sing-box 1.13 无 DNS 故障转移能力（`server` 不接受数组、
+无 `fallback`），一台上游抖动会同时打掉两类解析，前者会让整条代理停摆 10 秒。
+此前改动已回滚，等待用户裁决（隐私意图 vs 抗抖动）。
+
+### 用户裁决与实现
+
+用户选择「**新增可配置的引导解析器字段**」——第三条路，两个诉求都保留：
+
+- `DNSSettings.bootstrapResolver`（新字段）：**留空 = 跟随国内 DoH 的 IP**（默认行为不变，
+  隐私意图保留：用户换掉阿里后节点域名也不再问阿里）；**填入独立 IP**（如 `114.114.114.114`）
+  = dns-bootstrap 使用该上游，与国内 DoH 解耦。
+- 校验：只接受 IPv4/IPv6（`inet_pton`），域名/URL/带端口拒绝——引导解析器是 UDP 直连，
+  填域名会在解析它自身时引入新的依赖。
+- 兼容：`DNSSettings` 手写 `init(from:)` 用 `decodeIfPresent` 兜底，旧版 settings.json
+  缺该字段时回退为空（跟随国内 DoH），不会整体解码失败丢掉用户 DNS 设置。
+- `ConfigGenerator.dns(for:)`：`dns-bootstrap.server` = 配置值非空 ? 配置值 :
+  （国内 DoH 是 IP ? 它 : `223.5.5.5`），逻辑保持既有隐私意图。
+
+### 修改文件
+
+- `Sources/KongshanCore/DNSSettings.swift`（字段 + 兼容解码 + 校验 + 错误文案）
+- `Sources/KongshanCore/ConfigGenerator.swift`（bootstrap 选址）
+- `Sources/kongshan/MainWindowView.swift`（设置 → DNS 高级设置新增输入与说明）
+- `Tests/KongshanCoreTests/DNSConfigTests.swift`（+3 条：解耦生成、校验、旧配置解码；
+  bundled core check 扩展 system/TUN × 自定义引导组合）
+
+### 验证
+
+- DNSConfigTests 16/16 通过；DNS 相关 AppStateTests 5/5 通过。
+- 全量 **492 执行 / 2 跳过 / 0 失败**（跳过均为环境相关：App 未运行的身份探针、渲染快照；
+  与改动无关）。
+- `swift build -c release --disable-sandbox` 通过（本环境 SwiftPM 内层沙箱与外层冲突，
+  构建需加 `--disable-sandbox`，`verify_m4.sh` 的 release 门禁不受影响）。
+
+### 边界
+
+- 未提交、未构建 DMG、未安装；部署走既有 `scripts/release.sh prepare|install|publish` 门禁。
+- 默认行为不变，解耦入口可用即达成目标；是否值得默认解耦留待真实使用观察。

@@ -84,6 +84,76 @@ final class DNSConfigTests: XCTestCase {
         XCTAssertEqual(servers[0]["server"] as? String, "119.29.29.29")
     }
 
+    /// 用户显式指定引导解析器时，dns-bootstrap 使用独立上游，与国内 DoH 解耦：
+    /// 一台上游抖动不再同时打掉「节点域名解析」与「国内域名解析」。
+    func testBootstrapResolverCanBeOverriddenIndependently() throws {
+        let settings = DNSSettings(
+            domesticDoH: "https://119.29.29.29/dns-query",
+            remoteDoH: DNSSettings.defaults.remoteDoH,
+            bootstrapResolver: "114.114.114.114"
+        )
+        let root = try json(try ConfigGenerator.generate(input(dnsSettings: settings)))
+        let servers = try XCTUnwrap((root["dns"] as? [String: Any])?["servers"] as? [[String: Any]])
+
+        XCTAssertEqual(servers[0]["tag"] as? String, "dns-bootstrap")
+        XCTAssertEqual(servers[0]["type"] as? String, "udp")
+        XCTAssertEqual(servers[0]["server"] as? String, "114.114.114.114")
+        XCTAssertEqual(servers[0]["server_port"] as? Int, 53)
+        // 国内 DoH 仍是用户选择的 119.29.29.29——解耦意味着引导不再跟随它。
+        XCTAssertEqual(servers[1]["tag"] as? String, "dns-cn")
+        XCTAssertEqual(servers[1]["server"] as? String, "119.29.29.29")
+    }
+
+    /// 引导解析器只接受 IP（IPv4/IPv6）或留空；域名/URL/带端口一律拒绝——
+    /// 引导解析器是 UDP 直连，填域名会在解析它自身时引入新的依赖。
+    func testBootstrapResolverValidation() throws {
+        for valid in ["", "114.114.114.114", "2400:da00::1"] {
+            let settings = DNSSettings(
+                domesticDoH: DNSSettings.defaults.domesticDoH,
+                remoteDoH: DNSSettings.defaults.remoteDoH,
+                bootstrapResolver: valid
+            )
+            XCTAssertNoThrow(try settings.validated(), "expected valid: \(valid)")
+        }
+        for invalid in [
+            "dns.alidns.com",
+            "https://114.114.114.114/dns-query",
+            "223.5.5.5:53",
+            "not-an-ip"
+        ] {
+            let settings = DNSSettings(
+                domesticDoH: DNSSettings.defaults.domesticDoH,
+                remoteDoH: DNSSettings.defaults.remoteDoH,
+                bootstrapResolver: invalid
+            )
+            XCTAssertThrowsError(try settings.validated(), "expected invalid: \(invalid)")
+        }
+    }
+
+    /// 旧版 settings.json 的 dnsSettings 没有 bootstrapResolver 字段，
+    /// 解码必须回退为空（跟随国内 DoH），不能整体解码失败丢掉用户 DNS 设置。
+    func testOldDNSSettingsDecodesWithoutBootstrapResolver() throws {
+        let data = Data(
+            #"{"domesticDoH":"https://223.5.5.5/dns-query","remoteDoH":"https://8.8.8.8/dns-query"}"#.utf8
+        )
+        let settings = try JSONDecoder().decode(DNSSettings.self, from: data)
+        XCTAssertEqual(settings, .defaults)
+        XCTAssertEqual(settings.bootstrapResolver, "")
+    }
+
+    /// 编码必须带上 bootstrapResolver：应用持久化后重新加载，独立引导配置不能丢。
+    func testBootstrapResolverSurvivesEncodeDecodeRoundTrip() throws {
+        let original = DNSSettings(
+            domesticDoH: "https://119.29.29.29/dns-query",
+            remoteDoH: DNSSettings.defaults.remoteDoH,
+            bootstrapResolver: "114.114.114.114"
+        )
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(DNSSettings.self, from: data)
+        XCTAssertEqual(decoded, original)
+        XCTAssertEqual(decoded.bootstrapResolver, "114.114.114.114")
+    }
+
     func testCustomDomainDoHUsesFiniteDirectBootstrapChain() throws {
         let settings = DNSSettings(
             domesticDoH: "https://dns.alidns.com:8443/custom-query?profile=mac",
@@ -141,13 +211,20 @@ final class DNSConfigTests: XCTestCase {
             domesticDoH: "https://dns.alidns.com/dns-query",
             remoteDoH: "https://dns.google/dns-query"
         )
+        let customBootstrap = DNSSettings(
+            domesticDoH: "https://119.29.29.29/dns-query",
+            remoteDoH: "https://dns.google/dns-query",
+            bootstrapResolver: "114.114.114.114"
+        )
         let core = SingBoxProcess(binaryURL: singBoxURL)
 
         for (mode, dnsSettings) in [
             (ProxyMode.systemProxy, DNSSettings.defaults),
             (.tun, .defaults),
             (.systemProxy, custom),
-            (.tun, custom)
+            (.tun, custom),
+            (.systemProxy, customBootstrap),
+            (.tun, customBootstrap)
         ] {
             let config = try ConfigGenerator.generate(ConfigInput(
                 nodes: [node],
