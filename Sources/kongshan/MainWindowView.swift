@@ -29,29 +29,24 @@ struct MainWindowView: View {
             .toolbar(removing: .sidebarToggle)
             .safeAreaInset(edge: .bottom, spacing: 0) { sidebarStatus }
         } detail: {
-            // 错误与警告在所有页面统一呈现；此前只有仪表盘显示，
-            // 其余页面的失败（导入、应用分流、保存设置…）全是静默的。
-            VStack(spacing: 0) {
-                GlobalNoticeBar(selection: $selection)
-                Group {
-                    switch selection ?? .dashboard {
-                    case .dashboard:
-                        DashboardView()
-                    case .nodes:
-                        NodesView()
-                    case .policyGroups:
-                        PolicyGroupsView()
-                    case .routing:
-                        RoutingView()
-                    case .connections:
-                        ConnectionsView()
-                    case .logs:
-                        LogsView()
-                    case .messages:
-                        MessagesView()
-                    case .settings:
-                        SettingsView()
-                    }
+            Group {
+                switch selection ?? .dashboard {
+                case .dashboard:
+                    DashboardView()
+                case .nodes:
+                    NodesView()
+                case .policyGroups:
+                    PolicyGroupsView()
+                case .routing:
+                    RoutingView()
+                case .connections:
+                    ConnectionsView()
+                case .logs:
+                    LogsView()
+                case .messages:
+                    MessagesView()
+                case .settings:
+                    SettingsView()
                 }
             }
         }
@@ -64,6 +59,10 @@ struct MainWindowView: View {
                 }
                 .help(columnVisibility == .detailOnly ? "显示侧边栏" : "隐藏侧边栏")
                 .accessibilityLabel(columnVisibility == .detailOnly ? "显示侧边栏" : "隐藏侧边栏")
+            }
+
+            ToolbarItem(placement: .primaryAction) {
+                NotificationToolbarButton(selection: $selection)
             }
         }
         // ⌘1~⌘8 直接切页，与侧栏顺序一致。零尺寸透明按钮藏在背景里，
@@ -84,8 +83,23 @@ struct MainWindowView: View {
     }
 
     private func sidebarRow(_ page: SidebarPage) -> some View {
-        Label(page.title, systemImage: page.symbol)
-            .tag(page)
+        HStack(spacing: 6) {
+            Label(page.title, systemImage: page.symbol)
+            Spacer(minLength: 4)
+            if page == .messages {
+                let errorCount = state.errorMessage != nil ? 1 : 0
+                let total = errorCount + state.warnings.count
+                if total > 0 {
+                    Text("\(total)")
+                        .font(.system(size: 10, weight: .bold).monospacedDigit())
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1.5)
+                        .background(state.errorMessage != nil ? Color.red : Color.orange, in: Capsule())
+                }
+            }
+        }
+        .tag(page)
     }
 
     /// 侧栏底部常驻状态条，任何页面下都能看到当前接管方式与节点。
@@ -114,129 +128,123 @@ struct MainWindowView: View {
     }
 }
 
-/// 全页面统一的提醒条：只显示最新一条（错误优先于警告），完整列表在「消息」页。
-private struct GlobalNoticeBar: View {
+/// 顶部工具栏通知按钮与下拉快捷弹窗。
+/// 替代原先侵入 detail 主画面的通栏/横幅 Banner，将通知收纳进原生 Toolbar 与侧栏徽标。
+private struct NotificationToolbarButton: View {
     @Environment(AppState.self) private var state
     @Binding var selection: SidebarPage?
+    @State private var showingPopover = false
+
+    private var hasNotice: Bool {
+        state.errorMessage != nil || !state.warnings.isEmpty
+    }
+
+    private var noticeColor: Color {
+        if state.errorMessage != nil { return .red }
+        if !state.warnings.isEmpty { return .orange }
+        return .secondary
+    }
+
+    private var totalCount: Int {
+        (state.errorMessage != nil ? 1 : 0) + state.warnings.count
+    }
 
     var body: some View {
-        VStack(spacing: 0) {
-            if let notice = latestNotice {
-                HStack(spacing: 10) {
-                    // 左侧醒目标记图标
-                    Circle()
-                        .fill(notice.tint.opacity(0.15))
-                        .frame(width: 22, height: 22)
-                        .overlay(
-                            Image(systemName: notice.symbol)
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(notice.tint)
-                        )
-
-                    // 消息正文
-                    Text(notice.text)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .textSelection(.enabled)
-
-                    if notice.count > 1 {
-                        Text("\(notice.count)")
-                            .font(.system(size: 10, weight: .bold).monospacedDigit())
-                            .foregroundStyle(notice.tint)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(notice.tint.opacity(0.15), in: Capsule())
-                            .help("当前共有 \(notice.count) 条通知")
-                    }
-
-                    Spacer(minLength: 12)
-
-                    // 查看详情按钮
-                    HoverButton {
-                        selection = .messages
-                    } label: { isHovering in
-                        HStack(spacing: 3) {
-                            Text("查看")
-                                .font(.system(size: 11, weight: .medium))
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 9, weight: .semibold))
-                        }
-                        .foregroundStyle(notice.tint)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(
-                            isHovering ? notice.tint.opacity(0.16) : notice.tint.opacity(0.08),
-                            in: RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        )
-                    }
-
-                    // 快速清除/关闭按钮
-                    HoverButton(action: notice.dismiss) { isHovering in
-                        Image(systemName: "xmark")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(isHovering ? Color.primary : Color.secondary)
-                            .frame(width: 20, height: 20)
-                            .background(
-                                isHovering ? Color.secondary.opacity(0.2) : Color.secondary.opacity(0.08),
-                                in: Circle()
-                            )
-                    }
-                    .help(notice.dismissTitle)
-                    .accessibilityLabel(notice.dismissTitle)
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(
-                    notice.tint.opacity(0.08),
-                    in: RoundedRectangle(cornerRadius: Theme.subcardRadius, style: .continuous)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.subcardRadius, style: .continuous)
-                        .strokeBorder(notice.tint.opacity(0.25), lineWidth: 0.8)
-                )
-                .shadow(color: Color.black.opacity(0.04), radius: 3, y: 1)
-                .padding(.horizontal, 16)
-                .padding(.top, 10)
-                .padding(.bottom, 2)
-                .transition(.move(edge: .top).combined(with: .opacity))
+        Button {
+            showingPopover.toggle()
+        } label: {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: hasNotice ? "bell.badge.fill" : "bell")
+                    .symbolRenderingMode(hasNotice ? .multicolor : .monochrome)
+                    .foregroundStyle(hasNotice ? noticeColor : .secondary)
+                    .font(.system(size: 13, weight: .medium))
             }
         }
-        .animation(.smooth(duration: 0.2), value: latestNotice != nil)
+        .buttonStyle(.plain)
+        .help(hasNotice ? "有 \(totalCount) 条通知提醒" : "暂无新消息")
+        .popover(isPresented: $showingPopover, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 6) {
+                    Text("消息通知")
+                        .font(.system(size: 13, weight: .semibold))
+                    if totalCount > 0 {
+                        Text("\(totalCount)")
+                            .font(.system(size: 10, weight: .bold).monospacedDigit())
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(noticeColor, in: Capsule())
+                    }
+                    Spacer()
+                    if hasNotice {
+                        Button("全部清除") {
+                            state.dismissError()
+                            state.clearWarnings()
+                            showingPopover = false
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    }
+                }
+
+                Divider()
+
+                if let error = state.errorMessage {
+                    noticeItem(text: error, symbol: "exclamationmark.octagon.fill", tint: .red)
+                }
+                if let warning = state.warnings.last {
+                    noticeItem(text: warning, symbol: "exclamationmark.triangle.fill", tint: .orange)
+                }
+                if !hasNotice {
+                    HStack(spacing: 8) {
+                        Image(systemName: "checkmark.circle")
+                            .foregroundStyle(.green)
+                        Text("当前没有任何错误或警告")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 10)
+                }
+
+                Divider()
+
+                Button {
+                    showingPopover = false
+                    selection = .messages
+                } label: {
+                    HStack {
+                        Text("前往消息中心")
+                            .font(.system(size: 12, weight: .medium))
+                        Spacer()
+                        Image(systemName: "arrow.right")
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    .foregroundStyle(Color.accentColor)
+                    .padding(.vertical, 3)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(14)
+            .frame(width: 300)
+        }
     }
 
-    private var latestNotice: NoticeData? {
-        if let error = state.errorMessage {
-            return NoticeData(
-                text: error,
-                symbol: "exclamationmark.octagon.fill",
-                tint: .red,
-                dismissTitle: "忽略",
-                count: 1,
-                dismiss: { state.dismissError() }
-            )
+    private func noticeItem(text: String, symbol: String, tint: Color) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: symbol)
+                .font(.system(size: 12))
+                .foregroundStyle(tint)
+                .padding(.top, 1)
+            Text(text)
+                .font(.caption)
+                .lineLimit(3)
+                .foregroundStyle(.primary)
+                .textSelection(.enabled)
         }
-        if let warning = state.warnings.last {
-            return NoticeData(
-                text: warning,
-                symbol: "exclamationmark.triangle.fill",
-                tint: .orange,
-                dismissTitle: "清除",
-                count: state.warnings.count,
-                dismiss: { state.clearWarnings() }
-            )
-        }
-        return nil
-    }
-
-    private struct NoticeData {
-        let text: String
-        let symbol: String
-        let tint: Color
-        let dismissTitle: String
-        let count: Int
-        let dismiss: () -> Void
+        .padding(8)
+        .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
     }
 }
 
