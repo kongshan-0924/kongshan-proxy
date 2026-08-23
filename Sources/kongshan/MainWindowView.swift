@@ -29,34 +29,30 @@ struct MainWindowView: View {
             .toolbar(removing: .sidebarToggle)
             .safeAreaInset(edge: .bottom, spacing: 0) { sidebarStatus }
         } detail: {
-            ZStack(alignment: .topTrailing) {
-                Group {
-                    switch selection ?? .dashboard {
-                    case .dashboard:
-                        DashboardView()
-                    case .nodes:
-                        NodesView()
-                    case .policyGroups:
-                        PolicyGroupsView()
-                    case .routing:
-                        RoutingView()
-                    case .connections:
-                        ConnectionsView()
-                    case .logs:
-                        LogsView()
-                    case .messages:
-                        MessagesView()
-                    case .settings:
-                        SettingsView()
-                    }
+            Group {
+                switch selection ?? .dashboard {
+                case .dashboard:
+                    DashboardView()
+                case .nodes:
+                    NodesView()
+                case .policyGroups:
+                    PolicyGroupsView()
+                case .routing:
+                    RoutingView()
+                case .connections:
+                    ConnectionsView()
+                case .logs:
+                    LogsView()
+                case .messages:
+                    MessagesView()
+                case .settings:
+                    SettingsView()
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                // 真正的 Detail 右上角通知胶囊（只在非消息页且有未读警告/错误时展示）
-                if (selection ?? .dashboard) != .messages {
-                    DetailTopRightNoticeBadge(selection: $selection)
-                        .padding(.trailing, 20)
-                        .padding(.top, 16)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    NativeNoticeToolbarItem(selection: $selection)
                 }
             }
         }
@@ -134,9 +130,9 @@ struct MainWindowView: View {
     }
 }
 
-/// 页面 Detail 区域右上角微型通知胶囊组件。
-/// 精准定位在主内容区右上角（与 PageHeader 平齐），胶囊造型轻巧克制，即点即开。
-private struct DetailTopRightNoticeBadge: View {
+/// 原生 macOS 工具栏通知组件。
+/// 依托 Detail 视图的原生 Toolbar 渲染在窗口最右上角，拥有纯正系统质感与交互体验。
+private struct NativeNoticeToolbarItem: View {
     @Environment(AppState.self) private var state
     @Binding var selection: SidebarPage?
     @State private var showingPopover = false
@@ -156,43 +152,25 @@ private struct DetailTopRightNoticeBadge: View {
     }
 
     var body: some View {
-        if hasNotice {
-            HoverButton {
+        if hasNotice && (selection ?? .dashboard) != .messages {
+            Button {
                 showingPopover.toggle()
-            } label: { isHovering in
-                HStack(spacing: 5) {
-                    Image(systemName: state.errorMessage != nil ? "exclamationmark.octagon.fill" : "exclamationmark.triangle.fill")
-                        .font(.system(size: 11, weight: .semibold))
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "bell.badge.fill")
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(noticeColor, .primary)
+                    Text("\(totalCount)")
+                        .font(.system(size: 11, weight: .bold).monospacedDigit())
                         .foregroundStyle(noticeColor)
-                    Text("\(totalCount) 条提醒")
-                        .font(.system(size: 11, weight: .semibold).monospacedDigit())
-                        .foregroundStyle(noticeColor)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 8, weight: .bold))
-                        .foregroundStyle(noticeColor.opacity(0.7))
                 }
-                .padding(.horizontal, 9)
-                .padding(.vertical, 4.5)
-                .background(
-                    isHovering
-                        ? AnyShapeStyle(noticeColor.opacity(0.18))
-                        : AnyShapeStyle(Theme.cardFill),
-                    in: Capsule()
-                )
-                .overlay(
-                    Capsule()
-                        .strokeBorder(
-                            isHovering ? noticeColor.opacity(0.5) : noticeColor.opacity(0.3),
-                            lineWidth: 0.8
-                        )
-                )
-                .shadow(color: Color.black.opacity(isHovering ? 0.08 : 0.04), radius: 3, y: 1)
             }
+            .help("有 \(totalCount) 条通知提醒")
             .popover(isPresented: $showingPopover, arrowEdge: .bottom) {
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 10) {
                     HStack {
                         Text("通知提醒")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(.system(size: 13, weight: .semibold))
                         Text("\(totalCount)")
                             .font(.system(size: 10, weight: .bold).monospacedDigit())
                             .foregroundStyle(.white)
@@ -241,7 +219,6 @@ private struct DetailTopRightNoticeBadge: View {
                 .padding(12)
                 .frame(width: 280)
             }
-            .accessibilityLabel("有 \(totalCount) 条通知提醒，点击查看")
         }
     }
 
