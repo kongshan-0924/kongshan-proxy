@@ -353,6 +353,10 @@ struct PolicyGroupsView: View {
                             .foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 0)
+                    // 延迟放在底部行末尾。它是用户扫一屏节点时唯一要找的数字，曾为此提到
+                    // 右上角与节点名同行；但长节点名会把它挤掉，改成上下两段式后首行专供
+                    // 名称与国旗，延迟改用带背景与边框的胶囊（超时另加警告图标）来补足显著性。
+                    // 要再动位置前先想清楚这两条约束：**不能被长名字挤掉，也不能扫不到**。
                     if case .node = option {
                         delayBadge(delay)
                     }
