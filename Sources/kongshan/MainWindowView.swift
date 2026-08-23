@@ -120,33 +120,86 @@ private struct GlobalNoticeBar: View {
     @Binding var selection: SidebarPage?
 
     var body: some View {
-        // 出现/消失用 0.2 秒滑入滑出，避免硬切；动画挂在容器上才能驱动插入/移除过渡。
         VStack(spacing: 0) {
             if let notice = latestNotice {
-                HStack(spacing: 8) {
-                    Image(systemName: notice.symbol)
-                        .font(.system(size: 11))
-                        .foregroundStyle(notice.tint)
+                HStack(spacing: 10) {
+                    // 左侧醒目标记图标
+                    Circle()
+                        .fill(notice.tint.opacity(0.15))
+                        .frame(width: 22, height: 22)
+                        .overlay(
+                            Image(systemName: notice.symbol)
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(notice.tint)
+                        )
+
+                    // 消息正文
                     Text(notice.text)
-                        .font(.caption)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.primary)
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .textSelection(.enabled)
+
                     if notice.count > 1 {
-                        Text("共 \(notice.count) 条")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                        Text("\(notice.count)")
+                            .font(.system(size: 10, weight: .bold).monospacedDigit())
+                            .foregroundStyle(notice.tint)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(notice.tint.opacity(0.15), in: Capsule())
+                            .help("当前共有 \(notice.count) 条通知")
                     }
-                    Spacer(minLength: 8)
-                    Button("查看") { selection = .messages }
-                        .controlSize(.small)
-                    Button(notice.dismissTitle, action: notice.dismiss)
-                        .controlSize(.small)
+
+                    Spacer(minLength: 12)
+
+                    // 查看详情按钮
+                    HoverButton {
+                        selection = .messages
+                    } label: { isHovering in
+                        HStack(spacing: 3) {
+                            Text("查看")
+                                .font(.system(size: 11, weight: .medium))
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 9, weight: .semibold))
+                        }
+                        .foregroundStyle(notice.tint)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(
+                            isHovering ? notice.tint.opacity(0.16) : notice.tint.opacity(0.08),
+                            in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        )
+                    }
+
+                    // 快速清除/关闭按钮
+                    HoverButton(action: notice.dismiss) { isHovering in
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(isHovering ? Color.primary : Color.secondary)
+                            .frame(width: 20, height: 20)
+                            .background(
+                                isHovering ? Color.secondary.opacity(0.2) : Color.secondary.opacity(0.08),
+                                in: Circle()
+                            )
+                    }
+                    .help(notice.dismissTitle)
+                    .accessibilityLabel(notice.dismissTitle)
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 6)
-                .background(notice.tint.opacity(0.09))
-                .overlay(alignment: .bottom) { Divider() }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(
+                    notice.tint.opacity(0.08),
+                    in: RoundedRectangle(cornerRadius: Theme.subcardRadius, style: .continuous)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.subcardRadius, style: .continuous)
+                        .strokeBorder(notice.tint.opacity(0.25), lineWidth: 0.8)
+                )
+                .shadow(color: Color.black.opacity(0.04), radius: 3, y: 1)
+                .padding(.horizontal, 16)
+                .padding(.top, 10)
+                .padding(.bottom, 2)
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
