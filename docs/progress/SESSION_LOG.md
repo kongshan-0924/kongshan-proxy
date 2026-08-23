@@ -3940,3 +3940,15 @@ v6/v4 两条上游通道，非本应用决定。
 
 发布剩余流程（仍待用户确认）：`scripts/release.sh prepare → install → publish`；
 本地 `main` 领先 `origin/main` 5 个提交（60ac192 / 377d40a / 533eed2 / 15e3f94 / a58a907）。
+
+## 2026-08-23 18:10 — M4 门禁预跑：沙箱环境仅 ps 采样受限
+
+`KONGSHAN_KEEP_VERSION=1 zsh scripts/verify_m4.sh` 预跑结果：
+
+- M3 段（build + 全量 xctest + build_app + 签名/arm64/plutil/sing-box check/规则集/TUN）✅
+- M4 定向 6 项 xctest ✅（含 DNS 引导解析器扩展的 bundled core check）
+- M4 性能采样段：`scripts/verify_m4.sh:117: operation not permitted: ps`——
+  当前 agent 沙箱禁止 `ps`，采样无法执行（脚本按 `fail` 逻辑退出）。
+- **结论：这是 agent 环境限制，不是脚本或代码问题**。用户在正常终端跑
+  `release.sh prepare` 不受影响（历史每次发布均完整通过）。若后续仍需在
+  agent 环境跑完整 M4，需放宽沙箱允许 `ps`。
