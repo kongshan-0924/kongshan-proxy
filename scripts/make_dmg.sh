@@ -1,6 +1,6 @@
 #!/bin/zsh
 # 把 .build/kongshan.app 打包成拖拽安装式 DMG（含 /Applications 快捷方式）。
-# dist 只保留最新 DMG，不保存可运行 App 副本。
+# dist 保留历史 DMG，只清理可运行 App 副本与索引垃圾文件。
 set -euo pipefail
 
 project_dir="${0:A:h:h}"
@@ -44,7 +44,8 @@ if [[ -n "${KONGSHAN_NOTARY_PROFILE:-}" ]]; then
 fi
 
 size=$(du -h "$dmg_path" | cut -f1)
-find "$project_dir/dist" -maxdepth 1 -type f -name 'kongshan-*.dmg' ! -name "kongshan-$version.dmg" -delete
+# **不删历史 DMG**：发布只做加法，旧版本产物是回滚点与追溯依据（用户 2026-08-23 明确要求）。
+# 仍要清掉 dist 里的可运行 App 副本——它会被 Launch Services 记住，导致误启动第二个实例。
 rm -rf "$project_dir/dist/kongshan.app"
 rm -f "$project_dir/dist/.metadata_never_index" "$project_dir/dist/.DS_Store"
 print "Built $dmg_path  ($size)"

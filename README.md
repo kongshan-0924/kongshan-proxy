@@ -132,7 +132,7 @@ zsh scripts/verify_m4.sh       # 完整测试、签名与资源门禁
 zsh scripts/release.sh prepare # 生成与当前 Git 提交绑定的发布候选
 ```
 
-构建 App 位于 `.build`，`dist` 只保留最新 DMG。正式使用时请只运行 `/Applications/kongshan.app`，避免同时启动多个副本。
+构建 App 位于 `.build`，`dist` 保留历史 DMG。正式使用时请只运行 `/Applications/kongshan.app`，避免同时启动多个副本。
 
 ## 更多文档
 
