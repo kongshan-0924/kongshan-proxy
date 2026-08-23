@@ -214,12 +214,12 @@ private enum SidebarPage: String, CaseIterable, Identifiable {
 
     var symbol: String {
         switch self {
-        case .dashboard: "gauge.with.dots.needle.67percent"
-        case .nodes: "doc.text"
-        case .policyGroups: "arrow.triangle.swap"
+        case .dashboard: "gauge.with.needle"
+        case .nodes: "square.stack.3d.up"
+        case .policyGroups: "slider.horizontal.2.square.badge.arrow.down"
         case .routing: "arrow.triangle.branch"
         case .connections: "point.3.filled.connected.trianglepath.dotted"
-        case .logs: "doc.text.magnifyingglass"
+        case .logs: "text.alignleft"
         case .messages: "bell.badge"
         case .settings: "gearshape"
         }
@@ -320,7 +320,7 @@ struct NodesView: View {
                     .font(.system(size: 15))
                     .foregroundStyle(isActive ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
 
-                IconBadge(symbol: item.isLocal ? "wrench.and.screwdriver" : "doc.text", tint: item.isLocal ? .orange : .blue, size: 30)
+                IconBadge(symbol: item.isLocal ? "server.rack" : "network.badge.shield.half.filled", tint: item.isLocal ? .orange : .blue, size: 30)
 
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
@@ -328,9 +328,7 @@ struct NodesView: View {
                             .font(.system(size: 13, weight: .medium))
                             .lineLimit(1)
                         if isActive {
-                            Text("生效中")
-                                .font(.caption2)
-                                .foregroundStyle(Color.accentColor)
+                            StatusBadge(text: "生效中", tint: .accentColor)
                         }
                     }
                     Text(rowSubtitle(item))

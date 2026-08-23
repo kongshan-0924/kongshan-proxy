@@ -128,12 +128,22 @@ struct IconBadge: View {
     var size: CGFloat = 40
 
     var body: some View {
-        RoundedRectangle(cornerRadius: size * 0.28)
-            .fill(tint.opacity(0.15))
+        RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
+            .fill(
+                LinearGradient(
+                    colors: [tint.opacity(0.18), tint.opacity(0.10)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
             .frame(width: size, height: size)
             .overlay(
+                RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
+                    .strokeBorder(tint.opacity(0.25), lineWidth: 0.5)
+            )
+            .overlay(
                 Image(systemName: symbol)
-                    .font(.system(size: size * 0.44, weight: .medium))
+                    .font(.system(size: size * 0.44, weight: .semibold))
                     .foregroundStyle(tint)
             )
             .accessibilityHidden(true)
@@ -146,16 +156,17 @@ struct StatusBadge: View {
     let tint: Color
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 5) {
             Circle()
                 .fill(tint)
-                .frame(width: 7, height: 7)
+                .frame(width: 6, height: 6)
             Text(text)
-                .font(.caption.weight(.medium))
+                .font(.system(size: 11, weight: .medium))
         }
         .padding(.horizontal, 8)
-        .padding(.vertical, 4)
+        .padding(.vertical, 3.5)
         .background(tint.opacity(0.12), in: Capsule())
+        .overlay(Capsule().strokeBorder(tint.opacity(0.2), lineWidth: 0.5))
         .foregroundStyle(tint == .secondary ? AnyShapeStyle(.secondary) : AnyShapeStyle(tint))
     }
 }
@@ -165,15 +176,20 @@ struct ProtocolTag: View {
     let value: ProxyProtocol
 
     var body: some View {
+        let tint = Theme.protocolTint(value)
         Text(value.shortName)
             .font(.system(size: 9, weight: .bold))
-            .kerning(0.3)
+            .kerning(0.4)
             .lineLimit(1)
             .fixedSize()
             .padding(.horizontal, 5)
             .padding(.vertical, 2)
-            .foregroundStyle(Theme.protocolTint(value))
-            .background(Theme.protocolTint(value).opacity(0.14), in: RoundedRectangle(cornerRadius: 4))
+            .foregroundStyle(tint)
+            .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: Theme.tagRadius, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.tagRadius, style: .continuous)
+                    .strokeBorder(tint.opacity(0.25), lineWidth: 0.5)
+            )
     }
 }
 

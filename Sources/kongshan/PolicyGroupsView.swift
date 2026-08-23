@@ -62,10 +62,11 @@ struct PolicyGroupsView: View {
                         state.startAllDelayTests()
                     }
                 } label: {
-                    Label(
-                        state.isTestingAllDelays ? "取消 \(state.speedTestProgress.label)" : "测速全部",
-                        systemImage: state.isTestingAllDelays ? "xmark.circle" : "gauge.with.dots.needle.67percent"
-                    )
+                    if state.isTestingAllDelays {
+                        Label("取消 \(state.speedTestProgress.label)", systemImage: "xmark.circle.fill")
+                    } else {
+                        Label("测速全部", systemImage: "gauge.with.needle")
+                    }
                 }
                 .fixedSize(horizontal: true, vertical: false)
                 .disabled(state.testableNodes.isEmpty)
@@ -131,30 +132,43 @@ struct PolicyGroupsView: View {
     private func groupAppearance(_ group: PolicyGroup) -> (symbol: String, tint: Color) {
         let name = group.name.lowercased()
         if group.kind == .urltest || name.contains("自动") || name.contains("auto") {
-            return ("bolt.badge.automatic", .green)
+            return ("antenna.radiowaves.left.and.right", .green)
         }
-        if name.contains("手动") { return ("hand.tap", .blue) }
+        if name.contains("故障") || name.contains("fallback") {
+            return ("arrow.triangle.swap", .orange)
+        }
+        if name.contains("手动") || name.contains("manual") { return ("hand.tap.fill", .blue) }
         if name.contains("netflix") || name.contains("hbo") || name.contains("disney")
-            || name.contains("youtube") || name.contains("bilibili") || name.contains("mytv") {
+            || name.contains("youtube") || name.contains("bilibili") || name.contains("mytv")
+            || name.contains("media") || name.contains("流媒体") {
             return ("play.tv.fill", .red)
         }
-        if name.contains("telegram") { return ("paperplane.fill", .blue) }
-        if name == "ai" || name.contains("openai") || name.contains("claude") || name.contains("gemini") {
-            return ("brain.head.profile", .mint)
+        if name.contains("telegram") { return ("paperplane.fill", .cyan) }
+        if name == "ai" || name.contains("openai") || name.contains("claude")
+            || name.contains("gemini") || name.contains("gpt") || name.contains("copilot") {
+            return ("sparkles", .mint)
+        }
+        if name.contains("github") || name.contains("gitlab") {
+            return ("chevron.left.forwardslash.chevron.right", .primary)
+        }
+        if name.contains("twitter") || name.contains("x.com") {
+            return ("bubble.left.and.bubble.right.fill", .blue)
         }
         if name.contains("crypto") || name.contains("币") { return ("bitcoinsign.circle.fill", .orange) }
         if name.contains("steam") || name.contains("epic") || name.contains("xbox")
-            || name.contains("playstation") || name.contains("bahamut") || name.contains("游戏") {
+            || name.contains("playstation") || name.contains("bahamut") || name.contains("游戏") || name.contains("game") {
             return ("gamecontroller.fill", .indigo)
         }
         if name.contains("spotify") || name.contains("music") || name.contains("音乐") {
             return ("music.note", .green)
         }
         if name.contains("apple") || name.contains("icloud") { return ("apple.logo", .primary) }
+        if name.contains("google") { return ("g.circle.fill", .blue) }
         if name.contains("microsoft") || name.contains("onedrive") { return ("cloud.fill", .blue) }
         if name.contains("direct") || name.contains("直连") { return ("arrow.right.circle.fill", .green) }
-        if name.contains("prox") || name.contains("节点") { return ("point.3.connected.trianglepath.dotted", .purple) }
-        return ("rectangle.3.group", .purple)
+        if name.contains("reject") || name.contains("广告") || name.contains("adblock") { return ("shield.lefthalf.filled", .red) }
+        if name.contains("prox") || name.contains("节点") || name.contains("global") { return ("globe.asia.australia.fill", .purple) }
+        return ("rectangle.3.group.fill", .purple)
     }
 
     private func processedOptions(
@@ -389,16 +403,38 @@ struct PolicyGroupsView: View {
     private func delayBadge(_ delay: Int??) -> some View {
         switch delay {
         case let .some(.some(value)):
+            let color = Theme.delayColor(value)
             HStack(spacing: 4) {
-                Circle().fill(Theme.delayColor(value)).frame(width: 6, height: 6)
-                Text("\(value)ms")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                Circle()
+                    .fill(color)
+                    .frame(width: 5, height: 5)
+                Text("\(value) ms")
+                    .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(color)
             }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2.5)
+            .background(color.opacity(0.1), in: Capsule())
+            .overlay(Capsule().strokeBorder(color.opacity(0.25), lineWidth: 0.5))
         case .some(.none):
-            Text("超时").font(.caption2).foregroundStyle(.red)
+            HStack(spacing: 3) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 8))
+                Text("超时")
+                    .font(.system(size: 10, weight: .medium))
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2.5)
+            .foregroundStyle(.red)
+            .background(Color.red.opacity(0.1), in: Capsule())
+            .overlay(Capsule().strokeBorder(Color.red.opacity(0.25), lineWidth: 0.5))
         case .none:
-            Text("未测速").font(.caption2).foregroundStyle(.tertiary)
+            Text("未测速")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2.5)
+                .background(Color.secondary.opacity(0.08), in: Capsule())
         }
     }
 

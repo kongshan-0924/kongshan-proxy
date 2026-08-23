@@ -131,11 +131,18 @@ struct DashboardView: View {
     private func heroRate(symbol: String, tint: Color, title: String, value: Int64) -> some View {
         HStack(spacing: 8) {
             Circle()
-                .fill(tint)
+                .fill(
+                    LinearGradient(
+                        colors: [tint, tint.opacity(0.82)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
                 .frame(width: 24, height: 24)
+                .shadow(color: tint.opacity(0.28), radius: 2, y: 1)
                 .overlay(
                     Image(systemName: symbol)
-                        .font(.system(size: 11, weight: .bold))
+                        .font(.system(size: 10, weight: .bold))
                         .foregroundStyle(.white)
                 )
                 .accessibilityHidden(true)
@@ -144,7 +151,7 @@ struct DashboardView: View {
                 // 屏幕刷新率持续插值字形——真机上曾以 ~57% CPU 连烧 8 小时（2026-08-20）。
                 // monospacedDigit 已保证宽度稳定，数字直接跳变即可。
                 Text(Theme.rateOrDash(value))
-                    .font(.system(size: 18, weight: .bold).monospacedDigit())
+                    .font(.system(size: 17, weight: .bold).monospacedDigit())
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                 Text(title)
@@ -179,7 +186,7 @@ struct DashboardView: View {
             columns: [GridItem(.adaptive(minimum: 150), spacing: 10)],
             spacing: 10
         ) {
-            MetricCard(symbol: "network", tint: .orange, caption: "当前出口 IP") {
+            MetricCard(symbol: "globe.asia.australia.fill", tint: .orange, caption: "当前出口 IP") {
                 exitDiagnosticsValue
             } corner: {
                 HStack(spacing: 7) {
@@ -194,17 +201,19 @@ struct DashboardView: View {
                         Button {
                             Task { await state.refreshExitDiagnostics() }
                         } label: {
-                            Label("检测", systemImage: "arrow.clockwise")
+                            Image(systemName: "arrow.clockwise")
                                 .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                                .padding(4)
+                                .background(Color.secondary.opacity(0.12), in: Circle())
                         }
                         .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
                         .help("刷新出口 IP 并检测 DNS")
                     }
                 }
             }
 
-            MetricCard(symbol: "link", tint: .purple, caption: "活跃连接") {
+            MetricCard(symbol: "point.3.connected.trianglepath.dotted", tint: .purple, caption: "活跃连接") {
                 // 同上：高频数值不做动画（见 heroRate 的说明）。
                 Text("\(state.activeConnectionCount)")
             }
@@ -224,7 +233,7 @@ struct DashboardView: View {
                 }
             }
 
-            MetricCard(symbol: "clock", tint: .teal, caption: "运行时长") {
+            MetricCard(symbol: "clock.arrow.2.circlepath", tint: .teal, caption: "运行时长") {
                 if state.isOn, let startedAt = state.runtimeStartedAt {
                     Text(startedAt, style: .timer)
                 } else {

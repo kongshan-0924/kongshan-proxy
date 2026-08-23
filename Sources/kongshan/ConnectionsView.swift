@@ -202,14 +202,13 @@ struct ConnectionsView: View {
                     .foregroundStyle(.tertiary)
             }
             .fixedSize()
-            Button {
+            HoverButton {
                 Task { await state.closeConnection(conn.id) }
-            } label: {
+            } label: { isHovering in
                 Image(systemName: "xmark.circle.fill")
                     .font(.system(size: 13))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(isHovering ? Color.red.opacity(0.85) : Color.secondary.opacity(0.4))
             }
-            .buttonStyle(.plain)
             .help("关闭此连接")
         }
         .padding(.vertical, 7)

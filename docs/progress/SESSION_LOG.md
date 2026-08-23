@@ -4058,3 +4058,25 @@ DNS 引导解析器的真机效果（填入独立 IP 后节点域名解析是否
   - 消息中心空状态去除写死的 `padding(.top, 80)`，采用响应式 minHeight 居中。
   - 订阅导入栏圆角收敛至 `Theme.subcardRadius`。
 - **测试验证**：`swift build -c release` 编译通过，全量 493 条测试（1 跳过/0 失败）全部通过，提交 `8763852`。
+
+## 2026-08-23 18:45 — v0.1.84 按钮与图标精细化优化
+
+- **图标语义扩充与现代化（`PolicyGroupsView.swift`）**：
+  - 增强策略组图标映射：AI/OpenAI/Claude 使用 `sparkles`，流媒体使用 `play.tv.fill`，自动选路使用 `antenna.radiowaves.left.and.right`，故障转移使用 `arrow.triangle.swap`，社交/开发/游戏等各分类图标语义更加精准。
+  - 测速全部按钮采用原生测速仪图标 `gauge.with.needle`，测速中状态采用 `xmark.circle.fill`。
+  - 节点延迟 Badge 升级为带柔和背景与半透明边框的胶囊药丸（Capsule pill），超时状态增加警告图标。
+- **仪表盘视觉细节增强（`DashboardView.swift`）**：
+  - 出口 IP 采用更精细的 `globe.asia.australia.fill` 图标。
+  - 活跃连接采用 `point.3.connected.trianglepath.dotted`。
+  - 运行时长采用 `clock.arrow.2.circlepath`。
+  - 实时上下行速率圆形图标增加微妙阴影与渐变层。
+  - 出口诊断刷新按钮优化为轻量圆环微交互按钮。
+- **设计系统组件强化（`Theme.swift`）**：
+  - `IconBadge` 增加微妙的对角线线性渐变与内描边，立体感提升。
+  - `StatusBadge` 增加胶囊微边框。
+  - `ProtocolTag` 增加精确描边与字距微调。
+- **侧边栏与配置行优化（`MainWindowView.swift` & `ConnectionsView.swift`）**：
+  - 侧边栏图标更新为规范的 SF Symbols（`gauge.with.needle`, `square.stack.3d.up`, `slider.horizontal.2.square.badge.arrow.down`, `text.alignleft` 等）。
+  - 配置列表行生效中状态统一采用 `StatusBadge` 胶囊，本地配置图标改用 `server.rack`。
+  - 连接监控行关闭连接按钮增加悬停高亮反馈。
+- **测试与验证**：全量测试 493 项通过，构建版本 0.1.84（build 184）。
