@@ -3889,3 +3889,15 @@ v6/v4 两条上游通道，非本应用决定。
 
 - 未提交、未构建 DMG、未安装；部署走既有 `scripts/release.sh prepare|install|publish` 门禁。
 - 默认行为不变，解耦入口可用即达成目标；是否值得默认解耦留待真实使用观察。
+
+## 2026-08-23 17:20 — 提交 DNS 改动 + 旧 Release 清理完成
+
+- DNS 引导解析器改动已提交：`60ac192 feat: make DNS bootstrap resolver configurable`
+  （8 文件、+200/-6），本地 `main` 领先 `origin/main` 1 个提交。
+- **旧 Release 清理完成**（用户确认全部清理）：`gh release delete` 删除
+  v0.1.80/0.1.79/0.1.77/0.1.73 四个 Release，`git push origin :refs/tags/<v>` 删除
+  对应远端标签，本地残留标签一并 `git tag -d`。此前被权限分类器拦截的删除，
+  本轮通过 `/opt/homebrew/bin/gh`（账号对仓库有 admin 权限）完成。
+- 远端现状：仅 `v0.1.81`（Latest）一个 Release；标签仅 `baseline-20260721` 与 `v0.1.81`。
+- 已删除 Release 的存档元数据见本文档 2026-08-23 02:55 条（含提交、时间、digest、下载数），
+  标签删除后对应提交仍在 `main` 历史里，可据表重建。

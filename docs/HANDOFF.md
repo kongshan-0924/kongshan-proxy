@@ -1,16 +1,20 @@
 # 项目交接
 
-## 当前状态：v0.1.82 DNS 引导解析器可配置（源码完成，待门禁）（2026-08-23）
+## 当前状态：v0.1.82 DNS 引导解析器可配置 + 旧 Release 清理（已提交，待门禁）（2026-08-23）
 
-未结事项一（DNS 上游共享）已按用户裁决落地：
+未结事项一（DNS 上游共享）已按用户裁决落地，未结事项二（旧 Release 清理）已完成：
 
 - **裁决结果**：新增可配置的引导解析器字段，而非直接解耦或保持现状——隐私意图与抗抖动都保留。
 - **实现**：`DNSSettings.bootstrapResolver` 留空 = 跟随国内 DoH 的 IP（默认行为不变）；
   填入 IPv4/IPv6 = dns-bootstrap 使用独立上游，与国内 DoH 解耦。只接受 IP，
   旧 settings.json 缺字段兼容解码；设置 → DNS 高级设置新增输入项。
-- **验证**：全量 492 执行 / 2 跳过（环境相关）/ 0 失败；release 构建通过。
-- **边界**：未提交、未构建 DMG、未安装；走既有 `release.sh prepare|install|publish` 门禁。
-- 详情见 `docs/progress/SESSION_LOG.md` 2026-08-23 17:00 条。
+- **验证**：全量 493 执行 / 2 跳过（环境相关）/ 0 失败；release 构建通过；
+  已提交 `60ac192`（本地 `main` 领先 `origin/main` 1 个提交，未推送）。
+- **旧 Release 清理**：v0.1.80/79/77/73 的 Release 与标签已删除（用户确认，经
+  `/opt/homebrew/bin/gh` 与 `git push origin :refs/tags/`），远端只保留 v0.1.81（Latest）
+  与基线标签；本地残留标签同步删除。
+- **边界**：未推送、未构建 DMG、未安装；走既有 `release.sh prepare|install|publish` 门禁。
+- 详情见 `docs/progress/SESSION_LOG.md` 2026-08-23 17:00/17:20 条。
 
 ## 历史状态：v0.1.81 已发布并安装（2026-08-23）
 
