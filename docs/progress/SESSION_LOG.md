@@ -3998,3 +3998,23 @@ v6/v4 两条上游通道，非本应用决定。
 ### 未验证部分
 
 DNS 引导解析器的真机效果（填入独立 IP 后节点域名解析是否与国内 DoH 解耦）尚未在真实网络验证。
+
+### 2026-08-23 18:20 — 保留策略细化：区分远端与本地
+
+用户补充：本地不必保存历史构建产物，GitHub 上保留即可。据此把上一条的「一刀切保留」
+收窄为按载体区分：
+
+| 载体 | 策略 |
+|---|---|
+| GitHub Release 与标签 | **只增不删**，禁止 `gh release delete` / `git tag -d` / 删远端标签 |
+| 本地 `dist/` | 只保留最新 DMG，`make_dmg.sh` 恢复清理旧 DMG |
+| 仓库内容（代码/文档/历史记录） | 不删除，历史表述不改写 |
+
+理由：版本历史的载体是 GitHub，本地 DMG 是一次性产物，任何版本都能从对应标签重新构建
+或直接从 Releases 下载。`make_dmg.sh` 的 `find … -delete` 已恢复，注释写明「这不等于放弃
+版本历史」以免后人再次误改。`dist/kongshan.app` 可运行副本的清理与本议题无关，一直保留
+（Launch Services 会记住它并导致误启动第二个实例）。
+
+已同步：`scripts/make_dmg.sh`、`README.md`、`docs/HANDOFF.md` 顶部策略段、`docs/NEXT_STEPS.md`，
+以及项目记忆文件 `keep-release-history.md`。本地 `dist/kongshan-0.1.81.dmg` 已删除，
+现只剩 `kongshan-0.1.82.dmg`（v0.1.81 的安装包在 GitHub Releases 上完好）。
