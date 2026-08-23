@@ -128,8 +128,8 @@ struct MainWindowView: View {
     }
 }
 
-/// 顶部工具栏通知按钮与下拉快捷弹窗。
-/// 替代原先侵入 detail 主画面的通栏/横幅 Banner，将通知收纳进原生 Toolbar 与侧栏徽标。
+/// 顶部工具栏右上角通知组件。
+/// 采用紧凑的右上角微型药丸胶囊与轻量即时弹窗，无多余动效，简洁流畅。
 private struct NotificationToolbarButton: View {
     @Environment(AppState.self) private var state
     @Binding var selection: SidebarPage?
@@ -153,20 +153,40 @@ private struct NotificationToolbarButton: View {
         Button {
             showingPopover.toggle()
         } label: {
-            ZStack(alignment: .topTrailing) {
-                Image(systemName: hasNotice ? "bell.badge.fill" : "bell")
-                    .symbolRenderingMode(hasNotice ? .multicolor : .monochrome)
-                    .foregroundStyle(hasNotice ? noticeColor : .secondary)
-                    .font(.system(size: 13, weight: .medium))
+            if hasNotice {
+                HStack(spacing: 5) {
+                    Image(systemName: state.errorMessage != nil ? "exclamationmark.octagon.fill" : "exclamationmark.triangle.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(noticeColor)
+                    Text("\(totalCount) 条通知")
+                        .font(.system(size: 11, weight: .medium).monospacedDigit())
+                        .foregroundStyle(noticeColor)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(noticeColor.opacity(0.7))
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(noticeColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .strokeBorder(noticeColor.opacity(0.25), lineWidth: 0.5)
+                )
+            } else {
+                Image(systemName: "bell")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 24, height: 24)
+                    .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
         }
         .buttonStyle(.plain)
-        .help(hasNotice ? "有 \(totalCount) 条通知提醒" : "暂无新消息")
+        .help(hasNotice ? "点击查看 \(totalCount) 条通知" : "暂无新通知")
         .popover(isPresented: $showingPopover, arrowEdge: .bottom) {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 6) {
-                    Text("消息通知")
-                        .font(.system(size: 13, weight: .semibold))
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("通知提醒")
+                        .font(.system(size: 12, weight: .semibold))
                     if totalCount > 0 {
                         Text("\(totalCount)")
                             .font(.system(size: 10, weight: .bold).monospacedDigit())
@@ -177,7 +197,7 @@ private struct NotificationToolbarButton: View {
                     }
                     Spacer()
                     if hasNotice {
-                        Button("全部清除") {
+                        Button("清除") {
                             state.dismissError()
                             state.clearWarnings()
                             showingPopover = false
@@ -191,20 +211,16 @@ private struct NotificationToolbarButton: View {
                 Divider()
 
                 if let error = state.errorMessage {
-                    noticeItem(text: error, symbol: "exclamationmark.octagon.fill", tint: .red)
+                    noticeRow(text: error, symbol: "exclamationmark.octagon.fill", tint: .red)
                 }
                 if let warning = state.warnings.last {
-                    noticeItem(text: warning, symbol: "exclamationmark.triangle.fill", tint: .orange)
+                    noticeRow(text: warning, symbol: "exclamationmark.triangle.fill", tint: .orange)
                 }
                 if !hasNotice {
-                    HStack(spacing: 8) {
-                        Image(systemName: "checkmark.circle")
-                            .foregroundStyle(.green)
-                        Text("当前没有任何错误或警告")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.vertical, 10)
+                    Text("暂无任何错误或警告")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 4)
                 }
 
                 Divider()
@@ -214,37 +230,38 @@ private struct NotificationToolbarButton: View {
                     selection = .messages
                 } label: {
                     HStack {
-                        Text("前往消息中心")
-                            .font(.system(size: 12, weight: .medium))
+                        Text("进入消息中心查看全部")
+                            .font(.system(size: 11, weight: .medium))
                         Spacer()
                         Image(systemName: "arrow.right")
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.system(size: 9, weight: .semibold))
                     }
                     .foregroundStyle(Color.accentColor)
-                    .padding(.vertical, 3)
+                    .padding(.vertical, 2)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }
-            .padding(14)
-            .frame(width: 300)
+            .padding(12)
+            .frame(width: 280)
         }
     }
 
-    private func noticeItem(text: String, symbol: String, tint: Color) -> some View {
-        HStack(alignment: .top, spacing: 8) {
+    private func noticeRow(text: String, symbol: String, tint: Color) -> some View {
+        HStack(alignment: .top, spacing: 6) {
             Image(systemName: symbol)
-                .font(.system(size: 12))
+                .font(.system(size: 11))
                 .foregroundStyle(tint)
                 .padding(.top, 1)
             Text(text)
-                .font(.caption)
+                .font(.system(size: 11))
                 .lineLimit(3)
                 .foregroundStyle(.primary)
                 .textSelection(.enabled)
         }
-        .padding(8)
-        .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .padding(6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(tint.opacity(0.06), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
     }
 }
 
