@@ -3919,3 +3919,24 @@ v6/v4 两条上游通道，非本应用决定。
   `RuntimeAnomalyDetector.swift` 的 `failureMarkers`/`outboundTag`/窗口结算规则。
 - 待办更新：`NEXT_STEPS` 该项标记为已用真实数据回放验证，无需回调；
   仍保留观察项——v0.1.82 安装后若有真实误报/漏报再调。
+
+## 2026-08-23 18:00 — 发布门禁脚本沙箱适配（v0.1.82 发布前置）
+
+发布路径上发现一处环境阻塞并修复：`scripts/verify_m1/m2/m3.sh` 里的
+`swift test` / `swift build --build-tests` 都没有 `--disable-sandbox`，
+而 `scripts/build_app.sh:8-9` 早已针对同一本机问题做过适配
+（注释："本机环境沙盒被禁用（sandbox-exec: Operation not permitted），
+必须显式 --disable-sandbox"）。在当前环境直接跑 `release.sh prepare`
+会在 M3 门禁处失败（`swift build` 报 `sandbox-exec: Operation not permitted`；
+`swift test` 直接挂起超时）。
+
+修复：三处 verify 脚本统一改为
+`SWIFTPM_ENABLE_SANDBOX=NO swift test --disable-sandbox` /
+`SWIFTPM_ENABLE_SANDBOX=NO swift build --build-tests --disable-sandbox`，
+与 build_app.sh 一致。提交 `a58a907`。
+
+验证：`KONGSHAN_KEEP_VERSION=1 zsh scripts/verify_m3.sh` 完整通过
+（build + 全量 xctest + build_app + 签名/arm64/plutil/sing-box check/规则集/TUN fixture）。
+
+发布剩余流程（仍待用户确认）：`scripts/release.sh prepare → install → publish`；
+本地 `main` 领先 `origin/main` 5 个提交（60ac192 / 377d40a / 533eed2 / 15e3f94 / a58a907）。
