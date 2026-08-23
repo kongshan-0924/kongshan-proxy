@@ -4036,3 +4036,25 @@ DNS 引导解析器的真机效果（填入独立 IP 后节点域名解析是否
   已安装 CDHash 与发布件一致。旧版备份在废纸篓。
 - `dist` 只剩 `kongshan-0.1.82.dmg`，新的本地保留策略按预期生效。
 - App cdhash 已变，TUN 助手会提示重装一次（安全设计，不放宽）。
+
+## 2026-08-23 18:30 — 前端 UI 规范与视觉布局优化
+
+按用户要求对所有前端视图完成了一次完整 UI 审计与优化（不影响任何网络与业务逻辑）：
+
+- **设计系统（`Theme.swift`）**：
+  - 建立统一圆角阶梯：`cardRadius` (10)、`subcardRadius` (8)、`inputRadius` (7)、`tagRadius` (4)。
+  - 新增统一的 `.subcard()` 视觉修饰器，统一暗黑/浅色模式下的次级卡片层级。
+  - `SearchField` 统一采用 `Theme.inputRadius`。
+- **仪表盘（`DashboardView.swift`）**：
+  - 出口 IP 指标卡紧凑重构为 3 行结构化信息（IP / 地理位置·ISP / DNS 状态点），解决多卡网格高度不均问题。
+  - 会话累计流量药丸背景统一为 `Theme.subcardRadius`。
+- **代理策略页（`PolicyGroupsView.swift`）**：
+  - 节点卡片采用上下两段式布局：首行专供节点名称与国旗，底部弹性展示协议 Tag、倍率与延迟 Badge，彻底解决长节点名与延迟挤占的问题。
+  - 统一卡片与悬停圆角为 `Theme.subcardRadius`。
+- **规则与连接（`RoutingView.swift` & `ConnectionsView.swift`）**：
+  - 统一规则页 4 个折叠分区的背景层级（消除递减透明度的褪色感），输入框圆角对齐。
+  - 连接监控行的网络协议 Badge 统一对齐 `Theme.tagRadius`。
+- **消息中心与主窗口（`MessagesView.swift` & `MainWindowView.swift`）**：
+  - 消息中心空状态去除写死的 `padding(.top, 80)`，采用响应式 minHeight 居中。
+  - 订阅导入栏圆角收敛至 `Theme.subcardRadius`。
+- **测试验证**：`swift build -c release` 编译通过，全量 493 条测试（1 跳过/0 失败）全部通过，提交 `8763852`。
