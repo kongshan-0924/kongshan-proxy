@@ -4195,3 +4195,45 @@ DNS 引导解析器的真机效果（填入独立 IP 后节点域名解析是否
 
 v0.1.90 已发布 GitHub 并标记 Latest；远端现有 v0.1.90 / v0.1.82 / v0.1.81，
 按新策略保留全部历史。`main` 与远端同步。
+
+## 2026-08-23 22:10 — 只读评估：开机自启后自动恢复代理状态
+
+### 本轮问题
+
+用户想要：开机自启后自动恢复重启前的接管状态（重启前开着代理，重启后自动开）。评估可行性与风险。
+
+### 检查范围与现状
+
+- `initialize()` **刻意不自动接管**：它只做 `recoverTUNIfNeeded` / `systemProxyManager.recoverIfNeeded`
+  / `systemDNSManager.recoverIfNeeded`，即清理上次遗留的接管，与"恢复状态"是相反的动作。
+  发布验收记录里多处"未自动接管"是**确认没有意外接管**，非否决该功能。
+- 登录项已具备：`LoginItemManager` 用 `SMAppService.mainApp`，状态机完整。
+- 助手具备开机存活：LaunchDaemon `RunAtLoad=true` + `KeepAlive=true`（实测已连续运行 15 小时）。
+- `PersistedSettings` **没有** autoConnect/wasActive 类字段，需新增。
+- `start(modes:)` 的失败路径完整：会 stop 内核、还原系统代理/DNS/SSH，
+  还原失败时收集 `restoreFailures` 并提示用户手工清理。
+
+### 结论：可实现，改动小；但有三个真实风险
+
+1. **失败在登录时不可见（最需要处理）**：`KongshanApp` 在登录项启动时**不显示主窗口**
+   （`guard currentStatus() != .enabled else { return }`）。若自动接管失败且系统代理/DNS
+   还原也失败，用户开机即断网、且看不到任何提示——现有 `restoreFailures` 文案只写进
+   `errorMessage`（UI 横幅）与运行事件，登录场景两者都看不到。
+2. **TUN 在助手失效时会弹管理员密码框**：`startTUN` 在 `helperIsHealthy()` 为假时回退到
+   `privilegedLauncher`（`osascript with administrator privileges`）。App 更新后 cdhash 变化、
+   助手需重装，此时若自动开 TUN，就会在开机瞬间弹密码框。
+3. **登录时网络未就绪导致降级配置**：TUN 启动前的 `LANResolver` 内网 DNS 探测若在无网时进行，
+   会得到空快照，生成不含内网分流的配置，并**一直沿用到下次重启内核**。
+
+### 建议方案（未实施）
+
+- 新增两个持久化字段：用户意图开关 + 上次接管方式快照；只在**正常退出**时写入"曾开启"，
+  避免把崩溃状态也当成用户意图。
+- 仅自动恢复**系统代理**，TUN 需助手健康时才恢复；助手不健康则跳过并留一条运行事件，
+  绝不在登录时触发密码框。
+- 自动接管前等待网络可达（有超时上限），失败则不接管而非带着降级配置接管。
+- 登录场景的失败必须走**系统通知**（`notificationSender` 已有），不能只写 UI 横幅。
+
+### 未验证部分
+
+未实测重启后的真实时序（网络就绪时间、助手与 App 的启动先后）。
