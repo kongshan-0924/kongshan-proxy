@@ -55,6 +55,24 @@ struct LiveLogEntry: Identifiable, Equatable, Sendable {
     }
 }
 
+/// 只放行一次的续体守卫。`NWPathMonitor` 的回调可能连发多次，
+/// 重复 resume 同一个 `CheckedContinuation` 会直接 crash。
+private final class PathGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+
+    init(continuation: CheckedContinuation<Bool, Never>) {
+        self.continuation = continuation
+    }
+
+    func resume(_ value: Bool) {
+        lock.withLock {
+            continuation?.resume(returning: value)
+            continuation = nil
+        }
+    }
+}
+
 private final class AppWarningRelay: @unchecked Sendable {
     private let lock = NSLock()
     private var handler: (@Sendable (String) -> Void)?
@@ -139,6 +157,10 @@ final class AppState {
     private(set) var isUpdatingRuleSets = false
     private(set) var nextSubscriptionUpdateAt: Date?
     private(set) var loginItemStatus: LoginItemStatus = .notRegistered
+    /// 开机自启后自动恢复上次接管。默认关闭：它会在无人看屏幕时改动系统网络设置，
+    /// 必须是用户显式打开的。
+    var autoRestoreOnLaunch = false
+    @ObservationIgnored private var lastActiveModes: [ProxyMode] = []
     private(set) var uploadRate: Int64 = 0
     private(set) var downloadRate: Int64 = 0
     private(set) var activeConnectionCount = 0
@@ -634,6 +656,7 @@ final class AppState {
             isReady = true
             loginItemStatus = await loginItemManager.currentStatus()
             await rescheduleSubscriptionUpdates()
+            await restoreTakeoverIfNeeded()
         } catch {
             setFailure("启动恢复失败：\(error.localizedDescription)")
         }
@@ -977,6 +1000,9 @@ final class AppState {
         // 退出前先冲掉未完成的防抖落盘（用户切节点后 500ms 内退出会丢最后一次选择）。
         await flushPersistSettingsIfNeeded()
         finishSelfDiagnostics()
+        // 快照必须在 stop() **之前**取：stop 会清空 activeModes。
+        // 只有正常退出会走到这里，所以崩溃/断电不会留下"曾开启"的假意图。
+        await recordActiveModesSnapshot()
         if !activeModes.isEmpty || runtime != nil {
             await stop(reason: "应用退出")
             await flushRuntimeEventsIfNeeded()
@@ -2880,6 +2906,8 @@ final class AppState {
             activeConfigID = settings.activeConfigID
             preferredRelayPort = settings.proxyRelayPort
             menuBarIconStyle = settings.menuBarIconStyle ?? .peak
+            autoRestoreOnLaunch = settings.autoRestoreOnLaunch ?? false
+            lastActiveModes = settings.lastActiveModes ?? []
             if let deadline = settings.diagnosticModeEndsAt, deadline > now() {
                 diagnosticModeEndsAt = deadline
                 scheduleDiagnosticModeExpiry()
@@ -3000,7 +3028,9 @@ final class AppState {
                 speedTestMethod: speedTestMethod,
                 menuBarIconStyle: menuBarIconStyle,
                 proxyRelayPort: preferredRelayPort,
-                diagnosticModeEndsAt: diagnosticModeEndsAt
+                diagnosticModeEndsAt: diagnosticModeEndsAt,
+                autoRestoreOnLaunch: autoRestoreOnLaunch,
+                lastActiveModes: lastActiveModes
             )),
             to: settingsURL
         )
@@ -4055,6 +4085,138 @@ final class AppState {
         storage.rootDirectory.appending(path: "runtime-events.json")
     }
 
+    // MARK: - 开机自启后恢复接管
+
+    /// 等待网络可达的上限。开机时 Wi-Fi 关联要几秒，等不到就**不接管**——
+    /// 带着"无网时探测到的空内网 DNS"启动会生成降级配置，而那份配置会一直用到下次重启内核。
+    private static let autoRestoreNetworkTimeout = Duration.seconds(20)
+
+    func setAutoRestoreOnLaunch(_ enabled: Bool) async {
+        guard autoRestoreOnLaunch != enabled else { return }
+        autoRestoreOnLaunch = enabled
+        // 关掉时一并清空快照：留着旧快照，等用户下次再打开开关就会恢复一个很久以前的状态。
+        if !enabled { lastActiveModes = [] }
+        try? await persistSettings()
+    }
+
+    /// 正常退出时把当时的接管方式落盘，供下次开机恢复。
+    private func recordActiveModesSnapshot() async {
+        let snapshot = Array(activeModes).sorted { $0.rawValue < $1.rawValue }
+        guard snapshot != lastActiveModes else { return }
+        lastActiveModes = snapshot
+        try? await persistSettings()
+    }
+
+    /// 开机自启后按上次状态恢复接管。三条约束缺一不可，详见各自的 guard。
+    /// 决策与执行分离：`shouldRestoreSystemProxy` 是纯判断，可单测每条约束；
+    /// 真正的启动与网络等待留在 `restoreTakeoverIfNeeded`。
+    enum AutoRestoreDecision: Equatable {
+        case restoreSystemProxy
+        case skipDisabled
+        case skipNotLoginLaunch
+        case skipNoSnapshot
+        case skipTUNSnapshot
+    }
+
+    var autoRestoreDecision: AutoRestoreDecision {
+        guard autoRestoreOnLaunch else { return .skipDisabled }
+        guard loginItemStatus == .enabled else { return .skipNotLoginLaunch }
+        guard !lastActiveModes.isEmpty else { return .skipNoSnapshot }
+        if lastActiveModes.contains(.tun) { return .skipTUNSnapshot }
+        guard lastActiveModes.contains(.systemProxy) else { return .skipNoSnapshot }
+        return .restoreSystemProxy
+    }
+
+    /// 测试用：注入登录项状态（真实值来自 SMAppService，单测不能依赖宿主注册情况）。
+    func setLoginItemStatusForTesting(_ status: LoginItemStatus) {
+        loginItemStatus = status
+    }
+
+    /// 测试用：直接设置/读取正常退出快照。
+    var activeModesSnapshotForTesting: [ProxyMode] {
+        get { lastActiveModes }
+        set { lastActiveModes = newValue }
+    }
+
+    /// 测试用：模拟"带着这些接管方式正常退出"。传入的是**实时 activeModes**，
+    /// 因为快照正是从它取的——直接塞快照字段测不到取值逻辑。
+    func recordActiveModesSnapshotForTesting(exitingWith modes: Set<ProxyMode>) async {
+        activeModes = modes
+        await recordActiveModesSnapshot()
+    }
+
+    private func restoreTakeoverIfNeeded() async {
+        guard isReady, status == .off, activeModes.isEmpty else { return }
+        // 决策见 `autoRestoreDecision`：只在开机自启场景恢复（手动打开应用不该顺带改动
+        // 系统网络设置），且第一阶段只恢复系统代理——快照含 TUN 时整体跳过而非只恢复一半，
+        // 部分恢复会让用户处在与关机前不同的网络姿态却毫无察觉。
+        switch autoRestoreDecision {
+        case .restoreSystemProxy:
+            break
+        case .skipTUNSnapshot:
+            recordRuntimeEvent(
+                title: "已跳过自动恢复接管",
+                detail: "上次使用了 TUN，当前版本只自动恢复系统代理；请手动开启"
+            )
+            return
+        case .skipDisabled, .skipNotLoginLaunch, .skipNoSnapshot:
+            return
+        }
+
+        guard await waitForNetwork() else {
+            recordRuntimeEvent(
+                level: .warning,
+                title: "已跳过自动恢复接管",
+                detail: "开机后 \(Self.autoRestoreNetworkTimeout) 内网络仍不可达；未接管，可手动开启"
+            )
+            await notifyAutoRestoreFailure(reason: "开机时网络不可达")
+            return
+        }
+
+        recordRuntimeEvent(title: "正在自动恢复接管", detail: "系统代理（开机自启）")
+        await start(modes: [.systemProxy])
+
+        // 登录场景下主窗口不显示，`errorMessage` 这类 UI 提示没人看得见；
+        // 失败必须走系统通知，否则用户开机即断网却毫无线索。
+        if status != .on {
+            let reason = errorMessage ?? "未知原因"
+            await notifyAutoRestoreFailure(reason: reason)
+        }
+    }
+
+    private func notifyAutoRestoreFailure(reason: String) async {
+        try? await notificationSender.send(
+            title: "kongshan 未能自动开启代理",
+            body: "\(reason)。系统网络设置已保持原样，可打开 kongshan 手动开启。"
+        )
+    }
+
+    /// 等网络可达。`NWPathMonitor` 首次回调就带当前状态，已联网时立即返回。
+    private func waitForNetwork() async -> Bool {
+        let monitor = NWPathMonitor()
+        defer { monitor.cancel() }
+        let queue = DispatchQueue(label: "kongshan.auto-restore-path")
+
+        return await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                await withCheckedContinuation { continuation in
+                    let gate = PathGate(continuation: continuation)
+                    monitor.pathUpdateHandler = { path in
+                        if path.status == .satisfied { gate.resume(true) }
+                    }
+                    monitor.start(queue: queue)
+                }
+            }
+            group.addTask {
+                try? await Task.sleep(for: Self.autoRestoreNetworkTimeout)
+                return false
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+    }
+
     // MARK: - 运行期自诊断
 
     /// 采样间隔。取 15 秒是权衡：足够短到能把「持续异常」和「测速那种十几秒的正常尖峰」
@@ -4418,6 +4580,11 @@ private struct PersistedSettings: Codable {
     /// App 用户态 TCP relay 的公开端口。属于本机运行时状态，不进备份。
     var proxyRelayPort: UInt16? = nil
     var diagnosticModeEndsAt: Date? = nil
+    /// 用户意图：开机自启后是否恢复上次的接管。旧设置文件没有该字段，缺省关闭。
+    var autoRestoreOnLaunch: Bool? = nil
+    /// **正常退出时**记下的接管方式快照。只在 `prepareForTermination` 写入——
+    /// 崩溃或断电不会经过那里，于是不会把一次异常当成"用户想要的状态"反复恢复。
+    var lastActiveModes: [ProxyMode]? = nil
 }
 
 private struct FileSnapshot {

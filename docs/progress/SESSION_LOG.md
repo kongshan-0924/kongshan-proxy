@@ -4237,3 +4237,40 @@ v0.1.90 已发布 GitHub 并标记 Latest；远端现有 v0.1.90 / v0.1.82 / v0.
 ### 未验证部分
 
 未实测重启后的真实时序（网络就绪时间、助手与 App 的启动先后）。
+
+## 2026-08-25 00:20 — v0.1.91 第一阶段：开机后自动恢复系统代理
+
+### 改动
+
+- `PersistedSettings` 新增两个字段（均可选，旧配置解码为默认值）：
+  `autoRestoreOnLaunch`（用户意图，默认 **false**）与 `lastActiveModes`（正常退出快照）。
+- 快照只在 `prepareForTermination` 里、**`stop()` 之前**取——stop 会清空 `activeModes`；
+  崩溃/断电不经过该路径，因此不会把一次异常当成用户意图反复恢复。
+- `initialize()` 末尾调用 `restoreTakeoverIfNeeded()`，判断抽成纯函数 `autoRestoreDecision`
+  以便逐条单测。四条跳过原因：开关关闭、非开机自启、无快照、快照含 TUN。
+- 只在 `loginItemStatus == .enabled` 时恢复。这与 `KongshanApp` 决定是否展示主窗口用的是
+  同一个信号——LSUIElement 应用无法从激活状态或环境变量区分启动来源，登录项已启用时的
+  冷启动几乎必然来自 launchd。手动打开应用不会顺带改动系统网络设置。
+- 网络就绪等待上限 20 秒（`NWPathMonitor`，用 `PathGate` 保证续体只 resume 一次——
+  path 回调会连发，重复 resume `CheckedContinuation` 直接 crash）。等不到就不接管。
+- **失败必发系统通知**：登录场景不显示主窗口，`errorMessage` 与运行事件用户都看不见。
+- 关闭开关时清空快照，避免过很久再打开时恢复一个早已过时的状态。
+- 设置页新增开关与说明，仅在登录项已启用时可用。
+
+### 刻意不做的（第一阶段）
+
+**不自动恢复 TUN。** `startTUN` 在 `helperIsHealthy()` 为假时回退到 `privilegedLauncher`
+（`osascript with administrator privileges`），而 App 每次更新 cdhash 变化都会让助手需要重装
+——那个窗口期自动开 TUN 就会在开机瞬间弹管理员密码框。快照含 TUN 时**整体跳过**而非
+只恢复系统代理那一半：部分恢复会让用户处在与关机前不同的网络姿态却毫无察觉。
+
+### 验证
+
+- 新增 8 条定向测试，覆盖每条约束（默认关闭、非登录启动、无快照、含 TUN 整体跳过、
+  快照往返、关开关清快照、关着退出快照为空）。
+- 全量 **501 执行 / 1 跳过 / 0 失败**；`swift build` 0 警告；`git diff --check` 通过。
+
+### 未验证部分
+
+**真机重启时序未验证**：开机时网络就绪耗时、助手与 App 的启动先后、20 秒上限是否足够，
+都需要用户真实重启一次才能确认。这是本功能最需要真机回放的部分。

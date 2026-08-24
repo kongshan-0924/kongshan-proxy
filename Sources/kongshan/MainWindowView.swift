@@ -1012,6 +1012,11 @@ private struct SettingsView: View {
                                 || state.loginItemStatus == .unsupported
                         )
                     LabeledContent("登录项状态", value: loginItemStatusTitle)
+                    Toggle("登录后自动恢复上次的接管", isOn: autoRestoreBinding)
+                        .disabled(!state.isReady || state.loginItemStatus != .enabled)
+                    Text("仅在开机自启场景生效：登录后若上次是开着系统代理，会等网络就绪再自动开启；网络不可达或启动失败时不接管，并发系统通知告知。当前版本不自动恢复 TUN——它在助手需要重装时会弹管理员密码框，届时会跳过并在消息页留下记录。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     if state.loginItemStatus == .requiresApproval {
                         Text("登录项已登记，但需要你在系统设置中批准。应用不会重复发起注册。")
                             .font(.caption)
@@ -1301,6 +1306,13 @@ private struct SettingsView: View {
                 settings.strictRoute = enabled
                 Task { await state.applyTunSettings(settings) }
             }
+        )
+    }
+
+    private var autoRestoreBinding: Binding<Bool> {
+        Binding(
+            get: { state.autoRestoreOnLaunch },
+            set: { newValue in Task { await state.setAutoRestoreOnLaunch(newValue) } }
         )
     }
 
