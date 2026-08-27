@@ -68,6 +68,36 @@ require_verification_stamp() {
     verify_artifacts
 }
 
+# 反复取样直到条件成立，超时才判失败。
+#
+# **两处安装检查都因为「点采样当成稳态判据」而误报过**，所以统一走这里：
+# 旧版退出与系统状态还原之间有时间差（进程消失 ≠ scutil 已经反映还原结果，
+# SystemConfiguration 的动态存储是异步传播的），2026-08-25 就是这样把一次
+# 成功的还原判成了「系统代理仍处于启用状态」。
+wait_until() {
+    local deadline=$1; shift
+    local elapsed=0
+    while (( elapsed < deadline )); do
+        if "$@"; then return 0; fi
+        sleep 0.2
+        (( elapsed += 1 ))
+    done
+    "$@"
+}
+
+system_proxy_is_off() {
+    scutil --proxy | awk '/Enable :/ && $3 != 0 { bad=1 } END { exit bad }'
+}
+
+recovery_snapshots_are_gone() {
+    local support="$HOME/Library/Application Support/kongshan"
+    local residue
+    for residue in proxy-recovery.json dns-recovery.json tun-recovery.json; do
+        [[ ! -e "$support/$residue" ]] || return 1
+    done
+    return 0
+}
+
 installed_app_pid() {
     ps -axo pid=,command= | awk '$2 == "/Applications/kongshan.app/Contents/MacOS/kongshan" { print $1; exit }'
 }
@@ -112,12 +142,11 @@ install_verified() {
     fi
 
     pgrep -f '/kongshan.*/sing-box' >/dev/null 2>&1 && fail "仍有 kongshan sing-box 进程；未替换"
-    local support="$HOME/Library/Application Support/kongshan"
-    for residue in proxy-recovery.json dns-recovery.json tun-recovery.json; do
-        [[ ! -e "$support/$residue" ]] || fail "系统恢复快照仍存在：$residue；未替换"
-    done
-    scutil --proxy | awk '/Enable :/ && $3 != 0 { bad=1 } END { exit bad }' \
-        || fail "系统代理仍处于启用状态；未替换"
+    # 还原写入发生在退出流程末尾，晚于进程消失；给它 5 秒落地再判。
+    wait_until 25 recovery_snapshots_are_gone \
+        || fail "系统恢复快照在 5 秒内仍未清除；未替换"
+    wait_until 25 system_proxy_is_off \
+        || fail "系统代理在 5 秒内仍处于启用状态；未替换"
     if scutil --dns | grep -Eq 'nameserver\[[0-9]+\] : (172\.19\.0\.1|fdfe:dcba:9876::1)'; then
         fail "系统 DNS 仍指向 kongshan TUN；未替换"
     fi
@@ -145,11 +174,21 @@ install_verified() {
         fail "安装失败，已尝试恢复旧版"
     fi
     open "$target_app"
+    # 只等"进程出现"是不够的：单实例保护下新实例可能瞬间出现又退出，
+    # 那一瞬的 PID 会被当成安装成功（2026-08-23 真机踩过）。
+    # 改为等到出现，再确认**同一个 PID**连续存活满 3 秒。
+    local pid_after=""
     for _ in {1..100}; do
-        [[ -n $(installed_app_pid) ]] && break
+        pid_after=$(installed_app_pid)
+        [[ -n "$pid_after" ]] && break
         sleep 0.1
     done
-    [[ -n $(installed_app_pid) ]] || fail "新版未在 10 秒内保持运行；旧版备份仍在 $backup"
+    [[ -n "$pid_after" ]] || fail "新版未在 10 秒内启动；旧版备份仍在 $backup"
+    for _ in {1..15}; do
+        sleep 0.2
+        [[ $(installed_app_pid) == "$pid_after" ]] \
+            || fail "新版启动后未能稳定运行（PID $pid_after 已消失）；旧版备份仍在 $backup"
+    done
     print -- "已安装并打开 v$expected；旧版可恢复备份：$backup"
 }
 

@@ -340,6 +340,23 @@ public enum ConfigGenerator {
         return ConfigGenerationResult(config: config, warnings: warnings)
     }
 
+    /// 解析结果的地址族排序。
+    ///
+    /// 直连路径经常没有可用的 IPv6 出口，解析器却照样返回 AAAA。内核挑中 AAAA 去 dial，
+    /// 结果是 `network is unreachable` / `no route to host`，或者干耗到超时——
+    /// 真机 2026-08-26 日志里 `pve.<内网域>` 与 `t2.baidu.com` 都是这么失败的。
+    ///
+    /// 用 `prefer_ipv4` 而不是 `ipv4_only`：只调**顺序**，没有 A 记录时照样返回 AAAA，
+    /// 不会把纯 IPv6 的目标变成不可达。
+    ///
+    /// 放在 `dns.strategy` 而不是各个 server 的 `domain_strategy` 上，两个理由：
+    /// 一是 server 级 `domain_strategy` 管的是「解析这台 DNS 自己的域名」，不是它返回的答案，
+    /// 语义根本不对；二是它与 `domain_resolver` 同时出现会命中 sing-box 1.12 的
+    /// legacy 弃用检查，1.14 直接移除（真机 `sing-box check` 已报 FATAL）。
+    /// 全局生效也覆盖了「由 dns-remote 解析、却被 geoip-cn/ip_is_private 判回直连」这条路径；
+    /// 对走代理的域名无害——出站拿到的是域名本身，排序由对端决定。
+    private static let domainStrategy = "prefer_ipv4"
+
     private static func dns(for input: ConfigInput, primaryOutbound: String) throws -> [String: Any] {
         let endpoints = try input.dnsSettings.endpoints()
         var servers: [[String: Any]] = []
@@ -431,6 +448,26 @@ public enum ConfigGenerator {
                 "server": "dns-lan"
             ])
         }
+        // 直连域名的解析也必须留在国内解析器。它们在**路由**上走 direct，可**解析**上
+        // 既不命中内网规则、也多半不在 geosite-cn 里，于是掉到 `final: dns-remote`——
+        // 经代理去问 8.8.8.8，再把答案拿回本地直连。绕远一圈的代价是双份的：
+        // 解析本身随代理一起抖（真机 2026-08-26：旁路的内网域每次卡满 10 秒，两小时 26 次失败），
+        // 拿回来的还可能是本地根本连不通的地址。
+        // 与上面的内网规则同理，**必须排在 geosite-cn 与 fakeip 之前**。
+        if input.outboundMode == .rule, let settings = try input.routing?.settings.validated() {
+            // 自定义规则里指向代理的域名先截胡。路由上自定义规则优先于旁路，DNS 上也必须
+            // 保持同一优先级：否则 fakeip 模式下这些域名会拿到真实 IP 而不是假 IP，
+            // 失去域名信息后按 IP 匹配路由，就走错出口了。
+            for rule in settings.customRules where rule.enabled && rule.action == .proxy {
+                guard let field = dnsRuleField(for: rule.type) else { continue }
+                rules.append([field: [rule.value], "action": "route", "server": "dns-remote"])
+            }
+            let bypass = splitBypassDomains(settings.bypassDomains)
+            var bypassDNS: [String: Any] = ["action": "route", "server": "dns-cn"]
+            if !bypass.exact.isEmpty { bypassDNS["domain"] = bypass.exact }
+            if !bypass.suffixes.isEmpty { bypassDNS["domain_suffix"] = bypass.suffixes }
+            if bypassDNS.count > 2 { rules.append(bypassDNS) }
+        }
         if input.routing != nil, input.outboundMode == .rule {
             rules.append([
                 "rule_set": "geosite-cn",
@@ -450,6 +487,7 @@ public enum ConfigGenerator {
         var result: [String: Any] = [
             "servers": servers,
             "rules": rules,
+            "strategy": Self.domainStrategy,
             // 直连模式不应把解析绕到代理出口
             "final": input.outboundMode == .direct ? "dns-cn" : "dns-remote"
         ]
@@ -651,6 +689,18 @@ public enum ConfigGenerator {
         ]
     }
 
+    /// 自定义规则类型 → **DNS 规则**字段。DNS 规则只能按域名匹配，
+    /// `ip_cidr` 在解析阶段还没有 IP，`process_name` 与本函数的用途（域名截胡）无关，
+    /// 两者都返回 nil 由调用方跳过，而不是硬塞进去让内核校验失败。
+    static func dnsRuleField(for type: CustomRuleType) -> String? {
+        switch type {
+        case .domainSuffix: "domain_suffix"
+        case .domainKeyword: "domain_keyword"
+        case .domain: "domain"
+        case .ipCIDR, .processName: nil
+        }
+    }
+
     static func ruleField(for type: CustomRuleType) -> String {
         switch type {
         case .domainSuffix: "domain_suffix"
@@ -685,21 +735,29 @@ public enum ConfigGenerator {
     /// - Parameter extraDomainSuffixes: 内网域名后缀。除了 DNS 要交给内网 DNS 解析，
     ///   路由上也必须直连——内网域名可能解析到 DMZ 的公网 IP，那时按 IP 判定的
     ///   私有网段规则就落空了，流量还是会被送进代理。
+    /// 旁路域名拆成 sing-box 的 `domain` / `domain_suffix` 两类。
+    /// **路由与 DNS 两处必须用同一份拆法**——分开各写一遍必然会漂，
+    /// 而这两处一旦不一致，就会出现「路由走直连、解析走代理」的错配（见 `dns(for:)`）。
+    static func splitBypassDomains(_ domains: [String]) -> (exact: [String], suffixes: [String]) {
+        var exact: [String] = []
+        var suffixes: [String] = []
+        for domain in domains {
+            if domain.hasPrefix("*.") {
+                suffixes.append(String(domain.dropFirst(2)))
+            } else if domain.hasPrefix(".") {
+                suffixes.append(String(domain.dropFirst()))
+            } else {
+                exact.append(domain)
+            }
+        }
+        return (exact, suffixes)
+    }
+
     private static func bypassRule(
         for settings: RoutingSettings,
         extraDomainSuffixes: [String] = []
     ) -> [String: Any]? {
-        var exactDomains: [String] = []
-        var domainSuffixes: [String] = []
-        for domain in settings.bypassDomains {
-            if domain.hasPrefix("*.") {
-                domainSuffixes.append(String(domain.dropFirst(2)))
-            } else if domain.hasPrefix(".") {
-                domainSuffixes.append(String(domain.dropFirst()))
-            } else {
-                exactDomains.append(domain)
-            }
-        }
+        var (exactDomains, domainSuffixes) = splitBypassDomains(settings.bypassDomains)
 
         for suffix in extraDomainSuffixes where !domainSuffixes.contains(suffix) {
             domainSuffixes.append(suffix)

@@ -72,6 +72,70 @@ final class SystemProxyManagerTests: XCTestCase {
         ])
     }
 
+    /// networksetup 在网络服务列表变动期间会瞬时报
+    /// `** Error: Unable to find item in network database.`（exit 8）。
+    /// 真机 2026-08-25 07:48（换网 7 分钟后）连报两次「当前配置应用失败，已回滚」，
+    /// 且**回滚里的 `-listallnetworkservices` 也一起失败**，系统代理状态一度不确定。
+    func testTransientNetworkDatabaseErrorIsRetried() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runner = FlakyNetworkSetup(failures: 2)
+        let manager = SystemProxyManager(
+            storage: Storage(rootDirectory: root),
+            runner: runner.run(arguments:timeout:)
+        )
+
+        try await manager.enable(port: 32_123)
+
+        // 两次瞬时失败被吸收，第三次成功；调用方完全看不见这段抖动。
+        let listCalls = await runner.calls(matching: "-listallnetworkservices")
+        XCTAssertEqual(listCalls, 3)
+    }
+
+    /// 重试必须有界。服务若是真被删了，多花约 0.6 秒后照样如实报错——
+    /// 不能把「配置错了」伪装成「网络在抖」，那会让用户永远查不到真因。
+    func testTransientRetriesAreBoundedAndStillSurfaceTheError() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runner = FlakyNetworkSetup(failures: .max)
+        let manager = SystemProxyManager(
+            storage: Storage(rootDirectory: root),
+            runner: runner.run(arguments:timeout:)
+        )
+
+        do {
+            try await manager.enable(port: 32_123)
+            XCTFail("持续失败时必须抛错")
+        } catch {
+            XCTAssertTrue(
+                error.localizedDescription.contains("Unable to find item in network database"),
+                "原始错误必须原样透出，实际：\(error.localizedDescription)"
+            )
+        }
+        let listCalls = await runner.calls(matching: "-listallnetworkservices")
+        XCTAssertEqual(listCalls, 3, "一次原始调用 + 两次重试，不能无限重试")
+    }
+
+    /// 只重试那一种消息。别的失败原样抛出，不许拖慢也不许掩盖。
+    func testUnrelatedFailuresAreNotRetried() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runner = FlakyNetworkSetup(failures: .max, stderr: "** Error: some other failure")
+        let manager = SystemProxyManager(
+            storage: Storage(rootDirectory: root),
+            runner: runner.run(arguments:timeout:)
+        )
+
+        do {
+            try await manager.enable(port: 32_123)
+            XCTFail("必须抛错")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("some other failure"))
+        }
+        let listCalls = await runner.calls(matching: "-listallnetworkservices")
+        XCTAssertEqual(listCalls, 1)
+    }
+
     func testEnableWritesRecoverySnapshotBeforeMutatingAndRestoreDeletesIt() async throws {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -387,6 +451,40 @@ private actor NetworkSetupRecorder {
             "localhost\n*.local\n"
         default:
             ""
+        }
+    }
+}
+
+/// 前 `failures` 次调用返回指定失败，之后一切正常。
+private actor FlakyNetworkSetup {
+    private var remainingFailures: Int
+    private let stderr: String
+    private var seen: [[String]] = []
+
+    init(failures: Int, stderr: String = "** Error: Unable to find item in network database.") {
+        self.remainingFailures = failures
+        self.stderr = stderr
+    }
+
+    func calls(matching argument: String) -> Int {
+        seen.filter { $0.first == argument }.count
+    }
+
+    func run(arguments: [String], timeout: TimeInterval) async throws -> ProcessResult {
+        seen.append(arguments)
+        guard remainingFailures > 0 else {
+            return ProcessResult(exitCode: 0, stdout: output(for: arguments), stderr: "")
+        }
+        remainingFailures -= 1
+        return ProcessResult(exitCode: 8, stdout: "", stderr: stderr)
+    }
+
+    private func output(for arguments: [String]) -> String {
+        switch arguments.first {
+        case "-listallnetworkservices": "Wi-Fi"
+        case "-getwebproxy", "-getsecurewebproxy", "-getsocksfirewallproxy":
+            "Enabled: No\nServer: \nPort: 0\nAuthenticated Proxy Enabled: 0\n"
+        default: ""
         }
     }
 }

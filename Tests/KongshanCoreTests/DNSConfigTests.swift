@@ -53,11 +53,17 @@ final class DNSConfigTests: XCTestCase {
         XCTAssertNil(dns["fakeip"])
         XCTAssertEqual(dns["final"] as? String, "dns-remote")
 
+        // 三条，顺序即优先级：自定义代理规则 → 旁路直连 → geosite-cn。
+        // 前两条的存在理由见 `testDirectDomainsResolveLocally`。
         let dnsRules = try XCTUnwrap(dns["rules"] as? [[String: Any]])
-        XCTAssertEqual(dnsRules.count, 1)
-        XCTAssertEqual(dnsRules[0]["rule_set"] as? String, "geosite-cn")
-        XCTAssertEqual(dnsRules[0]["action"] as? String, "route")
-        XCTAssertEqual(dnsRules[0]["server"] as? String, "dns-cn")
+        XCTAssertEqual(dnsRules.count, 3)
+        XCTAssertEqual(dnsRules[0]["domain_suffix"] as? [String], ["custom.example"])
+        XCTAssertEqual(dnsRules[0]["server"] as? String, "dns-remote")
+        XCTAssertEqual(dnsRules[1]["domain"] as? [String], ["localhost"])
+        XCTAssertEqual(dnsRules[1]["server"] as? String, "dns-cn")
+        XCTAssertEqual(dnsRules[2]["rule_set"] as? String, "geosite-cn")
+        XCTAssertEqual(dnsRules[2]["action"] as? String, "route")
+        XCTAssertEqual(dnsRules[2]["server"] as? String, "dns-cn")
 
         // **必须是无连接的 dns-bootstrap，不能是 DoH。**
         // default_domain_resolver 负责解析出站节点自己的域名。DoH 是长连接，被路由器 NAT
@@ -400,18 +406,97 @@ final class DNSConfigTests: XCTestCase {
         XCTAssertEqual(result.exitCode, 0, result.stderr)
     }
 
+    /// 旁路域名在**路由**上走 direct，若解析仍掉到 `final: dns-remote`，
+    /// 就会经代理去问远端解析器再把答案拿回来直连——解析随代理一起抖，
+    /// 拿回来的地址还可能本地根本连不通。真机 2026-08-26：旁路的内网域每次卡满 10 秒，
+    /// 2 小时 44 分内 26 次失败。
+    func testDirectDomainsResolveLocally() throws {
+        var settings = routingSettings
+        settings.bypassDomains = ["localhost", "*.corp.example", ".lab.example", "nas.example"]
+        let root = try json(try ConfigGenerator.generate(input(routingSettings: settings)))
+        let rules = try XCTUnwrap((root["dns"] as? [String: Any])?["rules"] as? [[String: Any]])
+
+        let bypass = try XCTUnwrap(rules.first { $0["domain"] as? [String] != nil && $0["server"] as? String == "dns-cn" })
+        XCTAssertEqual(bypass["domain"] as? [String], ["localhost", "nas.example"])
+        // `*.` 与 `.` 两种写法都要落到 domain_suffix，与路由那条旁路规则用的是同一份拆法。
+        XCTAssertEqual(bypass["domain_suffix"] as? [String], ["corp.example", "lab.example"])
+        XCTAssertEqual(bypass["action"] as? String, "route")
+
+        // 路由与 DNS 必须覆盖同一批域名，否则又会出现「路由直连、解析走代理」的错配。
+        let routeRules = try XCTUnwrap((root["route"] as? [String: Any])?["rules"] as? [[String: Any]])
+        let routeBypass = try XCTUnwrap(routeRules.first {
+            $0["outbound"] as? String == "direct" && $0["domain"] as? [String] != nil
+        })
+        XCTAssertEqual(routeBypass["domain"] as? [String], bypass["domain"] as? [String])
+        XCTAssertEqual(routeBypass["domain_suffix"] as? [String], bypass["domain_suffix"] as? [String])
+    }
+
+    /// 自定义规则在路由上优先于旁路，DNS 上也必须保持同一优先级。
+    /// 否则 fakeip 模式下这些域名会拿到真实 IP 而不是假 IP，丢掉域名信息后按 IP 匹配路由，
+    /// 就绕过了用户显式指定的出口。
+    func testCustomProxyRulesOutrankBypassInDNS() throws {
+        var settings = routingSettings
+        settings.bypassDomains = ["*.example"]
+        settings.customRules = [
+            CustomRouteRule(order: 0, type: .domainSuffix, value: "mail.example", action: .proxy, proxyGroup: "手动选择"),
+            CustomRouteRule(order: 1, type: .ipCIDR, value: "1.2.3.0/24", action: .proxy, proxyGroup: "手动选择"),
+            CustomRouteRule(order: 2, type: .domain, value: "vpn.example", action: .direct)
+        ]
+        let root = try json(try ConfigGenerator.generate(
+            input(proxyMode: .tun, routingSettings: settings)
+        ))
+        let rules = try XCTUnwrap((root["dns"] as? [String: Any])?["rules"] as? [[String: Any]])
+
+        let mail = try XCTUnwrap(rules.firstIndex { ($0["domain_suffix"] as? [String]) == ["mail.example"] })
+        let bypass = try XCTUnwrap(rules.firstIndex { ($0["domain_suffix"] as? [String]) == ["example"] })
+        XCTAssertEqual(rules[mail]["server"] as? String, "dns-remote")
+        XCTAssertLessThan(mail, bypass, "自定义代理规则必须排在旁路之前")
+
+        // IP CIDR 在解析阶段还没有 IP，塞进 DNS 规则会让内核校验失败，必须跳过。
+        XCTAssertNil(rules.first { $0["ip_cidr"] != nil })
+        // 指向 direct 的自定义规则不需要单独截胡：它和旁路的落点本来就一样。
+        XCTAssertNil(rules.first { ($0["domain"] as? [String]) == ["vpn.example"] && $0["server"] as? String == "dns-remote" })
+
+        // 与内网规则同理：必须排在 fakeip 之前，否则旁路域名照样掉进假 IP。
+        let fakeIP = try XCTUnwrap(rules.firstIndex { $0["server"] as? String == "dns-fakeip" })
+        XCTAssertLessThan(bypass, fakeIP)
+    }
+
+    /// 直连路径常常没有 IPv6 出口，解析器却照样返回 AAAA，内核挑中它去 dial 就得到
+    /// `network is unreachable` / `no route to host`。只调顺序、不禁用 IPv6。
+    ///
+    /// 必须写在 `dns.strategy` 上：server 级 `domain_strategy` 管的是解析器自己的域名，
+    /// 语义不对，且与 `domain_resolver` 同时出现会被 sing-box 1.12 判为 legacy 而 FATAL。
+    /// 真机 `sing-box check` 的回归由 `testSystemAndTUNDefaultAndCustomDNSPassBundledCoreCheck` 兜底。
+    func testResolutionPrefersIPv4WithoutDisablingIPv6() throws {
+        for mode in [ProxyMode.systemProxy, .tun] {
+            let dns = try XCTUnwrap(
+                json(try ConfigGenerator.generate(input(proxyMode: mode, lanResolver: lanSnapshot)))["dns"] as? [String: Any]
+            )
+            XCTAssertEqual(dns["strategy"] as? String, "prefer_ipv4", "mode=\(mode)")
+            let servers = try XCTUnwrap(dns["servers"] as? [[String: Any]])
+            for server in servers {
+                XCTAssertNil(
+                    server["domain_strategy"],
+                    "server 级 domain_strategy 是 legacy 写法，1.14 会移除：\(server["tag"] ?? "?")"
+                )
+            }
+        }
+    }
+
     private func input(
         proxyMode: ProxyMode = .systemProxy,
         dnsSettings: DNSSettings = .defaults,
         tunSettings: TunSettings = .defaults,
-        lanResolver: LANResolverSnapshot = .empty
+        lanResolver: LANResolverSnapshot = .empty,
+        routingSettings: RoutingSettings? = nil
     ) -> ConfigInput {
         ConfigInput(
             nodes: [node],
             selectedNodeID: node.id,
             runtime: RuntimeParameters(mixedPort: 51_080, clashPort: 51_909, secret: "memory-only"),
             routing: RoutingConfiguration(
-                settings: routingSettings,
+                settings: routingSettings ?? self.routingSettings,
                 ruleSets: PreparedRuleSets(
                     geositeCN: URL(fileURLWithPath: "/tmp/geosite-cn.srs"),
                     geoipCN: URL(fileURLWithPath: "/tmp/geoip-cn.srs"),

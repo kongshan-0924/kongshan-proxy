@@ -204,7 +204,18 @@ public struct CPUAnomalyDetector: Sendable {
 
 // MARK: - DNS 停摆
 
+/// 同一种故障的两种形状。分开是因为**阈值形状决定了能看见什么**：
+/// 120 秒 3 次能抓住成簇爆发，却完全看不见「每几分钟卡一次、每次 10 秒」的慢性滴漏——
+/// 真机 2026-08-26 就是后者：2 小时 44 分内 30 次解析超时，`.burst` 一条事件都没留。
+public enum DNSStallKind: String, Equatable, Sendable {
+    /// 短窗口成簇爆发：解析器刚出问题或链路刚断。
+    case burst
+    /// 长窗口零星累积：解析器长期不稳，用户每次卡 10 秒但从不成簇。
+    case chronic
+}
+
 public struct DNSStallReport: Equatable, Sendable {
+    public let kind: DNSStallKind
     public let windowStart: Date
     public let windowEnd: Date
     /// 出站节点**自身域名**解析超时的次数。这类失败会让整条代理停摆，不只是某个网站打不开。
@@ -235,13 +246,25 @@ public struct DNSStallDetector: Sendable {
         var targets: Set<String> = []
     }
 
+    private let kind: DNSStallKind
     private let windowDuration: TimeInterval
     private let minimumStalls: Int
     private var window: Window?
 
-    public init(windowDuration: TimeInterval = 120, minimumStalls: Int = 3) {
+    public init(
+        kind: DNSStallKind = .burst,
+        windowDuration: TimeInterval = 120,
+        minimumStalls: Int = 3
+    ) {
+        self.kind = kind
         self.windowDuration = windowDuration
         self.minimumStalls = minimumStalls
+    }
+
+    /// 慢性滴漏用的参数：1 小时内累计 8 次即报。
+    /// 8 次意味着用户这一小时里至少白等了 80 秒，已经足够难受，而正常网络远到不了这个数。
+    public static func chronic() -> DNSStallDetector {
+        DNSStallDetector(kind: .chronic, windowDuration: 3600, minimumStalls: 8)
     }
 
     /// 解析超时的指纹。内核对 A/AAAA 并发查询，超时会写成
@@ -319,6 +342,7 @@ public struct DNSStallDetector: Sendable {
             delta = end - start
         }
         return DNSStallReport(
+            kind: kind,
             windowStart: current.startedAt,
             windowEnd: current.lastAt,
             outboundServerDomainStalls: current.outboundServerDomain,

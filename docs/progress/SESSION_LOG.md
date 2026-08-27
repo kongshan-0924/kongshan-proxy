@@ -4297,3 +4297,110 @@ v0.1.90 已发布 GitHub 并标记 Latest；远端现有 v0.1.90 / v0.1.82 / v0.
 2. 退出后立刻读 `scutil --proxy`，早于还原写入落地（本轮）。
 
 两处都应改为**在时间窗内持续观察直到稳定**，而不是取一次点采样。
+
+### 2026-08-26 15:15 — 只读排查：v0.1.91 运行 31 小时后的状况
+
+**本轮问题**：v0.1.91 安装后运行情况如何，还有什么问题。全程只读，未改任何配置与代码。
+
+**检查范围**：进程/CPU/RSS/线程（`ps`、30 秒 time 增量、`sample`）、`runtime-events.json`、
+`settings.json`、`rules.json`、生成的 `config.json`、`logs/sing-box.log`、`pmset -g log`、
+`scutil --proxy`、`DiagnosticReports`。
+
+**关键证据位置**
+- 内核日志失败归并：`~/Library/Application Support/kongshan/logs/sing-box.log`（12:31:32–15:15:15 窗口）
+- 事件：`runtime-events.json` 共 36 条，其中 2026-08-25 07:48:52 / 07:48:55 两条 warning
+- DNS 分流：`config.json` → `dns.rules` 只有 `da-gui.com → dns-lan`；`dns.strategy` 未设置
+- 旁路域：`rules.json` → `bypassDomains` 含 `*.kongshan.net`（走 direct）
+
+**结论**
+
+1. **无内存泄漏、无崩溃、无 CPU 异常事件**。App RSS 48 MB、8 线程稳定；`sample` 4 秒内
+   8 条线程全部阻塞在 `mach_msg2_trap`/`__workq_kernreturn`，无自旋。7 天内无崩溃报告。
+2. **CPU 1.02% 生涯均值 / 0.87%（30 秒窗口）**，高于 v0.1.79 修复后测得的 0.41–0.64%，
+   但检测器未报异常，且采样显示无自旋。判为随中转流量上升的波动（本次会话中转约 3,471 条
+   出站连接）叠加机器负载 2.7–4.4，非回归；继续观察。
+3. **P0：建连失败率 2.1% 且两小时内快速抬升**（12 时 1 次 → 13 时 5 次 → 14 时 38 次 →
+   15 时前 15 分钟 32 次）。当前小时 32 次里 **26 次集中在用户自有内网域**
+   `tz.kongshan.net:18081`（18 次 TCP 超时）与 `pve.kongshan.net:18080`（4 次
+   network is unreachable、4 次 TCP 超时、1 次 DNS 超时）。
+   **成因判断**：`*.kongshan.net` 已旁路到 direct，但 `dns.rules` 里只有 `da-gui.com`
+   走 `dns-lan`（172.16.16.7），`kongshan.net` 仍由公共 `dns-cn`（223.5.5.5 DoH）解析，
+   拿到的地址在当前网络不可达。**未验证**：尚未实际 dig 对比两个解析器的返回，
+   无法断定是「内网域被公共 DNS 解析成错误地址」还是「当前网络本就到不了」。
+4. **P1：`dns.strategy` 未设置**，A/AAAA 并发且可能优先 AAAA，而 direct 路径无 IPv6 出口。
+   硬证据：`pve.kongshan.net: network is unreachable`、
+   `t2.baidu.com dial tcp [240e:f7:...]:80 connect: no route to host`。
+   这与用户此前反馈的「访问 ChatGPT 慢且走 IPv6」是同一根因族。
+5. **P1：2026-08-25 07:48:52 / 07:48:55 两次「当前配置应用失败，已回滚」**，
+   `networksetup 执行失败（8）：Unable to find item in network database`，且**自动恢复也失败**，
+   系统代理状态一度不确定。发生在 07:41 物理网络变更之后，符合网络服务列表刚变动时的时序。
+   缺重试。
+6. **P2：检测器对「慢性滴漏」型 DNS 故障不可见**。2 小时 44 分内 30 次 10 秒解析超时，
+   但 `DNSStallDetector` 要求 120 秒窗口内 ≥3 次，实际约每 1–6 分钟 1 次，
+   因此一条事件都没留。检测器按设计工作，是阈值形状不覆盖这一类。
+7. **P3：2 条「系统已唤醒」在 pmset 中无对应唤醒**（14:14:50、14:16:07，其间系统持续清醒；
+   另外 3 条与 pmset 的 14:13:15 / 14:17:53 / 14:19:31 精确对应）。每条触发一次多余的
+   内核与接管检查，影响小。**未验证**成因。
+
+**其他状态**：系统代理已由用户重新开启（三类均启用，端口 36815）；
+`autoRestoreOnLaunch` 仍为 `false`，即 v0.1.91 新功能尚未启用，**真机重启时序仍未验证**。
+
+**未验证部分**：第 3 条的解析器对比、第 7 条的唤醒来源，均未实测。
+
+### 2026-08-27 18:40 — v0.1.92：修复上一轮排查出的五个问题
+
+**本轮任务**：修复 2026-08-26 只读排查列出的 P0–P3，外加两处早已记录未修的安装脚本竞态，
+然后构建发布并打标签。
+
+**回滚点**：`dd6d743`（分支 `fix/dns-direct-resolution`）。
+
+#### 改动
+
+1. **P0 直连域名绕道代理解析**（`ConfigGenerator.dns(for:)`）。
+   旁路域名在路由上走 direct，DNS 上却既不命中内网规则也多半不在 geosite-cn 里，
+   于是掉到 `final: dns-remote`——经代理问 8.8.8.8 再把答案拿回本地直连。
+   现在按与路由**同一份**域名拆分（抽出 `splitBypassDomains`，两处共用防漂）生成
+   `→ dns-cn` 规则，排在 geosite-cn 与 fakeip 之前。
+   自定义规则中指向代理的域名先截胡 `→ dns-remote`，保持与路由一致的优先级——
+   否则 fakeip 模式下它们会拿到真实 IP，丢掉域名信息后按 IP 匹配路由就走错出口。
+   `ip_cidr` / `process_name` 类型跳过（解析阶段还没有 IP）。
+2. **P1 IPv6 无路由**：新增 `dns.strategy = prefer_ipv4`。
+   **一次纠错**：最初写成各 server 的 `domain_strategy`，被仓库里那条跑真 `sing-box check`
+   的测试挡下——它是 legacy 写法（1.14 移除，`check` 直接 FATAL），
+   而且语义根本不对（管的是解析器自己的域名，不是它返回的答案）。
+   改用 `dns.strategy` 前**实测**确认新引擎采纳：`ipv6_only` 拨 `[2001::1]`、
+   `ipv4_only` 拨 IPv4。用 prefer 不用 only，纯 IPv6 目标仍可达。
+3. **P1 networksetup 瞬态失败**（`SystemProxyManager.execute`）：
+   只对 `Unable to find item in network database` 重试两次（200ms / 400ms）。
+   其他失败原样抛出、不重试、不拖慢。
+4. **P2 慢性 DNS 滴漏不可见**：`DNSStallDetector` 增加 `kind`，新增 `.chronic()`
+   （1 小时 ≥8 次）与既有 `.burst`（120 秒 ≥3 次）并行；报告标题与文案区分，
+   并把窗口跨度写进 detail——同样是「超时 10 次」，2 分钟和 1 小时是两回事。
+5. **P3 重复唤醒事件**：120 秒内合并。**只压事件不压检查**——健康检查便宜且幂等，
+   漏做才有代价。
+6. **安装脚本两处竞态**（`scripts/release.sh`）：新增 `wait_until`，
+   把「残留快照已清除」「系统代理已关闭」「新版稳定运行」三处从点采样改为
+   在时间窗内观察到稳定（前两者 5 秒，后者要求同一 PID 连续存活 3 秒）。
+
+#### 验证
+
+- 全量 **510 执行 / 2 跳过 / 0 失败**。新增 9 条定向测试
+  （旁路域名解析落点与路由一致、自定义规则优先级、fakeip 之前、prefer_ipv4 且
+  不得出现 server 级 domain_strategy、瞬态重试成功/有界/不误伤、慢性检测能看见
+  爆发检测看不见的滴漏、低于阈值保持安静、默认仍是 burst）。
+- 真 `sing-box check` 回归（`testSystemAndTUNDefaultAndCustomDNSPassBundledCoreCheck`）
+  覆盖 systemProxy 与 TUN 两种模式，是这轮 DNS 改动的主要护栏。
+
+#### 一处**未验证**：`testPopoverIsReleasedAfterClose` 本轮改为条件跳过
+
+跑全量时该用例失败，**在基线提交 `dd6d743` 上同样失败**，与本轮改动无关。
+用临时 worktree 加诊断实测定位：`performClose` 对 `.transient` 面板**只在应用活跃时才生效**。
+测试进程被系统拒绝激活时（前台被别的 App 占着，现代 macOS 会挡掉
+`activate(ignoringOtherApps:)`），`popover.isShown` 在 performClose 后 3 秒内**始终为 true**
+——面板还真实开着，既不会收到 `popoverDidClose`，也**不该**被就地释放。
+即前提不成立，不是产品缺陷。改为 `XCTSkipUnless(NSApp.isActive)`，前提成立时断言一字未减。
+
+**因此 v0.1.79 那条「关闭后释放 hosting controller」的端到端回归本轮没有真正执行过**，
+需要在测试进程能获得激活的环境下补跑。相邻的
+`testPopoverReopensAndStopReleasesIt` 与 `testStaleCloseNotificationDoesNotDropCurrentPopover`
+仍在跑且通过。

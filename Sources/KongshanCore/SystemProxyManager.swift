@@ -481,15 +481,34 @@ public actor SystemProxyManager {
         )
     }
 
+    /// networksetup 在网络服务列表变动期间会瞬时报
+    /// `** Error: Unable to find item in network database.`（exit 8）：服务这一刻查不到，
+    /// 几百毫秒后又恢复正常。
+    ///
+    /// 真机 2026-08-25 07:48（换网 7 分钟后）就是如此——启用系统代理失败，
+    /// **回滚里的 `-listallnetworkservices` 也一起失败**，于是系统代理状态一度不确定，
+    /// 3 秒内连报两次「当前配置应用失败，已回滚」。
+    private static let transientNetworkDatabaseError = "unable to find item in network database"
+
+    /// 只重试上面那一种消息，且次数有限。服务若是真被删掉了，多花约 0.6 秒后照样如实报错——
+    /// 不能让「配置错了」被伪装成「网络在抖」。
+    private static let retryDelays: [Duration] = [.milliseconds(200), .milliseconds(400)]
+
     private func execute(_ arguments: [String]) async throws -> ProcessResult {
-        let result = try await runner(arguments, timeout)
-        guard result.exitCode == 0 else {
-            let message = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            throw SystemProxyError.commandFailed(
-                exitCode: result.exitCode,
-                message: message.isEmpty ? result.stdout.trimmingCharacters(in: .whitespacesAndNewlines) : message
-            )
+        var attempt = 0
+        while true {
+            let result = try await runner(arguments, timeout)
+            guard result.exitCode != 0 else { return result }
+            let stderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            let message = stderr.isEmpty
+                ? result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+                : stderr
+            guard attempt < Self.retryDelays.count,
+                  message.lowercased().contains(Self.transientNetworkDatabaseError) else {
+                throw SystemProxyError.commandFailed(exitCode: result.exitCode, message: message)
+            }
+            try await Task.sleep(for: Self.retryDelays[attempt])
+            attempt += 1
         }
-        return result
     }
 }

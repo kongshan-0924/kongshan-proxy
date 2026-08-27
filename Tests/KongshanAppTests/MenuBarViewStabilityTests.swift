@@ -117,10 +117,20 @@ final class MenuBarViewStabilityTests: XCTestCase {
 
     /// 关闭后必须释放面板与其 NSHostingController。缓存的 hosting controller 会永久观察
     /// AppState，速率每 1~2 秒的变化持续驱动它求值——真机上烧过 8 小时 ~57% CPU。
-    func testPopoverIsReleasedAfterClose() {
+    func testPopoverIsReleasedAfterClose() throws {
         let controller = makeController()
         defer { controller.stop() }
         activateForPopover()
+        // `performClose` 对 `.transient` 面板**只在应用活跃时才真正生效**。
+        // 测试进程被系统拒绝激活时（另一个 App 占着前台，现代 macOS 会挡掉
+        // `activate(ignoringOtherApps:)`），面板会一直真实显示着：既不会收到
+        // popoverDidClose，也**不该**被就地释放——它还开着。
+        // 实测证据：`popover.isShown` 在 performClose 后 3 秒内始终为 true。
+        // 这时本用例的前提不成立，跳过而不是记成产品缺陷；前提成立时断言一字未减。
+        try XCTSkipUnless(
+            NSApp.isActive,
+            "测试进程未能激活，performClose 不会生效，无法验证关闭后的释放"
+        )
 
         controller.togglePopover()
         XCTAssertTrue(controller.isPopoverLoaded)

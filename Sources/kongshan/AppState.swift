@@ -431,6 +431,12 @@ final class AppState {
     @ObservationIgnored private var selfDiagnosticsTask: Task<Void, Never>?
     @ObservationIgnored private var cpuAnomalyDetector = CPUAnomalyDetector()
     @ObservationIgnored private var dnsStallDetector = DNSStallDetector()
+    /// 与上面同一条输入，只是窗口更长、阈值更低。两个都要留：爆发和慢性滴漏是
+    /// 两种不同的用户体感，也指向不同的处置（换解析器 vs. 查链路），合成一个会两头都看不清。
+    @ObservationIgnored private var chronicDNSStallDetector = DNSStallDetector.chronic()
+    @ObservationIgnored private var lastWakeEventAt: Date?
+    /// 合并重复唤醒事件的窗口。取 120 秒：真机观察到的伪唤醒间隔在 80~100 秒。
+    private static let wakeEventCoalescingWindow: TimeInterval = 120
     @ObservationIgnored private var outboundFailureDetector = OutboundFailureDetector()
     /// 两次自诊断采样之间流入的内核日志行数。异常时段的归因线索之一：
     /// 日志洪峰是本项目历史上实测的最高负载来源（v0.1.61：平均 6.36%、峰值 15.9%）。
@@ -956,6 +962,7 @@ final class AppState {
         // "重启前后各两次"误判成一簇持续故障。
         outboundFailureDetector.reset()
         dnsStallDetector.reset()
+        chronicDNSStallDetector.reset()
         recordRuntimeEvent(title: "内核已停止", detail: reason, previousPID: previousPID)
         if !restoreFailures.isEmpty {
             // 快照已保留，重开 App 会自动重试；但在那之前网络是坏的，必须明确告知怎么手工恢复。
@@ -3986,7 +3993,19 @@ final class AppState {
     /// 稳定 3 秒后做一次健康检查并补挂接管；真正的进程退出由退出监控兜底。
     private func handleDidWake() {
         guard status == .on else { return }
+        // macOS 会发出没有对应真实唤醒的 didWake：真机 2026-08-26 14:13–14:19 收到 5 条，
+        // 只有 3 条能在 `pmset -g log` 里找到对应唤醒。**只压事件、不压检查**——
+        // 健康检查很便宜且幂等，漏做才有代价；重复的事件只会淹掉消息页里真正要看的东西。
+        if let last = lastWakeEventAt, now().timeIntervalSince(last) < Self.wakeEventCoalescingWindow {
+            scheduleWakeVerification()
+            return
+        }
+        lastWakeEventAt = now()
         recordRuntimeEvent(title: "系统已唤醒", detail: "正在检查内核与接管")
+        scheduleWakeVerification()
+    }
+
+    private func scheduleWakeVerification() {
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(3))
             await self?.verifyCoreAfterWake()
@@ -4245,10 +4264,11 @@ final class AppState {
            let report = cpuAnomalyDetector.ingest(sample) {
             record(report, logLinesInWindow: logLines)
         }
-        if let report = dnsStallDetector.flush(
-            at: now(),
-            physicalBytes: Self.physicalByteTotal()
-        ) {
+        let physicalBytes = Self.physicalByteTotal()
+        if let report = dnsStallDetector.flush(at: now(), physicalBytes: physicalBytes) {
+            record(report)
+        }
+        if let report = chronicDNSStallDetector.flush(at: now(), physicalBytes: physicalBytes) {
             record(report)
         }
     }
@@ -4267,11 +4287,11 @@ final class AppState {
     /// 这条链路一旦断掉不会有任何报错，只会安静地不再留证。
     func inspectForDNSStall(_ line: CoreLogLine) {
         guard DNSStallDetector.isResolutionStall(line) else { return }
-        if let report = dnsStallDetector.ingest(
-            line,
-            at: now(),
-            physicalBytes: Self.physicalByteTotal()
-        ) {
+        let physicalBytes = Self.physicalByteTotal()
+        if let report = dnsStallDetector.ingest(line, at: now(), physicalBytes: physicalBytes) {
+            record(report)
+        }
+        if let report = chronicDNSStallDetector.ingest(line, at: now(), physicalBytes: physicalBytes) {
             record(report)
         }
     }
@@ -4342,13 +4362,20 @@ final class AppState {
         } else {
             throughput = "网卡计数不可用"
         }
+        // 跨度必须写进去：两种形状的窗口差 30 倍，「超时 10 次」在 2 分钟里和在 1 小时里
+        // 是完全不同的两件事，不带跨度的计数没法判断严重程度。
+        let span = max(report.windowEnd.timeIntervalSince(report.windowStart), 1) / 60
         let detail = [
-            "节点域名解析超时 \(report.outboundServerDomainStalls) 次"
-                + "（这类会让整条代理停摆），普通域名 \(report.generalStalls) 次",
+            String(format: "%.0f 分钟内：节点域名解析超时 %d 次（这类会让整条代理停摆），普通域名 %d 次",
+                   span, report.outboundServerDomainStalls, report.generalStalls),
             "涉及 \(report.distinctTargetCount) 个不同目标（目标本身不记录）",
             throughput
         ].joined(separator: "；")
-        recordRuntimeEvent(level: .warning, title: "DNS 解析持续超时", detail: detail)
+        let title = switch report.kind {
+        case .burst: "DNS 解析持续超时"
+        case .chronic: "DNS 解析长期零星超时"
+        }
+        recordRuntimeEvent(level: .warning, title: title, detail: detail)
     }
 
     // MARK: - 特权助手（零弹窗 TUN）

@@ -289,6 +289,60 @@ final class RuntimeAnomalyDetectorTests: XCTestCase {
         XCTAssertEqual(report.windowEnd, origin.addingTimeInterval(2))
     }
 
+    /// 阈值形状决定了能看见什么。120 秒 3 次抓得住成簇爆发，却完全看不见
+    /// 「每几分钟卡一次、每次 10 秒」的慢性滴漏——真机 2026-08-26 正是后者：
+    /// 2 小时 44 分内 30 次解析超时，`.burst` 一条事件都没留，而用户每次都实打实等了 10 秒。
+    func testChronicDetectorCatchesDripThatBurstDetectorCannotSee() throws {
+        var burst = DNSStallDetector()
+        var chronic = DNSStallDetector.chronic()
+        var burstReports: [DNSStallReport] = []
+        var chronicReports: [DNSStallReport] = []
+
+        // 每 5 分钟一次，共 12 次：任何 120 秒窗口里都只有 1 次，永远够不到爆发阈值。
+        for index in 0..<12 {
+            let at = origin.addingTimeInterval(Double(index) * 300)
+            let line = directStallLine(destination: "shop.example.invalid:443")
+            if let report = burst.ingest(line, at: at, physicalBytes: 0) { burstReports.append(report) }
+            if let report = chronic.ingest(line, at: at, physicalBytes: 0) { chronicReports.append(report) }
+        }
+        if let report = burst.flush(at: origin.addingTimeInterval(4_000), physicalBytes: 0) {
+            burstReports.append(report)
+        }
+        if let report = chronic.flush(at: origin.addingTimeInterval(4_000), physicalBytes: 0) {
+            chronicReports.append(report)
+        }
+
+        XCTAssertTrue(burstReports.isEmpty, "这种形状本就不该触发爆发检测")
+        let chronicReport = try XCTUnwrap(chronicReports.first, "慢性检测必须报出来")
+        XCTAssertEqual(chronicReport.kind, .chronic)
+        XCTAssertGreaterThanOrEqual(chronicReport.totalStalls, 8)
+    }
+
+    /// 慢性检测不能把偶发的一两次当成故障，否则消息页会被噪音淹掉。
+    func testChronicDetectorStaysQuietBelowItsThreshold() {
+        var chronic = DNSStallDetector.chronic()
+        for index in 0..<7 {
+            _ = chronic.ingest(
+                directStallLine(destination: "shop.example.invalid:443"),
+                at: origin.addingTimeInterval(Double(index) * 300),
+                physicalBytes: 0
+            )
+        }
+        XCTAssertNil(chronic.flush(at: origin.addingTimeInterval(4_000), physicalBytes: 0))
+    }
+
+    /// 默认形状仍是爆发，既有接线与断言不受影响。
+    func testDefaultDetectorReportsBurstKind() throws {
+        var detector = DNSStallDetector(windowDuration: 60, minimumStalls: 1)
+        _ = detector.ingest(
+            directStallLine(destination: "shop.example.invalid:443"),
+            at: origin,
+            physicalBytes: 0
+        )
+        let report = try XCTUnwrap(detector.flush(at: origin.addingTimeInterval(61), physicalBytes: 0))
+        XCTAssertEqual(report.kind, .burst)
+    }
+
     /// DNS 停摆统计同样要能在内核重启时清空，否则"重启前后各两次"会被并成一簇持续故障。
     func testDNSStallResetClearsWindow() {
         var detector = DNSStallDetector(windowDuration: 60, minimumStalls: 1)
