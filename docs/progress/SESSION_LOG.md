@@ -4404,3 +4404,28 @@ v0.1.90 已发布 GitHub 并标记 Latest；远端现有 v0.1.90 / v0.1.82 / v0.
 需要在测试进程能获得激活的环境下补跑。相邻的
 `testPopoverReopensAndStopReleasesIt` 与 `testStaleCloseNotificationDoesNotDropCurrentPopover`
 仍在跑且通过。
+
+### 2026-08-27 18:52 — v0.1.92 已发布并推送
+
+- 门禁：全量 **510 执行 / 2 跳过 / 0 失败**；M4 平均 CPU **0.300%**、最大 RSS 76,080 KB。
+  DMG SHA-256 `3dcb073878a676cc8886ae732cc826b3de22e5c382be5b4f1cf6d12467b48df5`，
+  App CDHash `c2c4069ea27a5d5c66c03742d14bf70b9a8f2c50`。
+- 已推 `main`（dd6d743 → dafbf3c）与标签 `v0.1.92`，GitHub Release 带 DMG 资产、标为 Latest。
+  历史版本全部保留（0.1.91 / 0.1.90 / 0.1.82 / 0.1.81 …，远端 10 个标签），
+  本地 `dist/` 只留最新一个 DMG，符合发布保留策略。
+- **M4 第一次失败于 1.060%**（阈值 1.0%）。未放宽阈值：查明当时 `mediaanalysisd`
+  正以 98% 跑照片分析（开机 50 分钟内）、`loginwindow` 18.7%，负载 2.2–3.0。
+  等负载回落后原样重跑，0.660% → 0.300% 通过。
+- **未安装到本机**：本轮用户只要求构建、推送、打标签。安装需要旧版正常退出，
+  会再次关掉用户的系统代理，未擅自执行。
+
+### 待查：已安装的 v0.1.91 本轮观察到 4.70% CPU
+
+开机 50 分钟时实测 20 秒窗口 **4.70%**、生涯 5.2%、RSS 145 MB，显著高于此前基线 0.5%。
+`sample` 显示主线程在跑 SwiftUI 求值（`AG::Graph::UpdateStack::update`、
+`ObservationCenter.invalidate`、`ResolvedTextFilter.updateValue`）——与 v0.1.79 那次
+燃烧同属一类机制。
+
+**但无法据此定性**：当时 `mediaanalysisd` 正占 98% CPU，而且**没能确认 App 是否有窗口开着**
+（查窗口可见性需要辅助功能权限，本轮未动系统设置）。窗口开着时主线程跑 SwiftUI 求值是正常的。
+需要在机器空闲、且确认无窗口显示的条件下复测，才能判断是不是回归。
