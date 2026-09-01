@@ -55,6 +55,13 @@ struct MainWindowView: View {
                     NativeNoticeToolbarItem(selection: $selection)
                 }
             }
+            // 只喂给自诊断做归因，不参与渲染。CPU 异常记录里此前缺的正是这一条：
+            // 只说得出"主线程在渲染"，说不出在渲染哪一页。
+            .onAppear { state.noteVisiblePage((selection ?? .dashboard).title) }
+            .onDisappear { state.noteVisiblePage(nil) }
+            .onChange(of: selection) { _, page in
+                state.noteVisiblePage((page ?? .dashboard).title)
+            }
         }
         .toolbar {
             ToolbarItem(placement: .navigation) {

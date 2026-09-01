@@ -380,6 +380,15 @@ final class AppState {
     /// 只挡"没人看的视图状态"，不挡数据流本身：会话累计量与连接速率跟踪都要
     /// 连续采样才算得准，两者不受此标志影响。
     @ObservationIgnored private var windowContentIsVisible = true
+    /// 主窗口当前停在哪个页面。**只为归因存在**，不参与任何渲染，故 ObservationIgnored。
+    /// 2026-09-01 那次 21 小时 CPU 异常里，记录只说得出「主线程 96%、窗口可见」，
+    /// 说不出是哪个页面在渲染，于是无法进一步定位。
+    @ObservationIgnored private var visiblePageTitle: String?
+
+    /// 由主窗口在页面切换时调用。窗口关闭时传 nil。
+    func noteVisiblePage(_ title: String?) {
+        visiblePageTitle = title
+    }
     /// 是否监听系统事件（网络路径、睡眠唤醒）。测试夹具以 automaticallyInitialize=false
     /// 构建，不该有后台监听扰动断言的命令序列，因此跟随该标志。
     @ObservationIgnored private let monitorsSystemEvents: Bool
@@ -395,6 +404,13 @@ final class AppState {
     @ObservationIgnored private let kernelLogStore: KernelLogStore
     @ObservationIgnored private let subscriptionUpdateScheduler: SubscriptionUpdateScheduler
     @ObservationIgnored private let notificationSender: any NotificationSending
+    /// 告警的取证存档。**与 `runtimeEvents` 分开是刻意的**：后者会被消息页「全部清除」
+    /// 整体抹掉，而 2026-09-01 的排查正是因此丢掉了 99.8% 的 CPU 异常证据。
+    @ObservationIgnored private let diagnosticsJournal: DiagnosticsJournal
+    /// 通知去重：同一标题在冷却期内只提醒一次。CPU 异常的中途报告本身是指数退避的，
+    /// 但配置失败这类事件可能几秒内连发数条，逐条弹窗会把用户训练成无视通知。
+    @ObservationIgnored private var lastNotifiedAt: [String: Date] = [:]
+    private static let notificationCooldown: TimeInterval = 600
     @ObservationIgnored private let loginItemManager: any LoginItemManaging
     @ObservationIgnored private var clashAPIClient: ClashAPIClient?
     @ObservationIgnored private var runtime: RuntimeParameters?
@@ -464,6 +480,7 @@ final class AppState {
         kernelLogStore: KernelLogStore? = nil,
         subscriptionUpdateScheduler: SubscriptionUpdateScheduler? = nil,
         notificationSender: (any NotificationSending)? = nil,
+        diagnosticsJournal: DiagnosticsJournal? = nil,
         loginItemManager: (any LoginItemManaging)? = nil,
         privilegedLauncher: (any PrivilegedLaunching)? = nil,
         proxyRelay: (any LocalTCPRelaying)? = nil,
@@ -531,6 +548,8 @@ final class AppState {
         self.kernelLogStore = resolvedLogStore
         self.subscriptionUpdateScheduler = subscriptionUpdateScheduler ?? SubscriptionUpdateScheduler(now: now)
         self.notificationSender = notificationSender ?? NotificationService()
+        self.diagnosticsJournal = diagnosticsJournal
+            ?? DiagnosticsJournal(directory: storage.rootDirectory)
         self.loginItemManager = loginItemManager ?? LoginItemManager()
         monitorsSystemEvents = automaticallyInitialize
         logWarningRelay.install { [weak self] message in
@@ -2934,6 +2953,16 @@ final class AppState {
 
     private static let runtimeEventLimit = 200
 
+    /// 取证存档在磁盘上的位置，显示给用户看。用 `~` 缩写，界面上不铺开完整家目录。
+    var diagnosticsArchivePath: String {
+        let path = diagnosticsJournal.fileURL.path(percentEncoded: false)
+        let home = FileManager.default.homeDirectoryForCurrentUser.path(percentEncoded: false)
+        return path.hasPrefix(home) ? "~" + path.dropFirst(home.count) : path
+    }
+
+    /// 只清界面上的事件列表。**取证存档（`diagnostics.ndjson`）刻意不清**：
+    /// 2026-09-01 排查时，21 小时 CPU 异常的证据就是被这个按钮抹掉的，
+    /// 只剩 0.20% 可归因。用户要的是"消息页清爽"，不是"销毁证据"。
     func clearRuntimeEvents() {
         runtimeEvents.removeAll(keepingCapacity: false)
         scheduleRuntimeEventsPersist()
@@ -2944,7 +2973,8 @@ final class AppState {
         title: String,
         detail: String? = nil,
         previousPID: Int32? = nil,
-        currentPID: Int32? = nil
+        currentPID: Int32? = nil,
+        announce: Bool = true
     ) {
         runtimeEvents.append(RuntimeEvent(
             timestamp: now(),
@@ -2958,6 +2988,48 @@ final class AppState {
             runtimeEvents.removeFirst(runtimeEvents.count - Self.runtimeEventLimit)
         }
         scheduleRuntimeEventsPersist()
+        // 存档收全部告警，提醒则可以按 `announce` 关掉。两者刻意不对称：
+        // 存档是给排查用的，漏一条就少一条线索；提醒会打断用户，
+        // 自愈型事件和"已经另发过通知"的事件都不该再弹一次。
+        guard level != .info else { return }
+        archive(level: level, title: title, detail: detail, at: now())
+        guard announce else { return }
+        announceIfNotThrottled(title: title, detail: detail, at: now())
+    }
+
+    /// 落存档。**先于提醒、且不受提醒成败影响**：提醒可能因为未授权而抛错，
+    /// 存档不能跟着一起丢——恰恰是没人看着的时候，存档才最重要。
+    private func archive(
+        level: RuntimeEvent.Level,
+        title: String,
+        detail: String?,
+        at date: Date
+    ) {
+        diagnosticsJournal.append(DiagnosticsJournal.Record(
+            t: date,
+            level: level.rawValue,
+            title: title,
+            detail: detail
+        ))
+    }
+
+    private func announceIfNotThrottled(title: String, detail: String?, at date: Date) {
+        guard shouldNotify(title: title, at: date) else { return }
+        let body = detail ?? "详情见消息页"
+        Task { [notificationSender] in
+            try? await notificationSender.send(title: title, body: body)
+        }
+    }
+
+    /// 同一标题在冷却期内只提醒一次。返回 true 时**顺带记下时间**——
+    /// 判断与记录分开写，早晚会漏掉一处。
+    private func shouldNotify(title: String, at date: Date) -> Bool {
+        if let last = lastNotifiedAt[title],
+           date.timeIntervalSince(last) < Self.notificationCooldown {
+            return false
+        }
+        lastNotifiedAt[title] = date
+        return true
     }
 
     private func scheduleRuntimeEventsPersist() {
@@ -3767,7 +3839,10 @@ final class AppState {
             level: .warning,
             title: "检测到内核意外退出",
             detail: "正在自动重启（第 \(crashRestartLimiter.recentRestartCount) 次，10 秒窗口内最多 3 次）",
-            previousPID: pid
+            previousPID: pid,
+            // 通常一秒内就自愈了，弹窗只会变成噪音；**存档照留**，
+            // 排查"为什么内核反复重启"时那条记录仍在。真正该打扰用户的是重启用尽后的失败。
+            announce: false
         )
         status = .starting
         errorMessage = nil
@@ -3855,7 +3930,14 @@ final class AppState {
         clearRuntimeState()
         let failureMessage = [message, cleanupMessage].compactMap { $0 }.joined(separator: "；")
         setFailure(failureMessage)
-        recordRuntimeEvent(level: .error, title: "内核自动恢复失败", detail: failureMessage)
+        // 紧接着有一条措辞更贴近用户的显式通知（「kongshan 内核已停止」），
+        // 这里再弹一次就是同一件事提醒两遍。
+        recordRuntimeEvent(
+            level: .error,
+            title: "内核自动恢复失败",
+            detail: failureMessage,
+            announce: false
+        )
         do {
             try await notificationSender.send(
                 title: "kongshan 内核已停止",
@@ -4329,7 +4411,9 @@ final class AppState {
         return counters.inputBytes &+ counters.outputBytes
     }
 
-    private func record(_ report: CPUAnomalyReport, logLinesInWindow: Int) {
+    /// internal 而非 private：归因字段一旦漏掉不会有任何报错，只会在下次排查时
+    /// 才发现又缺了一条线索（2026-09-01 缺的就是"哪个页面在渲染"），需回归覆盖。
+    func record(_ report: CPUAnomalyReport, logLinesInWindow: Int) {
         let title = report.phase == .ongoing ? "CPU 占用持续偏高" : "CPU 占用已回落"
         // 归因线索一次性写全：下次复现时不必再回头猜。域名、节点名一律不进这里。
         let detail = [
@@ -4346,9 +4430,23 @@ final class AppState {
             // "活跃连接 0"，正是读错了这个字段，白丢一条归因线索。
             "窗口可见 \(windowContentIsVisible ? "是" : "否")，活跃连接 \(activeConnectionCount)，"
                 + "本段日志流入 \(logLinesInWindow) 行",
+            // 「哪个页面在渲染」是主线程占比高时唯一还缺的一环。同时记下正在跑的推送订阅：
+            // 它们才是真正驱动重绘的源头，页面标题只说明用户看着哪儿。
+            "当前页面 \(visiblePageTitle ?? "无窗口")，活跃订阅 \(activeMonitorSummary)",
             "代理状态 \(status == .on ? "开启" : "非开启")，接管方式 \(activeModes.count) 项"
         ].joined(separator: "；")
         recordRuntimeEvent(level: .warning, title: title, detail: detail)
+    }
+
+    /// 正在运行的推送订阅。每个都会把新数据写进 `@Observable` 状态从而触发重绘，
+    /// 是主线程 CPU 的直接来源，比页面标题更能说明问题。
+    private var activeMonitorSummary: String {
+        var running: [String] = []
+        if connectionsTask != nil { running.append("连接流") }
+        if dashboardMonitorConsumers.contains(.dashboard) { running.append("仪表盘") }
+        if dashboardMonitorConsumers.contains(.menuBar) { running.append("菜单栏") }
+        if logTask != nil { running.append("日志流") }
+        return running.isEmpty ? "无" : running.joined(separator: "+")
     }
 
     private func record(_ report: DNSStallReport) {

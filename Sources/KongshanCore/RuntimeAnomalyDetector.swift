@@ -61,6 +61,30 @@ public struct CPUAnomalyReport: Equatable, Sendable {
     /// 本段内主线程消耗占进程总消耗的比例。接近 1 表示界面渲染在烧，接近 0 表示后台并发线程在烧。
     public let mainThreadShare: Double
 
+    public init(
+        phase: Phase,
+        startedAt: Date,
+        observedUntil: Date,
+        averagePercent: Double,
+        peakPercent: Double,
+        userShare: Double,
+        cpuSecondsConsumed: Double,
+        peakResidentBytes: UInt64,
+        peakThreadCount: Int,
+        mainThreadShare: Double
+    ) {
+        self.phase = phase
+        self.startedAt = startedAt
+        self.observedUntil = observedUntil
+        self.averagePercent = averagePercent
+        self.peakPercent = peakPercent
+        self.userShare = userShare
+        self.cpuSecondsConsumed = cpuSecondsConsumed
+        self.peakResidentBytes = peakResidentBytes
+        self.peakThreadCount = peakThreadCount
+        self.mainThreadShare = mainThreadShare
+    }
+
     public var duration: TimeInterval { observedUntil.timeIntervalSince(startedAt) }
 }
 
@@ -261,10 +285,14 @@ public struct DNSStallDetector: Sendable {
         self.minimumStalls = minimumStalls
     }
 
-    /// 慢性滴漏用的参数：1 小时内累计 8 次即报。
-    /// 8 次意味着用户这一小时里至少白等了 80 秒，已经足够难受，而正常网络远到不了这个数。
+    /// 慢性滴漏用的参数：6 小时内累计 5 次即报。
+    ///
+    /// 原本取 1 小时 ≥8 次，真机 2026-09-01 证明这个形状仍然太粗：18 小时里 17 次超时、
+    /// 每次都卡满 10 秒（用户累计白等约 170 秒），可折算下来只有 0.94 次/小时，
+    /// 一次都报不出来。窗口拉长到 6 小时后，同样的滴漏会稳定报出来，
+    /// 而正常网络在 6 小时里凑不满 5 次。
     public static func chronic() -> DNSStallDetector {
-        DNSStallDetector(kind: .chronic, windowDuration: 3600, minimumStalls: 8)
+        DNSStallDetector(kind: .chronic, windowDuration: 6 * 3600, minimumStalls: 5)
     }
 
     /// 解析超时的指纹。内核对 A/AAAA 并发查询，超时会写成

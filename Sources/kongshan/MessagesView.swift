@@ -24,6 +24,15 @@ struct MessagesView: View {
                 }
                 .disabled(state.errorMessage == nil && state.warnings.isEmpty && state.runtimeEvents.isEmpty)
             }
+            // 让用户知道清除不会毁掉证据——否则「全部清除」看起来就是不可逆的销毁。
+            HStack(spacing: 4) {
+                Image(systemName: "archivebox")
+                Text("警告与错误另存于 \(state.diagnosticsArchivePath)，不受「全部清除」影响")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .textSelection(.enabled)
             Picker("消息类型", selection: $tab) {
                 ForEach(Tab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
             }

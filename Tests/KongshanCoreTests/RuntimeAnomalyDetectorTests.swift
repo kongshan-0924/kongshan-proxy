@@ -290,45 +290,45 @@ final class RuntimeAnomalyDetectorTests: XCTestCase {
     }
 
     /// 阈值形状决定了能看见什么。120 秒 3 次抓得住成簇爆发，却完全看不见
-    /// 「每几分钟卡一次、每次 10 秒」的慢性滴漏——真机 2026-08-26 正是后者：
-    /// 2 小时 44 分内 30 次解析超时，`.burst` 一条事件都没留，而用户每次都实打实等了 10 秒。
+    /// 「每几小时卡一次、每次 10 秒」的慢性滴漏——真机 2026-09-01 正是后者：
+    /// 18 小时里 17 次解析超时（用户累计白等约 170 秒），折合 0.94 次/小时，
+    /// 连原本 1 小时 ≥8 次的慢性阈值都够不到，一条事件都没留。
     func testChronicDetectorCatchesDripThatBurstDetectorCannotSee() throws {
         var burst = DNSStallDetector()
         var chronic = DNSStallDetector.chronic()
         var burstReports: [DNSStallReport] = []
         var chronicReports: [DNSStallReport] = []
 
-        // 每 5 分钟一次，共 12 次：任何 120 秒窗口里都只有 1 次，永远够不到爆发阈值。
-        for index in 0..<12 {
-            let at = origin.addingTimeInterval(Double(index) * 300)
+        // 每小时 1 次，共 6 次：任何 120 秒窗口里都只有 1 次，永远够不到爆发阈值；
+        // 这正是真机观察到的密度（0.94 次/小时）。
+        for index in 0..<6 {
+            let at = origin.addingTimeInterval(Double(index) * 3_600)
             let line = directStallLine(destination: "shop.example.invalid:443")
             if let report = burst.ingest(line, at: at, physicalBytes: 0) { burstReports.append(report) }
             if let report = chronic.ingest(line, at: at, physicalBytes: 0) { chronicReports.append(report) }
         }
-        if let report = burst.flush(at: origin.addingTimeInterval(4_000), physicalBytes: 0) {
-            burstReports.append(report)
-        }
-        if let report = chronic.flush(at: origin.addingTimeInterval(4_000), physicalBytes: 0) {
-            chronicReports.append(report)
-        }
+        let closeout = origin.addingTimeInterval(6 * 3_600 + 60)
+        if let report = burst.flush(at: closeout, physicalBytes: 0) { burstReports.append(report) }
+        if let report = chronic.flush(at: closeout, physicalBytes: 0) { chronicReports.append(report) }
 
         XCTAssertTrue(burstReports.isEmpty, "这种形状本就不该触发爆发检测")
         let chronicReport = try XCTUnwrap(chronicReports.first, "慢性检测必须报出来")
         XCTAssertEqual(chronicReport.kind, .chronic)
-        XCTAssertGreaterThanOrEqual(chronicReport.totalStalls, 8)
+        XCTAssertEqual(chronicReport.totalStalls, 6)
     }
 
-    /// 慢性检测不能把偶发的一两次当成故障，否则消息页会被噪音淹掉。
+    /// 慢性检测不能把偶发的几次当成故障，否则消息页会被噪音淹掉，
+    /// 存档一旦变噪音就和被清空没区别。
     func testChronicDetectorStaysQuietBelowItsThreshold() {
         var chronic = DNSStallDetector.chronic()
-        for index in 0..<7 {
+        for index in 0..<4 {
             _ = chronic.ingest(
                 directStallLine(destination: "shop.example.invalid:443"),
-                at: origin.addingTimeInterval(Double(index) * 300),
+                at: origin.addingTimeInterval(Double(index) * 3_600),
                 physicalBytes: 0
             )
         }
-        XCTAssertNil(chronic.flush(at: origin.addingTimeInterval(4_000), physicalBytes: 0))
+        XCTAssertNil(chronic.flush(at: origin.addingTimeInterval(6 * 3_600 + 60), physicalBytes: 0))
     }
 
     /// 默认形状仍是爆发，既有接线与断言不受影响。
