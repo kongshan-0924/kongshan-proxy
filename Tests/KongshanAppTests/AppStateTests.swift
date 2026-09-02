@@ -1192,7 +1192,9 @@ final class AppStateTests: XCTestCase {
         await fixture.state.stop()
 
         XCTAssertEqual(fixture.state.status, .off)
-        try await waitUntil { streams.terminationCount == 2 }
+        // 三条：/traffic（已失败）、/connections、以及常开的 /logs。
+        // 停内核必须把它们全收掉，一条不留。
+        try await waitUntil { streams.terminationCount == 3 }
     }
 
     func testLogMonitoringKeepsTwoThousandEntriesAndIsIdempotent() async throws {
@@ -1219,9 +1221,15 @@ final class AppStateTests: XCTestCase {
 
         fixture.state.clearLiveLogs()
         XCTAssertTrue(fixture.state.liveLogs.isEmpty)
+
+        // 关掉日志页**不再断流**：这条流是 DNS 停摆与出站失败两个检测器的唯一输入，
+        // 跟着页面开关等于检测器几乎全程失明（真机 2026-09-02 因此丢掉一次 100% 建连失败的证据）。
         fixture.state.stopLogMonitoring()
-        try await waitUntil { streams.terminationCount == 1 }
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(streams.terminationCount, 0, "关页面不该掐断检测器的输入")
+
         await fixture.state.stop()
+        try await waitUntil { streams.terminationCount == 1 }
     }
 
     /// 日志行是**成批**并入 `liveLogs` 的，不是逐行。
@@ -1324,9 +1332,12 @@ final class AppStateTests: XCTestCase {
         }
 
         XCTAssertEqual(fixture.state.logLevel, .warning)
+        // 切等级仍然断旧流起新流；关页面则不断流（见上一条用例），停内核才收。
         fixture.state.stopLogMonitoring()
-        try await waitUntil { streams.terminationCount == 2 }
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(streams.terminationCount, 1)
         await fixture.state.stop()
+        try await waitUntil { streams.terminationCount == 2 }
     }
 
     func testLogMonitoringDoesNothingWhileProxyIsOff() async throws {
@@ -2598,6 +2609,10 @@ private final class DashboardStreamFixture: @unchecked Sendable {
                 continuation.yield(Data(
                     #"{"downloadTotal":0,"uploadTotal":0,"connections":[{},{}],"memory":4194304}"#.utf8
                 ))
+            case "/logs":
+                // 日志流现在常开（检测器的唯一输入），仪表盘用例里必须把它当作正常存在的一条流：
+                // 保持打开、不产数据，这样 terminationCount 只反映仪表盘自己的两条。
+                break
             default:
                 continuation.finish(throwing: DashboardStreamError.disconnected)
             }

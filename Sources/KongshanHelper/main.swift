@@ -727,6 +727,10 @@ while HelperSignals.terminationRequested == 0 {
     if now - lastLivenessCheck >= livenessCheckInterval {
         lastLivenessCheck = now
         checkClientLiveness()
+        // 轮转也挂这里。原来只在 helper 启动时轮转一次，而 TUN 会话可以连着跑几十小时，
+        // 期间日志无上限增长——真机 2026-09-02 实测已到 **63 MB**（限额 5 MB）。
+        // 未超限时只是一次 stat，代价可忽略。
+        rotateLogIfNeeded()
     }
 }
 

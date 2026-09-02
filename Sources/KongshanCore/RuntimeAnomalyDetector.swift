@@ -353,15 +353,26 @@ public struct DNSStallDetector: Sendable {
         return expired
     }
 
-    /// 内核重启/停止时清空，避免把两代内核的统计混在一个窗口里。
+    /// 不结算地清空。仅用于确实不该出报告的场景；内核停止请用 `finish`——
+    /// 直接丢弃未到期的窗口，等于在故障最严重时销毁唯一的证据。
     public mutating func reset() {
         window = nil
+    }
+
+    /// 内核停止/重启时**先结算再清空**。达不到阈值仍返回 nil，不会因为"停止"就凭空多报。
+    public mutating func finish(at date: Date, physicalBytes: UInt64?) -> DNSStallReport? {
+        guard let current = window else { return nil }
+        return settle(current, physicalBytes: physicalBytes)
     }
 
     /// 窗口到期就出报告。没有新日志行时也要由调用方周期性调用，否则最后一段永远不落盘。
     public mutating func flush(at date: Date, physicalBytes: UInt64?) -> DNSStallReport? {
         guard let current = window,
               date.timeIntervalSince(current.startedAt) >= windowDuration else { return nil }
+        return settle(current, physicalBytes: physicalBytes)
+    }
+
+    private mutating func settle(_ current: Window, physicalBytes: UInt64?) -> DNSStallReport? {
         window = nil
         guard current.outboundServerDomain + current.general >= minimumStalls else { return nil }
 
@@ -522,6 +533,10 @@ public struct OutboundFailureDetector: Sendable {
     public mutating func flush(at date: Date) -> OutboundFailureReport? {
         guard let current = window,
               date.timeIntervalSince(current.startedAt) >= windowDuration else { return nil }
+        return settle(current)
+    }
+
+    private mutating func settle(_ current: Window) -> OutboundFailureReport? {
         window = nil
 
         // 只报最糟的那个出站：一次弹一条，用户才看得下去。
@@ -551,8 +566,19 @@ public struct OutboundFailureDetector: Sendable {
         )
     }
 
-    /// 内核重启/停止时清空，避免把两代内核的统计混在一个窗口里。
+    /// 不结算地清空。仅用于确实不该出报告的场景；内核停止请用 `finish`——
+    /// 直接丢弃未到期的窗口，等于在故障最严重时销毁唯一的证据。
     public mutating func reset() {
         window = nil
+    }
+
+    /// 内核停止/重启时**先结算再清空**。
+    ///
+    /// 故障最严重的形态恰恰是「一开就全失败、用户几十秒内手动关掉」——窗口远没到 600 秒。
+    /// 真机 2026-09-02 22:41：节点 276 次建连全失败，52 秒后用户关掉代理，
+    /// 而 `reset()` 把窗口整个丢掉，消息页一条记录都没有。
+    public mutating func finish(at date: Date) -> OutboundFailureReport? {
+        guard let current = window else { return nil }
+        return settle(current)
     }
 }

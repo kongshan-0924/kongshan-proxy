@@ -979,9 +979,10 @@ final class AppState {
         status = .off
         // 两代内核的统计不能混在同一个窗口里。DNS 停摆同理：跨重启累计会把
         // "重启前后各两次"误判成一簇持续故障。
-        outboundFailureDetector.reset()
-        dnsStallDetector.reset()
-        chronicDNSStallDetector.reset()
+        // 但**清空前必须先结算**：故障最严重的形态就是"一开就全失败、用户几十秒内关掉"，
+        // 窗口远没到期。真机 2026-09-02 22:41 节点 276 次建连全失败、52 秒后被关掉，
+        // 旧实现直接丢弃，消息页一条记录都没有。
+        finishAnomalyWindows()
         recordRuntimeEvent(title: "内核已停止", detail: reason, previousPID: previousPID)
         if !restoreFailures.isEmpty {
             // 快照已保留，重开 App 会自动重试；但在那之前网络是坏的，必须明确告知怎么手工恢复。
@@ -2574,9 +2575,13 @@ final class AppState {
         resumeLogMonitoringIfNeeded()
     }
 
+    /// 关掉日志页**不掐断日志流**——检测器还要靠它。只把攒着的行清干净，
+    /// 之后收到的行在 `receiveLog` 里就地丢弃，不再进 `liveLogs`。
     func stopLogMonitoring() {
         isLogsVisible = false
-        suspendLogMonitoring()
+        logFlushTask?.cancel()
+        logFlushTask = nil
+        flushPendingLogs()
     }
 
     func setLogLevel(_ level: CoreLogLevel) {
@@ -3430,9 +3435,15 @@ final class AppState {
         dashboardTasks.removeAll()
     }
 
+    /// **不看 `isLogsVisible`**。这条流不只喂日志页，还是 DNS 停摆与出站失败两个检测器的
+    /// 唯一输入。原来跟着日志页开关，等于检测器几乎全程没有输入——
+    /// 真机 2026-09-02 22:41 节点连续 276 次建连全失败（100%），
+    /// 消息页一条记录都没有，正是因为那一刻没人开着日志页。
+    ///
+    /// 代价只有 websocket 收流与两次字符串判断；真正贵的是把行并进 `liveLogs`
+    /// 引发的视图失效，那部分仍然只在日志页可见时才做（见 `receiveLog`）。
     private func resumeLogMonitoringIfNeeded() {
-        guard isLogsVisible,
-              status == .on,
+        guard status == .on,
               let client = clashAPIClient,
               logTask == nil else {
             return
@@ -3477,10 +3488,32 @@ final class AppState {
     /// 攒批**不丢行**，只是最多晚 200ms 显示——日志页本来就是滚动流，没人能分辨。
     private static let logFlushInterval = Duration.milliseconds(200)
 
-    private func receiveLog(_ entry: CoreLogEntry) {
+    /// 这行是否**可能**被任一检测器用到。只做子串判断、不解析，宁可放宽也不能漏：
+    /// 判据必须覆盖 `DNSStallDetector.isResolutionStall` 与
+    /// `OutboundFailureDetector.isSuccessfulAttempt/isFailedAttempt` 认的全部形态。
+    /// 「connection to」同时覆盖 `open connection to`（尝试/失败）与
+    /// `outbound connection to`（成功计数），后者是失败率的分母，漏掉会让比例失真。
+    static func mayConcernDetectors(_ message: String) -> Bool {
+        message.contains("connection to") || message.contains("context deadline exceeded")
+    }
+
+    /// internal 而非 private：**检测器的输入就在这里分叉**，
+    /// 「日志页关着时还能不能检测」这条性质断了不会有任何报错，只会安静地不再留证
+    /// （真机 2026-09-02 因此丢掉一次 100% 建连失败的全部证据），需回归覆盖。
+    func receiveLog(_ entry: CoreLogEntry) {
         logRetryDelay = 2
-        let live = LiveLogEntry(entry: entry)
         logLinesSinceDiagnosticsTick += 1
+        // 日志页关着时走廉价路径：先用最便宜的判据挡掉绝大多数行，命中了才解析。
+        // 这条流为了留证而常开，不该顺带把 CPU 也常开——`LiveLogEntry` 每行要分配一个 UUID
+        // 并做完整解析（host/category），而内核忙时一秒几十行。
+        guard isLogsVisible else {
+            guard Self.mayConcernDetectors(entry.message) else { return }
+            let parsed = CoreLogLine.parse(entry.message)
+            inspectForDNSStall(parsed)
+            inspectForOutboundFailure(parsed)
+            return
+        }
+        let live = LiveLogEntry(entry: entry)
         inspectForDNSStall(live.parsed)
         inspectForOutboundFailure(live.parsed)
         pendingLogs.append(live)
@@ -3518,9 +3551,12 @@ final class AppState {
         pendingLogs.removeAll(keepingCapacity: false)
     }
 
+    /// 断流后**无论日志页开没开都要重连**：这条流是检测器的唯一输入，
+    /// 断了不重连等于检测器从此失明，而内核重启、网络抖动都会断它。
+    /// 警告只在日志页可见时冒泡——没人看着的时候弹一串"推送已断开"只是噪音。
     private func logStreamEnded(_ message: String) {
-        guard isLogsVisible, status == .on else { return }
-        if warnings.last != message { appendWarning(message) }
+        guard status == .on else { return }
+        if isLogsVisible, warnings.last != message { appendWarning(message) }
         scheduleLogReconnect()
     }
 
@@ -3532,7 +3568,7 @@ final class AppState {
             try? await Task.sleep(for: .seconds(delay))
             guard let self, !Task.isCancelled else { return }
             self.logRetryTask = nil
-            guard self.isLogsVisible, self.status == .on else { return }
+            guard self.status == .on else { return }
             self.suspendLogMonitoring()
             self.resumeLogMonitoringIfNeeded()
         }
@@ -4436,6 +4472,21 @@ final class AppState {
             "代理状态 \(status == .on ? "开启" : "非开启")，接管方式 \(activeModes.count) 项"
         ].joined(separator: "；")
         recordRuntimeEvent(level: .warning, title: title, detail: detail)
+    }
+
+    /// internal 测试入口：`finishAnomalyWindows` 的返回值被就地消费掉了，
+    /// 回归需要拿到出站那条报告来断言"日志页关着时也统计到了"。
+    func finishAnomalyWindowsForTesting() -> OutboundFailureReport? {
+        outboundFailureDetector.finish(at: now())
+    }
+
+    /// 内核停止前结算三个检测窗口。达不到阈值仍然不出报告，不会凭空多报。
+    private func finishAnomalyWindows() {
+        let at = now()
+        if let report = outboundFailureDetector.finish(at: at) { record(report) }
+        let physicalBytes = Self.physicalByteTotal()
+        if let report = dnsStallDetector.finish(at: at, physicalBytes: physicalBytes) { record(report) }
+        if let report = chronicDNSStallDetector.finish(at: at, physicalBytes: physicalBytes) { record(report) }
     }
 
     /// 正在运行的推送订阅。每个都会把新数据写进 `@Observable` 状态从而触发重绘，

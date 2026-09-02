@@ -343,6 +343,58 @@ final class RuntimeAnomalyDetectorTests: XCTestCase {
         XCTAssertEqual(report.kind, .burst)
     }
 
+    /// 故障最严重的形态是「一开就全失败、用户几十秒内手动关掉」——窗口远没到期。
+    /// 旧实现在内核停止时直接 `window = nil`，把证据整个丢掉。
+    /// 真机 2026-09-02 22:41：节点 276 次建连全失败，52 秒后用户关掉代理，
+    /// 消息页一条记录都没有。
+    func testOutboundFinishSettlesWindowThatNeverReachedItsDeadline() throws {
+        var detector = OutboundFailureDetector()
+        for index in 0..<30 {
+            _ = detector.ingest(
+                failureLine(tag: "node-x", host: "api.example.invalid:443", reason: "failed to create session: EOF"),
+                at: origin.addingTimeInterval(Double(index))
+            )
+        }
+        // 窗口是 600 秒，这里只过了 30 秒——flush 按设计不该出报告。
+        XCTAssertNil(detector.flush(at: origin.addingTimeInterval(30)))
+
+        let report = try XCTUnwrap(
+            detector.finish(at: origin.addingTimeInterval(30)),
+            "内核停止时必须先结算，不能丢弃"
+        )
+        XCTAssertEqual(report.failures, 30)
+        XCTAssertEqual(report.outboundTag, "node-x")
+        XCTAssertNil(detector.finish(at: origin.addingTimeInterval(31)), "结算后窗口要清空")
+    }
+
+    /// 结算不等于放宽阈值：达不到门槛照样不报，否则每次停内核都会多出一条噪音。
+    func testOutboundFinishStaysSilentBelowThreshold() {
+        var detector = OutboundFailureDetector()
+        for index in 0..<3 {
+            _ = detector.ingest(
+                failureLine(tag: "node-x", host: "api.example.invalid:443", reason: "failed to create session: EOF"),
+                at: origin.addingTimeInterval(Double(index))
+            )
+        }
+        XCTAssertNil(detector.finish(at: origin.addingTimeInterval(4)))
+    }
+
+    /// DNS 侧同理。
+    func testDNSFinishSettlesUnexpiredWindow() throws {
+        var detector = DNSStallDetector(windowDuration: 600, minimumStalls: 3)
+        for index in 0..<4 {
+            _ = detector.ingest(
+                directStallLine(destination: "shop.example.invalid:443"),
+                at: origin.addingTimeInterval(Double(index)),
+                physicalBytes: 0
+            )
+        }
+        XCTAssertNil(detector.flush(at: origin.addingTimeInterval(10), physicalBytes: 0))
+        let report = try XCTUnwrap(detector.finish(at: origin.addingTimeInterval(10), physicalBytes: 0))
+        XCTAssertEqual(report.totalStalls, 4)
+        XCTAssertNil(detector.finish(at: origin.addingTimeInterval(11), physicalBytes: 0))
+    }
+
     /// DNS 停摆统计同样要能在内核重启时清空，否则"重启前后各两次"会被并成一簇持续故障。
     func testDNSStallResetClearsWindow() {
         var detector = DNSStallDetector(windowDuration: 60, minimumStalls: 1)

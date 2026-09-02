@@ -4675,3 +4675,57 @@ v0.1.93 的取证存档也救不了它——存档只收已经产生的事件，
 - 上一版修的内网域（`tz/pve.kongshan.net`）报错次数 **0**，修复持续有效。
 - DNS 解析超时 11 次，耗时仍是 10.0~10.3 秒。
 - 系统代理当前处于关闭状态（22:42:42 用户主动关闭），sing-box 未运行。
+
+### 2026-09-02 23:30 — v0.1.94：检测器不再依赖用户开着日志页
+
+**本轮任务**：排查并修复问题，构建并安装。
+
+**回滚点**：`71174ae`（分支 `fix/always-on-detectors`）。
+
+#### 找到真正的根因，推翻上一轮的判断
+
+上一轮把"故障发生却零证据"归因到 `outboundFailureDetector.reset()` 丢弃窗口。
+**那只是次要原因。** 真正的根因是：
+
+`resumeLogMonitoringIfNeeded()` 的第一个条件是 `isLogsVisible`，而
+`startLogMonitoring()/stopLogMonitoring()` **只被 `LogsView.onAppear/onDisappear` 调用**。
+内核日志流是 `inspectForDNSStall` 与 `inspectForOutboundFailure` 的**唯一输入**，
+于是两个检测器只在用户盯着「内核日志」页时才工作，其余时间全瞎。
+
+这解释了此前所有"检测器该报没报"的现象，包括我上一轮基于**日志文件**算出的
+"0.94 次/小时 DNS 超时"——那是内核自己写的文件，检测器根本没看见过。
+
+#### 改动
+
+1. **日志流改为随代理常开**（`resumeLogMonitoringIfNeeded` 去掉 `isLogsVisible`）。
+   日志页只决定要不要把行并进 `liveLogs`。
+   - `stopLogMonitoring()` 不再掐断流，只清 UI 缓冲。
+   - `logStreamEnded` 无论页面开没开都重连（断了不重连＝检测器从此失明），
+     但警告只在页面可见时冒泡。
+   - **常开不能顺带把 CPU 也常开**：页面关闭时先用 `mayConcernDetectors`
+     做纯子串预筛，命中才 `CoreLogLine.parse`；`LiveLogEntry` 每行要分配 UUID
+     并解析 host/category，那部分只在页面可见时做。
+2. **内核停止先结算再清空**：两个检测器各加 `finish()`（不看窗口时长，仍看阈值），
+   `stop()` 改调 `finishAnomalyWindows()`。`reset()` 保留但注释写明用途。
+3. **导出补上 TUN 内核日志**：TUN 由 helper 以 root 启动，日志写在
+   `/Library/Application Support/kongshan/helper/sing-box-tun.log`，
+   而 App 一直在自己的 `logs/` 目录找同名文件——那个文件从来不存在。
+   `exportText()` 现在也读 helper 那份，且只取尾部。
+4. **helper 的 TUN 日志不再无限增长**：`rotateLogIfNeeded()` 原来只在 helper 启动时跑一次，
+   长会话期间一直涨，真机实测 **63 MB**（限额 5 MB）。挂到已有的 30 秒周期检查里。
+
+#### 验证
+
+全量 **531 执行 / 2 跳过 / 0 失败**；`swift build` 0 警告。新增 8 条定向测试：
+日志页关着时失败仍被统计、页面开着时行仍进列表、**预筛与检测器判据交叉校验**
+（凡检测器认的形态预筛必须放行，含成功计数这个分母）、
+出站 `finish` 结算未到期窗口、结算不放宽阈值、DNS `finish` 同理、
+导出包含 helper 的 TUN 日志、超大外部日志只取尾部。
+
+**6 条既有用例因本次语义变更而失败并已更新**（关页面不再断流、常开的 `/logs`
+进入流计数）。这些用例原本编码的正是被修掉的旧行为。
+
+#### 未验证
+
+- helper 的周期轮转只有代码路径，**未在真机跑满一次轮转**（需 TUN 长会话 + 超 5 MB）。
+- 常开日志流的真机 CPU 影响未长期观察；M4 门禁只覆盖空闲态。

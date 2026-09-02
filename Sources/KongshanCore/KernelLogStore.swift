@@ -21,6 +21,7 @@ public actor KernelLogStore {
 
     private let maxBufferedLines: Int
     private let maxFileBytes: Int
+    private let externalTUNLogURL: URL
     private let errorHandler: @Sendable (String) -> Void
     private var bufferedLines: [String] = []
     private var externalMonitorSource: KernelLogSource?
@@ -35,11 +36,13 @@ public actor KernelLogStore {
             .appending(path: "logs", directoryHint: .isDirectory),
         maxBufferedLines: Int = KernelLogStore.defaultBufferedLineLimit,
         maxFileBytes: Int = KernelLogStore.defaultFileByteLimit,
+        externalTUNLogURL: URL = KernelLogStore.defaultExternalTUNLogURL,
         errorHandler: @escaping @Sendable (String) -> Void = { _ in }
     ) {
         self.directory = directory
         self.maxBufferedLines = max(1, maxBufferedLines)
         self.maxFileBytes = max(1, maxFileBytes)
+        self.externalTUNLogURL = externalTUNLogURL
         self.errorHandler = errorHandler
     }
 
@@ -131,23 +134,45 @@ public actor KernelLogStore {
         externalMonitorSource = nil
     }
 
+    /// TUN 内核由 helper 以 root 起，**日志写在 helper 自己的目录**
+    /// （`HelperConstants.stateDirectory`），不在 App 的 logs 目录里。
+    /// 导出时若不去那边读，TUN 全程的内核日志就一条都拿不到——
+    /// 真机 2026-09-02 复盘时才发现，30 小时 TUN 会话在导出里完全是空白。
+    /// 文件是 0644、目录 `--x`，App 有读权限。
+    public static let defaultExternalTUNLogURL = URL(
+        fileURLWithPath: "/Library/Application Support/kongshan/helper/sing-box-tun.log"
+    )
+
     public func exportText() throws -> String {
-        let names = [
-            "sing-box.log.1",
-            "sing-box.log",
-            "sing-box-tun.log.1",
-            "sing-box-tun.log"
+        var urls = [
+            directory.appending(path: "sing-box.log.1"),
+            directory.appending(path: "sing-box.log"),
+            directory.appending(path: "sing-box-tun.log.1"),
+            directory.appending(path: "sing-box-tun.log")
         ]
+        urls.append(externalTUNLogURL)
         var sections: [String] = []
-        for name in names {
-            let url = directory.appending(path: name)
+        for url in urls {
+            let name = url.lastPathComponent
             guard FileManager.default.fileExists(atPath: url.path) else { continue }
-            let data = try Data(contentsOf: url)
+            // helper 那份可能有几十 MB，导出只取尾部，避免把导出文件撑爆。
+            guard let data = try? readTail(of: url, limit: maxFileBytes) else { continue }
             let content = String(decoding: data, as: UTF8.self)
             sections.append("===== \(name) =====\n\(content)")
         }
         if sections.isEmpty { return "kongshan 日志导出\n（没有可用的内核日志）\n" }
         return sections.joined(separator: "\n")
+    }
+
+    /// 只读文件尾部。大文件（helper 的 TUN 日志真机见过 63 MB）整份读进内存
+    /// 既慢又可能顶爆内存，而排查要看的本来就是最近这一段。
+    private func readTail(of url: URL, limit: Int) throws -> Data {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let size = try handle.seekToEnd()
+        if size > UInt64(limit) { try handle.seek(toOffset: size - UInt64(limit)) }
+        else { try handle.seek(toOffset: 0) }
+        return try handle.readToEnd() ?? Data()
     }
 
     private func appendToBuffer(_ text: String) {
