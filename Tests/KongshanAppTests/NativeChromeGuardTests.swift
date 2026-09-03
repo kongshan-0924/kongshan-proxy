@@ -82,4 +82,50 @@ final class NativeChromeGuardTests: XCTestCase {
         XCTAssertFalse(dashboard.contains(".animation(.smooth"))
         XCTAssertTrue(dashboard.contains("transaction.animation = nil"), "图表必须关动画")
     }
+
+    /// 指标网格是**六张卡、列数只取 6 的因数**。用 `.adaptive` 会在某些宽度下排成
+    /// 4 或 5 列，最后一行缺两个角——用户 2026-09-03 反馈的「首页有两个空的」。
+    func testDashboardMetricsGridNeverLeavesAGaggedRow() throws {
+        let dashboard = try source("DashboardView.swift")
+        XCTAssertFalse(dashboard.contains("GridItem(.adaptive"), "自适应列会排出缺角的最后一行")
+        XCTAssertTrue(dashboard.contains("count: metricColumns"))
+        for box in ["exitIPBox", "connectionsBox", "coreMemoryBox", "runtimeBox", "activeConfigBox", "selfUsageBox"] {
+            XCTAssertTrue(dashboard.contains(box), "缺少指标卡 \(box)")
+        }
+    }
+
+    /// 运行时长不能用每秒自更新的 `.timer`：它嵌在指标网格里，每次刷新都要把整个
+    /// GroupBox 网格重新布局。真机采样显示主线程持续耗在 layout 与视图图更新上。
+    func testRuntimeDurationRefreshesPerMinuteNotPerSecond() throws {
+        let dashboard = try source("DashboardView.swift")
+        XCTAssertFalse(dashboard.contains("style: .timer"), "每秒刷新会把整个网格重新布局")
+        XCTAssertTrue(dashboard.contains("TimelineView(.everyMinute)"))
+        // minimumScaleFactor 在布局时要二分搜索字号，不能加在每秒变化的数值上。
+        // 匹配调用而不是单词：注释里写了为什么不用它。
+        XCTAssertFalse(dashboard.contains(".minimumScaleFactor("))
+    }
+
+    /// 代理页左列不能用 `.sidebar`：它会画侧栏材质，嵌在 detail 里就是一块灰底，
+    /// 与右侧白色列表撞色（用户 2026-09-03 反馈）。
+    func testPolicyGroupColumnDoesNotPaintSidebarMaterial() throws {
+        let policy = try source("PolicyGroupsView.swift")
+        XCTAssertFalse(policy.contains(".listStyle(.sidebar)"), "detail 里的第二层列表不该用侧栏材质")
+        XCTAssertTrue(policy.contains(".listStyle(.inset)"))
+    }
+
+    /// 连接表默认列必须能在最小窗口（760pt）里放下，不然只能横向翻。
+    /// 两个「累计」列默认隐藏，需要时右键表头勾出来。
+    func testConnectionTableFitsMinimumWindowByDefault() throws {
+        let connections = try source("ConnectionsView.swift")
+        XCTAssertTrue(connections.contains("columnCustomization:"), "列应可自定义")
+        XCTAssertEqual(
+            connections.components(separatedBy: ".defaultVisibility(.hidden)").count - 1, 2,
+            "两个累计列默认隐藏"
+        )
+        // 默认可见列的 ideal 宽合计：目标 220 + 规则 180 + 速率 76×2 + 关闭 28 = 580，
+        // 最小窗口 760 减去侧栏 200 后仍有 560——留 20 余量给分隔线与内边距。
+        XCTAssertTrue(connections.contains(".width(min: 140, ideal: 220)"))
+        XCTAssertTrue(connections.contains(".width(min: 110, ideal: 180)"))
+        XCTAssertTrue(connections.contains(".disabledCustomizationBehavior(.visibility)"), "主列不许隐藏")
+    }
 }

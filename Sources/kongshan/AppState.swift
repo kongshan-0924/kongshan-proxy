@@ -160,6 +160,8 @@ final class AppState {
     /// 开机自启后自动恢复上次接管。默认关闭：它会在无人看屏幕时改动系统网络设置，
     /// 必须是用户显式打开的。
     var autoRestoreOnLaunch = false
+    /// 是否把代理入口共享给局域网。默认关闭。
+    private(set) var lanSharingEnabled = false
     @ObservationIgnored private var lastActiveModes: [ProxyMode] = []
     private(set) var uploadRate: Int64 = 0
     private(set) var downloadRate: Int64 = 0
@@ -420,7 +422,18 @@ final class AppState {
     /// 菜单栏图标样式，用户可在设置里切换。
     private(set) var menuBarIconStyle: MenuBarIconStyle = .peak
     /// 系统代理公开入口端口。只由普通用户 App 持有，绝不交给 root sing-box。
-    @ObservationIgnored private var preferredRelayPort: UInt16?
+    /// **被观察**（不再 ObservationIgnored）：设置页要显示局域网共享地址里的端口。
+    /// 只在启动/换端口时写，频率极低。
+    private var preferredRelayPort: UInt16?
+
+    /// 中转层当前对外的端口。只有中转层确实在跑时才有值——TUN 单开时不起中转层，
+    /// 这时给出端口会让用户去填一个连不上的地址。
+    var currentRelayPort: UInt16? {
+        guard status == .on,
+              activeModes.contains(.systemProxy) || !routingSettings.sshProxyTargets.isEmpty
+        else { return nil }
+        return preferredRelayPort
+    }
     @ObservationIgnored private var currentConfig: Data?
     @ObservationIgnored private var dashboardTasks: [Task<Void, Never>] = []
     @ObservationIgnored private var dashboardMonitorConsumers: Set<DashboardMonitorConsumer> = []
@@ -451,6 +464,9 @@ final class AppState {
     /// 两种不同的用户体感，也指向不同的处置（换解析器 vs. 查链路），合成一个会两头都看不清。
     @ObservationIgnored private var chronicDNSStallDetector = DNSStallDetector.chronic()
     @ObservationIgnored private let metricsJournal: MetricsJournal
+    /// 最近一分钟的自身占用。**被观察**（不是 ObservationIgnored）：仪表盘要显示它。
+    /// 每分钟才写一次，引发的视图失效可以忽略。
+    private(set) var lastMetrics: MetricsJournal.Sample?
     /// 指标窗口的累加状态。**每分钟无条件落一行**，与"越过阈值才记"的告警互补：
     /// 5~7% 这种低于异常阈值、却持续存在的开销，只有连续流水账才看得见。
     @ObservationIgnored private var metricsWindowStart: ProcessResourceSample?
@@ -757,7 +773,7 @@ final class AppState {
             appendWarnings(prepared.warnings)
             let needsRelay = usesSystemProxy || !routingSettings.sshProxyTargets.isEmpty
             let relayPort = needsRelay
-                ? try await proxyRelay.start(preferredPort: preferredRelayPort)
+                ? try await proxyRelay.start(preferredPort: preferredRelayPort, sharesOnLAN: lanSharingEnabled)
                 : nil
             if preferredRelayPort != relayPort, let relayPort {
                 if let previous = preferredRelayPort {
@@ -2095,7 +2111,7 @@ final class AppState {
             let needsRelay = activeModes.contains(.systemProxy) || !settings.sshProxyTargets.isEmpty
             let previouslyNeededRelay = activeModes.contains(.systemProxy) || !oldSettings.sshProxyTargets.isEmpty
             let relayPort = needsRelay
-                ? try await proxyRelay.start(preferredPort: preferredRelayPort)
+                ? try await proxyRelay.start(preferredPort: preferredRelayPort, sharesOnLAN: lanSharingEnabled)
                 : nil
             if preferredRelayPort != relayPort, let relayPort {
                 preferredRelayPort = relayPort
@@ -3004,6 +3020,7 @@ final class AppState {
             preferredRelayPort = settings.proxyRelayPort
             menuBarIconStyle = settings.menuBarIconStyle ?? .peak
             autoRestoreOnLaunch = settings.autoRestoreOnLaunch ?? false
+            lanSharingEnabled = settings.lanSharingEnabled ?? false
             lastActiveModes = settings.lastActiveModes ?? []
             if let deadline = settings.diagnosticModeEndsAt, deadline > now() {
                 diagnosticModeEndsAt = deadline
@@ -3184,6 +3201,7 @@ final class AppState {
                 proxyRelayPort: preferredRelayPort,
                 diagnosticModeEndsAt: diagnosticModeEndsAt,
                 autoRestoreOnLaunch: autoRestoreOnLaunch,
+                lanSharingEnabled: lanSharingEnabled,
                 lastActiveModes: lastActiveModes
             )),
             to: settingsURL
@@ -4501,7 +4519,7 @@ final class AppState {
         if let start = metricsWindowStartBytes, let end = physicalBytes, end >= start {
             netMB = Double(end - start) / 1_048_576
         }
-        metricsJournal.append(MetricsJournal.Sample(
+        let metricsSample = MetricsJournal.Sample(
             t: sample.capturedAt,
             win: (span * 10).rounded() / 10,
             cpu: ((cpuSeconds / span * 100) * 100).rounded() / 100,
@@ -4521,7 +4539,9 @@ final class AppState {
             pubConn: publishCountConnections,
             pubTraffic: publishCountTraffic,
             pubLogs: publishCountLogs
-        ))
+        )
+        metricsJournal.append(metricsSample)
+        lastMetrics = metricsSample
 
         metricsWindowStart = sample
         metricsWindowStartBytes = physicalBytes
@@ -4640,6 +4660,67 @@ final class AppState {
             "代理状态 \(status == .on ? "开启" : "非开启")，接管方式 \(activeModes.count) 项"
         ].joined(separator: "；")
         recordRuntimeEvent(level: .warning, title: title, detail: detail)
+    }
+
+    /// 切换局域网共享。
+    ///
+    /// 监听地址是建立监听时定死的，改它必须重建监听——**因此会掐断当前经由本机代理的连接**。
+    /// 这是个显式的低频操作，用户按下开关时接受这个代价；不改的话开关就是假的。
+    /// 代理没开时只存意图，下次启动生效。
+    func setLANSharing(enabled: Bool) async {
+        guard lanSharingEnabled != enabled else { return }
+        lanSharingEnabled = enabled
+        try? await persistSettings()
+        recordRuntimeEvent(
+            title: enabled ? "已开启局域网共享" : "已关闭局域网共享",
+            detail: enabled
+                ? "监听 \(lanProxyAddresses.first ?? "本机地址"):\(preferredRelayPort.map(String.init) ?? "—")，仅接受私网来源"
+                : "代理入口恢复为仅本机可用"
+        )
+        // 只有正在跑且用得上中转层时才需要重建；否则下次 start 自然带上新意图。
+        let needsRelay = activeModes.contains(.systemProxy)
+            || !routingSettings.sshProxyTargets.isEmpty
+        guard status == .on, needsRelay else { return }
+        proxyRelay.stop()
+        do {
+            let port = try await proxyRelay.start(
+                preferredPort: preferredRelayPort,
+                sharesOnLAN: enabled
+            )
+            preferredRelayPort = port
+            if let runtime { proxyRelay.setTarget(port: runtime.mixedPort) }
+            try? await persistSettings()
+        } catch {
+            appendWarning("切换局域网共享后重建代理入口失败：\(error.localizedDescription)")
+        }
+    }
+
+    /// 供其他设备填写的本机地址。只列私网 IPv4——用户要填进别的设备的代理设置里，
+    /// 链路本地与 IPv6 填了多半连不上，列出来只会误导。
+    var lanProxyAddresses: [String] {
+        var result: [String] = []
+        var head: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&head) == 0, let head else { return [] }
+        defer { freeifaddrs(head) }
+        var current: UnsafeMutablePointer<ifaddrs>? = head
+        while let entry = current {
+            defer { current = entry.pointee.ifa_next }
+            guard let addressPointer = entry.pointee.ifa_addr,
+                  addressPointer.pointee.sa_family == UInt8(AF_INET),
+                  entry.pointee.ifa_flags & UInt32(IFF_UP) != 0,
+                  entry.pointee.ifa_flags & UInt32(IFF_LOOPBACK) == 0 else { continue }
+            var buffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(
+                addressPointer, socklen_t(addressPointer.pointee.sa_len),
+                &buffer, socklen_t(buffer.count), nil, 0, NI_NUMERICHOST
+            ) == 0 else { continue }
+            let end = buffer.firstIndex(of: 0) ?? buffer.count
+            let text = String(decoding: buffer[0..<end].map { UInt8(bitPattern: $0) }, as: UTF8.self)
+            // utun（TUN 自己的地址）和链路本地不是别人能填的地址。
+            guard !text.hasPrefix("169.254"), !text.hasPrefix("172.19."), !result.contains(text) else { continue }
+            result.append(text)
+        }
+        return result.sorted()
     }
 
     /// internal 测试入口：`finishAnomalyWindows` 的返回值被就地消费掉了，
@@ -4926,6 +5007,9 @@ private struct PersistedSettings: Codable {
     var diagnosticModeEndsAt: Date? = nil
     /// 用户意图：开机自启后是否恢复上次的接管。旧设置文件没有该字段，缺省关闭。
     var autoRestoreOnLaunch: Bool? = nil
+    /// 是否把本机代理入口共享给局域网。旧设置文件没有该字段，**缺省关闭**——
+    /// 打开等于让同网段任何设备都能用你的出口，必须是用户显式选择。
+    var lanSharingEnabled: Bool? = nil
     /// **正常退出时**记下的接管方式快照。只在 `prepareForTermination` 写入——
     /// 崩溃或断电不会经过那里，于是不会把一次异常当成"用户想要的状态"反复恢复。
     var lastActiveModes: [ProxyMode]? = nil

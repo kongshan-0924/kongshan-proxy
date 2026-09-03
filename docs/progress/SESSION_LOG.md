@@ -4945,3 +4945,85 @@ usagimaru 的 macOS 设置窗口规范、Surge Mac 6.0 发行说明、SwiftUI on
 - 连接页 `Table` 在上千条实时刷新下的观感与 CPU；`Section(isExpanded:)` 在 macOS 14 上的
   折叠动画。
 - 未跑 `prepare` 之外的真机流程；**未安装**。
+
+### 2026-09-03 14:20 — v0.1.97：局域网共享 + 三处界面反馈修正
+
+**本轮任务**：用户装上 v0.1.96 后给了三条界面反馈与一条运行检查；随后追加「共享给局域网当代理」
+的新功能。要求先把上一版发到 GitHub，再做新修改。
+
+**回滚点**：`f9397b8`（v0.1.96）。已先发布 v0.1.96 到 GitHub（tag + Release），
+再开始本轮改动——publish 要求验证戳与 HEAD 一致，顺序不能颠倒。
+
+#### 运行检查：指标流水第一次真正定位到问题
+
+`metrics.ndjson` 给出了 P3 那个「主窗口开着时 5~7%」的答案：
+
+| 状态 | CPU | 主线程占比 | RSS |
+| --- | --- | --- | --- |
+| 无窗口 | 0.88~1.27% | 0.17~0.25 | 34 MB |
+| 代理页 | 1.12% | 0.25 | 69 MB |
+| 连接页 | 4.4~7.6% | 0.70~0.76 | 115~148 MB |
+| **仪表盘** | **3.9~10.5%** | 0.63~0.86 | 82~220 MB |
+
+而同期 `pubTraffic` 只有 15/分钟、`pubConn` 多为 0——**不是数据刷新驱动的**。
+`sample` 确认主线程持续耗在 `stepTransactionFlush → layout → NSHostingView.layout`（74 样本）
+与 `flushObservers → GraphHost.flushTransactions`（53 样本）上，即**每秒重新布局**。
+
+据此改了三处：
+1. 运行时长 `Text(_:style:.timer)` → `TimelineView(.everyMinute)`。前者每秒自更新，
+   而它嵌在指标网格里，每次刷新都要把整个 GroupBox 网格重新布局。运行时长看到分钟就够。
+2. 去掉高频数值上的 `.minimumScaleFactor`：它在布局时要二分搜索字号，而活跃连接、
+   内核内存、速率都是每秒在变。改为超长直接截断。
+3. 流量曲线 `.monotone` → `.linear`：60 个密集点上视觉差别看不出来，省掉每次的样条求解。
+
+#### 三条界面反馈
+
+- **首页两个空位**：`GridItem(.adaptive)` 在某些宽度下排成 4 或 5 列，四张卡的最后一行缺角。
+  改为六张卡 + 列数只取 6 的因数（6/3/2/1），任何宽度都排满。新增「当前配置」与
+  「空山占用」（后者读 `lastMetrics`，每分钟更新，不额外采样）。
+- **代理页左列发暗**：`.listStyle(.sidebar)` 会画侧栏材质，而它嵌在 detail 里，
+  于是整列是一块灰底。改 `.inset`，与右列同形，靠 Divider 分隔。
+- **连接页要横向翻**：默认 7 列 ideal 合计 912pt，最小窗口放不下。收窄到 580pt，
+  两个「累计」列 `.defaultVisibility(.hidden)`，加 `TableColumnCustomization` 并持久化到
+  `@AppStorage`；主列禁止隐藏，关闭列禁止自定义。规则·链路加 `.help()` 显示完整内容。
+
+#### 新功能：局域网共享
+
+**落点选在 App 的中转层，不动内核**。`HelperConfigWhitelist` 强制内核的 mixed 入站只能听
+loopback（root 进程不该对外开代理端口），那条边界保持原样；`LocalTCPRelay` 跑在用户权限下，
+由它多听一个接口是安全得多的做法。
+
+- `LocalTCPRelay.start(preferredPort:sharesOnLAN:)`：开启时不设 `requiredLocalEndpoint`，
+  改用 `NWListener(using:on:)` 监听全部接口。系统代理指向的 127.0.0.1:port 仍然可达，
+  不需要第二个监听。
+- **私网来源过滤**：绑 0.0.0.0 意味着端口跟着每一张网卡走，机器要是拿到公网 IP
+  （直连光猫、云主机、热点）就等于把开放代理挂到了互联网上。`isPrivatePeer` 按
+  RFC 1918 / RFC 4193 / 链路本地判定，公网来源直接拒绝。IPv4 映射地址按其 IPv4 部分判，
+  否则公网来源会从 `::ffff:8.8.8.8` 这条缝钻进来。
+- 设置 → 隧道新增分区：开关（默认关）、可拷贝的「IP:端口」列表、三段说明
+  （怎么用 / 安全边界 / 切换会断连接且可能弹防火墙窗）。
+- `setLANSharing` 落盘并记运行事件——这是个影响安全边界的状态，事后要能回答"什么时候开的"。
+
+#### 一处守卫收窄（说明理由，不是绕过）
+
+`testHighFrequencyValueViewsCarryNoAnimationModifiers` 原本禁止仪表盘出现 `TimelineView`
+这个词。但它的本意是挡住**按帧或按秒**的重绘驱动，而 `TimelineView(.everyMinute)` 每分钟
+才走一次，正是用来替掉每秒刷新的 `.timer` 的——按名字一刀切会把降频的改动也挡在外面。
+判据收窄为禁止 `.animation` / `.periodic` 两档与 `style: .timer`，`.everyMinute` 放行。
+另外两条守卫（`LazyVStack`、`minimumScaleFactor`）此前误匹配了注释里的词，已改为匹配调用。
+
+#### 验证
+
+- 全量 **563 执行 / 1 跳过 / 0 失败**；`swift build` 0 警告。
+- 新增 6 条测试：私网来源过滤（含 172.15/172.32 边界、IPv4 映射地址、非 host/port 端点）、
+  局域网共享默认关闭且中转层未跑时不给地址、开关落盘并留运行事件。
+- 新增 4 条界面守卫：指标网格不用 adaptive 且六张卡齐全、运行时长按分钟刷新且无
+  `.minimumScaleFactor(`、代理页左列不用 `.sidebar`、连接表默认列能放进最小窗口。
+- 离屏渲染核对：仪表盘 3×2 与宽窗口 6×1 均无缺角；代理页左列已是浅色。
+
+#### 未验证
+
+- **局域网共享全部是真机未验证的**：另一台设备实际填地址能否连通、macOS 防火墙弹窗、
+  切换开关时重建监听的实际中断时长——都要装上并用第二台设备才能确认。
+- 连接页列自定义（右键表头勾选、跨会话记忆）在离屏渲染里看不到。
+- 仪表盘三处降耗的实际收益需要装上后回看 `metrics.ndjson` 里 `page=仪表盘` 的行。

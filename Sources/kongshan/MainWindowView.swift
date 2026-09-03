@@ -1288,6 +1288,13 @@ private struct SettingsView: View {
         )
     }
 
+    private var lanSharingBinding: Binding<Bool> {
+        Binding(
+            get: { state.lanSharingEnabled },
+            set: { enabled in Task { await state.setLANSharing(enabled: enabled) } }
+        )
+    }
+
     private var strictRouteBinding: Binding<Bool> {
         Binding(
             get: { state.tunSettings.strictRoute },

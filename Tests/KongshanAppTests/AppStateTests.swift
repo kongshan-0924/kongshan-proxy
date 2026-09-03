@@ -2886,9 +2886,12 @@ private final class FakeLocalTCPRelay: LocalTCPRelaying, @unchecked Sendable {
     }
 
     var currentTarget: UInt16? { lock.withLock { target } }
+    /// 最近一次启动时是否要求共享给局域网。回归用。
+    private(set) var lastSharesOnLAN = false
 
-    func start(preferredPort: UInt16?) async throws -> UInt16 {
+    func start(preferredPort: UInt16?, sharesOnLAN: Bool) async throws -> UInt16 {
         preferredRecorder?.record(preferredPort)
+        lock.withLock { lastSharesOnLAN = sharesOnLAN }
         return port
     }
 

@@ -4,6 +4,7 @@ import SwiftUI
 
 struct DashboardView: View {
     @Environment(AppState.self) private var state
+    @State private var metricColumns = 3
 
     var body: some View {
         ScrollView {
@@ -134,10 +135,11 @@ struct DashboardView: View {
                 // 高频数值不做动画：.smooth 弹簧在下一次采样到来时仍未收敛，SwiftUI 会按
                 // 屏幕刷新率持续插值字形——真机上曾以 ~57% CPU 连烧 8 小时（2026-08-20）。
                 // monospacedDigit 已保证宽度稳定，数字直接跳变即可。
+                // 不用 minimumScaleFactor：它在布局时要二分搜索字号，而这个值每秒都在变。
+                // monospacedDigit + 固定框宽已经保证不跳动。
                 Text(Theme.rateOrDash(value))
                     .font(.title3.weight(.semibold).monospacedDigit())
                     .lineLimit(1)
-                    .minimumScaleFactor(0.8)
                 Text(title)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -163,63 +165,134 @@ struct DashboardView: View {
     // MARK: - 指标
 
     /// 接管方式、当前节点与出站模式已并入状态区，这里只保留观测类指标。
+    ///
+    /// 六张卡，列数**只取 6 的因数**（6/3/2/1）。`.adaptive` 会在某些宽度下排成 4 或 5 列，
+    /// 最后一行就缺两个角——用户反馈的「首页有两个空的」正是这个。
+    ///
+    /// 每张卡拆成独立属性：六张写在一个表达式里编译器类型检查会超时。
     private var metrics: some View {
-        // 自适应列数：窗口拉宽时 4 列，拖窄时自动收成 3/2 列。
         LazyVGrid(
-            columns: [GridItem(.adaptive(minimum: 170), spacing: 12)],
+            columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: metricColumns),
             spacing: 12
         ) {
-            MetricBox(symbol: "globe.asia.australia", tint: .orange, caption: "当前出口 IP") {
-                exitDiagnosticsValue
-            } corner: {
-                HStack(spacing: 7) {
-                    if let error = state.exitDiagnosticsError {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
-                            .help(error)
-                    }
-                    if state.isRefreshingExitDiagnostics {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Button {
-                            Task { await state.refreshExitDiagnostics() }
-                        } label: {
-                            Image(systemName: "arrow.clockwise")
-                        }
-                        .buttonStyle(.borderless)
-                        .controlSize(.small)
-                        .help("刷新出口 IP 并检测 DNS")
-                    }
+            exitIPBox
+            connectionsBox
+            coreMemoryBox
+            runtimeBox
+            activeConfigBox
+            selfUsageBox
+        }
+        .background {
+            GeometryReader { proxy in
+                Color.clear
+                    .onAppear { updateMetricColumns(proxy.size.width) }
+                    .onChange(of: proxy.size.width) { _, width in updateMetricColumns(width) }
+            }
+        }
+    }
+
+    private var exitIPBox: some View {
+        MetricBox(symbol: "globe.asia.australia", tint: .orange, caption: "当前出口 IP") {
+            exitDiagnosticsValue
+        } corner: {
+            HStack(spacing: 7) {
+                if let error = state.exitDiagnosticsError {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .help(error)
                 }
-            }
-
-            MetricBox(symbol: "point.3.connected.trianglepath.dotted", tint: .purple, caption: "活跃连接") {
-                // 同上：高频数值不做动画（见 rate 的说明）。
-                Text("\(state.activeConnectionCount)")
-            }
-
-            MetricBox(symbol: "memorychip", tint: .pink, caption: "内核内存") {
-                Text(Theme.bytesOrDash(Int64(clamping: state.coreMemory)))
-            } corner: {
-                if state.coreVersion != "—" {
-                    // 内核的 /version 返回的就带名字（`sing-box 1.13.14`），
-                    // 不要再加「内核」前缀——真机上会读成「内核 sing-box 1.13.14」。
-                    Text(state.coreVersion)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .help("内置 sing-box 版本")
-                }
-            }
-
-            MetricBox(symbol: "clock.arrow.2.circlepath", tint: .teal, caption: "运行时长") {
-                if state.isOn, let startedAt = state.runtimeStartedAt {
-                    Text(startedAt, style: .timer)
+                if state.isRefreshingExitDiagnostics {
+                    ProgressView().controlSize(.small)
                 } else {
-                    Text("—")
+                    Button {
+                        Task { await state.refreshExitDiagnostics() }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .help("刷新出口 IP 并检测 DNS")
                 }
             }
         }
+    }
+
+    private var connectionsBox: some View {
+        // 高频数值不做动画（见 rate 的说明）。
+        MetricBox(symbol: "point.3.connected.trianglepath.dotted", tint: .purple, caption: "活跃连接") {
+            Text("\(state.activeConnectionCount)")
+        }
+    }
+
+    private var coreMemoryBox: some View {
+        MetricBox(symbol: "memorychip", tint: .pink, caption: "内核内存") {
+            Text(Theme.bytesOrDash(Int64(clamping: state.coreMemory)))
+        } corner: {
+            if state.coreVersion != "—" {
+                // 内核的 /version 返回的就带名字（`sing-box 1.13.14`），
+                // 不要再加「内核」前缀——真机上会读成「内核 sing-box 1.13.14」。
+                Text(state.coreVersion)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .help("内置 sing-box 版本")
+            }
+        }
+    }
+
+    private var runtimeBox: some View {
+        MetricBox(symbol: "clock.arrow.2.circlepath", tint: .teal, caption: "运行时长") {
+            RuntimeDurationLabel()
+        }
+    }
+
+    private var activeConfigBox: some View {
+        MetricBox(symbol: "doc.badge.gearshape", tint: .indigo, caption: "当前配置") {
+            Text(activeConfig?.name ?? "无")
+        } corner: {
+            if let config = activeConfig {
+                Text("\(config.nodeCount) 个节点")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// 空山自身的占用。与「内核内存」是两回事（那是 sing-box），标签已写明。
+    /// 数据来自每分钟一次的运行指标，不额外采样。
+    private var selfUsageBox: some View {
+        MetricBox(symbol: "cpu", tint: .brown, caption: "空山占用") {
+            if let metrics = state.lastMetrics {
+                Text(String(format: "%.1f%%", metrics.cpu))
+            } else {
+                Text("—")
+            }
+        } corner: {
+            if let metrics = state.lastMetrics {
+                Text("\(metrics.rss) MB")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .help("内存占用，每分钟更新一次")
+            }
+        }
+    }
+
+    private var activeConfig: AppState.ConfigItem? {
+        state.configItems.first { $0.id == state.activeConfigID }
+    }
+
+    /// 只取 6 的因数，任何宽度下最后一行都排满。
+    private func updateMetricColumns(_ width: CGFloat) {
+        let candidates: [Int] = [6, 3, 2]
+        var next = 1
+        for count in candidates {
+            let needed: CGFloat = CGFloat(count) * 170 + CGFloat(count - 1) * 12
+            if needed <= width {
+                next = count
+                break
+            }
+        }
+        if next != metricColumns { metricColumns = next }
     }
 
     private var outboundModeBinding: Binding<OutboundMode> {
@@ -369,7 +442,7 @@ struct DashboardView: View {
                             endPoint: .bottom
                         )
                     )
-                    .interpolationMethod(.monotone)
+                    .interpolationMethod(.linear)
 
                     AreaMark(
                         x: .value("时间", point.timestamp),
@@ -383,7 +456,7 @@ struct DashboardView: View {
                             endPoint: .bottom
                         )
                     )
-                    .interpolationMethod(.monotone)
+                    .interpolationMethod(.linear)
 
                     LineMark(
                         x: .value("时间", point.timestamp),
@@ -392,7 +465,7 @@ struct DashboardView: View {
                     )
                     .foregroundStyle(.green)
                     .lineStyle(StrokeStyle(lineWidth: 1.6))
-                    .interpolationMethod(.monotone)
+                    .interpolationMethod(.linear)
 
                     LineMark(
                         x: .value("时间", point.timestamp),
@@ -401,7 +474,7 @@ struct DashboardView: View {
                     )
                     .foregroundStyle(.blue)
                     .lineStyle(StrokeStyle(lineWidth: 1.6))
-                    .interpolationMethod(.monotone)
+                    .interpolationMethod(.linear)
                 }
             }
             .chartLegend(.hidden)
@@ -463,6 +536,37 @@ struct DashboardView: View {
     }
 }
 
+/// 运行时长。
+///
+/// **不用 `Text(_:style:.timer)`**：那是每秒自更新的，而它嵌在指标网格里，
+/// 每次刷新都会把整个 `GroupBox` 网格重新布局一遍。真机 2026-09-03 采样显示主线程
+/// 持续耗在 `NSHostingView.layout` 与 `GraphHost.flushTransactions` 上，仪表盘开着时
+/// 4~10% CPU，而同期数据刷新只有每分钟 15 次——不是数据驱动，是这类每秒失效。
+/// 运行时长看到分钟就够，改为 `TimelineView(.everyMinute)`，刷新降到 1/60。
+private struct RuntimeDurationLabel: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        if state.isOn, let startedAt = state.runtimeStartedAt {
+            TimelineView(.everyMinute) { context in
+                Text(Self.text(since: startedAt, now: context.date))
+            }
+        } else {
+            Text("—")
+        }
+    }
+
+    static func text(since start: Date, now: Date) -> String {
+        let seconds = Int(max(now.timeIntervalSince(start), 0))
+        if seconds < 60 { return "刚启动" }
+        let minutes = seconds / 60
+        if minutes < 60 { return "\(minutes) 分钟" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours) 小时 \(minutes % 60) 分" }
+        return "\(hours / 24) 天 \(hours % 24) 小时"
+    }
+}
+
 /// 指标块：`GroupBox` 承载，左上角系统符号 + 说明，下方大号数值。
 /// 图标是普通符号而不是渐变贴纸——系统设置里的分区图标也只是单色符号。
 private struct MetricBox<Value: View, Corner: View>: View {
@@ -490,10 +594,11 @@ private struct MetricBox<Value: View, Corner: View>: View {
 
                 Spacer(minLength: 12)
 
+                // 同上：活跃连接与内核内存每秒都在变，minimumScaleFactor 会让每次变化
+                // 都触发一次字号二分搜索。改为超长直接中间截断。
                 value
                     .font(.title2.weight(.semibold).monospacedDigit())
                     .lineLimit(1)
-                    .minimumScaleFactor(0.6)
                     .truncationMode(.middle)
                     .accessibilityLabel(Text(caption))
             }

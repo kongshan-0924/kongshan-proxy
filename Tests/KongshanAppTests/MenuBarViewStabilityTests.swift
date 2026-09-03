@@ -159,16 +159,23 @@ final class MenuBarViewStabilityTests: XCTestCase {
         XCTAssertTrue(controller.isPopoverShown)
     }
 
-    /// 源码守卫：高频数值视图不得挂动画修饰符。`.smooth` 弹簧在下一次采样到来时仍未收敛，
-    /// SwiftUI 会按屏幕刷新率持续插值字形；这两个文件里的数值全部每 1~2 秒变化。
+    /// 源码守卫：高频数值视图不得挂**按帧或按秒**的重绘驱动。`.smooth` 弹簧在下一次采样
+    /// 到来时仍未收敛，SwiftUI 会按屏幕刷新率持续插值字形；这两个文件里的数值全部每 1~2 秒变化。
     /// 低频动画（如 MainWindowView 的通知条）不受此限制。
-    func testHighFrequencyValueViewsCarryNoAnimationModifiers() throws {
+    ///
+    /// 判据从"禁止 TimelineView"收窄到"禁止它的高频档位"（2026-09-03）：
+    /// 本意一直是挡住高频重绘，而 `TimelineView(.everyMinute)` 每分钟才走一次，
+    /// 正是用来**替掉**每秒刷新的 `Text(_:style:.timer)` 的——按名字一刀切会把
+    /// 降频的改动也挡在外面。`.animation` / `.periodic` 两档仍然禁止。
+    func testHighFrequencyValueViewsCarryNoPerFrameRedrawDrivers() throws {
         let root = projectRoot()
         for file in ["Sources/kongshan/DashboardView.swift", "Sources/kongshan/MenuBarPopoverView.swift"] {
             let source = try String(contentsOf: root.appending(path: file), encoding: .utf8)
             XCTAssertFalse(source.contains(".animation("), "\(file) 不得使用 .animation(")
             XCTAssertFalse(source.contains(".contentTransition("), "\(file) 不得使用 .contentTransition(")
-            XCTAssertFalse(source.contains("TimelineView"), "\(file) 不得使用 TimelineView")
+            XCTAssertFalse(source.contains("TimelineView(.animation"), "\(file) 不得按帧重绘")
+            XCTAssertFalse(source.contains("TimelineView(.periodic"), "\(file) 不得用自定义周期，只允许 .everyMinute")
+            XCTAssertFalse(source.contains("style: .timer"), "\(file) 不得用每秒自更新的计时文本")
         }
     }
 

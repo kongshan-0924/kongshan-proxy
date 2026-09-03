@@ -106,7 +106,11 @@ struct PolicyGroupsView: View {
                 groupRow(group).tag(group.name)
             }
         }
-        .listStyle(.sidebar)
+        // **不用 `.sidebar`**：那个样式会画侧栏的半透明材质，而这里已经嵌在 detail 里，
+        // 于是整列渲染成一块灰底，跟右侧白色列表撞得很难看（用户 2026-09-03 的反馈）。
+        // 窗口左侧那个才是真正的侧栏；这里是第二层列表，用 `.inset` 与右列同形，
+        // 靠中间的 Divider 分隔——邮件的「邮箱 / 邮件列表」两列就是这个关系。
+        .listStyle(.inset)
         // 弹性列宽：窗口拖宽时让位给右侧成员列表，拖窄时收缩但不低于 190。
         .frame(minWidth: 190, idealWidth: 220, maxWidth: 260)
     }

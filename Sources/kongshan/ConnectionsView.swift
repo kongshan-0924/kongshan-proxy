@@ -11,6 +11,11 @@ struct ConnectionsView: View {
     @Environment(AppState.self) private var state
     @State private var searchText = ""
     @State private var sortOrder = [KeyPathComparator(\ConnectionLiveDetail.totalRate, order: .reverse)]
+    /// 列的显示与顺序由用户定，跨会话记住。两个「累计」列默认隐藏——
+    /// 默认全开的话 7 列在 760pt 最小窗口下放不下，只能横向翻（用户 2026-09-03 的反馈）。
+    /// 需要看累计量时右键表头勾出来即可。
+    @AppStorage("connections.columns") private var columnCustomizationData = ""
+    @State private var columnCustomization = TableColumnCustomization<ConnectionLiveDetail>()
     @State private var selection: Set<ConnectionLiveDetail.ID> = []
     @State private var inspectedConnection: ConnectionLiveDetail?
     @State private var confirmsCloseAll = false
@@ -63,11 +68,29 @@ struct ConnectionsView: View {
             } message: {
                 Text("进行中的下载和长连接会立即断开，应用通常会自行重连。")
             }
-            .onAppear { state.startConnectionsMonitoring() }
+            .onAppear {
+                state.startConnectionsMonitoring()
+                restoreColumnCustomization()
+            }
+            .onChange(of: columnCustomization) { _, new in
+                // 跨会话记住用户调过的列宽与显隐；编码失败就保持上一次，不影响使用。
+                if let data = try? JSONEncoder().encode(new) {
+                    columnCustomizationData = String(decoding: data, as: UTF8.self)
+                }
+            }
             .onDisappear { state.stopConnectionsMonitoring() }
             .sheet(item: $inspectedConnection) { connection in
                 ConnectionRouteDetail(connection: connection, nodeNames: nodeNames)
             }
+    }
+
+    private func restoreColumnCustomization() {
+        guard !columnCustomizationData.isEmpty,
+              let stored = try? JSONDecoder().decode(
+                  TableColumnCustomization<ConnectionLiveDetail>.self,
+                  from: Data(columnCustomizationData.utf8)
+              ) else { return }
+        columnCustomization = stored
     }
 
     /// 条数与总速率放副标题——活动监视器就是把统计放在这里，而不是另画一行工具条。
@@ -96,7 +119,7 @@ struct ConnectionsView: View {
     }
 
     private func table(_ list: [ConnectionLiveDetail], nodeNames: [String: String]) -> some View {
-        Table(list, selection: $selection, sortOrder: $sortOrder) {
+        Table(list, selection: $selection, sortOrder: $sortOrder, columnCustomization: $columnCustomization) {
             TableColumn("目标", value: \.host) { conn in
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(spacing: 6) {
@@ -116,40 +139,53 @@ struct ConnectionsView: View {
                     }
                 }
             }
-            .width(min: 200, ideal: 300)
+            .width(min: 140, ideal: 220)
+            .customizationID("host")
+            // 主列不许隐藏：隐掉就不知道每行是谁了。
+            .disabledCustomizationBehavior(.visibility)
 
             TableColumn("规则 · 链路", value: \.rule) { conn in
-                Text(chainText(conn, nodeNames: nodeNames))
+                let text = chainText(conn, nodeNames: nodeNames)
+                Text(text)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    // 列窄时必然截断，完整链路交给悬停提示与右键的「查看完整命中链路」。
+                    .help(text)
             }
-            .width(min: 160, ideal: 240)
+            .width(min: 110, ideal: 180)
+            .customizationID("rule")
 
             TableColumn("↑ 速率", value: \.uploadRate) { conn in
                 rateCell(conn.uploadRate, active: conn.totalRate > 0)
             }
-            .width(min: 76, ideal: 88)
+            .width(min: 64, ideal: 76)
+            .customizationID("uploadRate")
 
             TableColumn("↓ 速率", value: \.downloadRate) { conn in
                 rateCell(conn.downloadRate, active: conn.totalRate > 0)
             }
-            .width(min: 76, ideal: 88)
+            .width(min: 64, ideal: 76)
+            .customizationID("downloadRate")
 
             TableColumn("↑ 累计", value: \.upload) { conn in
                 Text(Theme.bytesOrDash(conn.upload))
                     .font(.callout.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
-            .width(min: 72, ideal: 84)
+            .width(min: 64, ideal: 76)
+            .customizationID("upload")
+            .defaultVisibility(.hidden)
 
             TableColumn("↓ 累计", value: \.download) { conn in
                 Text(Theme.bytesOrDash(conn.download))
                     .font(.callout.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
-            .width(min: 72, ideal: 84)
+            .width(min: 64, ideal: 76)
+            .customizationID("download")
+            .defaultVisibility(.hidden)
 
             TableColumn("") { conn in
                 Button {
@@ -162,6 +198,8 @@ struct ConnectionsView: View {
                 .accessibilityLabel("关闭 \(conn.host)")
             }
             .width(28)
+            .customizationID("close")
+            .disabledCustomizationBehavior(.all)
         }
         .tableStyle(.inset(alternatesRowBackgrounds: true))
         .contextMenu(forSelectionType: ConnectionLiveDetail.ID.self) { ids in
