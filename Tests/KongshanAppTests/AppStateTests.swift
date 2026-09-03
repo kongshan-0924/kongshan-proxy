@@ -2886,14 +2886,32 @@ private final class FakeLocalTCPRelay: LocalTCPRelaying, @unchecked Sendable {
     }
 
     var currentTarget: UInt16? { lock.withLock { target } }
-    /// 最近一次启动时是否要求共享给局域网。回归用。
-    private(set) var lastSharesOnLAN = false
+    /// 回归用：局域网入口是否在跑，以及生效的来源策略。
+    private(set) var lanSharingActive = false
+    private(set) var lanPolicy = LANPeerPolicy()
+    private var clients: [LANClientStats] = []
 
-    func start(preferredPort: UInt16?, sharesOnLAN: Bool) async throws -> UInt16 {
+    func start(preferredPort: UInt16?) async throws -> UInt16 {
         preferredRecorder?.record(preferredPort)
-        lock.withLock { lastSharesOnLAN = sharesOnLAN }
         return port
     }
+
+    func startLANSharing(preferredPort: UInt16?, policy: LANPeerPolicy) async throws -> UInt16 {
+        lock.withLock {
+            lanSharingActive = true
+            lanPolicy = policy
+        }
+        return preferredPort ?? 7890
+    }
+
+    func stopLANSharing() {
+        lock.withLock { lanSharingActive = false }
+    }
+
+    func lanClients() -> [LANClientStats] { lock.withLock { clients } }
+
+    /// 回归用：注入一批客户端用量。
+    func setClients(_ value: [LANClientStats]) { lock.withLock { clients = value } }
 
     func setTarget(port: UInt16?) {
         lock.withLock { target = port }

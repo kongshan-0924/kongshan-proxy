@@ -17,15 +17,14 @@ public enum LocalTCPRelayError: Error, LocalizedError {
 }
 
 public protocol LocalTCPRelaying: AnyObject, Sendable {
-    func start(preferredPort: UInt16?, sharesOnLAN: Bool) async throws -> UInt16
+    func start(preferredPort: UInt16?) async throws -> UInt16
     func setTarget(port: UInt16?)
+    /// 另起一个监听全部接口的入口，供局域网设备使用。返回实际绑定的端口。
+    func startLANSharing(preferredPort: UInt16?, policy: LANPeerPolicy) async throws -> UInt16
+    func stopLANSharing()
+    /// 局域网客户端的累计用量。断开的客户端仍保留，直到共享关闭。
+    func lanClients() -> [LANClientStats]
     func stop()
-}
-
-public extension LocalTCPRelaying {
-    func start(preferredPort: UInt16?) async throws -> UInt16 {
-        try await start(preferredPort: preferredPort, sharesOnLAN: false)
-    }
 }
 
 /// App 持有的稳定 TCP 入口。它只转发原始字节，不解析 HTTP CONNECT 或 SOCKS。
@@ -40,8 +39,27 @@ public final class LocalTCPRelay: LocalTCPRelaying, @unchecked Sendable {
     private var listener: NWListener?
     private var boundPort: UInt16?
     private var targetPort: UInt16?
-    private var sharesOnLAN = false
     private var pairs: [UUID: RelayPair] = [:]
+
+    /// 局域网入口是**独立的监听与端口**，不是把本机入口改绑到 0.0.0.0。
+    /// 这样开关共享完全不碰系统代理走的那条 loopback 监听——上一版同端口重绑的做法
+    /// 每次切换都会掐断所有正在走代理的连接。
+    private var lanListener: NWListener?
+    private var lanPort: UInt16?
+    private var lanPolicy = LANPeerPolicy()
+    private var lanStats: [String: MutableClientStats] = [:]
+
+    /// 客户端条目上限。断开后仍保留是为了让用户看到"刚才谁用过"，
+    /// 但不能无上限——超出时淘汰最久未活动的。
+    private static let maxTrackedClients = 200
+
+    private struct MutableClientStats {
+        var activeConnections = 0
+        var upload: Int64 = 0
+        var download: Int64 = 0
+        var firstSeenAt: Date
+        var lastActiveAt: Date
+    }
 
     public init() {}
 
@@ -49,28 +67,20 @@ public final class LocalTCPRelay: LocalTCPRelaying, @unchecked Sendable {
         stop()
     }
 
-    public func start(preferredPort: UInt16?, sharesOnLAN: Bool) async throws -> UInt16 {
+    public func start(preferredPort: UInt16?) async throws -> UInt16 {
         if let existing = lock.withLock({ boundPort }) { return existing }
 
         let port = try await RuntimeSecrets.stableHighPort(preferred: preferredPort)
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
             throw LocalTCPRelayError.invalidPort(port)
         }
-        lock.withLock { self.sharesOnLAN = sharesOnLAN }
 
         let parameters = NWParameters.tcp
-        let candidate: NWListener
-        if sharesOnLAN {
-            // 不设 requiredLocalEndpoint 就是监听全部接口；系统代理指向的
-            // 127.0.0.1:port 仍然可达，无需另开一个监听。
-            candidate = try NWListener(using: parameters, on: nwPort)
-        } else {
-            parameters.requiredLocalEndpoint = .hostPort(
-                host: NWEndpoint.Host(HelperConstants.loopbackAddress),
-                port: nwPort
-            )
-            candidate = try NWListener(using: parameters)
-        }
+        parameters.requiredLocalEndpoint = .hostPort(
+            host: NWEndpoint.Host(HelperConstants.loopbackAddress),
+            port: nwPort
+        )
+        let candidate = try NWListener(using: parameters)
 
         return try await withCheckedThrowingContinuation { continuation in
             let gate = StartGate(continuation: continuation)
@@ -96,10 +106,83 @@ public final class LocalTCPRelay: LocalTCPRelaying, @unchecked Sendable {
                 }
             }
             candidate.newConnectionHandler = { [weak self] connection in
-                self?.accept(connection)
+                self?.accept(connection, fromLAN: false)
             }
             candidate.start(queue: queue)
         }
+    }
+
+    public func startLANSharing(preferredPort: UInt16?, policy: LANPeerPolicy) async throws -> UInt16 {
+        if let existing = lock.withLock({ lanPort }) { return existing }
+
+        let port = try await RuntimeSecrets.stableHighPort(preferred: preferredPort)
+        guard let nwPort = NWEndpoint.Port(rawValue: port) else {
+            throw LocalTCPRelayError.invalidPort(port)
+        }
+        lock.withLock { self.lanPolicy = policy }
+
+        // 不设 requiredLocalEndpoint 即监听全部接口。来源限制在 accept 里做，
+        // 而不是靠绑定地址——绑定粒度到不了"只允许某几个网段"。
+        let candidate = try NWListener(using: .tcp, on: nwPort)
+
+        return try await withCheckedThrowingContinuation { continuation in
+            let gate = StartGate(continuation: continuation)
+            candidate.stateUpdateHandler = { [weak self, weak candidate] state in
+                guard let self, let candidate else {
+                    gate.fail(LocalTCPRelayError.listenerCancelled)
+                    return
+                }
+                switch state {
+                case .ready:
+                    self.lock.withLock {
+                        self.lanListener = candidate
+                        self.lanPort = port
+                    }
+                    gate.succeed(port)
+                case let .failed(error):
+                    candidate.cancel()
+                    gate.fail(LocalTCPRelayError.listenerFailed(error.localizedDescription))
+                case .cancelled:
+                    gate.fail(LocalTCPRelayError.listenerCancelled)
+                default:
+                    break
+                }
+            }
+            candidate.newConnectionHandler = { [weak self] connection in
+                self?.accept(connection, fromLAN: true)
+            }
+            candidate.start(queue: queue)
+        }
+    }
+
+    public func stopLANSharing() {
+        let snapshot: (NWListener?, [RelayPair]) = lock.withLock {
+            let listener = lanListener
+            let lanPairs = pairs.values.filter(\.isFromLAN)
+            lanListener = nil
+            lanPort = nil
+            lanStats.removeAll()
+            return (listener, Array(lanPairs))
+        }
+        snapshot.0?.cancel()
+        // 只掐局域网来的连接，本机走系统代理的那些不受影响。
+        snapshot.1.forEach { $0.cancel() }
+    }
+
+    public func lanClients() -> [LANClientStats] {
+        lock.withLock {
+            lanStats.map { address, value in
+                LANClientStats(
+                    address: address,
+                    activeConnections: value.activeConnections,
+                    upload: value.upload,
+                    download: value.download,
+                    firstSeenAt: value.firstSeenAt,
+                    lastActiveAt: value.lastActiveAt
+                )
+            }
+        }
+        .sorted { $0.total > $1.total }
     }
 
     public func setTarget(port: UInt16?) {
@@ -114,36 +197,64 @@ public final class LocalTCPRelay: LocalTCPRelaying, @unchecked Sendable {
     }
 
     public func stop() {
-        let snapshot: (NWListener?, [RelayPair]) = lock.withLock {
-            let result = (listener, Array(pairs.values))
+        let snapshot: ([NWListener], [RelayPair]) = lock.withLock {
+            let listeners = [listener, lanListener].compactMap { $0 }
+            let result = (listeners, Array(pairs.values))
             listener = nil
+            lanListener = nil
             boundPort = nil
+            lanPort = nil
             targetPort = nil
-            sharesOnLAN = false
+            lanStats.removeAll()
             pairs.removeAll(keepingCapacity: false)
             return result
         }
-        snapshot.0?.cancel()
+        snapshot.0.forEach { $0.cancel() }
         snapshot.1.forEach { $0.cancel() }
     }
 
-    private func accept(_ client: NWConnection) {
+    private func accept(_ client: NWConnection, fromLAN: Bool) {
         let pair: RelayPair? = lock.withLock {
             guard let targetPort,
                   let nwPort = NWEndpoint.Port(rawValue: targetPort) else { return nil }
-            // 开着共享时只接受私网来源。绑 0.0.0.0 意味着这个端口跟着**每一张**网卡走——
-            // 机器要是拿到公网 IP（直连光猫、某些云主机/热点），就等于把开放代理挂到了互联网上。
-            // 谁都能拿它当跳板，而流量记在你的出口节点上。
-            guard !sharesOnLAN || Self.isPrivatePeer(client.endpoint) else { return nil }
+            // 局域网入口的来源限制。基线是"必须私网"，白名单在此之上再收紧。
+            var peer: String?
+            if fromLAN {
+                guard lanPolicy.allows(client.endpoint) else { return nil }
+                peer = LANPeerPolicy.ipv4Text(of: client.endpoint) ?? Self.hostText(client.endpoint)
+            }
             let id = UUID()
             let backend = NWConnection(
                 host: NWEndpoint.Host(HelperConstants.loopbackAddress),
                 port: nwPort,
                 using: .tcp
             )
-            let pair = RelayPair(id: id, client: client, backend: backend, queue: queue) { [weak self] id in
-                self?.lock.withLock { self?.pairs[id] = nil }
+            var byteRecorder: (@Sendable (String, Int, Bool) -> Void)?
+            if peer != nil {
+                byteRecorder = { [weak self] address, count, isUpload in
+                    self?.recordBytes(address: address, count: count, isUpload: isUpload)
+                }
             }
+            let closeHandler: @Sendable (UUID, String?) -> Void = { [weak self] id, address in
+                guard let self else { return }
+                self.lock.withLock {
+                    self.pairs[id] = nil
+                    if let address, var entry = self.lanStats[address] {
+                        entry.activeConnections = max(entry.activeConnections - 1, 0)
+                        self.lanStats[address] = entry
+                    }
+                }
+            }
+            let pair = RelayPair(
+                id: id,
+                client: client,
+                backend: backend,
+                queue: queue,
+                peer: peer,
+                onBytes: byteRecorder,
+                onClose: closeHandler
+            )
+            if let peer { openClient(peer) }
             pairs[id] = pair
             return pair
         }
@@ -152,6 +263,41 @@ public final class LocalTCPRelay: LocalTCPRelaying, @unchecked Sendable {
             return
         }
         pair.start()
+    }
+
+    /// 调用方已持锁。
+    private func openClient(_ address: String) {
+        let now = Date()
+        if var existing = lanStats[address] {
+            existing.activeConnections += 1
+            existing.lastActiveAt = now
+            lanStats[address] = existing
+        } else {
+            if lanStats.count >= Self.maxTrackedClients,
+               let oldest = lanStats.filter({ $0.value.activeConnections == 0 })
+                   .min(by: { $0.value.lastActiveAt < $1.value.lastActiveAt })?.key {
+                lanStats[oldest] = nil
+            }
+            lanStats[address] = MutableClientStats(
+                activeConnections: 1,
+                firstSeenAt: now,
+                lastActiveAt: now
+            )
+        }
+    }
+
+    private func recordBytes(address: String, count: Int, isUpload: Bool) {
+        lock.withLock {
+            guard var entry = lanStats[address] else { return }
+            if isUpload { entry.upload += Int64(count) } else { entry.download += Int64(count) }
+            entry.lastActiveAt = Date()
+            lanStats[address] = entry
+        }
+    }
+
+    static func hostText(_ endpoint: NWEndpoint) -> String? {
+        guard case let .hostPort(host, _) = endpoint else { return nil }
+        return "\(host)"
     }
 }
 
@@ -219,22 +365,32 @@ private final class RelayPair: @unchecked Sendable {
     private let client: NWConnection
     private let backend: NWConnection
     private let queue: DispatchQueue
-    private let onClose: @Sendable (UUID) -> Void
+    /// 局域网客户端的地址。本机来的连接为 nil，不计量——那是系统代理自己的流量，
+    /// 记进「局域网客户端」只会把用户看糊涂。
+    let peer: String?
+    private let onBytes: (@Sendable (String, Int, Bool) -> Void)?
+    private let onClose: @Sendable (UUID, String?) -> Void
     private let lock = NSLock()
     private var closed = false
     private var completedDirections = 0
+
+    var isFromLAN: Bool { peer != nil }
 
     init(
         id: UUID,
         client: NWConnection,
         backend: NWConnection,
         queue: DispatchQueue,
-        onClose: @escaping @Sendable (UUID) -> Void
+        peer: String? = nil,
+        onBytes: (@Sendable (String, Int, Bool) -> Void)? = nil,
+        onClose: @escaping @Sendable (UUID, String?) -> Void
     ) {
         self.id = id
         self.client = client
         self.backend = backend
         self.queue = queue
+        self.peer = peer
+        self.onBytes = onBytes
         self.onClose = onClose
     }
 
@@ -256,7 +412,7 @@ private final class RelayPair: @unchecked Sendable {
         guard shouldClose else { return }
         client.cancel()
         backend.cancel()
-        onClose(id)
+        onClose(id, peer)
     }
 
     private func handle(_ state: NWConnection.State) {
@@ -264,6 +420,8 @@ private final class RelayPair: @unchecked Sendable {
     }
 
     private func pump(from source: NWConnection, to destination: NWConnection) {
+        // 方向由源端决定：客户端读到的是"客户端上传"，后端读到的是"下载给客户端"。
+        let isUpload = source === client
         source.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, complete, error in
             guard let self, !self.lock.withLock({ self.closed }) else { return }
             if error != nil {
@@ -272,6 +430,9 @@ private final class RelayPair: @unchecked Sendable {
             }
 
             if let data, !data.isEmpty {
+                if let peer = self.peer, let onBytes = self.onBytes {
+                    onBytes(peer, data.count, isUpload)
+                }
                 destination.send(
                     content: data,
                     contentContext: .defaultStream,

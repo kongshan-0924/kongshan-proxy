@@ -18,6 +18,7 @@ struct MainWindowView: View {
                     sidebarRow(.routing)
                 }
                 Section("其他") {
+                    sidebarRow(.sharing)
                     sidebarRow(.connections)
                     sidebarRow(.logs)
                     sidebarRow(.messages)
@@ -39,6 +40,8 @@ struct MainWindowView: View {
                     PolicyGroupsView()
                 case .routing:
                     RoutingView()
+                case .sharing:
+                    SharingView()
                 case .connections:
                     ConnectionsView()
                 case .logs:
@@ -242,6 +245,7 @@ private enum SidebarPage: String, CaseIterable, Identifiable {
     case nodes
     case policyGroups
     case routing
+    case sharing
     case connections
     case logs
     case messages
@@ -255,6 +259,7 @@ private enum SidebarPage: String, CaseIterable, Identifiable {
         case .nodes: "配置"
         case .policyGroups: "代理"
         case .routing: "规则"
+        case .sharing: "共享"
         case .connections: "连接"
         case .logs: "内核日志"
         case .messages: "消息"
@@ -268,6 +273,7 @@ private enum SidebarPage: String, CaseIterable, Identifiable {
         case .nodes: "square.stack.3d.up"
         case .policyGroups: "slider.horizontal.2.square.badge.arrow.down"
         case .routing: "arrow.triangle.branch"
+        case .sharing: "wifi.router"
         case .connections: "point.3.filled.connected.trianglepath.dotted"
         case .logs: "text.alignleft"
         case .messages: "bell.badge"
@@ -1285,13 +1291,6 @@ private struct SettingsView: View {
         Binding(
             get: { state.menuBarIconStyle },
             set: { style in Task { await state.setMenuBarIconStyle(style) } }
-        )
-    }
-
-    private var lanSharingBinding: Binding<Bool> {
-        Binding(
-            get: { state.lanSharingEnabled },
-            set: { enabled in Task { await state.setLANSharing(enabled: enabled) } }
         )
     }
 

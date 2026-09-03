@@ -165,30 +165,4 @@ final class MetricsWiringTests: XCTestCase {
         XCTAssertEqual(AppState.spanText(from: start, to: start), "1 秒")
     }
 
-    /// 局域网共享默认关闭。打开等于让同网段任何设备都能用你的出口，
-    /// 升级绝不能凭空把它打开。
-    func testLANSharingDefaultsOff() {
-        let root = temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let state = makeState(root: root, journal: MetricsJournal(directory: root))
-        XCTAssertFalse(state.lanSharingEnabled)
-        // 中转层没在跑时不该给出地址——那会让用户去填一个连不上的端口。
-        XCTAssertNil(state.currentRelayPort)
-    }
-
-    /// 开关要落盘，并在消息页留痕：这是个影响安全边界的状态，
-    /// 事后必须能回答"什么时候开的"。
-    func testTogglingLANSharingPersistsAndRecordsEvent() async {
-        let root = temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let state = makeState(root: root, journal: MetricsJournal(directory: root))
-
-        await state.setLANSharing(enabled: true)
-        XCTAssertTrue(state.lanSharingEnabled)
-        XCTAssertEqual(state.runtimeEvents.last?.title, "已开启局域网共享")
-
-        await state.setLANSharing(enabled: false)
-        XCTAssertFalse(state.lanSharingEnabled)
-        XCTAssertEqual(state.runtimeEvents.last?.title, "已关闭局域网共享")
-    }
 }

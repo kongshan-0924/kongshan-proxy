@@ -72,6 +72,14 @@ final class RenderSnapshotTests: XCTestCase {
             name: "bypass-lists",
             size: CGSize(width: 520, height: 640)
         )
+        state.lanSharing = LANSharingSettings(enabled: true, port: 7890, allowedCIDRs: ["192.168.1.0/24"])
+        state.lanSharingBoundPort = 7890
+        render(
+            SharingView().environment(state),
+            name: "sharing",
+            size: CGSize(width: 820, height: 720)
+        )
+
         render(
             LogsView().environment(state),
             name: "logs",
@@ -173,6 +181,7 @@ final class RenderSnapshotTests: XCTestCase {
             .appending(path: "kongshan-snapshot-\(UUID().uuidString)")
         let state = AppState(
             storage: Storage(rootDirectory: root),
+            proxyRelay: SnapshotRelay(),
             automaticallyInitialize: false
         )
         let source = SubscriptionSource(
@@ -283,5 +292,30 @@ final class RenderSnapshotTests: XCTestCase {
         let url = outputDirectory.appending(path: "\(name).png")
         try? png.write(to: url)
         print("SNAPSHOT \(url.path)")
+    }
+}
+
+
+/// 渲染快照用的中转层：只回一批固定的局域网客户端，让共享页能画出真实的行。
+private final class SnapshotRelay: LocalTCPRelaying, @unchecked Sendable {
+    func start(preferredPort: UInt16?) async throws -> UInt16 { preferredPort ?? 36815 }
+    func setTarget(port: UInt16?) {}
+    func startLANSharing(preferredPort: UInt16?, policy: LANPeerPolicy) async throws -> UInt16 {
+        preferredPort ?? 7890
+    }
+    func stopLANSharing() {}
+    func stop() {}
+
+    func lanClients() -> [LANClientStats] {
+        let now = Date()
+        return [
+            LANClientStats(address: "192.168.1.23", activeConnections: 4,
+                           upload: 12_400_000, download: 143_000_000,
+                           firstSeenAt: now.addingTimeInterval(-3_600), lastActiveAt: now),
+            LANClientStats(address: "192.168.1.41", activeConnections: 0,
+                           upload: 900_000, download: 3_100_000,
+                           firstSeenAt: now.addingTimeInterval(-7_200),
+                           lastActiveAt: now.addingTimeInterval(-600))
+        ]
     }
 }

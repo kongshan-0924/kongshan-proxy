@@ -160,8 +160,6 @@ final class AppState {
     /// 开机自启后自动恢复上次接管。默认关闭：它会在无人看屏幕时改动系统网络设置，
     /// 必须是用户显式打开的。
     var autoRestoreOnLaunch = false
-    /// 是否把代理入口共享给局域网。默认关闭。
-    private(set) var lanSharingEnabled = false
     @ObservationIgnored private var lastActiveModes: [ProxyMode] = []
     private(set) var uploadRate: Int64 = 0
     private(set) var downloadRate: Int64 = 0
@@ -773,7 +771,7 @@ final class AppState {
             appendWarnings(prepared.warnings)
             let needsRelay = usesSystemProxy || !routingSettings.sshProxyTargets.isEmpty
             let relayPort = needsRelay
-                ? try await proxyRelay.start(preferredPort: preferredRelayPort, sharesOnLAN: lanSharingEnabled)
+                ? try await proxyRelay.start(preferredPort: preferredRelayPort)
                 : nil
             if preferredRelayPort != relayPort, let relayPort {
                 if let previous = preferredRelayPort {
@@ -830,6 +828,7 @@ final class AppState {
             if needsRelay {
                 guard let relayPort else { throw AppStateError.missingRuntimeState }
                 proxyRelay.setTarget(port: runtime.mixedPort)
+                await startLANSharingIfNeeded()
                 try await sshProxyConfigManager.apply(
                     targets: routingSettings.sshProxyTargets,
                     relayPort: relayPort
@@ -1068,7 +1067,10 @@ final class AppState {
         if !activeModes.isEmpty || runtime != nil {
             await stop(reason: "应用退出")
             await flushRuntimeEventsIfNeeded()
-            if status == .off { proxyRelay.stop() }
+            if status == .off {
+                proxyRelay.stop()
+                lanSharingBoundPort = nil
+            }
             return status == .off
         } else {
             do {
@@ -2111,7 +2113,7 @@ final class AppState {
             let needsRelay = activeModes.contains(.systemProxy) || !settings.sshProxyTargets.isEmpty
             let previouslyNeededRelay = activeModes.contains(.systemProxy) || !oldSettings.sshProxyTargets.isEmpty
             let relayPort = needsRelay
-                ? try await proxyRelay.start(preferredPort: preferredRelayPort, sharesOnLAN: lanSharingEnabled)
+                ? try await proxyRelay.start(preferredPort: preferredRelayPort)
                 : nil
             if preferredRelayPort != relayPort, let relayPort {
                 preferredRelayPort = relayPort
@@ -3020,7 +3022,7 @@ final class AppState {
             preferredRelayPort = settings.proxyRelayPort
             menuBarIconStyle = settings.menuBarIconStyle ?? .peak
             autoRestoreOnLaunch = settings.autoRestoreOnLaunch ?? false
-            lanSharingEnabled = settings.lanSharingEnabled ?? false
+            lanSharing = settings.lanSharing ?? .defaults
             lastActiveModes = settings.lastActiveModes ?? []
             if let deadline = settings.diagnosticModeEndsAt, deadline > now() {
                 diagnosticModeEndsAt = deadline
@@ -3201,7 +3203,7 @@ final class AppState {
                 proxyRelayPort: preferredRelayPort,
                 diagnosticModeEndsAt: diagnosticModeEndsAt,
                 autoRestoreOnLaunch: autoRestoreOnLaunch,
-                lanSharingEnabled: lanSharingEnabled,
+                lanSharing: lanSharing,
                 lastActiveModes: lastActiveModes
             )),
             to: settingsURL
@@ -4662,40 +4664,104 @@ final class AppState {
         recordRuntimeEvent(level: .warning, title: title, detail: detail)
     }
 
-    /// 切换局域网共享。
-    ///
-    /// 监听地址是建立监听时定死的，改它必须重建监听——**因此会掐断当前经由本机代理的连接**。
-    /// 这是个显式的低频操作，用户按下开关时接受这个代价；不改的话开关就是假的。
-    /// 代理没开时只存意图，下次启动生效。
-    func setLANSharing(enabled: Bool) async {
-        guard lanSharingEnabled != enabled else { return }
-        lanSharingEnabled = enabled
-        try? await persistSettings()
-        recordRuntimeEvent(
-            title: enabled ? "已开启局域网共享" : "已关闭局域网共享",
-            detail: enabled
-                ? "监听 \(lanProxyAddresses.first ?? "本机地址"):\(preferredRelayPort.map(String.init) ?? "—")，仅接受私网来源"
-                : "代理入口恢复为仅本机可用"
-        )
-        // 只有正在跑且用得上中转层时才需要重建；否则下次 start 自然带上新意图。
-        let needsRelay = activeModes.contains(.systemProxy)
-            || !routingSettings.sshProxyTargets.isEmpty
-        guard status == .on, needsRelay else { return }
-        proxyRelay.stop()
+    /// 局域网共享的当前设置。
+    /// internal setter：渲染快照要能摆出"已开启且有客户端"的样子。
+    var lanSharing = LANSharingSettings.defaults
+    /// 实际绑定的局域网端口。与设置里的期望端口可能不同（被占用时会另选）。
+    var lanSharingBoundPort: UInt16?
+    /// 局域网客户端的实时用量，共享页可见时每秒刷新。
+    var lanClients: [LANClientLiveStats] = []
+    @ObservationIgnored private var lanClientTracker = LANClientRateTracker()
+    @ObservationIgnored private var lanClientsTask: Task<Void, Never>?
+    @ObservationIgnored private var isSharingPageVisible = false
+
+    /// 应用共享设置。**独立监听独立端口**，开关它完全不碰系统代理走的那条 loopback 监听，
+    /// 因此不会掐断正在走代理的连接。
+    func applyLANSharing(_ settings: LANSharingSettings) async {
+        let validated: LANSharingSettings
         do {
-            let port = try await proxyRelay.start(
-                preferredPort: preferredRelayPort,
-                sharesOnLAN: enabled
-            )
-            preferredRelayPort = port
-            if let runtime { proxyRelay.setTarget(port: runtime.mixedPort) }
-            try? await persistSettings()
+            validated = try settings.validated()
         } catch {
-            appendWarning("切换局域网共享后重建代理入口失败：\(error.localizedDescription)")
+            errorMessage = error.localizedDescription
+            return
+        }
+        let previous = lanSharing
+        lanSharing = validated
+        try? await persistSettings()
+        guard previous != validated else { return }
+
+        // 关掉、或改了端口/白名单，都先收掉旧监听再按新设置起。
+        if previous.enabled {
+            proxyRelay.stopLANSharing()
+            lanSharingBoundPort = nil
+            lanClientTracker.reset()
+            lanClients = []
+        }
+        guard validated.enabled else {
+            if previous.enabled {
+                recordRuntimeEvent(title: "已关闭局域网共享", detail: "代理入口恢复为仅本机可用")
+            }
+            return
+        }
+        await startLANSharingIfNeeded()
+    }
+
+    /// 起局域网监听。中转层没在跑时不起——那时起了也没有后端可转发。
+    func startLANSharingIfNeeded() async {
+        guard lanSharing.enabled, status == .on, currentRelayPort != nil else { return }
+        guard lanSharingBoundPort == nil else { return }
+        do {
+            let port = try await proxyRelay.startLANSharing(
+                preferredPort: lanSharing.port,
+                policy: LANPeerPolicy(allowedCIDRs: lanSharing.allowedCIDRs)
+            )
+            lanSharingBoundPort = port
+            if port != lanSharing.port {
+                appendWarning("局域网端口 \(lanSharing.port) 被占用，已改用 \(port)")
+            }
+            recordRuntimeEvent(
+                title: "已开启局域网共享",
+                detail: "监听 \(port) 端口；"
+                    + (lanSharing.allowedCIDRs.isEmpty
+                       ? "允许全部私网来源"
+                       : "仅允许 \(lanSharing.allowedCIDRs.joined(separator: "、"))")
+            )
+        } catch {
+            appendWarning("局域网共享启动失败：\(error.localizedDescription)")
         }
     }
 
-    /// 供其他设备填写的本机地址。只列私网 IPv4——用户要填进别的设备的代理设置里，
+    func startLANClientsMonitoring() {
+        isSharingPageVisible = true
+        guard lanClientsTask == nil else { return }
+        lanClientsTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await MainActor.run { self?.refreshLANClients() }
+                guard self != nil else { return }
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    func stopLANClientsMonitoring() {
+        isSharingPageVisible = false
+        lanClientsTask?.cancel()
+        lanClientsTask = nil
+    }
+
+    private func refreshLANClients() {
+        // 共享没开时清空，避免关掉后还挂着上一批客户端。
+        guard lanSharing.enabled, lanSharingBoundPort != nil else {
+            if !lanClients.isEmpty { lanClients = [] }
+            return
+        }
+        let snapshot = proxyRelay.lanClients()
+        let updated = lanClientTracker.update(snapshot, at: now())
+        // `@Observable` 不做等值判断，无条件写会让这条每秒的循环变成每秒一次全量视图失效。
+        if updated != lanClients { lanClients = updated }
+    }
+
+    /// 供其他设备填写的本机地址。    /// 供其他设备填写的本机地址。只列私网 IPv4——用户要填进别的设备的代理设置里，
     /// 链路本地与 IPv6 填了多半连不上，列出来只会误导。
     var lanProxyAddresses: [String] {
         var result: [String] = []
@@ -5007,9 +5073,9 @@ private struct PersistedSettings: Codable {
     var diagnosticModeEndsAt: Date? = nil
     /// 用户意图：开机自启后是否恢复上次的接管。旧设置文件没有该字段，缺省关闭。
     var autoRestoreOnLaunch: Bool? = nil
-    /// 是否把本机代理入口共享给局域网。旧设置文件没有该字段，**缺省关闭**——
+    /// 局域网共享设置。旧设置文件没有该字段，**缺省关闭**——
     /// 打开等于让同网段任何设备都能用你的出口，必须是用户显式选择。
-    var lanSharingEnabled: Bool? = nil
+    var lanSharing: LANSharingSettings? = nil
     /// **正常退出时**记下的接管方式快照。只在 `prepareForTermination` 写入——
     /// 崩溃或断电不会经过那里，于是不会把一次异常当成"用户想要的状态"反复恢复。
     var lastActiveModes: [ProxyMode]? = nil
