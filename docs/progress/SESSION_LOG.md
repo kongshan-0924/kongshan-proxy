@@ -5371,3 +5371,11 @@ CPU 调用栈自动采样 + 界面打磨），24 个文件。
 **用户决策**：拒绝了截屏授权请求（窗口已在其屏幕上，无需代劳）。
 
 **未做**：`publish`（推 GitHub + 打 tag + 建 Release）未执行，等用户指示。
+
+### 2026-09-04 02:12 — 只读：确认安装回滚点（旧版 App 备份）位置
+
+- **本轮问题**：`ls ~/.Trash` 与全盘 `find` 都看不到 `kongshan-0.1.98-before-0.1.99-*.app`，需判断回滚点是否真的存在。
+- **检查范围**：`ls -la ~/.Trash`、`find /Applications ~/.Trash ~/Library -maxdepth 3 -name "kongshan*.app"`、`scripts/release.sh` 中 backup 的全部引用（105/117-119/155/161-162/167/172-173/186/190/192 行）。
+- **关键证据**：`ls ~/.Trash/` 直接报 `Operation not permitted`（macOS TCC 保护废纸篓，本 shell 无权读）；`find` 那条带 `2>/dev/null`，同样的权限错误被吞掉，所以"只找到 /Applications/kongshan.app"不构成证据。
+- **结论**：脚本 161→167 行在 `set -euo pipefail` 下先 `mv 旧版 → ~/.Trash/...` 再 `mv 暂存 → /Applications`，`mv` 失败会直接中止安装；安装已完成且 `/Applications/kongshan.app` 为 0.1.99，故备份必然已落地。**不是备份缺失，是我这边看不见。**
+- **未验证**：无法直接列出该文件（TCC）。用户在访达里打开废纸篓可自行确认；配置备份 `kongshan-config-0.1.99-20260904-020446.tar.gz` 是可见且已核对过的。
