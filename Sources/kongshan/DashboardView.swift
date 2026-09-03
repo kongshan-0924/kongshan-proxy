@@ -2,11 +2,19 @@ import Charts
 import KongshanCore
 import SwiftUI
 
+/// 仪表盘。
+///
+/// **高频状态一律不在整页作用域里读**：速率（两秒一变）、活跃连接、内核内存、空山占用、
+/// 出口检测各自成一个小视图，Observation 只失效读到它的那一块。此前这些值都在整页 `body`
+/// 的计算属性里读，任何一个变一下，状态区、六张指标卡、图表容器整页重排——真机 2026-09-03
+/// 指标流水：仪表盘可见时 CPU 中位 6.3%，其它页 1.5%，差的这一截主要就是这个。
+/// `DashboardObservationScopeTests` 用 body 求值计数钉住这条性质。
 struct DashboardView: View {
     @Environment(AppState.self) private var state
     @State private var metricColumns = 3
 
     var body: some View {
+        let _ = Self.noteBodyEvaluation()
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 statusGroup
@@ -81,10 +89,7 @@ struct DashboardView: View {
 
                     Spacer()
 
-                    HStack(spacing: 20) {
-                        rate(symbol: "arrow.up", tint: .blue, title: "上传", value: state.uploadRate)
-                        rate(symbol: "arrow.down", tint: .green, title: "下载", value: state.downloadRate)
-                    }
+                    DashboardLiveRatePair()
                 }
 
                 Divider()
@@ -124,30 +129,6 @@ struct DashboardView: View {
         }
     }
 
-    private func rate(symbol: String, tint: Color, title: String, value: Int64) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: symbol)
-                .font(.callout.weight(.semibold))
-                .foregroundStyle(tint)
-                .frame(width: 16)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 1) {
-                // 高频数值不做动画：.smooth 弹簧在下一次采样到来时仍未收敛，SwiftUI 会按
-                // 屏幕刷新率持续插值字形——真机上曾以 ~57% CPU 连烧 8 小时（2026-08-20）。
-                // monospacedDigit 已保证宽度稳定，数字直接跳变即可。
-                // 不用 minimumScaleFactor：它在布局时要二分搜索字号，而这个值每秒都在变。
-                // monospacedDigit + 固定框宽已经保证不跳动。
-                Text(Theme.rateOrDash(value))
-                    .font(.title3.weight(.semibold).monospacedDigit())
-                    .lineLimit(1)
-                Text(title)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .frame(width: 112, alignment: .leading)
-    }
-
     private func modeToggle(title: String, mode: ProxyMode) -> some View {
         Toggle(title, isOn: modeBinding(mode))
             .toggleStyle(.switch)
@@ -169,73 +150,24 @@ struct DashboardView: View {
     /// 六张卡，列数**只取 6 的因数**（6/3/2/1）。`.adaptive` 会在某些宽度下排成 4 或 5 列，
     /// 最后一行就缺两个角——用户反馈的「首页有两个空的」正是这个。
     ///
-    /// 每张卡拆成独立属性：六张写在一个表达式里编译器类型检查会超时。
+    /// 会变的卡各自是独立视图（见文件头）；运行时长与当前配置只读低频状态，留在这里。
     private var metrics: some View {
         LazyVGrid(
             columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: metricColumns),
             spacing: 12
         ) {
-            exitIPBox
-            connectionsBox
-            coreMemoryBox
+            ExitIPMetricBox()
+            ConnectionsMetricBox()
+            CoreMemoryMetricBox()
             runtimeBox
             activeConfigBox
-            selfUsageBox
+            SelfUsageMetricBox()
         }
         .background {
             GeometryReader { proxy in
                 Color.clear
                     .onAppear { updateMetricColumns(proxy.size.width) }
                     .onChange(of: proxy.size.width) { _, width in updateMetricColumns(width) }
-            }
-        }
-    }
-
-    private var exitIPBox: some View {
-        MetricBox(symbol: "globe.asia.australia", tint: .orange, caption: "当前出口 IP") {
-            exitDiagnosticsValue
-        } corner: {
-            HStack(spacing: 7) {
-                if let error = state.exitDiagnosticsError {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                        .help(error)
-                }
-                if state.isRefreshingExitDiagnostics {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Button {
-                        Task { await state.refreshExitDiagnostics() }
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .buttonStyle(.borderless)
-                    .controlSize(.small)
-                    .help("刷新出口 IP 并检测 DNS")
-                }
-            }
-        }
-    }
-
-    private var connectionsBox: some View {
-        // 高频数值不做动画（见 rate 的说明）。
-        MetricBox(symbol: "point.3.connected.trianglepath.dotted", tint: .purple, caption: "活跃连接") {
-            Text("\(state.activeConnectionCount)")
-        }
-    }
-
-    private var coreMemoryBox: some View {
-        MetricBox(symbol: "memorychip", tint: .pink, caption: "内核内存") {
-            Text(Theme.bytesOrDash(Int64(clamping: state.coreMemory)))
-        } corner: {
-            if state.coreVersion != "—" {
-                // 内核的 /version 返回的就带名字（`sing-box 1.13.14`），
-                // 不要再加「内核」前缀——真机上会读成「内核 sing-box 1.13.14」。
-                Text(state.coreVersion)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .help("内置 sing-box 版本")
             }
         }
     }
@@ -254,25 +186,6 @@ struct DashboardView: View {
                 Text("\(config.nodeCount) 个节点")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    /// 空山自身的占用。与「内核内存」是两回事（那是 sing-box），标签已写明。
-    /// 数据来自每分钟一次的运行指标，不额外采样。
-    private var selfUsageBox: some View {
-        MetricBox(symbol: "cpu", tint: .brown, caption: "空山占用") {
-            if let metrics = state.lastMetrics {
-                Text(String(format: "%.1f%%", metrics.cpu))
-            } else {
-                Text("—")
-            }
-        } corner: {
-            if let metrics = state.lastMetrics {
-                Text("\(metrics.rss) MB")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .help("内存占用，每分钟更新一次")
             }
         }
     }
@@ -302,56 +215,25 @@ struct DashboardView: View {
         )
     }
 
+    /// 「只跑内核」是测速拉起的临时状态：两个接管开关都是关的，但内核在计时。
+    /// 不给出口的话，主窗口里没有任何办法停掉它（此前只在托盘有入口）。
     @ViewBuilder
-    private var exitDiagnosticsValue: some View {
-        if let report = state.exitDiagnostics {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(report.exit.ip)
-                    .font(.title3.weight(.semibold).monospacedDigit())
-                    .textSelection(.enabled)
-                let locationOrg = [report.exit.location, report.exit.organization]
-                    .filter { !$0.isEmpty }
-                    .joined(separator: " · ")
-                Text(locationOrg.isEmpty ? "—" : locationOrg)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(dnsStatusTint(report.dns.status))
-                        .frame(width: 6, height: 6)
-                    Text(dnsStatusTitle(report.dns.status))
-                        .font(.caption2.weight(.medium))
-                        .foregroundStyle(dnsStatusTint(report.dns.status))
-                }
-                .help(report.dns.detail)
+    private var coreOnlyBanner: some View {
+        if state.isOn, state.activeModes.isEmpty {
+            HStack(spacing: 9) {
+                Image(systemName: "info.circle.fill")
+                    .foregroundStyle(.blue)
+                Text("内核正在运行但未接管网络（仅用于测速）。")
+                    .font(.callout)
+                Spacer(minLength: 8)
+                Button("停止内核") { Task { await state.stop() } }
+                    .controlSize(.small)
+                    .disabled(state.isBusy)
             }
-        } else {
-            Text(state.isRefreshingExitDiagnostics ? "检测中…" : (state.exitDiagnosticsError == nil ? "待检测" : "获取失败"))
-                .font(.callout.weight(.medium))
-                .foregroundStyle(state.exitDiagnosticsError == nil ? Color.secondary : Color.orange)
-                .help(state.exitDiagnosticsError ?? "")
+            .padding(12)
+            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
     }
-
-    private func dnsStatusTitle(_ status: DNSLeakStatus) -> String {
-        switch status {
-        case .clear: "DNS 未发现明显泄漏"
-        case .possible: "DNS 可能泄漏"
-        case .indeterminate: "DNS 无法判断"
-        }
-    }
-
-    private func dnsStatusTint(_ status: DNSLeakStatus) -> Color {
-        switch status {
-        case .clear: .green
-        case .possible: .orange
-        case .indeterminate: .secondary
-        }
-    }
-
-    // MARK: - 速率曲线
 
     /// 三块各自跟踪 Observation：速率每秒变，只更新标题；累计量和图表互不牵连。
     private struct DashboardTrafficGroup: View {
@@ -368,8 +250,6 @@ struct DashboardView: View {
     }
 
     private struct TrafficHeader: View {
-        @Environment(AppState.self) private var state
-
         var body: some View {
             HStack(alignment: .center) {
                 Text("网络流量")
@@ -514,24 +394,176 @@ struct DashboardView: View {
             }
         }
     }
+}
 
-    /// 「只跑内核」是测速拉起的临时状态：两个接管开关都是关的，但内核在计时。
-    /// 不给出口的话，主窗口里没有任何办法停掉它（此前只在托盘有入口）。
-    @ViewBuilder
-    private var coreOnlyBanner: some View {
-        if state.isOn, state.activeModes.isEmpty {
-            HStack(spacing: 9) {
-                Image(systemName: "info.circle.fill")
-                    .foregroundStyle(.blue)
-                Text("内核正在运行但未接管网络（仅用于测速）。")
-                    .font(.callout)
-                Spacer(minLength: 8)
-                Button("停止内核") { Task { await state.stop() } }
-                    .controlSize(.small)
-                    .disabled(state.isBusy)
+// MARK: - 会变的小块
+
+/// 上传 / 下载速率。每两秒一变，**单独成视图**：Observation 只失效这一小块，
+/// 不再把整页（状态区、六张指标卡、图表容器）一起重排。
+struct DashboardLiveRatePair: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        let _ = Self.noteBodyEvaluation()
+        HStack(spacing: 20) {
+            rate(symbol: "arrow.up", tint: .blue, title: "上传", value: state.uploadRate)
+            rate(symbol: "arrow.down", tint: .green, title: "下载", value: state.downloadRate)
+        }
+    }
+
+    private func rate(symbol: String, tint: Color, title: String, value: Int64) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: symbol)
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(tint)
+                .frame(width: 16)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 1) {
+                // 高频数值不做动画：.smooth 弹簧在下一次采样到来时仍未收敛，SwiftUI 会按
+                // 屏幕刷新率持续插值字形——真机上曾以 ~57% CPU 连烧 8 小时（2026-08-20）。
+                // monospacedDigit 已保证宽度稳定，数字直接跳变即可。
+                // 不用 minimumScaleFactor：它在布局时要二分搜索字号，而这个值每秒都在变。
+                Text(Theme.rateOrDash(value))
+                    .font(.title3.weight(.semibold).monospacedDigit())
+                    .lineLimit(1)
+                Text(title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-            .padding(12)
-            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .frame(width: 112, alignment: .leading)
+    }
+}
+
+private struct ExitIPMetricBox: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        MetricBox(symbol: "globe.asia.australia", tint: .orange, caption: "当前出口 IP") {
+            value
+        } corner: {
+            HStack(spacing: 7) {
+                if let error = state.exitDiagnosticsError {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .help(error)
+                }
+                if state.isRefreshingExitDiagnostics {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Button {
+                        Task { await state.refreshExitDiagnostics() }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                    .help("刷新出口 IP 并检测 DNS")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var value: some View {
+        if let report = state.exitDiagnostics {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(report.exit.ip)
+                    .font(.title3.weight(.semibold).monospacedDigit())
+                    .textSelection(.enabled)
+                let locationOrg = [report.exit.location, report.exit.organization]
+                    .filter { !$0.isEmpty }
+                    .joined(separator: " · ")
+                Text(locationOrg.isEmpty ? "—" : locationOrg)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(dnsStatusTint(report.dns.status))
+                        .frame(width: 6, height: 6)
+                    Text(dnsStatusTitle(report.dns.status))
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(dnsStatusTint(report.dns.status))
+                }
+                .help(report.dns.detail)
+            }
+        } else {
+            Text(state.isRefreshingExitDiagnostics ? "检测中…" : (state.exitDiagnosticsError == nil ? "待检测" : "获取失败"))
+                .font(.callout.weight(.medium))
+                .foregroundStyle(state.exitDiagnosticsError == nil ? Color.secondary : Color.orange)
+                .help(state.exitDiagnosticsError ?? "")
+        }
+    }
+
+    private func dnsStatusTitle(_ status: DNSLeakStatus) -> String {
+        switch status {
+        case .clear: "DNS 未发现明显泄漏"
+        case .possible: "DNS 可能泄漏"
+        case .indeterminate: "DNS 无法判断"
+        }
+    }
+
+    private func dnsStatusTint(_ status: DNSLeakStatus) -> Color {
+        switch status {
+        case .clear: .green
+        case .possible: .orange
+        case .indeterminate: .secondary
+        }
+    }
+}
+
+private struct ConnectionsMetricBox: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        // 高频数值不做动画（见 DashboardLiveRatePair 的说明）。
+        MetricBox(symbol: "point.3.connected.trianglepath.dotted", tint: .purple, caption: "活跃连接") {
+            Text("\(state.activeConnectionCount)")
+        }
+    }
+}
+
+private struct CoreMemoryMetricBox: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        MetricBox(symbol: "memorychip", tint: .pink, caption: "内核内存") {
+            Text(Theme.bytesOrDash(Int64(clamping: state.coreMemory)))
+        } corner: {
+            if state.coreVersion != "—" {
+                // 内核的 /version 返回的就带名字（`sing-box 1.13.14`），
+                // 不要再加「内核」前缀——真机上会读成「内核 sing-box 1.13.14」。
+                Text(state.coreVersion)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .help("内置 sing-box 版本")
+            }
+        }
+    }
+}
+
+/// 空山自身的占用。与「内核内存」是两回事（那是 sing-box），标签已写明。
+/// 数据来自每分钟一次的运行指标，不额外采样。
+private struct SelfUsageMetricBox: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        MetricBox(symbol: "cpu", tint: .brown, caption: "空山占用") {
+            if let metrics = state.lastMetrics {
+                Text(String(format: "%.1f%%", metrics.cpu))
+            } else {
+                Text("—")
+            }
+        } corner: {
+            if let metrics = state.lastMetrics {
+                Text("\(metrics.rss) MB")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .help("内存占用，每分钟更新一次")
+            }
         }
     }
 }
@@ -567,7 +599,8 @@ private struct RuntimeDurationLabel: View {
     }
 }
 
-/// 指标块：`GroupBox` 承载，左上角系统符号 + 说明，下方大号数值。
+/// 指标块：`GroupBox` 承载，左上角系统符号 + 说明，紧接着是大号数值，多余高度留在底部。
+/// 此前数值贴在卡片底边、说明贴顶边，中间一大段空白，六张卡看着像没加载完。
 /// 图标是普通符号而不是渐变贴纸——系统设置里的分区图标也只是单色符号。
 private struct MetricBox<Value: View, Corner: View>: View {
     let symbol: String
@@ -578,7 +611,7 @@ private struct MetricBox<Value: View, Corner: View>: View {
 
     var body: some View {
         GroupBox {
-            VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .top) {
                     Label {
                         Text(caption)
@@ -592,18 +625,18 @@ private struct MetricBox<Value: View, Corner: View>: View {
                     corner
                 }
 
-                Spacer(minLength: 12)
-
-                // 同上：活跃连接与内核内存每秒都在变，minimumScaleFactor 会让每次变化
+                // 活跃连接与内核内存每秒都在变，minimumScaleFactor 会让每次变化
                 // 都触发一次字号二分搜索。改为超长直接中间截断。
                 value
                     .font(.title2.weight(.semibold).monospacedDigit())
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .accessibilityLabel(Text(caption))
+
+                Spacer(minLength: 0)
             }
             .padding(4)
-            .frame(maxWidth: .infinity, minHeight: 78, alignment: .leading)
+            .frame(maxWidth: .infinity, minHeight: 66, alignment: .topLeading)
         }
     }
 }
@@ -616,5 +649,35 @@ extension MetricBox where Corner == EmptyView {
         @ViewBuilder value: () -> Value
     ) {
         self.init(symbol: symbol, tint: tint, caption: caption, value: value) { EmptyView() }
+    }
+}
+
+// MARK: - body 求值计数（测试用）
+
+#if DEBUG
+extension DashboardView {
+    /// 整页 body 的求值次数。速率、连接数这类每秒变化的值**不该**让它涨——
+    /// 涨了就是有高频状态又被读回了整页作用域。
+    @MainActor static var bodyEvaluations = 0
+}
+
+extension DashboardLiveRatePair {
+    @MainActor static var bodyEvaluations = 0
+}
+#endif
+
+extension DashboardView {
+    @MainActor static func noteBodyEvaluation() {
+        #if DEBUG
+        bodyEvaluations += 1
+        #endif
+    }
+}
+
+extension DashboardLiveRatePair {
+    @MainActor static func noteBodyEvaluation() {
+        #if DEBUG
+        bodyEvaluations += 1
+        #endif
     }
 }

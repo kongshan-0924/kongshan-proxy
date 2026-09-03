@@ -432,6 +432,8 @@ final class AppState {
         else { return nil }
         return preferredRelayPort
     }
+    /// 已记过事件的待还原服务（按"系统代理"/"系统 DNS"分），见 `notePendingTakeover`。
+    @ObservationIgnored private var notedPendingTakeovers: [String: [String]] = [:]
     @ObservationIgnored private var currentConfig: Data?
     @ObservationIgnored private var dashboardTasks: [Task<Void, Never>] = []
     @ObservationIgnored private var dashboardMonitorConsumers: Set<DashboardMonitorConsumer> = []
@@ -488,6 +490,11 @@ final class AppState {
     /// 两次自诊断采样之间流入的内核日志行数。异常时段的归因线索之一：
     /// 日志洪峰是本项目历史上实测的最高负载来源（v0.1.61：平均 6.36%、峰值 15.9%）。
     @ObservationIgnored private var logLinesSinceDiagnosticsTick = 0
+    /// CPU 异常持续时给自己采调用栈，见 `CPUSampleCapture`。目录在 init 里按 storage 定。
+    @ObservationIgnored private var cpuSampleCapture: CPUSampleCapture
+    /// 真正执行 `/usr/bin/sample` 的闭包；测试替换成假的，不真起进程。
+    @ObservationIgnored var cpuSampleRunner: @Sendable ([String]) throws -> Void = CPUSampleCapture.run
+    @ObservationIgnored private(set) var cpuSampleTask: Task<Void, Never>?
     @ObservationIgnored private var pendingRoutingApplication: PendingRoutingApplication?
 
     /// 特权助手客户端（零弹窗 TUN）。助手不可达时回退 `privilegedLauncher`（osascript）。
@@ -533,6 +540,9 @@ final class AppState {
             errorHandler: logWarningRelay.send
         )
         self.storage = storage
+        self.cpuSampleCapture = CPUSampleCapture(
+            directory: storage.rootDirectory.appending(path: "samples", directoryHint: .isDirectory)
+        )
         self.subscriptionService = subscriptionService ?? SubscriptionService(storage: storage)
         self.ruleSetService = ruleSetService ?? RuleSetService(storage: storage, binaryURL: binaryURL)
         self.systemProxyManager = systemProxyManager ?? SystemProxyManager(storage: storage)
@@ -692,20 +702,13 @@ final class AppState {
             // 清理上次遗留的接管。常见情况（无残留记录）都是秒回的空操作；
             // 只有真有残留 root TUN 内核时才会走授权，那正是我们要清掉的僵尸隧道。
             try await recoverTUNIfNeeded()
-            // 配置仍要加载，但恢复失败必须保留快照并提示，不能静默丢掉再次恢复的机会。
-            do {
-                try await systemProxyManager.recoverIfNeeded()
-            } catch {
-                appendWarning("启动时恢复系统代理失败：\(error.localizedDescription)")
-            }
-            do {
-                try await systemDNSManager.recoverIfNeeded()
-            } catch {
-                appendWarning("启动时恢复系统 DNS 失败：\(error.localizedDescription)")
-            }
             try await storage.prepare()
             // 大订阅 YAML 的解析已挪到后台线程（见 loadPersistedState），不再卡住启动。
             try await loadPersistedState()
+            // 上次遗留的系统代理 / DNS 接管：先按快照精确还原，再不依赖快照地兜底清扫。
+            // 放在读完设置之后——清扫要知道中转端口与 TUN 劫持地址。
+            // 恢复失败必须保留快照并提示，不能静默丢掉再次恢复的机会。
+            await reconcileInactiveTakeovers(trigger: "启动")
             do {
                 try await syncSSHProxyConfiguration()
             } catch {
@@ -882,12 +885,14 @@ final class AppState {
             // 状态，用户只看到"启动失败"却完全不知道网为什么全废。收集起来附到最终错误里。
             var restoreFailures: [String] = []
             do {
-                try await systemProxyManager.restore()
+                let proxyOutcome = try await systemProxyManager.restore()
+                notePendingTakeover(kind: "系统代理", proxyOutcome.pending, trigger: "启动失败回滚")
             } catch {
                 restoreFailures.append("系统代理（系统设置 → 网络 → 详细信息 → 代理）")
             }
             do {
-                try await systemDNSManager.restore()
+                let dnsOutcome = try await systemDNSManager.restore()
+                notePendingTakeover(kind: "系统 DNS", dnsOutcome.pending, trigger: "启动失败回滚")
             } catch {
                 restoreFailures.append("系统 DNS（系统设置 → 网络 → 详细信息 → DNS）")
             }
@@ -930,6 +935,112 @@ final class AppState {
     /// - Parameter reason: 触发这次停止的动作。**必须落进运行事件**：
     ///   「内核已停止」不带原因时，事后无法区分用户主动关闭、切换模式、退出应用与异常停止。
     ///   2026-08-23 01:55 那次停止就是这样成了无头案。
+    /// 未接管状态下的遗留接管清理：先按快照精确还原（快照里待还原的服务可能刚回到列表），再不依赖
+    /// 快照地按「设置里指向谁」兜底清扫。只处理**当前没在接管**的那类——接管中的快照是活动的，
+    /// 碰了等于把自己关掉。触发点：启动、换网。
+    func reconcileInactiveTakeovers(trigger: String) async {
+        if !(status == .on && activeModes.contains(.systemProxy)) {
+            do {
+                let outcome = try await systemProxyManager.recoverIfNeeded()
+                notePendingTakeover(kind: "系统代理", outcome.pending, trigger: trigger)
+            } catch {
+                appendWarning("\(trigger)时恢复系统代理失败：\(error.localizedDescription)")
+            }
+        }
+        if !(status == .on && activeModes.contains(.tun)) {
+            do {
+                let outcome = try await systemDNSManager.recoverIfNeeded()
+                notePendingTakeover(kind: "系统 DNS", outcome.pending, trigger: trigger)
+            } catch {
+                appendWarning("\(trigger)时恢复系统 DNS 失败：\(error.localizedDescription)")
+            }
+        }
+        await sweepTakeoverResidue(trigger: trigger)
+    }
+
+    /// 不依赖快照的残留清扫：没在接管时，任何指向我们中转端口的系统代理、指向 TUN 劫持地址的系统 DNS
+    /// 都是残留，一律清掉并记事件。真机 2026-09-03：停止代理后「Shadowrocket」服务的三项代理仍指向
+    /// 127.0.0.1:36815（还原时它不在服务列表里，旧实现静默跳过并删了快照），用户关了代理所有直连请求
+    /// 仍被送进空端口（Codex 全 404），设置页却显示代理已关——只有按"指向谁"来清才兜得住。
+    func sweepTakeoverResidue(trigger: String) async {
+        if !(status == .on && activeModes.contains(.systemProxy)), let port = preferredRelayPort {
+            do {
+                let cleared = try await systemProxyManager.sweepResidue(port: Int(port))
+                if !cleared.isEmpty {
+                    recordRuntimeEvent(
+                        level: .warning,
+                        title: "已清理残留的系统代理设置",
+                        detail: "\(trigger)时发现这些网络服务的代理仍指向本机 \(port) 端口（kongshan 并未在接管），已关闭：\(cleared.joined(separator: "、"))"
+                    )
+                }
+            } catch {
+                appendWarning("\(trigger)时检查系统代理残留失败：\(error.localizedDescription)")
+            }
+        }
+        if !(status == .on && activeModes.contains(.tun)) {
+            do {
+                let cleared = try await systemDNSManager.sweepResidue(server: tunSettings.dnsServerAddress)
+                if !cleared.isEmpty {
+                    recordRuntimeEvent(
+                        level: .warning,
+                        title: "已清理残留的系统 DNS 设置",
+                        detail: "\(trigger)时发现这些网络服务的 DNS 仍指向 TUN 地址 \(tunSettings.dnsServerAddress)（TUN 并未运行），已摘除：\(cleared.joined(separator: "、"))"
+                    )
+                }
+            } catch {
+                appendWarning("\(trigger)时检查系统 DNS 残留失败：\(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// 快照里有服务此刻不在网络服务列表中（VPN 类虚拟服务随其 App 启停出现/消失）：还原不了，
+    /// 但也不算失败——快照已保留，服务重新出现时（启动/换网）自动复位。记一条不会被清掉的事件。
+    private func notePendingTakeover(kind: String, _ pending: [String], trigger: String) {
+        guard !pending.isEmpty else {
+            notedPendingTakeovers[kind] = nil
+            return
+        }
+        // 服务长期缺席时启动、每次换网都会再报同一批——只在这批服务变化时记一次，别把消息页刷满。
+        guard notedPendingTakeovers[kind] != pending else { return }
+        notedPendingTakeovers[kind] = pending
+        recordRuntimeEvent(
+            level: .warning,
+            title: "\(kind)有待还原的网络服务",
+            detail: "\(trigger)时这些网络服务不在系统的网络服务列表中，其\(kind)设置暂未还原（快照已保留，服务重新出现时自动复位）：\(pending.joined(separator: "、"))"
+        )
+    }
+
+    /// 回滚路径上的接管还原。失败**必须**回传给调用方拼进错误信息——旧实现用 `try?` 吞掉，
+    /// 用户只看到"配置应用失败"，不知道系统代理 / DNS / SSH 配置还指着已经不存在的内核。
+    /// 没有快照的那类 restore 是空操作，所以两类都还原是安全的。
+    private func restoreTakeoversDuringRollback() async -> [String] {
+        var failures: [String] = []
+        do {
+            let outcome = try await systemProxyManager.restore()
+            notePendingTakeover(kind: "系统代理", outcome.pending, trigger: "回滚")
+        } catch {
+            failures.append("系统代理（系统设置 → 网络 → 详细信息 → 代理）：\(error.localizedDescription)")
+        }
+        do {
+            let outcome = try await systemDNSManager.restore()
+            notePendingTakeover(kind: "系统 DNS", outcome.pending, trigger: "回滚")
+        } catch {
+            failures.append("系统 DNS（系统设置 → 网络 → 详细信息 → DNS）：\(error.localizedDescription)")
+        }
+        do {
+            try await sshProxyConfigManager.apply(targets: [], relayPort: nil)
+        } catch {
+            failures.append("SSH 代理配置（~/.ssh/config）：\(error.localizedDescription)")
+        }
+        return failures
+    }
+
+    private func rollbackRestoreNote(_ failures: [String]) -> String {
+        failures.isEmpty
+            ? ""
+            : "；另外这些系统设置未能还原，请手工清空或重开 kongshan 自动重试：" + failures.joined(separator: "；")
+    }
+
     func stop(reason: String = "用户停止接管") async {
         // 崩溃自愈期间 isBusy 包含 .starting，旧实现的 guard 会直接 return，用户点停止无响应。
         // 这里特殊放行：置位 stopRequestedDuringCrashHandling 让 handleUnexpectedCoreExit 中止，
@@ -967,7 +1078,8 @@ final class AppState {
         }
         if stoppingModes.contains(.systemProxy) {
             do {
-                try await systemProxyManager.restore()
+                let proxyOutcome = try await systemProxyManager.restore()
+                notePendingTakeover(kind: "系统代理", proxyOutcome.pending, trigger: "停止")
             } catch {
                 restoreFailures.append("系统代理（系统设置 → 网络 → 详细信息 → 代理）：\(error.localizedDescription)")
             }
@@ -978,7 +1090,8 @@ final class AppState {
         if stoppingModes.contains(.tun) {
             // 先把系统 DNS 还原（此刻 TUN 还在，解析不断档），再停内核。
             do {
-                try await systemDNSManager.restore()
+                let dnsOutcome = try await systemDNSManager.restore()
+                notePendingTakeover(kind: "系统 DNS", dnsOutcome.pending, trigger: "停止")
             } catch {
                 restoreFailures.append("系统 DNS（系统设置 → 网络 → 详细信息 → DNS）：\(error.localizedDescription)")
             }
@@ -3294,15 +3407,10 @@ final class AppState {
             )
         } catch {
             await singBoxProcess.stop()
-            let restoreMessage: String
-            do {
-                try await systemProxyManager.restore()
-                restoreMessage = "系统代理已恢复"
-            } catch let proxyError {
-                restoreMessage = "系统代理恢复失败：\(proxyError.localizedDescription)"
-            }
-            try? await systemDNSManager.restore()
-            try? await sshProxyConfigManager.apply(targets: [], relayPort: nil)
+            let restoreFailures = await restoreTakeoversDuringRollback()
+            let restoreMessage = restoreFailures.isEmpty
+                ? "系统代理已恢复"
+                : "以下系统设置未能还原，请手工清空或重开 kongshan 自动重试：" + restoreFailures.joined(separator: "；")
             clearRuntimeState()
             setFailure(
                 "\(operation)更新失败且旧配置无法恢复：\(updateError.localizedDescription)；\(error.localizedDescription)；\(restoreMessage)"
@@ -3347,18 +3455,22 @@ final class AppState {
                 currentPID: record.pid
             )
         } catch {
-            try? await stopTUN()
-            try? await systemProxyManager.restore()
-            try? await systemDNSManager.restore()
-            try? await sshProxyConfigManager.apply(targets: [], relayPort: nil)
+            var restoreFailures: [String] = []
+            do {
+                try await stopTUN()
+            } catch let stopError {
+                restoreFailures.append("TUN 内核：\(stopError.localizedDescription)")
+            }
+            restoreFailures += await restoreTakeoversDuringRollback()
             clearRuntimeState()
+            let restoreNote = rollbackRestoreNote(restoreFailures)
             setFailure(
-                "\(operation)更新失败且旧 TUN 配置无法恢复：\(updateError.localizedDescription)；\(error.localizedDescription)"
+                "\(operation)更新失败且旧 TUN 配置无法恢复：\(updateError.localizedDescription)；\(error.localizedDescription)\(restoreNote)"
             )
             recordRuntimeEvent(
                 level: .error,
                 title: "\(operation)应用与 TUN 回滚均失败",
-                detail: "更新失败：\(updateError.localizedDescription)；回滚失败：\(error.localizedDescription)"
+                detail: "更新失败：\(updateError.localizedDescription)；回滚失败：\(error.localizedDescription)\(restoreNote)"
             )
         }
     }
@@ -3439,23 +3551,24 @@ final class AppState {
                 )
                 return false
             } catch let rollbackError {
-                if oldConfigurationRecord != nil {
-                    try? await stopTUN()
-                } else {
-                    // start 失败时默认 launcher 也会清理临时记录；再次 stop 是幂等安全网。
-                    try? await stopTUN()
+                var restoreFailures: [String] = []
+                // start 失败时默认 launcher 也会清理临时记录；再次 stop 是幂等安全网。
+                do {
+                    try await stopTUN()
+                } catch let stopError {
+                    restoreFailures.append("TUN 内核：\(stopError.localizedDescription)")
                 }
                 // TUN 已经起不来了，接管的系统 DNS 不还原会导致全网解析瘫痪。
-                try? await systemDNSManager.restore()
-                try? await sshProxyConfigManager.apply(targets: [], relayPort: nil)
+                restoreFailures += await restoreTakeoversDuringRollback()
                 clearRuntimeState()
+                let restoreNote = rollbackRestoreNote(restoreFailures)
                 setFailure(
-                    "\(operation)更新失败且旧 TUN 配置无法恢复：\(updateError.localizedDescription)；\(rollbackError.localizedDescription)"
+                    "\(operation)更新失败且旧 TUN 配置无法恢复：\(updateError.localizedDescription)；\(rollbackError.localizedDescription)\(restoreNote)"
                 )
                 recordRuntimeEvent(
                     level: .error,
                     title: "\(operation)重载与回滚均失败",
-                    detail: "更新失败：\(updateError.localizedDescription)；回滚失败：\(rollbackError.localizedDescription)",
+                    detail: "更新失败：\(updateError.localizedDescription)；回滚失败：\(rollbackError.localizedDescription)\(restoreNote)",
                     previousPID: previousPID
                 )
                 return false
@@ -3679,6 +3792,11 @@ final class AppState {
         if coreMemory != snapshot.memory { coreMemory = snapshot.memory }
         if sessionUpload != sessionTraffic.upload { sessionUpload = sessionTraffic.upload }
         if sessionDownload != sessionTraffic.download { sessionDownload = sessionTraffic.download }
+    }
+
+    /// 测试用：仪表盘 Observation 作用域的行为测试要能从外面喂速率样本。
+    func receiveTrafficForTesting(_ sample: TrafficSample) {
+        receiveTraffic(sample)
     }
 
     private func receiveTraffic(_ sample: TrafficSample) {
@@ -4027,7 +4145,8 @@ final class AppState {
         var cleanupMessages: [String] = []
         if modes.contains(.systemProxy) {
             do {
-                try await systemProxyManager.restore()
+                let proxyOutcome = try await systemProxyManager.restore()
+                notePendingTakeover(kind: "系统代理", proxyOutcome.pending, trigger: "内核崩溃清理")
             } catch {
                 cleanupMessages.append("系统代理恢复失败：\(error.localizedDescription)")
             }
@@ -4039,7 +4158,8 @@ final class AppState {
                 cleanupMessages.append("TUN 清理失败：\(error.localizedDescription)")
             }
             do {
-                try await systemDNSManager.restore()
+                let dnsOutcome = try await systemDNSManager.restore()
+                notePendingTakeover(kind: "系统 DNS", dnsOutcome.pending, trigger: "内核崩溃清理")
             } catch {
                 cleanupMessages.append("系统 DNS 恢复失败：\(error.localizedDescription)")
             }
@@ -4101,7 +4221,8 @@ final class AppState {
 
     /// 路径事件在切网时会连发多条，压到一次、等网络稳定 2 秒再补挂。
     private func scheduleTakeoverReassert() {
-        guard status == .on, !activeModes.isEmpty else { return }
+        // 未接管时也要跑：VPN 类虚拟网络服务随其 App 启停出现/消失，快照里待还原的服务可能这会儿
+        // 刚回到列表里；残留清扫也只有在换网点上才有机会发现。真正的分流在 reassertTakeoversAfterNetworkChange。
         pathChangeTask?.cancel()
         pathChangeTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(2))
@@ -4114,7 +4235,11 @@ final class AppState {
     /// 补挂系统代理/DNS。`resetConnections` 为 true 时无条件重置全部连接
     /// （睡眠唤醒场景：连接必然已死，但客户端不知道）。
     func reassertTakeoversAfterNetworkChange(resetConnections: Bool = false, identityChangedForTesting: Bool? = nil) async {
-        guard status == .on, !isBusy else { return }
+        guard !isBusy else { return }
+        guard status == .on else {
+            await reconcileInactiveTakeovers(trigger: "网络变化")
+            return
+        }
         let identityChanged = identityChangedForTesting ?? networkIdentityChanged()
         if identityChanged {
             recordRuntimeEvent(title: "物理网络已变更", detail: "正在刷新 LAN DNS 与 DoH 连接")
@@ -4144,6 +4269,8 @@ final class AppState {
                 appendWarning("网络变化后补挂系统 DNS 失败：\(error.localizedDescription)")
             }
         }
+        // 只接管了一类时另一类可能有遗留（TUN 单开时残留的系统代理）；按类自检，不碰接管中的那类。
+        await reconcileInactiveTakeovers(trigger: "网络变化")
         // 换网/唤醒后内核里的旧连接已经作废，但**本地客户端并不知道**：它们的 socket 仍是
         // ESTABLISHED，写进去石沉大海，要等 TCP 重传耗尽（可长达十几分钟）才报错；很多客户端
         // 还用长连接池反复复用这些死连接 → "网络明明恢复了，某个 App 却一直转圈，只能重启它"。
@@ -4642,7 +4769,7 @@ final class AppState {
     func record(_ report: CPUAnomalyReport, logLinesInWindow: Int) {
         let title = report.phase == .ongoing ? "CPU 占用持续偏高" : "CPU 占用已回落"
         // 归因线索一次性写全：下次复现时不必再回头猜。域名、节点名一律不进这里。
-        let detail = [
+        var parts = [
             String(format: "平均 %.1f%%，峰值 %.1f%%，持续 %.0f 秒",
                    report.averagePercent, report.peakPercent, report.duration),
             String(format: "消耗 CPU %.1f 秒，user 占比 %.0f%%（接近 100%% 为纯计算，偏低为 I/O 密集）",
@@ -4660,8 +4787,51 @@ final class AppState {
             // 它们才是真正驱动重绘的源头，页面标题只说明用户看着哪儿。
             "当前页面 \(visiblePageTitle ?? "无窗口")，活跃订阅 \(activeMonitorSummary)",
             "代理状态 \(status == .on ? "开启" : "非开启")，接管方式 \(activeModes.count) 项"
-        ].joined(separator: "；")
-        recordRuntimeEvent(level: .warning, title: title, detail: detail)
+        ]
+        // 上面这些说得出"主线程在渲染仪表盘"，说不出主线程具体在跑什么；只有调用栈说得出。
+        // 异常**持续**时采（回落时已经不在烧了），10 分钟最多一份，见 `CPUSampleCapture`。
+        if report.phase == .ongoing, let output = cpuSampleCapture.claim(now: now()) {
+            parts.append("正在保存调用栈采样（\(CPUSampleCapture.durationSeconds) 秒）：\(output.path)")
+            captureCPUSample(to: output)
+        }
+        recordRuntimeEvent(level: .warning, title: title, detail: parts.joined(separator: "；"))
+    }
+
+    private func captureCPUSample(to output: URL) {
+        let directory = output.deletingLastPathComponent()
+        let arguments = CPUSampleCapture.arguments(pid: ProcessInfo.processInfo.processIdentifier, output: output)
+        let runner = cpuSampleRunner
+        cpuSampleTask = Task.detached(priority: .utility) { [weak self] in
+            let result = Result<Void, Error> {
+                try FileManager.default.createDirectory(
+                    at: directory,
+                    withIntermediateDirectories: true,
+                    attributes: [.posixPermissions: 0o700]
+                )
+                try runner(arguments)
+                CPUSampleCapture.prune(directory: directory)
+            }
+            await self?.finishCPUSample(output: output, result: result)
+        }
+    }
+
+    private func finishCPUSample(output: URL, result: Result<Void, Error>) {
+        cpuSampleTask = nil
+        switch result {
+        case .success:
+            recordRuntimeEvent(
+                title: "已保存 CPU 调用栈采样",
+                detail: "文件：\(output.path)。可直接发给开发者定位；只保留最近 \(CPUSampleCapture.keepCount) 份。",
+                announce: false
+            )
+        case let .failure(error):
+            recordRuntimeEvent(
+                level: .warning,
+                title: "CPU 调用栈采样失败",
+                detail: error.localizedDescription,
+                announce: false
+            )
+        }
     }
 
     /// 局域网共享的当前设置。

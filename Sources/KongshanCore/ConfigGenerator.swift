@@ -468,6 +468,21 @@ public enum ConfigGenerator {
             if !bypass.suffixes.isEmpty { bypassDNS["domain_suffix"] = bypass.suffixes }
             if bypassDNS.count > 2 { rules.append(bypassDNS) }
         }
+        // 反向解析与 Bonjour 发现（`*.in-addr.arpa` / `*.ip6.arpa` / `lb._dns-sd._udp.*`）留在本地解析器。
+        // TUN 劫持 DNS 后 macOS 会不停发这类 PTR 查询，不加这条它们掉到 `final: dns-remote`——
+        // 经代理去问 8.8.8.8：既白跑（公网解析器不认内网反向域），又把内网网段信息送出去。
+        // 真机 2026-09-03 一天 73 条此类失败（换网/重载期间 closed pipe、context canceled）。
+        let localResolver = lan.isUsable ? "dns-lan" : "dns-cn"
+        rules.append([
+            "domain_suffix": ["in-addr.arpa", "ip6.arpa"],
+            "action": "route",
+            "server": localResolver
+        ])
+        rules.append([
+            "domain_keyword": ["_dns-sd._udp"],
+            "action": "route",
+            "server": localResolver
+        ])
         if input.routing != nil, input.outboundMode == .rule {
             rules.append([
                 "rule_set": "geosite-cn",

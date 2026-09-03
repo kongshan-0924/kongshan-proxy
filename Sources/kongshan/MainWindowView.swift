@@ -301,7 +301,8 @@ struct NodesView: View {
                     configRow(item)
                 }
             }
-            .listStyle(.inset(alternatesRowBackgrounds: true))
+            // 同代理页：配置一般只有一两条，交替条纹会在空白处画出一排幽灵行。
+            .listStyle(.inset)
             .overlay {
                 if state.configItems.isEmpty {
                     ContentUnavailableView(

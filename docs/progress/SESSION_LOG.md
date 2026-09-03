@@ -5224,3 +5224,123 @@ VPN 类虚拟服务（Shadowrocket 就是）在断开时会短暂从列表消失
 `restoreFromDisk` 对快照中"当前列表里没有"的服务应照样尝试还原，失败再收进 `restoreFailures`；
 且只要有服务未还原成功，就**不能删除** `proxy-recovery.json`——否则下次启动的
 `recoverIfNeeded` 也救不回来。用户尚未答复是否现在修。
+
+### 2026-09-04 00:35 — v0.1.99（源码完成、未提交）：系统代理 / DNS 还原不再静默漏项，加读回核对与残留清扫
+
+**本轮任务**：清理「Shadowrocket」服务上的残留代理设置；修掉 23:40 条发现的 `restoreFromDisk`
+静默跳过；审核整套代码找同类问题；按用户开启诊断模式后的内核日志再查一遍；一起修掉。
+
+**回滚点**：`5d2d0d9`（v0.1.98 + 两条排查记录）。本轮改动**未提交**。
+
+**用户决策**：清理残留 + 修复 + 审核同类 + 按调试日志复查，一起修。未要求安装，也未提及发布 / 提交。
+
+#### 残留清理（已做，改的是系统设置）
+
+`networksetup -setwebproxystate / -setsecurewebproxystate / -setsocksfirewallproxystate "Shadowrocket" off`，
+三项读回均为 `Enabled: No`；全部网络服务扫描无任何指向 36815 的代理。
+
+#### 审核结论：同一类问题共三处
+
+1. `SystemProxyManager.restoreFromDisk`：`for service in snapshot.services where currentServices.contains(service.name)`
+   ——不在列表的服务被跳过，且 `failedServices.isEmpty` 就删快照（23:40 条已定位）。
+2. `SystemDNSManager.restoreFromDisk`（原 274 行）：一模一样的模式。
+3. `AppState` 三处回滚路径（`restoreOldConfiguration` / `restoreOldTUNConfiguration` / `reloadTUNConfiguration`）
+   用 `try?` 吞掉系统代理 / DNS / SSH 配置的还原失败——配置应用失败又回滚失败时用户只看到"应用失败"。
+
+另有三处 `try? await sshProxyConfigManager.apply(targets: oldSettings.sshProxyTargets, …)`（2165 / 2189 / 2226 附近）
+是回滚成功后**重新挂上** SSH 代理的尽力而为：失败的后果是 SSH 走直连而不是被劫持，方向相反，不属同类，**未改**。
+
+#### 修法：三层防线
+
+- **待还原保留**：快照里此刻不在列表的服务留作 `pending`，快照不删；`restore() / recoverIfNeeded()` 返回
+  `ProxyRestoreOutcome / DNSRestoreOutcome`。`enable()` 遇到旧快照不再抛 `recoveryPending`（该 case 已删）：
+  先还原能还原的，把 pending 并入新快照（记的是接管前的原始状态）；真有还原失败才拒绝并原样抛错。
+- **读回核对**：每个服务写回后 `capture` 读回，开关 / 地址 / 端口不一致算失败、保留重试；bypass 列表不比较
+  （格式化差异不该判成失败，而"该关的没关"正是残留的定义）。
+- **残留清扫**：`sweepResidue(port:)` / `sweepResidue(server:)` 不依赖快照，按"指向谁"关掉指向我们端口的端点 /
+  摘掉劫持地址，用户自己的其它代理与 DNS 不动。只对写过 `proxy-takeover.marker` / `dns-takeover.marker`
+  的安装生效（enable 时写、只写不删）：从未接管过的安装和测试夹具不碰 `networksetup`，
+  也避免 `swift test` 时误清宿主机上正在运行的接管。
+- **AppState 接线**：`reconcileInactiveTakeovers(trigger:)` = 对**没在接管**的那类做 recoverIfNeeded + 清扫，
+  启动（读完设置后，因为要知道端口与劫持地址）与换网时调用；`scheduleTakeoverReassert` 不再在未接管时直接 return；
+  回滚路径统一走 `restoreTakeoversDuringRollback()`，失败拼进 `setFailure` 与事件 detail；
+  待还原 / 已清理各记一条 warning 事件，待还原按服务集合去重（服务长期缺席时不随每次换网重复记）。
+- **DNS 规则**：`*.in-addr.arpa` / `*.ip6.arpa` 与 `_dns-sd._udp` 走 `dns-lan`（有内网 DNS 时）或 `dns-cn`，
+  排在 geosite-cn 与 fakeip 之前。
+
+#### 调试日志复查（23:23:30–23:24:26 DEBUG 595 行 + 全天 ERROR）
+
+- DEBUG 形态正常：sniff / dns exchange / fakeip / `route(AI)` / `route(🎯Direct)` / geosite-cn 命中。
+- **可修（已修）**：73 条 `*.in-addr.arpa` PTR（含 `lb / b / db._dns-sd._udp.*`）失败——Bonjour 反向发现被 TUN
+  劫持后落到 `final: dns-remote`，经代理去问 8.8.8.8；换网 / 重载时 `closed pipe`、
+  `use of closed network connection`、`context canceled`。
+- 环境因素，不动：13× `direct: dial tcp … network is unreachable`（那段时间本机网络本身不通）；
+  `www.apple.com` / feishu / icloud 的 `context canceled` 全落在内核重载点
+  （23:06 / 23:23:02 / 23:23:29 / 23:24:25）；34× sentry reject 是广告拦截的预期行为。无其它异常。
+
+#### 验证
+
+- 全量 `swift test`：**588 执行 / 2 跳过 / 0 失败**（含用真实 `sing-box check` 校验 TUN 配置的用例，新 DNS 规则通过）。
+- 新增 `TakeoverResidueTests`（8 条）：待还原保留与回归复位、enable 携带 pending、读回核对失败保留快照并拒绝启用、
+  清扫只关指向我们端口的端点且幂等、无标记零调用；DNS 侧同样三条。
+- 新增 `TakeoverResidueWiringTests`（5 条）：启动清扫两类残留并记事件、无接管历史零调用、未接管换网也清扫、
+  源码守卫（无 `try?` 吞还原；启动 / 换网接线）。
+- 改写旧用例 3 条（proxy / DNS 的"跳过 stale"→"保留 pending"；DNS 的 `recoveryPending` → 先还原再接管）；
+  `DNSConfigTests` 规则数 3→5，新增反向解析用例。
+- **未跑** `release.sh prepare`（M4 门禁）与构建：用户本轮未要求发布 / 安装，改动未提交，等用户决定。
+
+#### 未验证
+
+- "服务重新出现时自动复位"只在仿真 `networksetup` 上验证；真机 Shadowrocket 的残留是我手动清的。
+- 清扫在真机的耗时（服务数 × 4 次 `networksetup`）未实测；换网触发有 2 秒去抖，且只对接管过的安装生效。
+
+### 2026-09-04 01:10 — v0.1.99（续，未提交）：界面打磨 + 资源占用分析与修复
+
+**本轮任务**：UI 再打磨一轮（用户让我自行发挥）；按最近运行日志分析资源占用问题，有则一并修。
+
+**回滚点**：仍是 `5d2d0d9`；本轮与 00:35 条的改动都在工作区未提交。
+
+**用户决策**：UI 方向交给我定；发了两张 2480×1400 截图但我这边只收到占位、看不到内容，已告知。
+
+#### 资源占用分析（只读，数据来自 `metrics.ndjson` 902 分钟 / `diagnostics.ndjson` / `runtime-events.json`）
+
+- **仪表盘可见时 CPU 明显高于其它页**：中位 6.30%、p90 10.1%、峰值 36.2%（n=330）；规则页 1.47%、
+  共享页 0.91%、窗口关闭 1.50%。差的 4–5 个点是结构性的：整页 `body` 直接读速率 / 连接数 /
+  内核内存 / 空山占用，任何一个变一下整页重排。
+- **三次 CPU 异常事件**：08-31 07:52（平均 24.2% / 峰值 80.4% / 623 秒 / 主线程 96% / 日志 0 行）、
+  09-03 14:45（10.2% / 92 秒 / 规则页 / 峰值内存 198 MB）、09-03 22:40（24.8% / 39.9% / 278 秒 /
+  主线程 96% / 仪表盘 / 日志流入 456 行）。22:36–22:38 三分钟 25–36%，同期日志 1.5–2k 行/分钟、
+  连接 23–67。归因字段到"主线程在渲染仪表盘"为止，**具体调用栈没有**——这是可观测性的缺口。
+- **内存不是泄漏**：RSS 35→148 MB 的差异对应窗口关/开与规则页（峰值 220 MB）；`heap` 355k 节点
+  71.5 MB，最多的一类是 `Swift.StringStorage` 16k 个，无单类爆量；物理占用峰值 162 MB。
+- 线程 7–9，测速时 19–20，当前 13。`/usr/bin/sample` 对硬化运行时的自身进程可用（1 秒 271 KB、完整符号化）。
+- 日志流水线复核：`OutboundFailureDetector.ingest` 每行 O(1)，解码在 `ClashAPIClient` actor 里不占主线程；
+  日志页关着时每行只做两次子串判断。**没找到**能解释 22:36 爆发的每行开销，不硬猜。
+
+#### 修复
+
+- `DashboardView`：速率、活跃连接、内核内存、空山占用、出口检测拆成独立小视图
+  （`DashboardLiveRatePair` 等），Observation 只失效读到它的那块；`MetricBox` 数值改为紧贴说明、
+  多余高度留底部。`DashboardObservationScopeTests`：源码守卫（整页作用域不读九个高频属性）+
+  行为测试（离屏挂载后喂 8 个速率样本，整页 body 求值次数为 0、速率视图 > 0）。
+- `CPUSampleCapture`（KongshanCore）+ AppState 接线：`CPUAnomalyReport.phase == .ongoing` 时
+  `sample <pid> 5 -mayDie -file samples/cpu-<时间戳>.txt`，10 分钟一份、只留 5 份；路径写进
+  「CPU 占用持续偏高」事件，完成/失败各记一条事件。`CPUSampleCaptureTests`（3）+ `CPUSampleWiringTests`（2）。
+- 界面：`PolicyGroupsView` / `NodesView` 去掉 `alternatesRowBackgrounds`；未选中节点行不放机架符号；
+  `RoutingView` 分应用区两行布局 + 说明、规则浏览器加 `Section` 标题、分组名改色点 + 正文色；
+  `NativeChromeGuardTests` 的指标卡名单跟着改；`docs/design/NATIVE_UI.md` 两行更新。
+
+#### 验证
+
+- 相关用例：NativeChromeGuard / MenuBarViewStability / RuntimeEventDetail / CPUSampleCapture /
+  CPUSampleWiring / DashboardObservationScope 全过；离屏快照重出并逐页看过（仪表盘窄/宽/深色、代理、
+  配置、规则）。全量 `swift test` 结果见本条末尾补记。
+- 仪表盘 CPU 的真机收益**未实测**（代理关闭中，用户要求不开）；行为测试证明的是"速率变化不再触发
+  整页求值"这一机制。
+
+#### 未验证 / 未定位
+
+- 22:36 那次 25–36% 爆发的具体调用栈：下次复现由自动采样给出，届时看 `samples/` 目录。
+- 规则页 198–220 MB 峰值内存的构成未细查（`heap` 是在当前空闲状态跑的）。
+
+**补记（01:15）**：全量 `swift test` 595 执行 / 2 跳过 / 0 失败（含新增 7 条用例）。打磨后的四张快照已发给用户。

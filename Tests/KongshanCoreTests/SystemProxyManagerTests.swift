@@ -195,18 +195,21 @@ final class SystemProxyManagerTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: recoveryURL.path))
     }
 
-    /// 切网络配置后快照里的服务可能已消失（如 Thunderbolt Bridge 拔了）。
-    /// 恢复时只处理仍存在的服务；已消失服务无需反复阻塞恢复。
-    func testRecoverSkipsStaleServicesNoLongerPresent() async throws {
+    /// 切网络配置后快照里的服务可能此刻不在列表里（Thunderbolt Bridge 拔了、VPN 类虚拟服务随其 App 退出）。
+    /// 恢复只处理仍存在的服务，**但已消失的服务不能被静默丢掉**：真机 2026-09-03「Shadowrocket」服务
+    /// 就是这样被旧实现跳过并删了快照，之后回到列表时三项代理仍指向已停的中转端口。
+    /// 现在它留在快照里作为待还原项，等它回来再复位；期间不向它发任何命令。
+    func testRecoverKeepsStaleServicesPendingWithoutTouchingThem() async throws {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let storage = Storage(rootDirectory: root)
         try await storage.prepare()
         // 快照含 Wi-Fi + Thunderbolt Bridge，但 recorder 的 -listallnetworkservices 只返回 Wi-Fi。
+        // Wi-Fi 的快照值与 recorder 读回的固定值一致（Enabled: No / old.local / 8080），读回核对能过。
         let snapshot = ProxyRecoverySnapshot(services: [
             NetworkServiceProxySnapshot(
                 name: "Wi-Fi",
-                http: .init(enabled: true, server: "old.local", port: 8080),
+                http: .init(enabled: false, server: "old.local", port: 8080),
                 https: .init(enabled: false, server: "", port: 0),
                 socks: .init(enabled: false, server: "", port: 0),
                 bypassDomains: []
@@ -224,8 +227,13 @@ final class SystemProxyManagerTests: XCTestCase {
         let runner = NetworkSetupRecorder(recoveryURL: recoveryURL)
         let manager = SystemProxyManager(storage: storage, runner: runner.run(arguments:timeout:))
 
-        try await manager.recoverIfNeeded()
-        XCTAssertFalse(FileManager.default.fileExists(atPath: recoveryURL.path))
+        let outcome = try await manager.recoverIfNeeded()
+
+        XCTAssertEqual(outcome.restored, ["Wi-Fi"])
+        XCTAssertEqual(outcome.pending, ["Thunderbolt Bridge"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: recoveryURL.path), "有待还原的服务时快照必须保留")
+        let retained = try JSONDecoder().decode(ProxyRecoverySnapshot.self, from: Data(contentsOf: recoveryURL))
+        XCTAssertEqual(retained.services.map(\.name), ["Thunderbolt Bridge"], "已复位的服务不必再留")
         // 不应对 stale 服务执行任何 networksetup 命令
         let arguments = await runner.arguments
         XCTAssertFalse(arguments.contains { $0.contains("Thunderbolt Bridge") },

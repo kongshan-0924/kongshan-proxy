@@ -64,7 +64,7 @@ final class SystemDNSManagerTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: manager.recoveryURL.path))
     }
 
-    func testEnableRefusesWhenRecoveryPendingAndRollsBackOnFailure() async throws {
+    func testEnableRollsBackOnFailureAndRecoversStaleSnapshotInsteadOfRefusing() async throws {
         let root = temporaryDNSDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let recoveryURL = root.appending(path: "dns-recovery.json")
@@ -90,14 +90,23 @@ final class SystemDNSManagerTests: XCTestCase {
         XCTAssertTrue(mutations.contains(["-setdnsservers", "Wi-Fi", "9.9.9.9"]))
         XCTAssertFalse(FileManager.default.fileExists(atPath: recoveryURL.path))
 
-        // 残留快照存在时拒绝再次接管。
-        try Data("{\"version\":1,\"capturedAt\":0,\"services\":[]}".utf8).write(to: recoveryURL)
-        do {
-            try await manager.enable(server: "172.19.0.2")
-            XCTFail("Expected recoveryPending")
-        } catch let error as SystemDNSError {
-            XCTAssertEqual(error, .recoveryPending)
-        }
+        // 残留快照存在时不再拒绝：先把能还原的还原掉，只剩"服务此刻不在列表"的待还原项就带进本次快照。
+        // 拒绝会让用户永远开不了——真机 2026-09-03 的「Shadowrocket」服务随其 App 启停出现/消失。
+        let stale = DNSRecoverySnapshot(services: [
+            DNSServiceSnapshot(name: "Wi-Fi", servers: ["9.9.9.9"]),
+            DNSServiceSnapshot(name: "Shadowrocket", servers: ["1.1.1.1"])
+        ])
+        try JSONEncoder().encode(stale).write(to: recoveryURL)
+        try await manager.enable(server: "172.19.0.2")
+        let afterEnable = await recorder.mutationArguments
+        XCTAssertTrue(afterEnable.contains(["-setdnsservers", "Wi-Fi", "9.9.9.9"]), "在列表里的旧快照项先还原")
+        let carried = try JSONDecoder().decode(DNSRecoverySnapshot.self, from: Data(contentsOf: recoveryURL))
+        XCTAssertEqual(Set(carried.services.map(\.name)), ["Wi-Fi", "Thunderbolt Bridge", "Shadowrocket"])
+        XCTAssertEqual(
+            carried.services.first { $0.name == "Shadowrocket" }?.servers,
+            ["1.1.1.1"],
+            "不在列表的待还原项并入新快照，服务回来时照样复位"
+        )
     }
 
     func testReassertOnlyTouchesStaleServicesAndExtendsSnapshotForRestore() async throws {
@@ -152,33 +161,39 @@ final class SystemDNSManagerTests: XCTestCase {
         XCTAssertTrue(arguments.isEmpty, "没有活动快照时不得执行任何 networksetup 命令")
     }
 
-    /// 切网络配置后快照里的服务可能已消失；跳过后应完成其余恢复并清理快照。
-    func testRecoverSkipsStaleServicesNoLongerPresent() async throws {
+    /// 切网络配置后快照里的服务可能此刻不在列表里。恢复只处理仍存在的服务，
+    /// **但已消失的服务不能被静默丢掉**（真机 2026-09-03 系统代理侧就是这样漏掉「Shadowrocket」的）：
+    /// 留在快照里作为待还原项，等它回来再复位；期间不向它发任何命令。
+    func testRecoverKeepsStaleServicesPendingWithoutTouchingThem() async throws {
         let root = temporaryDNSDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
-        let recorder = DNSSetupRecorder(
-            recoveryURL: root.appending(path: "dns-recovery.json"),
-            services: ["Wi-Fi", "Thunderbolt Bridge"],
-            dnsByService: ["Wi-Fi": ["8.8.8.8"], "Thunderbolt Bridge": ["1.1.1.1"]]
-        )
-        let manager = SystemDNSManager(
-            storage: Storage(rootDirectory: root),
-            runner: recorder.run(arguments:timeout:)
-        )
-        try await manager.enable(server: "172.19.0.2")
-
-        // 模拟切网络配置：Thunderbolt Bridge 消失，只剩 Wi-Fi。
-        await recorder.setServices(["Wi-Fi"])
-        let mutationCountBeforeRestore = await recorder.mutationArguments.count
-
-        try await manager.restore()
+        let storage = Storage(rootDirectory: root)
+        try await storage.prepare()
         let recoveryURL = root.appending(path: "dns-recovery.json")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: recoveryURL.path))
-        // 只检查 restore 阶段的命令，不应对 stale 服务发 setdnsservers
-        let allMutations = await recorder.mutationArguments
-        let restoreMutations = Array(allMutations.dropFirst(mutationCountBeforeRestore))
-        XCTAssertFalse(restoreMutations.contains { $0.contains("Thunderbolt Bridge") },
-                       "不应向已消失的服务发命令")
+        // 快照含 Wi-Fi + Thunderbolt Bridge，但 recorder 的 -listallnetworkservices 只返回 Wi-Fi。
+        let snapshot = DNSRecoverySnapshot(services: [
+            DNSServiceSnapshot(name: "Wi-Fi", servers: ["8.8.8.8"]),
+            DNSServiceSnapshot(name: "Thunderbolt Bridge", servers: [])
+        ])
+        try await storage.writeAtomically(JSONEncoder().encode(snapshot), to: recoveryURL)
+        let recorder = DNSSetupRecorder(
+            recoveryURL: recoveryURL,
+            services: ["Wi-Fi"],
+            dnsByService: ["Wi-Fi": ["172.19.0.2"]]
+        )
+        let manager = SystemDNSManager(storage: storage, runner: recorder.run(arguments:timeout:))
+
+        let outcome = try await manager.recoverIfNeeded()
+
+        XCTAssertEqual(outcome.restored, ["Wi-Fi"])
+        XCTAssertEqual(outcome.pending, ["Thunderbolt Bridge"])
+        let mutations = await recorder.mutationArguments
+        XCTAssertEqual(mutations, [["-setdnsservers", "Wi-Fi", "8.8.8.8"]])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: recoveryURL.path), "有待还原的服务时快照必须保留")
+        let retained = try JSONDecoder().decode(DNSRecoverySnapshot.self, from: Data(contentsOf: recoveryURL))
+        XCTAssertEqual(retained.services.map(\.name), ["Thunderbolt Bridge"], "已复位的服务不必再留")
+        let arguments = await recorder.arguments
+        XCTAssertFalse(arguments.contains { $0.contains("Thunderbolt Bridge") }, "不应向已消失的服务发命令")
     }
 
     func testRecoverKeepsFailedDNSServiceThenRetries() async throws {

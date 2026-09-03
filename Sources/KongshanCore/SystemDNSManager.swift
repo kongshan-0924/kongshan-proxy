@@ -32,9 +32,20 @@ public struct DNSRecoverySnapshot: Codable, Equatable, Sendable {
     }
 }
 
+/// 还原结果；`pending` 语义同 `ProxyRestoreOutcome`：快照里此刻不在网络服务列表中的服务，
+/// 快照保留，服务重新出现时自动复位。
+public struct DNSRestoreOutcome: Equatable, Sendable {
+    public let restored: [String]
+    public let pending: [String]
+
+    public init(restored: [String], pending: [String]) {
+        self.restored = restored
+        self.pending = pending
+    }
+}
+
 public enum SystemDNSError: Error, Equatable, LocalizedError {
     case noEnabledServices
-    case recoveryPending
     case transactionInProgress
     case unsupportedSnapshotVersion(Int)
     case commandFailed(exitCode: Int32, message: String)
@@ -44,8 +55,6 @@ public enum SystemDNSError: Error, Equatable, LocalizedError {
         switch self {
         case .noEnabledServices:
             "没有可用的网络服务"
-        case .recoveryPending:
-            "检测到尚未恢复的系统 DNS 快照"
         case .transactionInProgress:
             "另一项系统 DNS 操作仍在执行"
         case let .unsupportedSnapshotVersion(version):
@@ -114,8 +123,14 @@ public actor SystemDNSManager {
         try beginTransaction()
         defer { transactionInProgress = false }
 
-        guard try await storage.readIfPresent(from: recoveryURL) == nil else {
-            throw SystemDNSError.recoveryPending
+        // 同 SystemProxyManager.enable：旧快照先还原，只剩待还原（服务不在列表）项时并入本次快照，
+        // 真有还原失败才拒绝接管。
+        var carried: [DNSServiceSnapshot] = []
+        if try await storage.readIfPresent(from: recoveryURL) != nil {
+            let outcome = try await restoreFromDisk()
+            if !outcome.pending.isEmpty, let data = try await storage.readIfPresent(from: recoveryURL) {
+                carried = try decode(data).services
+            }
         }
         try await storage.prepare()
 
@@ -128,7 +143,11 @@ public actor SystemDNSManager {
         for service in services {
             snapshots.append(try await capture(service: service))
         }
+        for entry in carried where !snapshots.contains(where: { $0.name == entry.name }) {
+            snapshots.append(entry)
+        }
         try await persist(DNSRecoverySnapshot(services: snapshots))
+        try await storage.writeAtomically(Data("1".utf8), to: takeoverMarkerURL)
 
         do {
             for service in services {
@@ -147,16 +166,40 @@ public actor SystemDNSManager {
         }
     }
 
-    public func restore() async throws {
+    @discardableResult
+    public func restore() async throws -> DNSRestoreOutcome {
         try beginTransaction()
         defer { transactionInProgress = false }
-        try await restoreFromDisk()
+        return try await restoreFromDisk()
     }
 
-    public func recoverIfNeeded() async throws {
+    @discardableResult
+    public func recoverIfNeeded() async throws -> DNSRestoreOutcome {
         try beginTransaction()
         defer { transactionInProgress = false }
-        try await restoreFromDisk()
+        return try await restoreFromDisk()
+    }
+
+    /// 不依赖快照的兜底清扫：任何 DNS 列表里还含 `server`（TUN 劫持地址）的服务，把它摘掉，
+    /// 用户自己加的其它 DNS 保留；返回被清理的服务名。TUN 已停时残留的劫持地址意味着
+    /// 全网解析瘫痪。**只能在没有接管系统 DNS 时调用**，调用方负责这个判断。
+    public func sweepResidue(server: String) async throws -> [String] {
+        try beginTransaction()
+        defer { transactionInProgress = false }
+        guard try await storage.readIfPresent(from: takeoverMarkerURL) != nil else { return [] }
+
+        let services = SystemProxyCommands.allServices(
+            from: try await execute(["-listallnetworkservices"]).stdout
+        )
+        var cleared: [String] = []
+        for service in services {
+            let current = try await capture(service: service).servers
+            guard current.contains(server) else { continue }
+            let remaining = current.filter { $0 != server }
+            _ = try await execute(SystemDNSCommands.set(service: service, servers: remaining))
+            cleared.append(service)
+        }
+        return cleared
     }
 
     /// 网络服务集合变化后的补挂：只处理「DNS 不再包含我们的 hijack 服务器」的服务，
@@ -232,6 +275,11 @@ public actor SystemDNSManager {
         }
     }
 
+    /// 「这个安装曾接管过系统 DNS」的持久标记，语义同 `SystemProxyManager.takeoverMarkerURL`。
+    private var takeoverMarkerURL: URL {
+        recoveryURL.deletingLastPathComponent().appending(path: "dns-takeover.marker")
+    }
+
     private func beginTransaction() throws {
         guard !transactionInProgress else { throw SystemDNSError.transactionInProgress }
         transactionInProgress = true
@@ -260,8 +308,13 @@ public actor SystemDNSManager {
         return snapshot
     }
 
-    private func restoreFromDisk() async throws {
-        guard let data = try await storage.readIfPresent(from: recoveryURL) else { return }
+    /// 逐个服务写回快照并**读回核对**；此刻不在列表中的服务保留为待还原，失败/不一致的也保留并抛错；
+    /// 只有全部复位成功才删除快照。
+    @discardableResult
+    private func restoreFromDisk() async throws -> DNSRestoreOutcome {
+        guard let data = try await storage.readIfPresent(from: recoveryURL) else {
+            return DNSRestoreOutcome(restored: [], pending: [])
+        }
         let snapshot = try decode(data)
         // 切网络配置后快照里的服务可能已改名/消失；已禁用的服务仍必须恢复。
         let currentServices = Set(
@@ -270,28 +323,54 @@ public actor SystemDNSManager {
             )
         )
         var failures: [String] = []
-        var failedServices: [DNSServiceSnapshot] = []
-        for service in snapshot.services where currentServices.contains(service.name) {
+        var retained: [DNSServiceSnapshot] = []
+        var restored: [String] = []
+        var pending: [String] = []
+        for service in snapshot.services {
+            guard currentServices.contains(service.name) else {
+                pending.append(service.name)
+                retained.append(service)
+                continue
+            }
             do {
                 _ = try await execute(SystemDNSCommands.set(service: service.name, servers: service.servers))
+                // networksetup 返回 0 不等于设置真的落下去了；读回核对，不一致就当没还原。
+                let actual = try await capture(service: service.name).servers
+                guard actual == service.servers else {
+                    failures.append(
+                        "\(service.name)：还原后读回仍不一致（应为 \(Self.describe(service.servers))，实际 \(Self.describe(actual))）"
+                    )
+                    retained.append(service)
+                    continue
+                }
+                restored.append(service.name)
             } catch {
                 failures.append("\(service.name)：\(error.localizedDescription)")
-                failedServices.append(service)
+                retained.append(service)
             }
         }
 
-        if failedServices.isEmpty {
+        if retained.isEmpty {
             try FileManager.default.removeItem(at: recoveryURL)
-            return
+            return DNSRestoreOutcome(restored: restored, pending: [])
         }
-        try await persist(DNSRecoverySnapshot(
-            capturedAt: snapshot.capturedAt,
-            services: failedServices
-        ))
-        throw SystemDNSError.commandFailed(
-            exitCode: -1,
-            message: "部分网络服务 DNS 恢复失败，已保留快照重试：\(failures.joined(separator: "；"))"
-        )
+        if retained != snapshot.services {
+            try await persist(DNSRecoverySnapshot(
+                capturedAt: snapshot.capturedAt,
+                services: retained
+            ))
+        }
+        guard failures.isEmpty else {
+            throw SystemDNSError.commandFailed(
+                exitCode: -1,
+                message: "部分网络服务 DNS 恢复失败，已保留快照重试：\(failures.joined(separator: "；"))"
+            )
+        }
+        return DNSRestoreOutcome(restored: restored, pending: pending)
+    }
+
+    private static func describe(_ servers: [String]) -> String {
+        servers.isEmpty ? "空（DHCP）" : servers.joined(separator: " ")
     }
 
     private func execute(_ arguments: [String]) async throws -> ProcessResult {

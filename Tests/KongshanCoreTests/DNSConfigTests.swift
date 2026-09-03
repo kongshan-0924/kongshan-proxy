@@ -53,17 +53,22 @@ final class DNSConfigTests: XCTestCase {
         XCTAssertNil(dns["fakeip"])
         XCTAssertEqual(dns["final"] as? String, "dns-remote")
 
-        // 三条，顺序即优先级：自定义代理规则 → 旁路直连 → geosite-cn。
-        // 前两条的存在理由见 `testDirectDomainsResolveLocally`。
+        // 五条，顺序即优先级：自定义代理规则 → 旁路直连 → 反向解析 / Bonjour 留本地 → geosite-cn。
+        // 前两条的存在理由见 `testDirectDomainsResolveLocally`，
+        // 中间两条见 `testReverseLookupAndBonjourQueriesStayOnLocalResolver`。
         let dnsRules = try XCTUnwrap(dns["rules"] as? [[String: Any]])
-        XCTAssertEqual(dnsRules.count, 3)
+        XCTAssertEqual(dnsRules.count, 5)
         XCTAssertEqual(dnsRules[0]["domain_suffix"] as? [String], ["custom.example"])
         XCTAssertEqual(dnsRules[0]["server"] as? String, "dns-remote")
         XCTAssertEqual(dnsRules[1]["domain"] as? [String], ["localhost"])
         XCTAssertEqual(dnsRules[1]["server"] as? String, "dns-cn")
-        XCTAssertEqual(dnsRules[2]["rule_set"] as? String, "geosite-cn")
-        XCTAssertEqual(dnsRules[2]["action"] as? String, "route")
+        XCTAssertEqual(dnsRules[2]["domain_suffix"] as? [String], ["in-addr.arpa", "ip6.arpa"])
         XCTAssertEqual(dnsRules[2]["server"] as? String, "dns-cn")
+        XCTAssertEqual(dnsRules[3]["domain_keyword"] as? [String], ["_dns-sd._udp"])
+        XCTAssertEqual(dnsRules[3]["server"] as? String, "dns-cn")
+        XCTAssertEqual(dnsRules[4]["rule_set"] as? String, "geosite-cn")
+        XCTAssertEqual(dnsRules[4]["action"] as? String, "route")
+        XCTAssertEqual(dnsRules[4]["server"] as? String, "dns-cn")
 
         // **必须是无连接的 dns-bootstrap，不能是 DoH。**
         // default_domain_resolver 负责解析出站节点自己的域名。DoH 是长连接，被路由器 NAT
@@ -370,6 +375,29 @@ final class DNSConfigTests: XCTestCase {
         XCTAssertNil(servers.first { $0["tag"] as? String == "dns-lan" })
         let rules = try XCTUnwrap(dns["rules"] as? [[String: Any]])
         XCTAssertNil(rules.first { $0["server"] as? String == "dns-lan" })
+    }
+
+    /// 反向解析与 Bonjour 发现必须留在本地解析器：TUN 劫持 DNS 后 macOS 不停发 `*.in-addr.arpa` PTR 与
+    /// `lb._dns-sd._udp.*` 查询，旧配置让它们掉到 `final: dns-remote`——经代理去问 8.8.8.8，白跑还把
+    /// 内网网段送出去（真机 2026-09-03 一天 73 条此类失败）。
+    func testReverseLookupAndBonjourQueriesStayOnLocalResolver() throws {
+        let withLAN = try json(try ConfigGenerator.generate(input(proxyMode: .tun, lanResolver: lanSnapshot)))
+        let lanRules = try XCTUnwrap((withLAN["dns"] as? [String: Any])?["rules"] as? [[String: Any]])
+        let reverseIndex = try XCTUnwrap(lanRules.firstIndex {
+            ($0["domain_suffix"] as? [String])?.contains("in-addr.arpa") == true
+        })
+        XCTAssertEqual(lanRules[reverseIndex]["domain_suffix"] as? [String], ["in-addr.arpa", "ip6.arpa"])
+        XCTAssertEqual(lanRules[reverseIndex]["server"] as? String, "dns-lan", "有内网 DNS 时反向解析交给它——只有它认得内网网段")
+        let bonjour = try XCTUnwrap(lanRules.first { ($0["domain_keyword"] as? [String]) == ["_dns-sd._udp"] })
+        XCTAssertEqual(bonjour["server"] as? String, "dns-lan")
+        let fakeIPIndex = try XCTUnwrap(lanRules.firstIndex { $0["server"] as? String == "dns-fakeip" })
+        XCTAssertLessThan(reverseIndex, fakeIPIndex, "必须排在兜底规则之前")
+
+        let withoutLAN = try json(try ConfigGenerator.generate(input(proxyMode: .tun)))
+        let rules = try XCTUnwrap((withoutLAN["dns"] as? [String: Any])?["rules"] as? [[String: Any]])
+        let fallback = try XCTUnwrap(rules.first { ($0["domain_suffix"] as? [String])?.contains("in-addr.arpa") == true })
+        XCTAssertEqual(fallback["server"] as? String, "dns-cn", "没有内网 DNS 也绝不能绕到代理出口")
+        XCTAssertNotEqual(withoutLAN["dns"].flatMap { ($0 as? [String: Any])?["final"] as? String }, "dns-cn", "前提：兜底本来是 dns-remote，这条规则才有意义")
     }
 
     func testLANSplitCanBeTurnedOff() throws {

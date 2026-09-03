@@ -265,7 +265,9 @@ struct PolicyGroupsView: View {
                     .tag(option.name)
                 }
             }
-            .listStyle(.inset(alternatesRowBackgrounds: true))
+            // 不用交替行底色：节点通常只有几条到几十条，交替条纹会一路铺到列表底部，
+            // 空白处画出一排"幽灵行"，也正是用户反馈「代理这一列比较暗」的来源。
+            .listStyle(.inset)
             .disabled(state.isBusy)
             .overlay {
                 if visibleOptions.isEmpty {
@@ -300,9 +302,14 @@ struct PolicyGroupsView: View {
             nil
         }
         return HStack(spacing: 8) {
-            Image(systemName: symbol(for: option, selected: isSelected))
-                .foregroundStyle(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
-                .frame(width: 16)
+            // 只给选中行放标记，其余留空——菜单里的单选项就是这样；一屏几十个一样的机架符号只是噪音。
+            if let symbol = symbol(for: option, selected: isSelected) {
+                Image(systemName: symbol)
+                    .foregroundStyle(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
+                    .frame(width: 16)
+            } else {
+                Color.clear.frame(width: 16, height: 1)
+            }
             if case let .node(node) = option,
                let flag = metadata?.flag,
                !node.name.contains(flag) {
@@ -335,10 +342,10 @@ struct PolicyGroupsView: View {
         .help(helpText(for: option, isSelectable: isSelectable))
     }
 
-    private func symbol(for option: GroupOption, selected: Bool) -> String {
+    private func symbol(for option: GroupOption, selected: Bool) -> String? {
         if selected { return "checkmark.circle.fill" }
         switch option {
-        case .node: return "server.rack"
+        case .node: return nil
         case .reference: return "arrow.turn.down.right"
         }
     }

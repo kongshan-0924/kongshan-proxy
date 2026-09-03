@@ -89,7 +89,8 @@ final class NativeChromeGuardTests: XCTestCase {
         let dashboard = try source("DashboardView.swift")
         XCTAssertFalse(dashboard.contains("GridItem(.adaptive"), "自适应列会排出缺角的最后一行")
         XCTAssertTrue(dashboard.contains("count: metricColumns"))
-        for box in ["exitIPBox", "connectionsBox", "coreMemoryBox", "runtimeBox", "activeConfigBox", "selfUsageBox"] {
+        // 会随流量变化的四张卡各自是独立视图（Observation 只失效自己），见 DashboardObservationScopeTests。
+        for box in ["ExitIPMetricBox", "ConnectionsMetricBox", "CoreMemoryMetricBox", "runtimeBox", "activeConfigBox", "SelfUsageMetricBox"] {
             XCTAssertTrue(dashboard.contains(box), "缺少指标卡 \(box)")
         }
     }

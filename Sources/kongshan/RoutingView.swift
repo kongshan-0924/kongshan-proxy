@@ -111,17 +111,23 @@ struct RoutingView: View {
         } else if keyword.isEmpty {
             // 不搜索时按目标策略折叠：三千多条规则平铺出来既没有全局认知、也找不到东西——
             // 用户真正想知道的是"哪些流量走哪个策略"，那正是按 target 分组的形状。
+            // 分区标题说明这半屏是什么：上面是可改的表单，下面是只读的订阅规则，
+            // 之前两者之间只有一条分隔线，读者得靠猜。
             List {
-                ForEach(targetGroups) { group in
-                    RuleTargetGroupRow(group: group, tint: targetTint(group.target))
+                Section("订阅规则 · 只读 · 按目标策略分组") {
+                    ForEach(targetGroups) { group in
+                        RuleTargetGroupRow(group: group, tint: targetTint(group.target))
+                    }
                 }
             }
             .listStyle(.inset)
         } else {
             // 搜索时给扁平结果（用户已经在找具体一条）。
             List {
-                ForEach(matched.prefix(300)) { rule in
-                    RuleRow(rule: rule, tint: targetTint(rule.target))
+                Section("匹配的订阅规则 · 只读") {
+                    ForEach(matched.prefix(300)) { rule in
+                        RuleRow(rule: rule, tint: targetTint(rule.target))
+                    }
                 }
                 if matched.count > 300 {
                     Text("仅显示前 300 条，共 \(matched.count) 条匹配——把关键词写得更具体些")
@@ -153,6 +159,8 @@ struct RoutingView: View {
 
     private var perAppSection: some View {
         Section(isExpanded: $perAppExpanded) {
+            // 两行：主操作（选 App、选走向、添加）一行；两个辅助入口另起一行并说明用途。
+            // 此前五个控件挤一行，App 名在普通窗宽下就被截成「"企业微信"网页内容…」。
             HStack(spacing: 10) {
                 Picker("App", selection: $selectedProcess) {
                     if runningApps.isEmpty {
@@ -164,7 +172,7 @@ struct RoutingView: View {
                     }
                 }
                 .labelsHidden()
-                .frame(maxWidth: 300)
+                .frame(minWidth: 180, maxWidth: 360)
 
                 Picker("走向", selection: $perAppTarget) {
                     Text("直连").tag(PerAppTarget.direct)
@@ -178,13 +186,19 @@ struct RoutingView: View {
                     }
                 }
                 .labelsHidden()
-                .frame(maxWidth: 260)
-
-                Button("添加 / 更新") { addPerAppRule() }
-                    .disabled(selectedProcess.isEmpty || state.isApplyingRouting)
+                .frame(minWidth: 120, maxWidth: 260)
 
                 Spacer(minLength: 0)
 
+                Button("添加 / 更新") { addPerAppRule() }
+                    .disabled(selectedProcess.isEmpty || state.isApplyingRouting)
+            }
+
+            HStack(spacing: 8) {
+                Text("列表只含正在运行的 App；没在跑的用「选择已安装 App…」。")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                Spacer(minLength: 8)
                 Button("刷新 App") { refreshRunningApps() }
                     .controlSize(.small)
                 Button("选择已安装 App…") { chooseInstalledApp() }
@@ -641,9 +655,13 @@ private struct RuleTargetGroupRow: View {
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.tertiary)
                         .frame(width: 10)
+                    // 目标策略的颜色放在色点上，名字用正文色：整行彩色粗体像一列链接和警告，
+                    // 访达的标签就是"色点 + 普通文字"。
+                    Circle()
+                        .fill(tint)
+                        .frame(width: 7, height: 7)
                     Text(group.target)
                         .fontWeight(.medium)
-                        .foregroundStyle(tint)
                         .lineLimit(1)
                     Spacer(minLength: 8)
                     Text("\(group.rules.count)")

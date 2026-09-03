@@ -54,11 +54,24 @@ public struct ProxyRecoverySnapshot: Codable, Equatable, Sendable {
     }
 }
 
+/// 还原结果。`pending` 是快照里此刻不在网络服务列表中的服务：VPN 类虚拟服务
+/// （真机 2026-09-03 的「Shadowrocket」）随其 App 启停出现/消失，它们的代理设置这会儿写不回去，
+/// 但也不是失败——快照保留，服务重新出现时（重开 App / 换网）自动复位。
+/// 旧实现直接跳过这些服务并删掉快照，残留的代理指向已停的中转端口，用户关了代理仍全网走空。
+public struct ProxyRestoreOutcome: Equatable, Sendable {
+    public let restored: [String]
+    public let pending: [String]
+
+    public init(restored: [String], pending: [String]) {
+        self.restored = restored
+        self.pending = pending
+    }
+}
+
 public enum SystemProxyError: Error, Equatable, LocalizedError {
     case invalidPort
     case noEnabledServices
     case invalidProxyState(String)
-    case recoveryPending
     case noActiveProxySession
     case transactionInProgress
     case unsupportedSnapshotVersion(Int)
@@ -73,8 +86,6 @@ public enum SystemProxyError: Error, Equatable, LocalizedError {
             "没有可用的网络服务"
         case let .invalidProxyState(message):
             "无法读取系统代理状态：\(message)"
-        case .recoveryPending:
-            "检测到尚未恢复的系统代理快照"
         case .noActiveProxySession:
             "系统代理尚未启用，无法更新绕过列表"
         case .transactionInProgress:
@@ -173,6 +184,20 @@ public enum SystemProxyCommands {
             }
             return commands
         }
+    }
+
+    /// 残留清扫用：只关掉指向我们的那几项端点，用户自己配的其它代理（企业 HTTPS 代理等）不动。
+    public static func disable(
+        service: String,
+        http: Bool,
+        https: Bool,
+        socks: Bool
+    ) -> [NetworkSetupCommand] {
+        var commands: [NetworkSetupCommand] = []
+        if http { commands.append(command("-setwebproxystate", service, "off")) }
+        if https { commands.append(command("-setsecurewebproxystate", service, "off")) }
+        if socks { commands.append(command("-setsocksfirewallproxystate", service, "off")) }
+        return commands
     }
 
     public static func restore(snapshot: ProxyRecoverySnapshot) -> [NetworkSetupCommand] {
@@ -275,8 +300,15 @@ public actor SystemProxyManager {
         try beginTransaction()
         defer { transactionInProgress = false }
 
-        guard try await storage.readIfPresent(from: recoveryURL) == nil else {
-            throw SystemProxyError.recoveryPending
+        // 上次的快照还在：先把能还原的还原掉。只剩「服务此刻不在列表里」的待还原项时不能拒绝
+        // 启用——那会让用户永远开不了代理；把它们带进本次快照，服务回来时照样复位。
+        // 真有还原失败（服务在、写不回去）才拒绝，错误原样抛出，用户能看到是哪个服务。
+        var carried: [NetworkServiceProxySnapshot] = []
+        if try await storage.readIfPresent(from: recoveryURL) != nil {
+            let outcome = try await restoreFromDisk()
+            if !outcome.pending.isEmpty, let data = try await storage.readIfPresent(from: recoveryURL) {
+                carried = try JSONDecoder().decode(ProxyRecoverySnapshot.self, from: data).services
+            }
         }
         try await storage.prepare()
 
@@ -289,10 +321,14 @@ public actor SystemProxyManager {
         for service in services {
             serviceSnapshots.append(try await capture(service: service))
         }
+        for entry in carried where !serviceSnapshots.contains(where: { $0.name == entry.name }) {
+            serviceSnapshots.append(entry)
+        }
         let snapshot = ProxyRecoverySnapshot(services: serviceSnapshots)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try await storage.writeAtomically(try encoder.encode(snapshot), to: recoveryURL)
+        try await storage.writeAtomically(Data("1".utf8), to: takeoverMarkerURL)
 
         do {
             for command in SystemProxyCommands.enable(
@@ -315,16 +351,60 @@ public actor SystemProxyManager {
         }
     }
 
-    public func restore() async throws {
+    @discardableResult
+    public func restore() async throws -> ProxyRestoreOutcome {
         try beginTransaction()
         defer { transactionInProgress = false }
-        try await restoreFromDisk()
+        return try await restoreFromDisk()
     }
 
-    public func recoverIfNeeded() async throws {
+    @discardableResult
+    public func recoverIfNeeded() async throws -> ProxyRestoreOutcome {
         try beginTransaction()
         defer { transactionInProgress = false }
-        try await restoreFromDisk()
+        return try await restoreFromDisk()
+    }
+
+    /// 不依赖快照的兜底清扫：把所有指向 `127.0.0.1:port`（我们的中转端口）的系统代理端点关掉，
+    /// 返回被清理的服务名。快照丢失、服务当时不在列表里被漏掉——这类场景只有按"设置里指向谁"
+    /// 来清才兜得住：真机 2026-09-03，「Shadowrocket」服务三项代理仍指向已停的 36815，
+    /// 用户关掉代理后所有直连请求被送进空端口（Codex 全 404），设置页却显示代理已关。
+    ///
+    /// **只能在没有接管系统代理时调用**——接管中调用等于把自己关掉；调用方负责这个判断。
+    public func sweepResidue(port: Int) async throws -> [String] {
+        guard (1...65_535).contains(port) else { throw SystemProxyError.invalidPort }
+        try beginTransaction()
+        defer { transactionInProgress = false }
+        guard try await storage.readIfPresent(from: takeoverMarkerURL) != nil else { return [] }
+
+        let services = SystemProxyCommands.allServices(
+            from: try await execute(["-listallnetworkservices"]).stdout
+        )
+        var cleared: [String] = []
+        for service in services {
+            let state = try await capture(service: service)
+            let http = Self.pointsAtLoopback(state.http, port: port)
+            let https = Self.pointsAtLoopback(state.https, port: port)
+            let socks = Self.pointsAtLoopback(state.socks, port: port)
+            guard http || https || socks else { continue }
+            for command in SystemProxyCommands.disable(service: service, http: http, https: https, socks: socks) {
+                _ = try await execute(command.arguments)
+            }
+            cleared.append(service)
+        }
+        return cleared
+    }
+
+    /// 「这个安装曾接管过系统代理」的持久标记，只写不删。残留只可能出现在接管过的安装上：
+    /// 没标记时清扫直接返回、不碰 networksetup——从未开过系统代理的用户不必每次换网白跑一圈，
+    /// 测试夹具（临时目录）也不会去动宿主机的真实设置。
+    private var takeoverMarkerURL: URL {
+        recoveryURL.deletingLastPathComponent().appending(path: "proxy-takeover.marker")
+    }
+
+    static func pointsAtLoopback(_ endpoint: ProxyEndpointState, port: Int) -> Bool {
+        guard endpoint.enabled, endpoint.port == port else { return false }
+        return ["127.0.0.1", "localhost", "::1"].contains(endpoint.server.lowercased())
     }
 
     /// 网络服务集合变化后的补挂：macOS 的代理设置按服务存储，新出现的服务
@@ -435,8 +515,14 @@ public actor SystemProxyManager {
         )
     }
 
-    private func restoreFromDisk() async throws {
-        guard let data = try await storage.readIfPresent(from: recoveryURL) else { return }
+    /// 逐个服务写回快照并**读回核对**。快照里此刻不在列表中的服务保留为待还原（见
+    /// `ProxyRestoreOutcome.pending`），写回失败或读回不一致的服务也保留并抛错；
+    /// 只有全部复位成功才删除快照。
+    @discardableResult
+    private func restoreFromDisk() async throws -> ProxyRestoreOutcome {
+        guard let data = try await storage.readIfPresent(from: recoveryURL) else {
+            return ProxyRestoreOutcome(restored: [], pending: [])
+        }
         let snapshot = try JSONDecoder().decode(ProxyRecoverySnapshot.self, from: data)
         guard snapshot.version == 1 else {
             throw SystemProxyError.unsupportedSnapshotVersion(snapshot.version)
@@ -448,8 +534,15 @@ public actor SystemProxyManager {
             )
         )
         var failures: [String] = []
-        var failedServices: [NetworkServiceProxySnapshot] = []
-        for service in snapshot.services where currentServices.contains(service.name) {
+        var retained: [NetworkServiceProxySnapshot] = []
+        var restored: [String] = []
+        var pending: [String] = []
+        for service in snapshot.services {
+            guard currentServices.contains(service.name) else {
+                pending.append(service.name)
+                retained.append(service)
+                continue
+            }
             var serviceFailed = false
             for command in SystemProxyCommands.restore(
                 snapshot: ProxyRecoverySnapshot(services: [service])
@@ -461,24 +554,68 @@ public actor SystemProxyManager {
                     failures.append("\(service.name)：\(error.localizedDescription)")
                 }
             }
-            if serviceFailed { failedServices.append(service) }
+            if !serviceFailed {
+                // networksetup 返回 0 不等于设置真的落下去了；读回核对，不一致就当没还原。
+                do {
+                    let actual = try await capture(service: service.name)
+                    if let mismatch = Self.restoreMismatch(expected: service, actual: actual) {
+                        serviceFailed = true
+                        failures.append("\(service.name)：还原后读回仍不一致（\(mismatch)）")
+                    }
+                } catch {
+                    serviceFailed = true
+                    failures.append("\(service.name)：还原后无法读回核对：\(error.localizedDescription)")
+                }
+            }
+            if serviceFailed {
+                retained.append(service)
+            } else {
+                restored.append(service.name)
+            }
         }
 
-        if failedServices.isEmpty {
+        if retained.isEmpty {
             try FileManager.default.removeItem(at: recoveryURL)
-            return
+            return ProxyRestoreOutcome(restored: restored, pending: [])
         }
-        let retrySnapshot = ProxyRecoverySnapshot(
-            capturedAt: snapshot.capturedAt,
-            services: failedServices
-        )
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try await storage.writeAtomically(try encoder.encode(retrySnapshot), to: recoveryURL)
-        throw SystemProxyError.commandFailed(
-            exitCode: -1,
-            message: "部分网络服务代理恢复失败，已保留快照重试：\(failures.joined(separator: "；"))"
-        )
+        if retained != snapshot.services {
+            let retrySnapshot = ProxyRecoverySnapshot(
+                capturedAt: snapshot.capturedAt,
+                services: retained
+            )
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            try await storage.writeAtomically(try encoder.encode(retrySnapshot), to: recoveryURL)
+        }
+        guard failures.isEmpty else {
+            throw SystemProxyError.commandFailed(
+                exitCode: -1,
+                message: "部分网络服务代理恢复失败，已保留快照重试：\(failures.joined(separator: "；"))"
+            )
+        }
+        return ProxyRestoreOutcome(restored: restored, pending: pending)
+    }
+
+    /// 读回核对只看开关与（开着时的）地址端口——bypass 列表的格式化差异不该判成失败，
+    /// 而"该关的没关、该指回去的没指回去"正是残留的定义。
+    static func restoreMismatch(
+        expected: NetworkServiceProxySnapshot,
+        actual: NetworkServiceProxySnapshot
+    ) -> String? {
+        let endpoints: [(String, ProxyEndpointState, ProxyEndpointState)] = [
+            ("HTTP", expected.http, actual.http),
+            ("HTTPS", expected.https, actual.https),
+            ("SOCKS", expected.socks, actual.socks)
+        ]
+        var problems: [String] = []
+        for (label, want, got) in endpoints {
+            if want.enabled != got.enabled {
+                problems.append("\(label) 应为\(want.enabled ? "开" : "关")，实际\(got.enabled ? "开" : "关")")
+            } else if want.enabled, !want.server.isEmpty, want.server != got.server || want.port != got.port {
+                problems.append("\(label) 应指向 \(want.server):\(want.port)，实际 \(got.server):\(got.port)")
+            }
+        }
+        return problems.isEmpty ? nil : problems.joined(separator: "，")
     }
 
     /// networksetup 在网络服务列表变动期间会瞬时报
