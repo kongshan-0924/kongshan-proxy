@@ -1,7 +1,7 @@
 import KongshanCore
 import SwiftUI
 
-/// 消息中心：集中展示错误与警告。顶部提醒条只显示最新一条，完整列表在这里。
+/// 消息中心：集中展示错误与警告。工具栏通知按钮只显示最新一条，完整列表在这里。
 struct MessagesView: View {
     @Environment(AppState.self) private var state
     @State private var tab: Tab = .warnings
@@ -15,76 +15,86 @@ struct MessagesView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            PageHeader(title: "消息", subtitle: "应用运行中的错误与警告") {
-                Button("全部清除") {
+        Group {
+            if tab == .warnings { warningList } else { eventList }
+        }
+        .navigationTitle("消息")
+        .navigationSubtitle(subtitle)
+        .toolbar {
+            // 分区切换放工具栏正中：访达的视图切换器就在这个位置。
+            ToolbarItem(placement: .principal) {
+                Picker("消息类型", selection: $tab) {
+                    ForEach(Tab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
                     state.dismissError()
                     state.clearWarnings()
                     state.clearRuntimeEvents()
+                } label: {
+                    Label("全部清除", systemImage: "trash")
                 }
                 .disabled(state.errorMessage == nil && state.warnings.isEmpty && state.runtimeEvents.isEmpty)
+                .help("清空消息页；告警与指标的存档不受影响")
             }
-            // 让用户知道清除不会毁掉证据——否则「全部清除」看起来就是不可逆的销毁。
-            HStack(spacing: 4) {
-                Image(systemName: "archivebox")
-                Text("警告与错误另存于 \(state.diagnosticsArchivePath)；"
-                     + "运行指标每分钟记一行到 \(state.metricsArchivePath)。两者都不受「全部清除」影响")
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .textSelection(.enabled)
-            Picker("消息类型", selection: $tab) {
-                ForEach(Tab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 240)
-            .padding(.vertical, 10)
-            if tab == .events {
-                HStack(spacing: 8) {
-                    Toggle("只看问题", isOn: $eventProblemsOnly)
-                        .toggleStyle(.checkbox)
-                    if eventProblemsOnly {
-                        Text("\(visibleEvents.count) / \(state.runtimeEvents.count) 条")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 8)
-            }
-            Divider()
-            if tab == .warnings { warningList } else { eventList }
         }
-        .pageBackground()
-        .navigationTitle("消息")
+        // 让用户知道清除不会毁掉证据——否则「全部清除」看起来就是不可逆的销毁。
+        // 放在底栏：邮件/访达的状态信息都在窗口底部那一条。
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 0) {
+                Divider()
+                HStack(spacing: 6) {
+                    Image(systemName: "archivebox")
+                    Text("警告与错误另存于 \(state.diagnosticsArchivePath)；"
+                         + "运行指标每分钟记一行到 \(state.metricsArchivePath)。两者都不受「全部清除」影响")
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 0)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+                .background(.bar)
+            }
+        }
+    }
+
+    private var subtitle: String {
+        switch tab {
+        case .warnings:
+            let count = (state.errorMessage != nil ? 1 : 0) + state.warnings.count
+            return count == 0 ? "没有未处理的消息" : "\(count) 条"
+        case .events:
+            return eventProblemsOnly
+                ? "\(visibleEvents.count) / \(state.runtimeEvents.count) 条"
+                : "\(state.runtimeEvents.count) 条"
+        }
     }
 
     private var warningList: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                if let error = state.errorMessage {
-                    messageRow(text: error, symbol: "exclamationmark.octagon.fill", tint: .red)
-                    Divider().opacity(0.4)
-                }
-                ForEach(Array(state.warnings.enumerated()), id: \.offset) { _, warning in
-                    messageRow(text: warning, symbol: "exclamationmark.triangle.fill", tint: .orange)
-                    Divider().opacity(0.4)
-                }
-                if state.errorMessage == nil && state.warnings.isEmpty {
-                    ContentUnavailableView(
-                        "暂无消息",
-                        systemImage: "checkmark.circle",
-                        description: Text("代理运行中出现错误或警告时会显示在这里。")
-                    )
-                    .frame(maxWidth: .infinity, minHeight: 220)
-                }
+        List {
+            if let error = state.errorMessage {
+                messageRow(text: error, symbol: "exclamationmark.octagon.fill", tint: .red)
             }
-            .padding(.horizontal, 16)
+            ForEach(Array(state.warnings.enumerated()), id: \.offset) { _, warning in
+                messageRow(text: warning, symbol: "exclamationmark.triangle.fill", tint: .orange)
+            }
         }
-        .scrollIndicators(.hidden)
+        .listStyle(.inset)
+        .overlay {
+            if state.errorMessage == nil && state.warnings.isEmpty {
+                ContentUnavailableView(
+                    "暂无消息",
+                    systemImage: "checkmark.circle",
+                    description: Text("代理运行中出现错误或警告时会显示在这里。")
+                )
+            }
+        }
     }
 
     /// 一次算好再交给列表：`ForEach` 在 body 里过滤等于每次重绘都重算一遍。
@@ -93,12 +103,22 @@ struct MessagesView: View {
     }
 
     private var eventList: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Toggle("只看问题", isOn: $eventProblemsOnly)
+                    .toggleStyle(.checkbox)
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            Divider()
+            List {
                 ForEach(visibleEvents.reversed()) { event in
                     eventRow(event)
-                    Divider().opacity(0.4)
                 }
+            }
+            .listStyle(.inset)
+            .overlay {
                 if visibleEvents.isEmpty {
                     ContentUnavailableView(
                         eventProblemsOnly ? "没有问题事件" : "暂无运行事件",
@@ -107,24 +127,24 @@ struct MessagesView: View {
                             ? Text("当前 \(state.runtimeEvents.count) 条记录里没有警告或错误。")
                             : nil
                     )
-                    .frame(maxWidth: .infinity, minHeight: 220)
                 }
             }
-            .padding(.horizontal, 16)
         }
-        .scrollIndicators(.hidden)
     }
 
     private func eventRow(_ event: RuntimeEvent) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: eventSymbol(event.level))
-                .font(.system(size: 13))
                 .foregroundStyle(eventTint(event.level))
+                .frame(width: 16)
                 .padding(.top, 2)
             VStack(alignment: .leading, spacing: 3) {
-                Text(event.title).font(.system(size: 13, weight: .medium))
+                Text(event.title)
+                    .font(.body.weight(.medium))
                 if let detail = event.detail {
-                    Text(detail).font(.caption).foregroundStyle(.secondary)
+                    Text(detail)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
                 }
                 HStack(spacing: 8) {
                     Text(event.timestamp.formatted(date: .abbreviated, time: .standard))
@@ -132,13 +152,13 @@ struct MessagesView: View {
                         Text("PID \(event.previousPID.map { String($0) } ?? "-") → \(event.currentPID.map { String($0) } ?? "-")")
                     }
                 }
-                .font(.caption2.monospacedDigit())
+                .font(.caption.monospacedDigit())
                 .foregroundStyle(.tertiary)
             }
             .textSelection(.enabled)
             Spacer(minLength: 0)
         }
-        .padding(.vertical, 10)
+        .padding(.vertical, 4)
     }
 
     private func eventSymbol(_ level: RuntimeEvent.Level) -> String {
@@ -160,14 +180,13 @@ struct MessagesView: View {
     private func messageRow(text: String, symbol: String, tint: Color) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: symbol)
-                .font(.system(size: 13))
                 .foregroundStyle(tint)
+                .frame(width: 16)
                 .padding(.top, 2)
             Text(text)
-                .font(.system(size: 13))
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.vertical, 10)
+        .padding(.vertical, 4)
     }
 }

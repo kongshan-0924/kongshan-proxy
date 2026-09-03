@@ -3,126 +3,79 @@ import KongshanCore
 import SwiftUI
 
 /// 连接监控页：实时列出活跃连接（目标主机 / 进程、命中的规则与出站链路、上下行流量），
-/// 支持单条关闭与右上角一键全部关闭。只在本页可见时轮询，离开即停。
+/// 支持单条关闭与工具栏一键全部关闭。只在本页可见时订阅，离开即停。
+///
+/// 用系统 `Table`：活动监视器那类实时表格就是它——列可排序、列宽可拖、AppKit 承载，
+/// 上千行每秒刷新也比自绘 `LazyVStack` 省。
 struct ConnectionsView: View {
     @Environment(AppState.self) private var state
     @State private var searchText = ""
-    @State private var sortOption: ConnectionSortOption = .defaultOrder
+    @State private var sortOrder = [KeyPathComparator(\ConnectionLiveDetail.totalRate, order: .reverse)]
+    @State private var selection: Set<ConnectionLiveDetail.ID> = []
     @State private var inspectedConnection: ConnectionLiveDetail?
     @State private var confirmsCloseAll = false
 
     private var filteredConnections: [ConnectionLiveDetail] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        var result = query.isEmpty ? state.connections : state.connections.filter { conn in
+        let matched = query.isEmpty ? state.connections : state.connections.filter { conn in
             conn.host.localizedCaseInsensitiveContains(query)
                 || (conn.process?.localizedCaseInsensitiveContains(query) ?? false)
                 || conn.rule.localizedCaseInsensitiveContains(query)
                 || conn.chains.contains(where: { $0.localizedCaseInsensitiveContains(query) })
         }
-        switch sortOption {
-        case .defaultOrder: break
-        case .totalRate: result.sort { $0.totalRate > $1.totalRate }
-        case .uploadRate: result.sort { $0.uploadRate > $1.uploadRate }
-        case .downloadRate: result.sort { $0.downloadRate > $1.downloadRate }
-        }
-        return result
+        return matched.sorted(using: sortOrder)
     }
 
     var body: some View {
-        // 只算一遍。`filteredConnections` 每次访问都要 filter + sort，而工具栏里的汇总、
-        // 计数和下面的列表都要用它——连接上千条时每秒重复三四遍纯属白工。
+        // 只算一遍：`filteredConnections` 每次访问都要 filter + sort。
         let list = filteredConnections
         // 出站 tag → 节点名。内核回报的链路里节点是 `node-<uuid>` 形式的内部 tag，
         // 直接显示就是一串 UUID 而不是「DMIT-Trojan」——信息量为零还占满整行。
-        // 每次渲染建一次即可：节点集合不大，而按需线性扫会变成
-        // 可见行数 × 链路长度 次遍历。
         let nodeNames = Dictionary(
             state.nodes.map { (ConfigGenerator.outboundTag(for: $0), $0.name) },
             uniquingKeysWith: { first, _ in first }
         )
-        return VStack(spacing: 0) {
-            header
-            Divider()
-            if state.status == .on && !state.connections.isEmpty {
-                HStack {
-                    SearchField(text: $searchText, placeholder: "搜索目标域名、进程或出站规则…")
-                        .frame(maxWidth: 320)
-                    Menu {
-                        Picker("排序", selection: $sortOption) {
-                            ForEach(ConnectionSortOption.allCases) { option in
-                                Text(option.rawValue).tag(option)
-                            }
-                        }
+        return content(list: list, nodeNames: nodeNames)
+            .navigationTitle("连接")
+            .navigationSubtitle(subtitle)
+            .searchable(text: $searchText, placement: .toolbar, prompt: "搜索目标、进程或规则")
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Button(role: .destructive) {
+                        confirmsCloseAll = true
                     } label: {
-                        Label(sortOption.rawValue, systemImage: "arrow.up.arrow.down")
-                            .font(.caption)
+                        Label("全部关闭", systemImage: "xmark.circle")
                     }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                    Spacer()
-                    // 汇总：把"这些连接一共传了多少"直接给出来。
-                    // 只列每条连接的累计量、要用户自己心算加总是没意义的。
-                    HStack(spacing: 10) {
-                        Text("累计 ↑ \(Self.bytesOrDash(list.reduce(0) { $0 + $1.upload }))")
-                        Text("↓ \(Self.bytesOrDash(list.reduce(0) { $0 + $1.download }))")
-                    }
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    Divider().frame(height: 10)
-                    Text("当前显示 \(list.count) / \(state.connections.count) 条")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                    .disabled(state.connections.isEmpty)
+                    .help("关闭全部活跃连接")
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-                .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
-                Divider()
             }
-            content(list: list, nodeNames: nodeNames)
-        }
-        .pageBackground()
-        .navigationTitle("连接")
-        .onAppear { state.startConnectionsMonitoring() }
-        .onDisappear { state.stopConnectionsMonitoring() }
-        .sheet(item: $inspectedConnection) { connection in
-            ConnectionRouteDetail(connection: connection, nodeNames: nodeNames)
-        }
+            // 误点一下会掐掉所有进行中的下载和长连接，必须有确认。
+            .confirmationDialog(
+                "关闭全部 \(state.connections.count) 条活跃连接？",
+                isPresented: $confirmsCloseAll,
+                titleVisibility: .visible
+            ) {
+                Button("全部关闭", role: .destructive) {
+                    Task { await state.closeAllActiveConnections() }
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("进行中的下载和长连接会立即断开，应用通常会自行重连。")
+            }
+            .onAppear { state.startConnectionsMonitoring() }
+            .onDisappear { state.stopConnectionsMonitoring() }
+            .sheet(item: $inspectedConnection) { connection in
+                ConnectionRouteDetail(connection: connection, nodeNames: nodeNames)
+            }
     }
 
-    private var header: some View {
-        PageHeader(title: "连接", subtitle: "实时活跃连接；显示出站链路与命中的规则") {
-            HStack(spacing: 10) {
-                HStack(spacing: 8) {
-                    Label("↑ \(Self.rateOrDash(state.connections.totalUploadRate))", systemImage: "arrow.up.circle.fill")
-                        .foregroundStyle(.blue)
-                    Label("↓ \(Self.rateOrDash(state.connections.totalDownloadRate))", systemImage: "arrow.down.circle.fill")
-                        .foregroundStyle(.green)
-                }
-                .font(.caption.monospacedDigit())
-                Text("\(state.connections.count) 条")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Button(role: .destructive) {
-                    confirmsCloseAll = true
-                } label: {
-                    Label("全部关闭", systemImage: "xmark.circle")
-                }
-                .disabled(state.connections.isEmpty)
-                // 误点一下会掐掉所有进行中的下载和长连接，必须有确认。
-                .confirmationDialog(
-                    "关闭全部 \(state.connections.count) 条活跃连接？",
-                    isPresented: $confirmsCloseAll,
-                    titleVisibility: .visible
-                ) {
-                    Button("全部关闭", role: .destructive) {
-                        Task { await state.closeAllActiveConnections() }
-                    }
-                    Button("取消", role: .cancel) {}
-                } message: {
-                    Text("进行中的下载和长连接会立即断开，应用通常会自行重连。")
-                }
-            }
-        }
+    /// 条数与总速率放副标题——活动监视器就是把统计放在这里，而不是另画一行工具条。
+    private var subtitle: String {
+        guard state.status == .on else { return "代理未开启" }
+        let count = state.connections.count
+        guard count > 0 else { return "暂无活跃连接" }
+        return "\(count) 条 · ↑ \(Theme.rateOrDash(state.connections.totalUploadRate)) · ↓ \(Theme.rateOrDash(state.connections.totalDownloadRate))"
     }
 
     @ViewBuilder
@@ -133,86 +86,102 @@ struct ConnectionsView: View {
                 systemImage: "bolt.slash",
                 description: Text("开启系统代理或 TUN 后，这里会显示实时活跃连接。")
             )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if state.connections.isEmpty {
-            ContentUnavailableView(
-                "暂无活跃连接",
-                systemImage: "point.3.connected.trianglepath.dotted"
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            ContentUnavailableView("暂无活跃连接", systemImage: "point.3.connected.trianglepath.dotted")
+        } else if list.isEmpty {
+            ContentUnavailableView.search(text: searchText)
         } else {
-            if list.isEmpty {
-                ContentUnavailableView(
-                    "未匹配到相关连接",
-                    systemImage: "magnifyingglass",
-                    description: Text("请尝试搜索其他关键字。")
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(list) { conn in
-                            row(conn, nodeNames: nodeNames)
-                            Divider()
-                        }
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 6)
-                }
-                .scrollIndicators(.hidden)
-            }
+            table(list, nodeNames: nodeNames)
         }
     }
 
-    private func row(_ conn: ConnectionLiveDetail, nodeNames: [String: String]) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(conn.network.uppercased())
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(Theme.cardFill, in: RoundedRectangle(cornerRadius: Theme.tagRadius))
-                    Text(conn.host)
-                        .font(.system(size: 12, weight: .medium))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+    private func table(_ list: [ConnectionLiveDetail], nodeNames: [String: String]) -> some View {
+        Table(list, selection: $selection, sortOrder: $sortOrder) {
+            TableColumn("目标", value: \.host) { conn in
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(spacing: 6) {
+                        Text(conn.network.uppercased())
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text(conn.host)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
                     if let process = conn.process {
                         Text(process)
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
                 }
+            }
+            .width(min: 200, ideal: 300)
+
+            TableColumn("规则 · 链路", value: \.rule) { conn in
                 Text(chainText(conn, nodeNames: nodeNames))
-                    .font(.caption2)
+                    .font(.callout)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            Spacer(minLength: 8)
-            VStack(alignment: .trailing, spacing: 2) {
-                Text("↑ \(Self.rateOrDash(conn.uploadRate))   ↓ \(Self.rateOrDash(conn.downloadRate))")
-                    .font(.caption2.weight(.semibold).monospacedDigit())
-                    .foregroundStyle(conn.totalRate > 0 ? .primary : .secondary)
-                Text("累计 ↑ \(Self.bytesOrDash(conn.upload))   ↓ \(Self.bytesOrDash(conn.download))")
-                    .font(.system(size: 9).monospacedDigit())
-                    .foregroundStyle(.tertiary)
+            .width(min: 160, ideal: 240)
+
+            TableColumn("↑ 速率", value: \.uploadRate) { conn in
+                rateCell(conn.uploadRate, active: conn.totalRate > 0)
             }
-            .fixedSize()
-            HoverButton {
-                Task { await state.closeConnection(conn.id) }
-            } label: { isHovering in
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 13))
-                    .foregroundStyle(isHovering ? Color.red.opacity(0.85) : Color.secondary.opacity(0.4))
+            .width(min: 76, ideal: 88)
+
+            TableColumn("↓ 速率", value: \.downloadRate) { conn in
+                rateCell(conn.downloadRate, active: conn.totalRate > 0)
             }
-            .help("关闭此连接")
+            .width(min: 76, ideal: 88)
+
+            TableColumn("↑ 累计", value: \.upload) { conn in
+                Text(Theme.bytesOrDash(conn.upload))
+                    .font(.callout.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .width(min: 72, ideal: 84)
+
+            TableColumn("↓ 累计", value: \.download) { conn in
+                Text(Theme.bytesOrDash(conn.download))
+                    .font(.callout.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .width(min: 72, ideal: 84)
+
+            TableColumn("") { conn in
+                Button {
+                    Task { await state.closeConnection(conn.id) }
+                } label: {
+                    Image(systemName: "xmark.circle")
+                }
+                .buttonStyle(.borderless)
+                .help("关闭此连接")
+                .accessibilityLabel("关闭 \(conn.host)")
+            }
+            .width(28)
         }
-        .padding(.vertical, 7)
-        .contextMenu {
+        .tableStyle(.inset(alternatesRowBackgrounds: true))
+        .contextMenu(forSelectionType: ConnectionLiveDetail.ID.self) { ids in
+            contextMenu(for: ids, in: list)
+        } primaryAction: { ids in
+            if let id = ids.first, let conn = list.first(where: { $0.id == id }) {
+                inspectedConnection = conn
+            }
+        }
+    }
+
+    private func rateCell(_ value: Int64, active: Bool) -> some View {
+        Text(Theme.rateOrDash(value))
+            .font(.callout.monospacedDigit())
+            .foregroundStyle(active ? .primary : .secondary)
+    }
+
+    @ViewBuilder
+    private func contextMenu(for ids: Set<ConnectionLiveDetail.ID>, in list: [ConnectionLiveDetail]) -> some View {
+        if ids.count == 1, let id = ids.first, let conn = list.first(where: { $0.id == id }) {
             let endpoint = ConnectionEndpoint(hostAndPort: conn.host)
             Button {
                 Task {
@@ -259,6 +228,20 @@ struct ConnectionsView: View {
             } label: {
                 Label("查看完整命中链路", systemImage: "point.3.connected.trianglepath.dotted")
             }
+            Divider()
+            Button(role: .destructive) {
+                Task { await state.closeConnection(conn.id) }
+            } label: {
+                Label("关闭此连接", systemImage: "xmark.circle")
+            }
+        } else if !ids.isEmpty {
+            Button(role: .destructive) {
+                Task {
+                    for id in ids { await state.closeConnection(id) }
+                }
+            } label: {
+                Label("关闭所选 \(ids.count) 条", systemImage: "xmark.circle")
+            }
         }
     }
 
@@ -270,15 +253,6 @@ struct ConnectionsView: View {
         if conn.rule.isEmpty { return chain }
         return chain.isEmpty ? conn.rule : "\(conn.rule)   ·   \(chain)"
     }
-
-    /// 0 时用固定占位符，避免空串导致布局跳动。
-    static func rateOrDash(_ value: Int64) -> String {
-        Theme.rateOrDash(value)
-    }
-
-    static func bytesOrDash(_ value: Int64) -> String {
-        Theme.bytesOrDash(value)
-    }
 }
 
 private struct ConnectionRouteDetail: View {
@@ -287,48 +261,31 @@ private struct ConnectionRouteDetail: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text("命中链路")
-                    .font(.headline)
-                Spacer()
-                Button {
-                    dismiss()
-                } label: {
-                    Image(systemName: "xmark")
+        VStack(spacing: 0) {
+            Form {
+                Section {
+                    LabeledContent("目标", value: connection.host)
+                    if let process = connection.process { LabeledContent("进程", value: process) }
+                    LabeledContent("命中规则", value: connection.rule.isEmpty ? "未报告" : connection.rule)
                 }
-                .buttonStyle(.plain)
-                .help("关闭")
-            }
-            LabeledContent("目标", value: connection.host)
-            if let process = connection.process { LabeledContent("进程", value: process) }
-            LabeledContent("命中规则", value: connection.rule.isEmpty ? "未报告" : connection.rule)
-            Divider()
-            VStack(alignment: .leading, spacing: 8) {
-                Text("出站链路").font(.caption).foregroundStyle(.secondary)
-                ForEach(Array(connection.chains.enumerated()), id: \.offset) { index, tag in
-                    HStack(spacing: 8) {
-                        Text("\(index + 1)")
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.tertiary)
-                            .frame(width: 18)
-                        Text(nodeNames[tag] ?? tag)
-                            .font(.system(.body, design: .monospaced))
+                Section("出站链路") {
+                    ForEach(Array(connection.chains.enumerated()), id: \.offset) { index, tag in
+                        LabeledContent("\(index + 1)") {
+                            Text(nodeNames[tag] ?? tag)
+                                .font(.body.monospaced())
+                        }
                     }
                 }
             }
-            Spacer()
+            .formStyle(.grouped)
+            Divider()
+            HStack {
+                Spacer()
+                Button("完成") { dismiss() }
+                    .keyboardShortcut(.defaultAction)
+            }
+            .padding(14)
         }
-        .padding(20)
-        .frame(minWidth: 460, minHeight: 260)
+        .frame(width: 460, height: 320)
     }
-}
-
-private enum ConnectionSortOption: String, CaseIterable, Identifiable {
-    case defaultOrder = "累计流量"
-    case totalRate = "实时总速率"
-    case downloadRate = "下载速率"
-    case uploadRate = "上传速率"
-
-    var id: Self { self }
 }

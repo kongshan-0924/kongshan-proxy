@@ -37,113 +37,68 @@ struct LogsView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            PageHeader(title: "内核日志", subtitle: "代理运行时实时订阅内核推送") {
-                HStack(spacing: 8) {
-                    Button("清空显示") { state.clearLiveLogs() }
-                        .disabled(state.liveLogs.isEmpty)
+        logList
+            .navigationTitle("内核日志")
+            .navigationSubtitle("\(filteredLogs.count) / \(state.liveLogs.count) 行")
+            .searchable(text: $filterText, placement: .toolbar, prompt: "搜索日志或主机名")
+            .toolbar {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    // 这个选择器只是"过滤内核推来的日志"，不改内核自己的 log.level（那要重启内核）。
+                    // 内核按 info 输出，因此没有「调试」这一档可选——放上去只会是个点了没反应的死控件。
+                    Picker("日志等级", selection: logLevelBinding) {
+                        Text("信息").tag(CoreLogLevel.info)
+                        Text("警告").tag(CoreLogLevel.warning)
+                        Text("错误").tag(CoreLogLevel.error)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .disabled(!state.isOn)
+                    .help("过滤显示的最低等级")
+
+                    // 三个过滤开关收进一个菜单：控制台的工具栏也是这么做的，
+                    // 勾选项在菜单里天然是原生形态。
+                    Menu {
+                        Toggle("只看问题", isOn: $showsProblemsOnly)
+                        Toggle("按连接聚合", isOn: $groupsByConnection)
+                        Divider()
+                        Toggle("暂停自动滚动", isOn: $pausesAutomaticScroll)
+                    } label: {
+                        Label("过滤", systemImage: showsProblemsOnly || groupsByConnection
+                              ? "line.3.horizontal.decrease.circle.fill"
+                              : "line.3.horizontal.decrease.circle")
+                    }
+                    .help("只看问题 / 按连接聚合 / 暂停自动滚动")
+
+                    Button {
+                        state.clearLiveLogs()
+                    } label: {
+                        Label("清空显示", systemImage: "trash")
+                    }
+                    .disabled(state.liveLogs.isEmpty)
+                    .help("清空当前显示的日志，不影响磁盘上的日志文件")
+
                     Button {
                         prepareExport()
                     } label: {
                         Label("导出", systemImage: "square.and.arrow.up")
                     }
                     .disabled(isPreparingExport)
+                    .help("导出内核日志")
                 }
             }
-            toolbar
-            Divider()
-            logList
-        }
-        .pageBackground()
-        .navigationTitle("内核日志")
-        .onAppear { state.startLogMonitoring() }
-        .onDisappear { state.stopLogMonitoring() }
-        .fileExporter(
-            isPresented: $showsExporter,
-            document: exportDocument,
-            contentType: .plainText,
-            defaultFilename: "kongshan-logs"
-        ) { result in
-            if case let .failure(error) = result {
-                state.errorMessage = "导出日志失败：\(error.localizedDescription)"
-            }
-            exportDocument = nil
-        }
-    }
-
-    private var toolbar: some View {
-        // 一行摆不下所有控件时自动退成两行：先量单行版，超宽就用双行版，
-        // 窗口拖窄不再把右侧开关截掉。
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 12) {
-                levelPicker
-                searchField
-                filterToggles
-                Spacer()
-                counter
-            }
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 12) {
-                    levelPicker
-                    searchField
-                    Spacer()
-                    counter
+            .onAppear { state.startLogMonitoring() }
+            .onDisappear { state.stopLogMonitoring() }
+            .fileExporter(
+                isPresented: $showsExporter,
+                document: exportDocument,
+                contentType: .plainText,
+                defaultFilename: "kongshan-logs"
+            ) { result in
+                if case let .failure(error) = result {
+                    state.errorMessage = "导出日志失败：\(error.localizedDescription)"
                 }
-                HStack(spacing: 12) {
-                    filterToggles
-                    Spacer()
-                }
+                exportDocument = nil
             }
-        }
-        .padding(.horizontal, 16)
-        .padding(.bottom, 12)
-    }
-
-    private var levelPicker: some View {
-        // 这个选择器只是"过滤内核推来的日志"，不改内核自己的 log.level（那要重启内核）。
-        // 内核按 info 输出，因此没有「调试」这一档可选——放上去只会是个点了没反应的死控件。
-        Picker("日志等级", selection: logLevelBinding) {
-            Text("信息").tag(CoreLogLevel.info)
-            Text("警告").tag(CoreLogLevel.warning)
-            Text("错误").tag(CoreLogLevel.error)
-        }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .controlSize(.small)
-        .frame(width: 180)
-        .disabled(!state.isOn)
-    }
-
-    private var searchField: some View {
-        SearchField(text: $filterText, placeholder: "搜索日志关键词…")
-            .frame(maxWidth: 220)
-    }
-
-    private var filterToggles: some View {
-        HStack(spacing: 12) {
-            Toggle("只看问题", isOn: $showsProblemsOnly)
-                .toggleStyle(.checkbox)
-                .font(.caption)
-                .help("只显示警告与错误，排除规则命中的预期拒绝")
-
-            Toggle("按连接聚合", isOn: $groupsByConnection)
-                .toggleStyle(.checkbox)
-                .font(.caption)
-                .help("把同一条连接的多行日志折成一组，并合并网络切换期间的派生错误")
-
-            Toggle("暂停自动滚动", isOn: $pausesAutomaticScroll)
-                .toggleStyle(.checkbox)
-                .font(.caption)
-        }
-        // 锁定理想尺寸：文字不被挤压换行，也让 ViewThatFits 量出真实宽度，
-        // 放不下时整体折成两行而不是把开关挤变形。
-        .fixedSize()
-    }
-
-    private var counter: some View {
-        Text("\(filteredLogs.count) / \(state.liveLogs.count)")
-            .font(.caption.monospacedDigit())
-            .foregroundStyle(.tertiary)
     }
 
     private var logList: some View {
@@ -172,7 +127,6 @@ struct LogsView: View {
                 }
                 .padding(.horizontal, 16)
             }
-            .scrollIndicators(.hidden)
             .background(Color(nsColor: .textBackgroundColor))
             .overlay {
                 if filteredLogs.isEmpty {
@@ -198,12 +152,8 @@ struct LogsView: View {
                                 }
                             } label: {
                                 Label("回到底部", systemImage: "arrow.down.circle.fill")
-                                    .font(.caption)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 5)
-                                    .background(.ultraThinMaterial, in: Capsule())
                             }
-                            .buttonStyle(.plain)
+                            .controlSize(.small)
                             .padding(.trailing, 24)
                             .padding(.bottom, 12)
                         }
@@ -298,7 +248,7 @@ private struct LogEntryRow: View {
             Text(item.entry.receivedAt, format: .dateTime.hour().minute().second())
                 .foregroundStyle(.tertiary)
             Text(levelTitle)
-                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .font(.caption2.weight(.bold).monospaced())
                 .foregroundStyle(levelColor)
                 .padding(.horizontal, 5)
                 .padding(.vertical, 2)
@@ -374,7 +324,7 @@ private struct LogConnectionRow: View {
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.caption2.weight(.semibold))
                         .foregroundStyle(.tertiary)
                         .frame(width: 10)
                     Circle()

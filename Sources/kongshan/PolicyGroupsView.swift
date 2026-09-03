@@ -3,6 +3,9 @@ import SwiftUI
 
 /// 代理页。左列是当前配置带出的策略（含内置 手动选择/自动选择），
 /// 右列是所选策略的成员：节点显示协议与延迟、可测速；也可能是指向其他策略的引用。
+///
+/// 成员用**列表选中即切换**：Surge / ClashX 都是一行一个节点、点一下就选，
+/// 不是卡片网格。列表是 AppKit 承载的，上百个节点每秒刷延迟也不重排整屏。
 struct PolicyGroupsView: View {
     @Environment(AppState.self) private var state
     @State private var selectedGroupName: String?
@@ -19,41 +22,44 @@ struct PolicyGroupsView: View {
         let delays = state.delays
         let isSelectable = currentGroup.kind == .selector
 
-        VStack(spacing: 0) {
-            header(currentGroup: currentGroup, isSelectable: isSelectable)
+        HStack(spacing: 0) {
+            groupColumn(groups: groups, currentGroupName: currentGroup.name)
             Divider()
-            HStack(spacing: 0) {
-                groupColumn(groups: groups, currentGroupName: currentGroup.name)
-                Divider()
-                nodeColumn(
-                    currentGroup: currentGroup,
-                    options: options,
-                    selectedName: selectedName,
-                    delays: delays,
-                    isSelectable: isSelectable
-                )
-                .frame(maxWidth: .infinity)
-            }
+            memberColumn(
+                currentGroup: currentGroup,
+                options: options,
+                selectedName: selectedName,
+                delays: delays,
+                isSelectable: isSelectable
+            )
+            .frame(maxWidth: .infinity)
         }
-        .pageBackground()
         .navigationTitle("代理")
-    }
-
-    // MARK: - 顶部
-
-    private func header(currentGroup: PolicyGroup, isSelectable: Bool) -> some View {
-        PageHeader(title: "代理", subtitle: "为每个策略选择出站节点；出站模式决定分流是否生效") {
-            HStack(spacing: 10) {
+        .navigationSubtitle(subtitle(currentGroup: currentGroup, optionCount: options.count, selectedName: selectedName))
+        .searchable(text: $searchText, placement: .toolbar, prompt: "搜索节点")
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
                 Picker("出站模式", selection: outboundModeBinding) {
                     ForEach(OutboundMode.allCases, id: \.self) { mode in
-                        Label(mode.displayName, systemImage: mode.symbol).tag(mode)
+                        Text(mode.displayName).tag(mode)
                     }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(width: 220)
                 .help(state.outboundMode.detail)
                 .disabled(state.isBusy || !state.isReady)
+
+                Menu {
+                    Picker("排序", selection: $sortOption) {
+                        ForEach(NodeSortOption.allCases) { opt in
+                            Label(opt.rawValue, systemImage: opt.symbol).tag(opt)
+                        }
+                    }
+                    .pickerStyle(.inline)
+                } label: {
+                    Label("排序", systemImage: "arrow.up.arrow.down")
+                }
+                .help("节点排序：\(sortOption.rawValue)")
 
                 Button {
                     if state.isTestingAllDelays {
@@ -63,28 +69,33 @@ struct PolicyGroupsView: View {
                     }
                 } label: {
                     if state.isTestingAllDelays {
-                        Label("取消 \(state.speedTestProgress.label)", systemImage: "xmark.circle.fill")
+                        Label("取消 \(state.speedTestProgress.label)", systemImage: "xmark.circle")
                     } else {
                         Label("测速全部", systemImage: "gauge.with.needle")
                     }
                 }
-                .fixedSize(horizontal: true, vertical: false)
                 .disabled(state.testableNodes.isEmpty)
+                .help(state.isTestingAllDelays ? "取消正在进行的测速" : "对当前配置的全部节点测速")
 
                 Button {
                     state.startFastestTest(in: currentGroup.name)
                 } label: {
                     Label("测速并选最快", systemImage: "bolt.badge.checkmark")
                 }
-                .fixedSize(horizontal: true, vertical: false)
-                .disabled(
-                    state.testableNodes.isEmpty
-                        || state.isTestingAllDelays
-                        || !isSelectable
-                )
+                .disabled(state.testableNodes.isEmpty || state.isTestingAllDelays || !isSelectable)
                 .help(isSelectable ? "测速完成后自动选择当前策略中延迟最低的节点" : "自动策略由内核选择")
             }
         }
+    }
+
+    private func subtitle(currentGroup: PolicyGroup, optionCount: Int, selectedName: String?) -> String {
+        var parts = ["\(currentGroup.name) · \(optionCount) 个"]
+        if currentGroup.kind == .urltest {
+            parts.append("自动选路")
+        } else if let selectedName {
+            parts.append("当前：\(selectedName)")
+        }
+        return parts.joined(separator: " · ")
     }
 
     // MARK: - 左列：策略
@@ -96,8 +107,7 @@ struct PolicyGroupsView: View {
             }
         }
         .listStyle(.sidebar)
-        .scrollContentBackground(.hidden)
-        // 弹性列宽：窗口拖宽时让位给右侧节点网格，拖窄时收缩但不低于 190。
+        // 弹性列宽：窗口拖宽时让位给右侧成员列表，拖窄时收缩但不低于 190。
         .frame(minWidth: 190, idealWidth: 220, maxWidth: 260)
     }
 
@@ -105,15 +115,13 @@ struct PolicyGroupsView: View {
         let appearance = groupAppearance(group)
         return HStack(spacing: 9) {
             Image(systemName: appearance.symbol)
-                .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(appearance.tint)
                 .frame(width: 18)
             VStack(alignment: .leading, spacing: 1) {
                 Text(group.name)
-                    .font(.system(size: 12, weight: .medium))
                     .lineLimit(1)
                 Text(subtitle(for: group))
-                    .font(.caption2)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -212,72 +220,62 @@ struct PolicyGroupsView: View {
         return ms
     }
 
-    private func nodeColumn(
+    private func memberColumn(
         currentGroup: PolicyGroup,
         options: [GroupOption],
         selectedName: String?,
         delays: [UUID: Int?],
         isSelectable: Bool
     ) -> some View {
-        VStack(spacing: 0) {
-            // 工具条：搜索框 + 排序菜单
-            HStack(spacing: 10) {
-                SearchField(text: $searchText, placeholder: "搜索节点或域名…")
-                    .frame(maxWidth: 260)
-                Spacer()
-                Menu {
-                    Picker("排序", selection: $sortOption) {
-                        ForEach(NodeSortOption.allCases) { opt in
-                            Label(opt.rawValue, systemImage: opt.symbol).tag(opt)
-                        }
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: sortOption.symbol)
-                        Text(sortOption.rawValue)
-                    }
-                    .font(.caption)
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
+        let visibleOptions = processedOptions(options, delays: delays)
+        // 选中即切换。不可选（内核自动选路）时给一个只读的常量绑定，列表不响应点击。
+        let selection = Binding<String?>(
+            get: { selectedName },
+            set: { name in
+                guard isSelectable, let name, name != selectedName else { return }
+                Task { await state.select(optionName: name, in: currentGroup.name) }
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
-
-            Divider()
-
-            ScrollView {
-                let visibleOptions = processedOptions(options, delays: delays)
-                if visibleOptions.isEmpty {
-                    ContentUnavailableView(
-                        searchText.isEmpty ? "当前配置没有节点" : "未匹配到相关节点",
-                        systemImage: searchText.isEmpty ? "tray" : "magnifyingglass",
-                        description: Text(searchText.isEmpty ? "请先在「配置」页导入订阅并设为生效。" : "请尝试搜索其他关键字。")
+        )
+        return VStack(spacing: 0) {
+            if !isSelectable {
+                HStack(spacing: 7) {
+                    Image(systemName: "bolt.badge.automatic")
+                        .foregroundStyle(.secondary)
+                    Text("「\(currentGroup.name)」由内核按测速自动选路，无法手动指定。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                Divider()
+            }
+            List(selection: selection) {
+                ForEach(visibleOptions) { option in
+                    optionRow(
+                        option,
+                        isSelected: option.name == selectedName,
+                        delay: optionDelay(option, delays: delays),
+                        isSelectable: isSelectable
                     )
-                    .frame(maxWidth: .infinity, minHeight: 240)
-                } else {
-                    if !isSelectable {
-                        hintBanner("「\(currentGroup.name)」由内核按测速自动选路，无法手动指定。")
-                    }
-                    LazyVGrid(
-                        columns: [GridItem(.adaptive(minimum: 190), spacing: 12)],
-                        spacing: 12
-                    ) {
-                        ForEach(visibleOptions) { option in
-                            optionCard(
-                                option,
-                                in: currentGroup.name,
-                                selectedName: selectedName,
-                                delay: optionDelay(option, delays: delays),
-                                isSelectable: isSelectable
-                            )
-                        }
-                    }
-                    .padding(18)
+                    .tag(option.name)
                 }
             }
-            .scrollIndicators(.hidden)
+            .listStyle(.inset(alternatesRowBackgrounds: true))
+            .disabled(state.isBusy)
+            .overlay {
+                if visibleOptions.isEmpty {
+                    if searchText.isEmpty {
+                        ContentUnavailableView(
+                            "当前配置没有节点",
+                            systemImage: "tray",
+                            description: Text("请先在「配置」页导入订阅并设为生效。")
+                        )
+                    } else {
+                        ContentUnavailableView.search(text: searchText)
+                    }
+                }
+            }
         }
     }
 
@@ -286,104 +284,50 @@ struct PolicyGroupsView: View {
         return delays[node.id]
     }
 
-    private func hintBanner(_ text: String) -> some View {
-        HStack(spacing: 7) {
-            Image(systemName: "bolt.badge.automatic")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-            Text(text)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Spacer()
-        }
-        .padding(.horizontal, 18)
-        .padding(.top, 14)
-    }
-
-    private func optionCard(
+    private func optionRow(
         _ option: GroupOption,
-        in groupName: String,
-        selectedName: String?,
+        isSelected: Bool,
         delay: Int??,
         isSelectable: Bool
     ) -> some View {
-        let isSelected = option.name == selectedName
         let metadata: NodeNameMetadata? = if case let .node(node) = option {
             NodeNameMetadata.parse(node.name)
         } else {
             nil
         }
-        return HoverButton(isEnabled: isSelectable && !state.isBusy) {
-            Task { await state.select(optionName: option.name, in: groupName) }
-        } label: { isHovering in
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .top, spacing: 8) {
-                    Image(systemName: symbol(for: option, selected: isSelected))
-                        .font(.system(size: 12))
-                        .foregroundStyle(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
-                        .padding(.top, 2)
-                    if case let .node(node) = option,
-                       let flag = metadata?.flag,
-                       !node.name.contains(flag) {
-                        Text(flag)
-                            .font(.system(size: 14))
-                    }
-                    Text(option.name)
-                        .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                    Spacer(minLength: 4)
-                }
-                HStack(alignment: .center, spacing: 6) {
-                    switch option {
-                    case let .node(node):
-                        ProtocolTag(value: node.protocolType)
-                        if let multiplier = metadata?.multiplierText {
-                            Text(multiplier)
-                                .font(.caption2.weight(.bold).monospacedDigit())
-                                .foregroundStyle(.orange)
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 2)
-                                .background(Color.orange.opacity(0.12), in: Capsule())
-                                .help("订阅节点倍率")
-                        }
-                    case .reference:
-                        Text("策略引用")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer(minLength: 0)
-                    // 延迟放在底部行末尾。它是用户扫一屏节点时唯一要找的数字，曾为此提到
-                    // 右上角与节点名同行；但长节点名会把它挤掉，改成上下两段式后首行专供
-                    // 名称与国旗，延迟改用带背景与边框的胶囊（超时另加警告图标）来补足显著性。
-                    // 要再动位置前先想清楚这两条约束：**不能被长名字挤掉，也不能扫不到**。
-                    if case .node = option {
-                        delayBadge(delay)
-                    }
-                }
+        return HStack(spacing: 8) {
+            Image(systemName: symbol(for: option, selected: isSelected))
+                .foregroundStyle(isSelected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
+                .frame(width: 16)
+            if case let .node(node) = option,
+               let flag = metadata?.flag,
+               !node.name.contains(flag) {
+                Text(flag)
             }
-            .frame(maxWidth: .infinity, minHeight: 62, alignment: .topLeading)
-            .padding(10)
-            .background(
-                isSelected
-                    ? AnyShapeStyle(Color.accentColor.opacity(0.09))
-                    : AnyShapeStyle(Theme.cardFill),
-                in: RoundedRectangle(cornerRadius: Theme.subcardRadius, style: .continuous)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: Theme.subcardRadius, style: .continuous)
-                    .strokeBorder(
-                        isSelected
-                            ? Color.accentColor.opacity(0.8)
-                            : Color.secondary.opacity(isHovering ? 0.4 : 0.18),
-                        lineWidth: isSelected ? 1.5 : 0.5
-                    )
-            )
-            // 悬停微抬：一点点阴影和描边加深，让整卡可点这件事能被"摸"出来。
-            .shadow(color: .black.opacity(isHovering ? 0.12 : 0), radius: 4, y: 2)
-            .animation(.smooth(duration: 0.15), value: isHovering)
-            .contentShape(RoundedRectangle(cornerRadius: Theme.subcardRadius, style: .continuous))
+            Text(option.name)
+                .fontWeight(isSelected ? .semibold : .regular)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 8)
+            switch option {
+            case let .node(node):
+                if let multiplier = metadata?.multiplierText {
+                    Text(multiplier)
+                        .font(.caption2.weight(.semibold).monospacedDigit())
+                        .foregroundStyle(.orange)
+                        .help("订阅节点倍率")
+                }
+                ProtocolTag(value: node.protocolType)
+                // 延迟固定在行末：它是用户扫一屏节点时唯一要找的数字，定宽保证一列对齐。
+                delayLabel(delay)
+                    .frame(width: 64, alignment: .trailing)
+            case .reference:
+                Text("策略引用")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
+        .padding(.vertical, 2)
         .help(helpText(for: option, isSelectable: isSelectable))
     }
 
@@ -404,7 +348,7 @@ struct PolicyGroupsView: View {
     }
 
     @ViewBuilder
-    private func delayBadge(_ delay: Int??) -> some View {
+    private func delayLabel(_ delay: Int??) -> some View {
         switch delay {
         case let .some(.some(value)):
             let color = Theme.delayColor(value)
@@ -413,32 +357,17 @@ struct PolicyGroupsView: View {
                     .fill(color)
                     .frame(width: 5, height: 5)
                 Text("\(value) ms")
-                    .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                    .font(.caption.weight(.medium).monospacedDigit())
                     .foregroundStyle(color)
             }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2.5)
-            .background(color.opacity(0.1), in: Capsule())
-            .overlay(Capsule().strokeBorder(color.opacity(0.25), lineWidth: 0.5))
         case .some(.none):
-            HStack(spacing: 3) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 8))
-                Text("超时")
-                    .font(.system(size: 10, weight: .medium))
-            }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2.5)
-            .foregroundStyle(.red)
-            .background(Color.red.opacity(0.1), in: Capsule())
-            .overlay(Capsule().strokeBorder(Color.red.opacity(0.25), lineWidth: 0.5))
+            Label("超时", systemImage: "exclamationmark.triangle.fill")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.red)
         case .none:
             Text("未测速")
-                .font(.system(size: 10))
+                .font(.caption)
                 .foregroundStyle(.tertiary)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2.5)
-                .background(Color.secondary.opacity(0.08), in: Capsule())
         }
     }
 

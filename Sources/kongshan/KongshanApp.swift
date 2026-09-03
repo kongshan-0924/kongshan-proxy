@@ -150,8 +150,11 @@ final class KongshanAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             defer: false
         )
         window.title = "kongshan"
-        window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
+        // 真标题栏 + 统一工具栏：页面标题/副标题与操作都进工具栏，不再各页自绘页头。
+        // 副标题承载统计（邮件写"收件箱 — 12 封"，这里写"连接 — 12 条 · ↑ 1.2 MB/s"）。
+        window.titlebarAppearsTransparent = false
+        window.titleVisibility = .visible
+        window.toolbarStyle = .unified
         // 各页布局已做自适应（仪表盘自适应网格、代理页弹性列、日志工具条折行），
         // 最小尺寸可以再放小一档，小屏/分屏也能用。
         window.minSize = NSSize(width: 760, height: 500)

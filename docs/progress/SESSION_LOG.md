@@ -4880,3 +4880,68 @@ v0.1.94 新加的「当前页面 / 活跃订阅」归因字段因此也用不上
 **未验证**：跑满一天后的真实体量与轮转行为；P3（主窗口开着时 5~7%）**仍未定位**，
 本轮做的是让它可被定位——需要用户开着主窗口用一段时间，再回看流水账里
 `page` / `pubConn` / `pubTraffic` / `pubLogs` 四项的对应关系。
+
+### 2026-09-03 12:40 — v0.1.96：界面重构为原生 macOS 形态（只构建，不安装）
+
+**本轮任务**：用户要求把 UI 改成更贴近苹果原生的风格与布局，先详细整理、参考网上设计，
+最后输出成品但**不安装**，由用户决定。
+
+**回滚点**：`ad31eeb`（v0.1.95 发布提交之后、本轮之前的 `main`）。
+
+#### 整理与依据
+
+写成 `docs/design/NATIVE_UI.md`：现状盘点（8 项与原生的差距）、参考来源（Apple HIG 工具栏/侧栏、
+usagimaru 的 macOS 设置窗口规范、Surge Mac 6.0 发行说明、SwiftUI on macOS 文章）、
+六条原则、逐页方案、刻意不做的三件事。
+
+`ui-ux-pro-max` skill 的产品/风格数据库偏 web（推荐 OLED 暗色 + 玻璃拟态，正是要去掉的语汇），
+只采纳了"设置用 Form 不手工分组""尊重减弱动态"两条，其余不用。
+
+#### 改动（纯表现层，`AppState` 与 Core 零改动）
+
+- **窗口**：`titleVisibility = .visible`、`toolbarStyle = .unified`。每页 `.navigationTitle` +
+  `.navigationSubtitle`（统计进副标题），操作进 `.toolbar`；删除自绘 `PageHeader`。
+- **Theme.swift**：删掉 `card()/subcard()/pageBackground()/IconBadge/SearchField/HoverButton`
+  与全部投影；`StatusBadge`/`ProtocolTag` 去描边只留淡色填充。
+- **仪表盘**：状态区、指标块、流量图三处全部改 `GroupBox`；指标图标改单色符号。
+- **配置**：工具栏放刷新/自建；导入栏改圆角文本框；列表交替行底色；渐变图标块改符号。
+- **代理**：右列改 `List(selection:)` 选中即切换；`.searchable`；出站模式/排序/测速进工具栏；
+  延迟固定行末定宽对齐。
+- **规则**：上半改 `Form(.grouped)`，五个分区（规则开关 + 四个 `Section(isExpanded:)`）；
+  已添加规则由横向胶囊改为逐行列出可删；搜索进工具栏，计数进副标题；删除 `RoutingSection`。
+- **连接**：改系统 `Table`（7 列，6 列可排序，`.inset(alternatesRowBackgrounds:)`），
+  `.contextMenu(forSelectionType:)` 保留全部右键操作，单击行看链路；副标题放条数与总速率。
+- **内核日志**：等级分段、过滤菜单（三个勾选项）、清空、导出进工具栏；`.searchable`。
+- **消息**：分段控件放工具栏正中（`.principal`），清除进工具栏；存档路径提示改底栏 `.bar`。
+- **设置**：分段控件放工具栏正中；去掉自绘页头与自定义背景。
+- **托盘弹窗**：策略选择改 `Picker(.menu)` 并用 `Grid` 两列对齐；底部改 `.link` 按钮。
+- 侧栏宽度 168–230 → 200–280；未读数改系统 `.badge`。
+- 硬编码字号 `.system(size:)`：重写的文件全部改为系统文本样式；`MainWindowView` 的设置分区
+  与 Sheet 内仍有少量保留（不在本轮重写范围，见下）。
+
+#### 守卫
+
+新增 `NativeChromeGuardTests`（6 条）：视图无 `.shadow(`、无 `PageHeader(`、无 `IconBadge(`、
+各页有 `.navigationSubtitle(`、窗口标题栏可见且工具栏统一、四页用 `.searchable(`、
+连接页用 `Table(` 且有 `sortOrder`、仪表盘高频数值不做动画且图表关动画。
+守卫初版把注释里的 "LazyVStack" 也当成调用，改为匹配 `LazyVStack(`。
+
+既有约束全部保住：`MainWindowToolbarTests`（一个 `.navigation` 工具栏项 + `removing: .sidebarToggle`）、
+`RuntimeEventDetailTests`（消息页「只看问题」开关与事件详情渲染）。
+
+#### 验证
+
+- 全量 **553 执行 / 1 跳过 / 0 失败**；`swift build` 0 警告。
+- **离屏渲染核对**（`RenderSnapshotTests` + `KONGSHAN_SNAPSHOT_DIR`，共 17 张）：
+  仪表盘/配置/代理/规则/日志/托盘弹窗/深色模式逐张看过。发现并修掉两处：
+  仪表盘出站分段控件在框内居中未左对齐（`.frame(alignment: .leading)`）；
+  托盘弹窗各策略弹出按钮宽度不齐（改 `Grid` 两列）。修后复核通过。
+
+#### 未验证（离屏渲染抓不到）
+
+- **侧栏与工具栏**：`.sidebar` 列表的毛玻璃与窗口标题栏都不在 `contentView` 的 `cacheDisplay` 里，
+  离屏图上侧栏是白块、工具栏不存在。`.searchable`、副标题、工具栏按钮的实际排布与溢出行为
+  只能装上真机看——这正是本次改动最核心的部分。
+- 连接页 `Table` 在上千条实时刷新下的观感与 CPU；`Section(isExpanded:)` 在 macOS 14 上的
+  折叠动画。
+- 未跑 `prepare` 之外的真机流程；**未安装**。

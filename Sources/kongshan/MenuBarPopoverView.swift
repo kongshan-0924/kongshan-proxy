@@ -10,7 +10,7 @@ struct MenuBarPopoverView: View {
     let openMainWindow: () -> Void
 
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(alignment: .leading, spacing: 12) {
             headerSection
             rateSection
             Divider()
@@ -22,8 +22,8 @@ struct MenuBarPopoverView: View {
             Divider()
             footerSection
         }
-        .padding(12)
-        .frame(width: 280)
+        .padding(14)
+        .frame(width: 290)
     }
 
     // MARK: - 状态与节点
@@ -33,10 +33,9 @@ struct MenuBarPopoverView: View {
             Circle()
                 .fill(state.statusTint)
                 .frame(width: 9, height: 9)
-                .shadow(color: state.statusTint.opacity(state.isOn ? 0.55 : 0), radius: 3)
             VStack(alignment: .leading, spacing: 2) {
                 Text(state.statusText)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.headline)
                 HStack(spacing: 5) {
                     Text(state.selectedNode?.name ?? "未选择节点")
                         .font(.caption)
@@ -60,26 +59,23 @@ struct MenuBarPopoverView: View {
     private var rateSection: some View {
         HStack(spacing: 0) {
             rateColumn(symbol: "arrow.up", tint: .blue, title: "上传", value: state.uploadRate)
-            Divider().frame(height: 30)
+            Divider().frame(height: 28)
             rateColumn(symbol: "arrow.down", tint: .green, title: "下载", value: state.downloadRate)
         }
     }
 
     private func rateColumn(symbol: String, tint: Color, title: String, value: Int64) -> some View {
         HStack(spacing: 8) {
-            Circle()
-                .fill(tint.opacity(0.15))
-                .frame(width: 26, height: 26)
-                .overlay(
-                    Image(systemName: symbol)
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(tint)
-                )
+            Image(systemName: symbol)
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(tint)
+                .frame(width: 16)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 1) {
                 // 高频数值不做动画：弹簧插值会让本视图在每次速率采样后按刷新率持续重绘
-                //（DashboardView.heroRate 有完整说明与真机代价）。
+                //（DashboardView 有完整说明与真机代价）。
                 Text(Theme.rateOrDash(value))
-                    .font(.system(size: 15, weight: .bold).monospacedDigit())
+                    .font(.callout.weight(.semibold).monospacedDigit())
                 Text(title)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -93,7 +89,7 @@ struct MenuBarPopoverView: View {
     // MARK: - 模式与开关
 
     private var modeSection: some View {
-        VStack(spacing: 10) {
+        VStack(alignment: .leading, spacing: 10) {
             Picker("出站模式", selection: outboundModeBinding) {
                 ForEach(OutboundMode.allCases, id: \.self) { mode in
                     Text(mode.displayName).tag(mode)
@@ -122,7 +118,6 @@ struct MenuBarPopoverView: View {
         Toggle(title, isOn: modeBinding(mode))
             .toggleStyle(.switch)
             .controlSize(.small)
-            .font(.system(size: 12, weight: .medium))
             .disabled(state.isBusy || !state.isReady)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -140,16 +135,22 @@ struct MenuBarPopoverView: View {
         state.displayPolicyGroups.filter { $0.kind == .selector }
     }
 
+    /// 每个策略一行系统弹出按钮（`Picker(.menu)`）：标签在左、当前选择在右，
+    /// 与系统设置里的下拉项同形，不再自绘带描边的菜单标签。
     private var groupSection: some View {
-        VStack(spacing: 8) {
+        // 两列网格让所有弹出按钮左沿对齐——系统设置里标签列 + 控件列就是这个形状。
+        Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 6) {
             ForEach(selectorGroups, id: \.name) { group in
-                HStack(spacing: 8) {
+                GridRow {
                     Text(group.name)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
-                    Spacer(minLength: 6)
+                        .truncationMode(.middle)
+                        .gridColumnAlignment(.leading)
                     groupPicker(group)
+                        .labelsHidden()
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         }
@@ -157,41 +158,26 @@ struct MenuBarPopoverView: View {
 
     private func groupPicker(_ group: PolicyGroup) -> some View {
         let options = state.groupOptions(group)
-        let selected = state.selectedMemberName(in: group.name, options: options)
-        return Menu {
+        let selected = state.selectedMemberName(in: group.name, options: options) ?? ""
+        let binding = Binding<String>(
+            get: { selected },
+            set: { name in
+                guard !name.isEmpty, name != selected else { return }
+                Task { await state.select(optionName: name, in: group.name) }
+            }
+        )
+        return Picker(selection: binding) {
+            if selected.isEmpty { Text("未选择").tag("") }
             ForEach(options.prefix(60)) { option in
-                Button {
-                    Task { await state.select(optionName: option.name, in: group.name) }
-                } label: {
-                    HStack {
-                        if option.name == selected {
-                            Image(systemName: "checkmark")
-                        }
-                        Text(optionTitle(option))
-                    }
-                }
+                Text(optionTitle(option)).tag(option.name)
             }
         } label: {
-            HStack(spacing: 4) {
-                Text(selected ?? "未选择")
-                    .font(.caption.weight(.medium))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 8, weight: .semibold))
-                    .foregroundStyle(.tertiary)
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(Theme.cardFill, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .strokeBorder(.quaternary.opacity(0.7), lineWidth: 0.5)
-            )
+            Text(group.name)
+                .lineLimit(1)
+                .truncationMode(.middle)
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
+        .pickerStyle(.menu)
+        .controlSize(.small)
         .disabled(state.isBusy || options.isEmpty)
     }
 
@@ -211,11 +197,9 @@ struct MenuBarPopoverView: View {
             Button {
                 openMainWindow()
             } label: {
-                Label("打开仪表盘", systemImage: "macwindow")
-                    .font(.caption.weight(.medium))
+                Label("打开主窗口", systemImage: "macwindow")
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(Color.accentColor)
+            .buttonStyle(.link)
 
             Spacer()
 
@@ -223,10 +207,10 @@ struct MenuBarPopoverView: View {
                 NSApplication.shared.terminate(nil)
             } label: {
                 Label("退出", systemImage: "power")
-                    .font(.caption.weight(.medium))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.link)
             .foregroundStyle(.secondary)
         }
+        .font(.caption)
     }
 }

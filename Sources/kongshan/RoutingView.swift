@@ -3,8 +3,8 @@ import KongshanCore
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// 规则页。只读展示当前生效配置带出的分流规则；顶部开关控制是否套用这些规则、是否拦广告。
-/// 手动绕过域名/IP 与跳过 TUN 的列表挪到「设置 → 隧道」。
+/// 规则页。上半是低频配置表单（原生 grouped Form，四个分区可折叠），
+/// 下半只读展示当前生效配置带出的分流规则。手动绕过域名/IP 与跳过 TUN 的列表在「设置 → 隧道」。
 struct RoutingView: View {
     @Environment(AppState.self) private var state
     @State private var ruleSearch = ""
@@ -33,63 +33,74 @@ struct RoutingView: View {
 
     var body: some View {
         let subscriptionRules = state.subscriptionRules
-        VStack(spacing: 0) {
-            header(hasSubscriptionRules: !subscriptionRules.isEmpty)
-            Divider()
-            content(subscriptionRules)
+        let keyword = ruleSearch.trimmingCharacters(in: .whitespaces).lowercased()
+        let matched = keyword.isEmpty
+            ? subscriptionRules
+            : subscriptionRules.filter { $0.value.lowercased().contains(keyword) || $0.target.lowercased().contains(keyword) }
+        // 分组只算一次：副标题的「N 个目标」与下面的列表都要用，三千多条各分一遍纯属白工。
+        let targetGroups = keyword.isEmpty ? groups(of: subscriptionRules) : []
+
+        GeometryReader { proxy in
+            VStack(spacing: 0) {
+                // 上半部分是低频配置表单：封顶 55% 高度。
+                // 四个分区全展开也不会把规则浏览器挤没；折叠后规则列表自动长大。
+                Form {
+                    switchesSection(hasSubscriptionRules: !subscriptionRules.isEmpty)
+                    perAppSection
+                    forcedProxySection
+                    sshProxySection
+                    routeTesterSection
+                }
+                .formStyle(.grouped)
+                .frame(maxHeight: proxy.size.height * 0.55)
+                Divider()
+                subscriptionRulesContent(subscriptionRules, matched: matched, targetGroups: targetGroups, keyword: keyword)
+            }
         }
-        .pageBackground()
         .navigationTitle("规则")
+        .navigationSubtitle(subtitle(total: subscriptionRules.count, matched: matched.count, groups: targetGroups.count, keyword: keyword))
+        .searchable(text: $ruleSearch, placement: .toolbar, prompt: "搜索规则或目标策略")
         .onAppear { refreshRunningApps() }
     }
 
-    private func header(hasSubscriptionRules: Bool) -> some View {
-        let subtitle = hasSubscriptionRules
-            ? "配置「\(activeName)」自带的分流规则（只读）"
-            : "当前配置未提供订阅规则；仍可管理强制代理和分应用代理"
-        return PageHeader(title: "规则", subtitle: subtitle) {
-            HStack(spacing: 12) {
+    private func subtitle(total: Int, matched: Int, groups: Int, keyword: String) -> String {
+        guard total > 0 else { return "当前配置未提供订阅规则" }
+        if keyword.isEmpty { return "配置「\(activeName)」· \(total) 条规则 · \(groups) 个目标" }
+        return "匹配 \(matched) / \(total) 条"
+    }
+
+    // MARK: - 规则开关
+
+    private func switchesSection(hasSubscriptionRules: Bool) -> some View {
+        Section {
+            if hasSubscriptionRules {
+                Toggle("应用订阅规则", isOn: useSubscriptionRulesBinding)
+            }
+            Toggle("拦截广告", isOn: blockAdsBinding)
+        } header: {
+            HStack {
+                Text("规则")
                 if state.isApplyingRouting {
-                    ProgressView().controlSize(.small)
+                    ProgressView().controlSize(.mini)
                 }
-                if hasSubscriptionRules {
-                    Toggle("应用订阅规则", isOn: useSubscriptionRulesBinding)
-                }
-                Toggle("拦截广告", isOn: blockAdsBinding)
             }
-            .toggleStyle(.switch)
-            .controlSize(.mini)
-            .disabled(state.isApplyingRouting)
+        } footer: {
+            Text(hasSubscriptionRules
+                 ? "订阅规则来自配置「\(activeName)」，只读；关掉后仍套用内置兜底（私有网段与中国大陆直连，其余走代理）。"
+                 : "当前配置未提供订阅规则，仍套用内置兜底；强制代理与分应用代理照常可用。")
         }
+        .disabled(state.isApplyingRouting)
     }
 
-    @ViewBuilder
-    private func content(_ subscriptionRules: [SubscriptionRule]) -> some View {
-        GeometryReader { proxy in
-            VStack(spacing: 0) {
-                // 上半部分是低频配置表单：包一层滚动区并封顶 52% 高度。
-                // 四个分区全展开也不会把规则浏览器挤没；折叠后规则列表自动长大。
-                ScrollView {
-                    VStack(spacing: 0) {
-                        perAppSection
-                        Divider()
-                        forcedProxySection
-                        Divider()
-                        sshProxySection
-                        Divider()
-                        routeTesterSection
-                    }
-                }
-                .scrollIndicators(.hidden)
-                .frame(maxHeight: proxy.size.height * 0.52)
-                Divider()
-                subscriptionRulesContent(subscriptionRules)
-            }
-        }
-    }
+    // MARK: - 规则浏览
 
     @ViewBuilder
-    private func subscriptionRulesContent(_ rules: [SubscriptionRule]) -> some View {
+    private func subscriptionRulesContent(
+        _ rules: [SubscriptionRule],
+        matched: [SubscriptionRule],
+        targetGroups: [RuleTargetGroup],
+        keyword: String
+    ) -> some View {
         if rules.isEmpty {
             ContentUnavailableView {
                 Label("当前配置没有自带规则", systemImage: "arrow.triangle.branch")
@@ -97,60 +108,30 @@ struct RoutingView: View {
                 Text("仍会套用内置兜底：私有网段与中国大陆直连、其余走代理。切换到带规则的配置可在此查看。")
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if keyword.isEmpty {
+            // 不搜索时按目标策略折叠：三千多条规则平铺出来既没有全局认知、也找不到东西——
+            // 用户真正想知道的是"哪些流量走哪个策略"，那正是按 target 分组的形状。
+            List {
+                ForEach(targetGroups) { group in
+                    RuleTargetGroupRow(group: group, tint: targetTint(group.target))
+                }
+            }
+            .listStyle(.inset)
         } else {
-            let keyword = ruleSearch.trimmingCharacters(in: .whitespaces).lowercased()
-            let matched = keyword.isEmpty
-                ? rules
-                : rules.filter { $0.value.lowercased().contains(keyword) || $0.target.lowercased().contains(keyword) }
-            // 分组只算一次：header 的「N 个目标」与下面的列表都要用，
-            // 三千多条各分一遍纯属白工。
-            let targetGroups = keyword.isEmpty ? groups(of: rules) : []
-            VStack(spacing: 0) {
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                    TextField("搜索规则或目标策略", text: $ruleSearch)
-                        .textFieldStyle(.plain)
-                    if keyword.isEmpty {
-                        Text("\(rules.count) 条 · \(targetGroups.count) 个目标")
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.tertiary)
-                    } else {
-                        Text("匹配 \(matched.count) / \(rules.count)")
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.tertiary)
-                    }
+            // 搜索时给扁平结果（用户已经在找具体一条）。
+            List {
+                ForEach(matched.prefix(300)) { rule in
+                    RuleRow(rule: rule, tint: targetTint(rule.target))
                 }
-                .padding(.horizontal, 22)
-                .padding(.vertical, 10)
-                Divider()
-
-                // 搜索时给扁平结果（用户已经在找具体一条）；不搜索时按目标策略折叠。
-                // 三千多条规则平铺出来既没有全局认知、也找不到东西——用户真正想知道的是
-                // "哪些流量走哪个策略"，那正是按 target 分组的形状。
-                if keyword.isEmpty {
-                    List {
-                        ForEach(targetGroups) { group in
-                            RuleTargetGroupRow(group: group, tint: targetTint(group.target))
-                        }
-                    }
-                    .listStyle(.inset)
-                    .scrollContentBackground(.hidden)
-                } else {
-                    List {
-                        ForEach(matched.prefix(300)) { rule in
-                            RuleRow(rule: rule, tint: targetTint(rule.target))
-                        }
-                        if matched.count > 300 {
-                            Text("仅显示前 300 条，共 \(matched.count) 条匹配——把关键词写得更具体些")
-                                .font(.caption)
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
-                    .listStyle(.inset)
-                    .scrollContentBackground(.hidden)
+                if matched.count > 300 {
+                    Text("仅显示前 300 条，共 \(matched.count) 条匹配——把关键词写得更具体些")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
                 }
+            }
+            .listStyle(.inset)
+            .overlay {
+                if matched.isEmpty { ContentUnavailableView.search(text: ruleSearch) }
             }
         }
     }
@@ -168,14 +149,10 @@ struct RoutingView: View {
             .sorted { $0.rules.count > $1.rules.count }
     }
 
+    // MARK: - 分应用代理
+
     private var perAppSection: some View {
-        RoutingSection(
-            title: "分应用代理",
-            symbol: "app.badge.checkmark",
-            hint: "按可执行进程名优先分流",
-            badge: state.processRules.isEmpty ? nil : "\(state.processRules.count) 条",
-            isExpanded: $perAppExpanded
-        ) {
+        Section(isExpanded: $perAppExpanded) {
             HStack(spacing: 10) {
                 Picker("App", selection: $selectedProcess) {
                     if runningApps.isEmpty {
@@ -186,6 +163,7 @@ struct RoutingView: View {
                         }
                     }
                 }
+                .labelsHidden()
                 .frame(maxWidth: 300)
 
                 Picker("走向", selection: $perAppTarget) {
@@ -199,16 +177,18 @@ struct RoutingView: View {
                         }
                     }
                 }
-                .frame(maxWidth: 300)
+                .labelsHidden()
+                .frame(maxWidth: 260)
 
-                Button {
-                    addPerAppRule()
-                } label: {
-                    Label("添加 / 更新", systemImage: "plus")
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(selectedProcess.isEmpty || state.isApplyingRouting)
+                Button("添加 / 更新") { addPerAppRule() }
+                    .disabled(selectedProcess.isEmpty || state.isApplyingRouting)
+
                 Spacer(minLength: 0)
+
+                Button("刷新 App") { refreshRunningApps() }
+                    .controlSize(.small)
+                Button("选择已安装 App…") { chooseInstalledApp() }
+                    .controlSize(.small)
             }
 
             if state.processRules.isEmpty {
@@ -216,62 +196,39 @@ struct RoutingView: View {
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             } else {
-                ScrollView(.horizontal) {
+                ForEach(state.processRules) { rule in
                     HStack(spacing: 8) {
-                        ForEach(state.processRules) { rule in
-                            HStack(spacing: 6) {
-                                Text(rule.value)
-                                    .font(.caption.monospaced())
-                                Image(systemName: "arrow.right")
-                                    .font(.system(size: 9))
-                                    .foregroundStyle(.tertiary)
-                                Text(state.processRuleTargetName(rule))
-                                    .font(.caption.weight(.medium))
-                                    .foregroundStyle(rule.action == .direct ? .green : .accentColor)
-                                Button(role: .destructive) {
-                                    Task { await state.removeProcessRule(rule.id) }
-                                } label: {
-                                    Image(systemName: "xmark.circle.fill")
-                                }
-                                .buttonStyle(.plain)
+                        Text(rule.value)
+                            .font(.body.monospaced())
+                        Image(systemName: "arrow.right")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                        Text(state.processRuleTargetName(rule))
+                            .foregroundStyle(rule.action == .direct ? .green : .accentColor)
+                        Spacer(minLength: 8)
+                        Button(role: .destructive) {
+                            Task { await state.removeProcessRule(rule.id) }
+                        } label: {
+                            Image(systemName: "minus.circle.fill")
                                 .foregroundStyle(.secondary)
-                            }
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 5)
-                            .background(Theme.cardFill, in: Capsule())
                         }
+                        .buttonStyle(.borderless)
+                        .help("删除该 App 的分流规则")
+                        .accessibilityLabel("删除 \(rule.value)")
                     }
                 }
-                .scrollIndicators(.hidden)
             }
-        } trailing: {
-            HStack(spacing: 8) {
-                Button {
-                    refreshRunningApps()
-                } label: {
-                    Label("刷新 App", systemImage: "arrow.clockwise")
-                }
-                .controlSize(.small)
-                Button {
-                    chooseInstalledApp()
-                } label: {
-                    Label("选择已安装 App", systemImage: "folder")
-                }
-                .controlSize(.small)
-            }
+        } header: {
+            sectionHeader("分应用代理", symbol: "app.badge.checkmark",
+                          hint: "按可执行进程名优先分流", count: state.processRules.count, expanded: perAppExpanded)
         }
-        .background(Theme.cardFill.opacity(0.25))
     }
 
+    // MARK: - 强制代理
+
     private var forcedProxySection: some View {
-        RoutingSection(
-            title: "强制代理",
-            symbol: "arrow.up.forward.app",
-            hint: "规则模式下优先于订阅规则和中国大陆直连",
-            badge: state.forcedProxyRules.isEmpty ? nil : "\(state.forcedProxyRules.count) 条",
-            isExpanded: $forcedProxyExpanded
-        ) {
-            HStack(spacing: 10) {
+        Section(isExpanded: $forcedProxyExpanded) {
+            HStack(alignment: .top, spacing: 10) {
                 Picker("类型", selection: $forcedProxyKind) {
                     ForEach(ForcedProxyInputKind.allCases) { kind in
                         Text(kind.title).tag(kind)
@@ -281,31 +238,19 @@ struct RoutingView: View {
                 .labelsHidden()
                 .frame(width: 150)
 
-                TextEditor(text: $forcedProxyInput)
-                    .font(.system(.body, design: .monospaced))
-                    .scrollContentBackground(.hidden)
-                    .frame(minHeight: 44, maxHeight: 58)
-                    .padding(.horizontal, 6)
-                    .background(Theme.cardFill, in: RoundedRectangle(cornerRadius: Theme.inputRadius))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: Theme.inputRadius)
-                            .stroke(Color(nsColor: .separatorColor), lineWidth: 0.5)
-                    }
+                TextField(forcedProxyKind.placeholder, text: $forcedProxyInput, axis: .vertical)
+                    .lineLimit(1...4)
+                    .font(.body.monospaced())
 
-                Button {
-                    addForcedProxyRule()
-                } label: {
-                    Label("批量应用", systemImage: "checkmark.circle")
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(
-                    forcedProxyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        || state.isApplyingRouting
-                )
+                Button("批量应用") { addForcedProxyRule() }
+                    .disabled(
+                        forcedProxyInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || state.isApplyingRouting
+                    )
             }
 
             Text("可用空格、逗号或换行分隔多个目标；整批校验通过后只重载一次内核，现有连接会在重载时断开。")
-                .font(.caption2)
+                .font(.caption)
                 .foregroundStyle(.tertiary)
 
             if let forcedProxyError {
@@ -317,72 +262,56 @@ struct RoutingView: View {
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             } else {
-                ScrollView(.horizontal) {
+                ForEach(state.forcedProxyRules) { rule in
                     HStack(spacing: 8) {
-                        ForEach(state.forcedProxyRules) { rule in
-                            HStack(spacing: 6) {
-                                Image(systemName: rule.type == .ipCIDR ? "network" : "globe")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(.secondary)
-                                Text(rule.value)
-                                    .font(.caption.monospaced())
-                                Button(role: .destructive) {
-                                    Task { await state.removeForcedProxyRule(rule.id) }
-                                } label: {
-                                    Image(systemName: "xmark.circle.fill")
-                                }
-                                .buttonStyle(.plain)
+                        Image(systemName: rule.type == .ipCIDR ? "network" : "globe")
+                            .foregroundStyle(.secondary)
+                            .frame(width: 16)
+                        Text(rule.value)
+                            .font(.body.monospaced())
+                        Spacer(minLength: 8)
+                        Button(role: .destructive) {
+                            Task { await state.removeForcedProxyRule(rule.id) }
+                        } label: {
+                            Image(systemName: "minus.circle.fill")
                                 .foregroundStyle(.secondary)
-                                .disabled(state.isApplyingRouting)
-                                .help("删除强制代理规则")
-                                .accessibilityLabel("删除 \(rule.value)")
-                            }
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 5)
-                            .background(Theme.cardFill, in: Capsule())
                         }
+                        .buttonStyle(.borderless)
+                        .disabled(state.isApplyingRouting)
+                        .help("删除强制代理规则")
+                        .accessibilityLabel("删除 \(rule.value)")
                     }
                 }
-                .scrollIndicators(.hidden)
             }
+        } header: {
+            sectionHeader("强制代理", symbol: "arrow.up.forward.app",
+                          hint: "规则模式下优先于订阅规则和中国大陆直连", count: state.forcedProxyRules.count, expanded: forcedProxyExpanded)
         }
-        .background(Theme.cardFill.opacity(0.25))
         .onChange(of: forcedProxyKind) { _, _ in forcedProxyError = nil }
         .onChange(of: forcedProxyInput) { _, _ in forcedProxyError = nil }
     }
 
+    // MARK: - SSH 走代理
+
     private var sshProxySection: some View {
-        RoutingSection(
-            title: "SSH 走代理",
-            symbol: "terminal",
-            hint: "指定 IP 的 OpenSSH 连接通过当前节点",
-            badge: state.sshProxyTargets.isEmpty ? nil : "\(state.sshProxyTargets.count) 条",
-            isExpanded: $sshProxyExpanded
-        ) {
+        Section(isExpanded: $sshProxyExpanded) {
             HStack(spacing: 10) {
                 TextField("IP 地址", text: $sshProxyAddress)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.body, design: .monospaced))
+                    .font(.body.monospaced())
                     .onSubmit { addSSHProxyTarget() }
                 TextField("端口", value: $sshProxyPort, format: .number.grouping(.never))
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.body, design: .monospaced))
+                    .font(.body.monospaced())
                     .frame(width: 92)
                     .onSubmit { addSSHProxyTarget() }
-                Button {
-                    addSSHProxyTarget()
-                } label: {
-                    Label("添加", systemImage: "plus")
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(
-                    sshProxyAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        || state.isApplyingRouting
-                )
+                Button("添加") { addSSHProxyTarget() }
+                    .disabled(
+                        sshProxyAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || state.isApplyingRouting
+                    )
             }
 
             Text("规则保存在本机，开启代理后生效；只修改空山托管的 SSH 配置片段，不会读取或保存 SSH 密码、私钥。")
-                .font(.caption2)
+                .font(.caption)
                 .foregroundStyle(.tertiary)
 
             if let sshProxyError {
@@ -394,47 +323,39 @@ struct RoutingView: View {
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             } else {
-                ScrollView(.horizontal) {
+                ForEach(state.sshProxyTargets) { target in
                     HStack(spacing: 8) {
-                        ForEach(state.sshProxyTargets) { target in
-                            HStack(spacing: 6) {
-                                Image(systemName: "network")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(.secondary)
-                                Text("\(target.address):\(target.port)")
-                                    .font(.caption.monospaced())
-                                Button(role: .destructive) {
-                                    Task { await state.removeSSHProxyTarget(target) }
-                                } label: {
-                                    Image(systemName: "xmark.circle.fill")
-                                }
-                                .buttonStyle(.plain)
+                        Image(systemName: "network")
+                            .foregroundStyle(.secondary)
+                            .frame(width: 16)
+                        Text("\(target.address):\(target.port)")
+                            .font(.body.monospaced())
+                        Spacer(minLength: 8)
+                        Button(role: .destructive) {
+                            Task { await state.removeSSHProxyTarget(target) }
+                        } label: {
+                            Image(systemName: "minus.circle.fill")
                                 .foregroundStyle(.secondary)
-                                .disabled(state.isApplyingRouting)
-                                .help("删除 SSH 代理目标")
-                                .accessibilityLabel("删除 \(target.address):\(target.port)")
-                            }
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 5)
-                            .background(Theme.cardFill, in: Capsule())
                         }
+                        .buttonStyle(.borderless)
+                        .disabled(state.isApplyingRouting)
+                        .help("删除 SSH 代理目标")
+                        .accessibilityLabel("删除 \(target.address):\(target.port)")
                     }
                 }
-                .scrollIndicators(.hidden)
             }
+        } header: {
+            sectionHeader("SSH 走代理", symbol: "terminal",
+                          hint: "指定 IP 的 OpenSSH 连接通过当前节点", count: state.sshProxyTargets.count, expanded: sshProxyExpanded)
         }
-        .background(Theme.cardFill.opacity(0.25))
         .onChange(of: sshProxyAddress) { _, _ in sshProxyError = nil }
         .onChange(of: sshProxyPort) { _, _ in sshProxyError = nil }
     }
 
+    // MARK: - 规则命中测试
+
     private var routeTesterSection: some View {
-        RoutingSection(
-            title: "规则命中测试",
-            symbol: "scope",
-            hint: "按实际生成顺序解释本地可判定规则",
-            isExpanded: $routeTesterExpanded
-        ) {
+        Section(isExpanded: $routeTesterExpanded) {
             HStack(spacing: 10) {
                 Picker("输入类型", selection: $routeTestKind) {
                     ForEach(RouteTestKind.allCases) { kind in Text(kind.title).tag(kind) }
@@ -443,15 +364,10 @@ struct RoutingView: View {
                 .labelsHidden()
                 .frame(width: 220)
                 TextField(routeTestKind.placeholder, text: $routeTestInput)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.body, design: .monospaced))
+                    .font(.body.monospaced())
                     .onSubmit { runRouteTest() }
-                Button {
-                    runRouteTest()
-                } label: {
-                    Label("测试", systemImage: "play.fill")
-                }
-                .disabled(routeTestInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Button("测试") { runRouteTest() }
+                    .disabled(routeTestInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             if let result = routeTestResult {
                 HStack(spacing: 14) {
@@ -464,15 +380,30 @@ struct RoutingView: View {
                         .foregroundStyle(.secondary)
                     Spacer()
                 }
-                .font(.caption.monospaced())
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
-                .background(Theme.cardFill, in: RoundedRectangle(cornerRadius: 6))
+                .font(.callout.monospaced())
             }
+        } header: {
+            sectionHeader("规则命中测试", symbol: "scope",
+                          hint: "按实际生成顺序解释本地可判定规则", count: 0, expanded: routeTesterExpanded)
         }
-        .background(Theme.cardFill.opacity(0.25))
         .onChange(of: routeTestKind) { _, _ in routeTestResult = nil }
         .onChange(of: routeTestInput) { _, _ in routeTestResult = nil }
+    }
+
+    /// 分区标题：符号 + 名称 + 一句说明；折叠时把条目数留在标题行，不用展开也能看到有多少条。
+    private func sectionHeader(_ title: String, symbol: String, hint: String, count: Int, expanded: Bool) -> some View {
+        HStack(spacing: 8) {
+            Label(title, systemImage: symbol)
+            Text(hint)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            if count > 0, !expanded {
+                Text("\(count) 条")
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 
     private func runRouteTest() {
@@ -639,81 +570,6 @@ private enum RouteTestKind: String, CaseIterable, Identifiable {
     }
 }
 
-/// 可折叠分区：标题行整行可点。规则页上半部分是低频配置表单，
-/// 收起后各占一行，把纵向空间让给下面真正常看的规则浏览器。
-/// 折叠时条目数以徽标形式留在标题行，不用展开也能看到有多少条。
-private struct RoutingSection<Content: View, Trailing: View>: View {
-    let title: String
-    let symbol: String
-    let hint: String
-    var badge: String? = nil
-    @Binding var isExpanded: Bool
-    @ViewBuilder var content: Content
-    @ViewBuilder var trailing: Trailing
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Button {
-                    withAnimation(.smooth(duration: 0.2)) { isExpanded.toggle() }
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(.tertiary)
-                            .frame(width: 10)
-                        Label(title, systemImage: symbol)
-                            .font(.system(size: 13, weight: .semibold))
-                        Text(hint)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                        if let badge, !isExpanded {
-                            Text(badge)
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 1)
-                                .background(Color.secondary.opacity(0.12), in: Capsule())
-                        }
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(isExpanded ? "折叠\(title)" : "展开\(title)")
-                Spacer(minLength: 8)
-                if isExpanded { trailing }
-            }
-            if isExpanded {
-                content
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-    }
-}
-
-extension RoutingSection where Trailing == EmptyView {
-    init(
-        title: String,
-        symbol: String,
-        hint: String,
-        badge: String? = nil,
-        isExpanded: Binding<Bool>,
-        @ViewBuilder content: () -> Content
-    ) {
-        self.init(
-            title: title,
-            symbol: symbol,
-            hint: hint,
-            badge: badge,
-            isExpanded: isExpanded,
-            content: content
-        ) { EmptyView() }
-    }
-}
-
 /// 可增删的字符串列表（绕过域名 / IP / 跳过 TUN 网段）。设置页的隧道分区复用。
 /// 两个列表结构一致时，用带前缀的显式 id 把行身份分开，避免 SwiftUI 串内容。
 struct BypassListSection: View {
@@ -738,7 +594,7 @@ struct BypassListSection: View {
                     TextField(placeholder, text: $values[index], prompt: Text(placeholder))
                         .labelsHidden()
                         .textFieldStyle(.plain)
-                        .font(.system(.body, design: .monospaced))
+                        .font(.body.monospaced())
                     Button(role: .destructive) {
                         values.remove(at: index)
                     } label: {
@@ -759,7 +615,6 @@ struct BypassListSection: View {
     }
 }
 
-/// 同一目标策略下的规则集合。
 struct RuleTargetGroup: Identifiable {
     let target: String
     let rules: [SubscriptionRule]
@@ -783,20 +638,17 @@ private struct RuleTargetGroupRow: View {
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.caption2.weight(.semibold))
                         .foregroundStyle(.tertiary)
                         .frame(width: 10)
                     Text(group.target)
-                        .font(.system(size: 12, weight: .medium))
+                        .fontWeight(.medium)
                         .foregroundStyle(tint)
                         .lineLimit(1)
                     Spacer(minLength: 8)
                     Text("\(group.rules.count)")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 1)
-                        .background(tint.opacity(0.12), in: Capsule())
                 }
                 .padding(.vertical, 3)
                 .contentShape(Rectangle())
@@ -811,7 +663,7 @@ private struct RuleTargetGroupRow: View {
                 }
                 if group.rules.count > Self.expandedLimit {
                     Text("还有 \(group.rules.count - Self.expandedLimit) 条未显示，用上方搜索定位")
-                        .font(.caption2)
+                        .font(.caption)
                         .foregroundStyle(.tertiary)
                         .padding(.leading, 20)
                         .padding(.vertical, 3)
@@ -835,7 +687,7 @@ private struct RuleRow: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 76, alignment: .leading)
             Text(rule.value)
-                .font(.system(.caption, design: .monospaced))
+                .font(.caption.monospaced())
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .textSelection(.enabled)

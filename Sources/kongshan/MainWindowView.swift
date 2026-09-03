@@ -25,7 +25,7 @@ struct MainWindowView: View {
                 }
             }
             .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(min: 168, ideal: 184, max: 230)
+            .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 280)
             .toolbar(removing: .sidebarToggle)
             .safeAreaInset(edge: .bottom, spacing: 0) { sidebarStatus }
         } detail: {
@@ -92,23 +92,13 @@ struct MainWindowView: View {
     }
 
     private func sidebarRow(_ page: SidebarPage) -> some View {
-        HStack(spacing: 6) {
-            Label(page.title, systemImage: page.symbol)
-            Spacer(minLength: 4)
-            if page == .messages {
-                let errorCount = state.errorMessage != nil ? 1 : 0
-                let total = errorCount + state.warnings.count
-                if total > 0 {
-                    Text("\(total)")
-                        .font(.system(size: 10, weight: .bold).monospacedDigit())
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 1.5)
-                        .background(state.errorMessage != nil ? Color.red : Color.orange, in: Capsule())
-                }
-            }
-        }
-        .tag(page)
+        // 未读数用系统 `.badge`：与访达 / 邮件的侧栏一致，不再自绘胶囊。
+        let noticeCount = page == .messages
+            ? (state.errorMessage != nil ? 1 : 0) + state.warnings.count
+            : 0
+        return Label(page.title, systemImage: page.symbol)
+            .badge(noticeCount)
+            .tag(page)
     }
 
     /// 侧栏底部常驻状态条，任何页面下都能看到当前接管方式与节点。
@@ -177,7 +167,7 @@ private struct NativeNoticeToolbarItem: View {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
                         Text("通知提醒")
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(.headline)
                         Text("\(totalCount)")
                             .font(.system(size: 10, weight: .bold).monospacedDigit())
                             .foregroundStyle(.white)
@@ -298,34 +288,14 @@ struct NodesView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            PageHeader(title: "配置", subtitle: configSummary) {
-                HStack(spacing: 8) {
-                    Button {
-                        Task { await state.refreshSubscriptions() }
-                    } label: {
-                        Label("刷新全部", systemImage: "arrow.clockwise")
-                    }
-                    .disabled(state.subscriptions.isEmpty || state.isBusy)
-
-                    Button {
-                        showingManualNode = true
-                    } label: {
-                        Label("自建节点", systemImage: "plus")
-                    }
-                }
-            }
-
             importBar
-
             Divider()
-
             List {
                 ForEach(state.configItems) { item in
                     configRow(item)
                 }
             }
-            .listStyle(.inset)
-            .scrollContentBackground(.hidden)
+            .listStyle(.inset(alternatesRowBackgrounds: true))
             .overlay {
                 if state.configItems.isEmpty {
                     ContentUnavailableView(
@@ -336,8 +306,26 @@ struct NodesView: View {
                 }
             }
         }
-        .pageBackground()
         .navigationTitle("配置")
+        .navigationSubtitle(configSummary)
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    Task { await state.refreshSubscriptions() }
+                } label: {
+                    Label("刷新全部", systemImage: "arrow.clockwise")
+                }
+                .disabled(state.subscriptions.isEmpty || state.isBusy)
+                .help("重新下载全部订阅")
+
+                Button {
+                    showingManualNode = true
+                } label: {
+                    Label("自建节点", systemImage: "plus")
+                }
+                .help("添加自建节点")
+            }
+        }
         .sheet(isPresented: $showingManualNode) {
             ManualNodeSheet().environment(state)
         }
@@ -377,15 +365,18 @@ struct NodesView: View {
         } label: {
             HStack(spacing: 11) {
                 Image(systemName: isActive ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 15))
+                    .font(.title3)
                     .foregroundStyle(isActive ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
 
-                IconBadge(symbol: item.isLocal ? "server.rack" : "network.badge.shield.half.filled", tint: item.isLocal ? .orange : .blue, size: 30)
+                Image(systemName: item.isLocal ? "server.rack" : "network.badge.shield.half.filled")
+                    .font(.title3)
+                    .foregroundStyle(item.isLocal ? Color.orange : Color.blue)
+                    .frame(width: 26)
 
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
                         Text(item.name)
-                            .font(.system(size: 13, weight: .medium))
+                            .font(.body.weight(.medium))
                             .lineLimit(1)
                         if isActive {
                             StatusBadge(text: "生效中", tint: .accentColor)
@@ -464,22 +455,14 @@ struct NodesView: View {
 
     private var importBar: some View {
         HStack(spacing: 8) {
-            Image(systemName: "link")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
             TextField("粘贴 Clash YAML 订阅链接", text: $subscriptionURL)
-                .textFieldStyle(.plain)
+                .textFieldStyle(.roundedBorder)
                 .onSubmit(beginImport)
             Button("导入") { beginImport() }
-                .controlSize(.small)
                 .disabled(subscriptionURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
-        .padding(.horizontal, 11)
-        .padding(.vertical, 8)
-        .background(Theme.cardFill, in: RoundedRectangle(cornerRadius: Theme.subcardRadius))
-        .overlay(RoundedRectangle(cornerRadius: Theme.subcardRadius).strokeBorder(.quaternary.opacity(0.6), lineWidth: 0.5))
-        .padding(.horizontal, 16)
-        .padding(.bottom, 10)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
     }
 
     private var configSummary: String {
@@ -518,7 +501,7 @@ private struct SubscriptionImportSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("导入订阅")
-                .font(.system(size: 13, weight: .semibold))
+                .font(.headline)
                 .padding(.horizontal, 20)
                 .padding(.top, 18)
                 .padding(.bottom, 12)
@@ -597,7 +580,7 @@ private struct SubscriptionRenameSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("重命名订阅")
-                .font(.system(size: 13, weight: .semibold))
+                .font(.headline)
             TextField("名称", text: $name)
                 .textFieldStyle(.roundedBorder)
             HStack {
@@ -660,15 +643,6 @@ private struct SettingsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            PageHeader(title: "设置", subtitle: nil) {
-                Picker("分区", selection: $tab) {
-                    ForEach(SettingsTab.allCases) { Text($0.title).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 340)
-            }
-
             Form {
                 if tab == .tunnel {
                 Section("代理模式") {
@@ -1144,10 +1118,19 @@ private struct SettingsView: View {
                 }
             }
             .formStyle(.grouped)
-            .scrollContentBackground(.hidden)
         }
-        .pageBackground()
         .navigationTitle("设置")
+        .navigationSubtitle(tab.title)
+        .toolbar {
+            // 分区切换放工具栏正中：访达的视图切换器就在这个位置。
+            ToolbarItem(placement: .principal) {
+                Picker("分区", selection: $tab) {
+                    ForEach(SettingsTab.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+        }
         .onAppear {
             dnsDraft = state.dnsSettings
             subscriptionUpdateDraft = state.subscriptionUpdateSettings
@@ -1399,11 +1382,11 @@ private struct ManualNodeSheet: View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
                 Image(systemName: "plus.circle.fill")
-                    .font(.system(size: 16))
+                    .font(.title3)
                     .foregroundStyle(.tint)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("添加自建节点")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.headline)
                     Text("保存后会生成独立的“自建”策略组")
                         .font(.caption)
                         .foregroundStyle(.secondary)
