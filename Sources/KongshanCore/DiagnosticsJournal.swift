@@ -28,48 +28,29 @@ public final class DiagnosticsJournal: @unchecked Sendable {
         }
     }
 
-    private let url: URL
-    private let rotatedURL: URL
-    private let maxBytes: Int
-    private let lock = NSLock()
+    private let file: JournalFile
 
     public init(
         directory: URL = AppIdentity.supportDirectory,
         fileName: String = "diagnostics.ndjson",
         maxBytes: Int = 1_048_576
     ) {
-        self.url = directory.appending(path: fileName)
-        self.rotatedURL = directory.appending(path: "\(fileName).1")
-        self.maxBytes = maxBytes
+        self.file = JournalFile(url: directory.appending(path: fileName), maxBytes: maxBytes)
     }
 
-    public var fileURL: URL { url }
+    public var fileURL: URL { file.fileURL }
 
-    /// 追加一条。**任何失败都只是静默返回**：取证记录写不进去，不该反过来打断
-    /// 正在处理的那件事本身（记录 CPU 异常时抛错、把异常处理流程带崩，是最坏的结果）。
     /// **刻意是同步的**，不是异步任务。`finishSelfDiagnostics()` 会在退出流程里记下
     /// 最后一段异常——「一直烧到用户退出」那类场景唯一的证据就是它。
-    /// 交给 detached Task 去写，进程正好在这时结束，那条记录就没了；
-    /// 而告警本就稀疏（一天数条），一次几百字节的追加不值得为异步承担丢失风险。
     public func append(_ record: Record) {
         guard let line = encode(record) else { return }
-        lock.lock()
-        defer { lock.unlock() }
-        rotateIfNeeded(adding: line.count)
-        if let handle = try? FileHandle(forWritingTo: url) {
-            defer { try? handle.close() }
-            guard (try? handle.seekToEnd()) != nil else { return }
-            try? handle.write(contentsOf: line)
-        } else {
-            try? line.write(to: url, options: .atomic)
-        }
+        file.append(line)
     }
 
-    /// 读回全部记录（新的在后）。轮转过的那一份也一并读，否则刚跨过轮转点就查不到上一段。
     public func records() -> [Record] {
-        lock.lock()
-        defer { lock.unlock() }
-        return decode(at: rotatedURL) + decode(at: url)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return file.readLines().compactMap { try? decoder.decode(Record.self, from: $0) }
     }
 
     private func encode(_ record: Record) -> Data? {
@@ -80,22 +61,5 @@ public final class DiagnosticsJournal: @unchecked Sendable {
         return data
     }
 
-    private func decode(at url: URL) -> [Record] {
-        guard let data = try? Data(contentsOf: url) else { return [] }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return data.split(separator: 0x0A).compactMap { line in
-            try? decoder.decode(Record.self, from: Data(line))
-        }
-    }
 
-    /// 超过上限就把当前文件顶替掉上一份轮转文件。只留两代——取证要的是"最近一段完整"，
-    /// 不是无限历史；无限增长会变成另一个问题。
-    private func rotateIfNeeded(adding incoming: Int) {
-        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
-        let size = (attributes?[.size] as? Int) ?? 0
-        guard size + incoming > maxBytes else { return }
-        try? FileManager.default.removeItem(at: rotatedURL)
-        try? FileManager.default.moveItem(at: url, to: rotatedURL)
-    }
 }

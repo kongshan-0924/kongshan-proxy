@@ -450,6 +450,23 @@ final class AppState {
     /// 与上面同一条输入，只是窗口更长、阈值更低。两个都要留：爆发和慢性滴漏是
     /// 两种不同的用户体感，也指向不同的处置（换解析器 vs. 查链路），合成一个会两头都看不清。
     @ObservationIgnored private var chronicDNSStallDetector = DNSStallDetector.chronic()
+    @ObservationIgnored private let metricsJournal: MetricsJournal
+    /// 指标窗口的累加状态。**每分钟无条件落一行**，与"越过阈值才记"的告警互补：
+    /// 5~7% 这种低于异常阈值、却持续存在的开销，只有连续流水账才看得见。
+    @ObservationIgnored private var metricsWindowStart: ProcessResourceSample?
+    @ObservationIgnored private var metricsWindowStartBytes: UInt64?
+    @ObservationIgnored private var metricsPrevSample: ProcessResourceSample?
+    @ObservationIgnored private var metricsPeakPercent: Double = 0
+    @ObservationIgnored private var metricsPeakResident: UInt64 = 0
+    @ObservationIgnored private var metricsPeakThreads: Int = 0
+    @ObservationIgnored private var metricsLogLines: Int = 0
+    /// 三个刷新源本段的发布次数。它们直接驱动 SwiftUI 重绘——
+    /// 只知道"主线程在渲染"定位不到是谁，这三项才是。
+    @ObservationIgnored private var publishCountConnections = 0
+    @ObservationIgnored private var publishCountTraffic = 0
+    @ObservationIgnored private var publishCountLogs = 0
+    /// 指标落盘间隔。取 60 秒：一天约 1,440 行、约 290 KB，两代能留住近两周。
+    private static let metricsInterval: TimeInterval = 60
     @ObservationIgnored private var lastWakeEventAt: Date?
     /// 合并重复唤醒事件的窗口。取 120 秒：真机观察到的伪唤醒间隔在 80~100 秒。
     private static let wakeEventCoalescingWindow: TimeInterval = 120
@@ -481,6 +498,7 @@ final class AppState {
         subscriptionUpdateScheduler: SubscriptionUpdateScheduler? = nil,
         notificationSender: (any NotificationSending)? = nil,
         diagnosticsJournal: DiagnosticsJournal? = nil,
+        metricsJournal: MetricsJournal? = nil,
         loginItemManager: (any LoginItemManaging)? = nil,
         privilegedLauncher: (any PrivilegedLaunching)? = nil,
         proxyRelay: (any LocalTCPRelaying)? = nil,
@@ -550,6 +568,7 @@ final class AppState {
         self.notificationSender = notificationSender ?? NotificationService()
         self.diagnosticsJournal = diagnosticsJournal
             ?? DiagnosticsJournal(directory: storage.rootDirectory)
+        self.metricsJournal = metricsJournal ?? MetricsJournal(directory: storage.rootDirectory)
         self.loginItemManager = loginItemManager ?? LoginItemManager()
         monitorsSystemEvents = automaticallyInitialize
         logWarningRelay.install { [weak self] message in
@@ -1703,7 +1722,10 @@ final class AppState {
                         guard self.windowContentIsVisible else { continue }
                         let sorted = tracked
                             .sorted { ($0.download + $0.upload) > ($1.download + $1.upload) }
-                        if self.connections != sorted { self.connections = sorted }
+                        if self.connections != sorted {
+                            self.connections = sorted
+                            self.publishCountConnections += 1
+                        }
                     }
                 } catch {
                     // 流断开（内核重启 / 网络抖动）：等一会再重订。
@@ -2698,10 +2720,54 @@ final class AppState {
         ===== 脱敏配置 =====
         \(configText)
 
+        ===== 告警存档（不受「全部清除」影响）=====
+        \(diagnosticsArchiveText)
+
+        ===== 运行指标流水（每分钟一行，近 4 小时）=====
+        \(metricsTableText)
+
         ===== 内核日志 =====
         \(try await kernelLogStore.exportText())
         """
         return diagnostics.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+    }
+
+    /// 告警存档的可读渲染。只取最近 60 条——更久的在文件里，导出不必全带。
+    private var diagnosticsArchiveText: String {
+        let records = diagnosticsJournal.records().suffix(60)
+        guard !records.isEmpty else { return "（无告警记录）" }
+        return records.map { record in
+            let time = record.t.formatted(.iso8601.timeZone(separator: .omitted))
+            return "\(time) [\(record.level)] \(record.title)：\(record.detail ?? "")"
+        }.joined(separator: "\n")
+    }
+
+    /// 指标流水的表格渲染。
+    ///
+    /// **这是为"事后定位"准备的**：光看某一时刻的快照说明不了问题，
+    /// 要看的是"CPU 从什么时候开始涨、涨的时候在哪个页面、哪个刷新源在猛发"。
+    /// 近 4 小时（240 行）够覆盖绝大多数"刚才怎么突然卡了"，
+    /// 更久的历史在 metrics.ndjson 里。
+    private var metricsTableText: String {
+        let samples = metricsJournal.samples().suffix(240)
+        guard !samples.isEmpty else { return "（尚无指标，应用启动不足一分钟）" }
+        let header = "时刻      CPU%  峰值%  user 主线程  RSS  线程  连接  日志  网卡MB"
+            + "  连接发布 流量发布 日志发布  页面 / 订阅 / 接管"
+        let rows = samples.map { s -> String in
+            let time = s.t.formatted(.dateTime.hour().minute().second())
+            return String(
+                format: "%@  %5.2f %6.2f %5.2f %6.2f %5d %5d %5d %5d %8.2f %9d %8d %8d  %@ / %@ / %@",
+                time, s.cpu, s.peak, s.usr, s.main, s.rss, s.th, s.conns, s.logs, s.net,
+                s.pubConn, s.pubTraffic, s.pubLogs,
+                s.page ?? "无窗口", s.subs, s.mode
+            )
+        }
+        return ([header] + rows).joined(separator: "\n")
+    }
+
+    /// 指标流水在磁盘上的位置，显示给用户看。
+    var metricsArchivePath: String {
+        Self.abbreviatedHomePath(metricsJournal.fileURL)
     }
 
     func exportBackup() async throws -> Data {
@@ -2960,7 +3026,11 @@ final class AppState {
 
     /// 取证存档在磁盘上的位置，显示给用户看。用 `~` 缩写，界面上不铺开完整家目录。
     var diagnosticsArchivePath: String {
-        let path = diagnosticsJournal.fileURL.path(percentEncoded: false)
+        Self.abbreviatedHomePath(diagnosticsJournal.fileURL)
+    }
+
+    static func abbreviatedHomePath(_ url: URL) -> String {
+        let path = url.path(percentEncoded: false)
         let home = FileManager.default.homeDirectoryForCurrentUser.path(percentEncoded: false)
         return path.hasPrefix(home) ? "~" + path.dropFirst(home.count) : path
     }
@@ -3536,6 +3606,7 @@ final class AppState {
 
     private func flushPendingLogs() {
         guard !pendingLogs.isEmpty else { return }
+        publishCountLogs += 1
         liveLogs.append(contentsOf: pendingLogs)
         pendingLogs.removeAll(keepingCapacity: true)
         if liveLogs.count > KernelLogStore.defaultBufferedLineLimit {
@@ -3604,6 +3675,7 @@ final class AppState {
         let chartVisible = windowContentIsVisible && dashboardMonitorConsumers.contains(.dashboard)
         // 四秒一个趋势点；状态栏和速率数字仍按两秒发布，不影响可读性。
         guard dashboardMetrics.shouldPublishTrafficPoint(isDashboardVisible: chartVisible) else { return }
+        publishCountTraffic += 1
         trafficHistory.append(TrafficPoint(
             timestamp: now(),
             upload: sample.up,
@@ -4377,18 +4449,89 @@ final class AppState {
     private func tickSelfDiagnostics() {
         let logLines = logLinesSinceDiagnosticsTick
         logLinesSinceDiagnosticsTick = 0
+        metricsLogLines += logLines
 
-        if let sample = ProcessResourceSampler.current(now: now()),
-           let report = cpuAnomalyDetector.ingest(sample) {
-            record(report, logLinesInWindow: logLines)
-        }
         let physicalBytes = Self.physicalByteTotal()
+        if let sample = ProcessResourceSampler.current(now: now()) {
+            accumulateMetrics(sample, physicalBytes: physicalBytes)
+            if let report = cpuAnomalyDetector.ingest(sample) {
+                record(report, logLinesInWindow: logLines)
+            }
+        }
         if let report = dnsStallDetector.flush(at: now(), physicalBytes: physicalBytes) {
             record(report)
         }
         if let report = chronicDNSStallDetector.flush(at: now(), physicalBytes: physicalBytes) {
             record(report)
         }
+    }
+
+    /// 攒进当前指标窗口；跨过 `metricsInterval` 就落一行并开新窗口。
+    ///
+    /// **无条件记录，不看阈值**——这正是与告警互补的地方：告警回答"出事了吗"，
+    /// 流水账回答"从什么时候开始变的、当时在做什么"。后者才是 2026-08-28 那 21 小时
+    /// 与 2026-09-03 那持续 5~7% 缺掉的东西。
+    /// internal 而非 private：**这条流水账断掉不会有任何报错**，只会在下次排查时
+    /// 才发现又只剩下阈值告警，需回归覆盖。
+    func accumulateMetrics(_ sample: ProcessResourceSample, physicalBytes: UInt64?) {
+        defer { metricsPrevSample = sample }
+        guard let windowStart = metricsWindowStart else {
+            metricsWindowStart = sample
+            metricsWindowStartBytes = physicalBytes
+            return
+        }
+        // 单次采样间隔内的瞬时占用，用来取峰值。上一拍缺失时跳过，不猜。
+        if let previous = metricsPrevSample {
+            let elapsed = sample.capturedAt.timeIntervalSince(previous.capturedAt)
+            if elapsed > 0 {
+                let percent = (sample.totalSeconds - previous.totalSeconds) / elapsed * 100
+                metricsPeakPercent = max(metricsPeakPercent, percent)
+            }
+        }
+        metricsPeakResident = max(metricsPeakResident, sample.residentBytes)
+        metricsPeakThreads = max(metricsPeakThreads, sample.threadCount)
+
+        let span = sample.capturedAt.timeIntervalSince(windowStart.capturedAt)
+        guard span >= Self.metricsInterval else { return }
+
+        let cpuSeconds = sample.totalSeconds - windowStart.totalSeconds
+        let userSeconds = sample.userSeconds - windowStart.userSeconds
+        let mainSeconds = sample.mainThreadSeconds - windowStart.mainThreadSeconds
+        var netMB = 0.0
+        if let start = metricsWindowStartBytes, let end = physicalBytes, end >= start {
+            netMB = Double(end - start) / 1_048_576
+        }
+        metricsJournal.append(MetricsJournal.Sample(
+            t: sample.capturedAt,
+            win: (span * 10).rounded() / 10,
+            cpu: ((cpuSeconds / span * 100) * 100).rounded() / 100,
+            peak: (metricsPeakPercent * 100).rounded() / 100,
+            usr: cpuSeconds > 0 ? ((userSeconds / cpuSeconds) * 100).rounded() / 100 : 0,
+            main: cpuSeconds > 0 ? ((mainSeconds / cpuSeconds) * 100).rounded() / 100 : 0,
+            rss: Int(metricsPeakResident / 1_048_576),
+            th: metricsPeakThreads,
+            page: visiblePageTitle,
+            subs: activeMonitorSummary,
+            mode: status == .on
+                ? (activeModes.isEmpty ? "on" : activeModes.map(\.displayName).sorted().joined(separator: "+"))
+                : "off",
+            conns: activeConnectionCount,
+            logs: metricsLogLines,
+            net: (netMB * 100).rounded() / 100,
+            pubConn: publishCountConnections,
+            pubTraffic: publishCountTraffic,
+            pubLogs: publishCountLogs
+        ))
+
+        metricsWindowStart = sample
+        metricsWindowStartBytes = physicalBytes
+        metricsPeakPercent = 0
+        metricsPeakResident = 0
+        metricsPeakThreads = 0
+        metricsLogLines = 0
+        publishCountConnections = 0
+        publishCountTraffic = 0
+        publishCountLogs = 0
     }
 
     /// 退出前把仍开着的异常段落盘。没有这一步，「一直烧到用户退出」的那类异常
@@ -4429,17 +4572,42 @@ final class AppState {
         return "节点 …\(tag.suffix(6))"
     }
 
-    private func record(_ report: OutboundFailureReport) {
+    /// internal 而非 private：「本机没网」与「节点坏了」分流错了会给出**误导性建议**，
+    /// 比不报还糟（真机 2026-09-03 就建议用户去换一个其实没问题的节点），需回归覆盖。
+    func record(_ report: OutboundFailureReport) {
         let name = displayName(forOutboundTag: report.outboundTag)
+        let span = Self.spanText(from: report.windowStart, to: report.windowEnd)
+        let counts = "\(name) 在\(span)内 \(report.failures)/\(report.attempts) 次建连失败"
+            + String(format: "（%.0f%%）", report.failureRate * 100)
+        let reason = "主要原因：\(report.dominantReason)（共 \(report.distinctReasonCount) 类）"
+
+        // 直连也在大面积失败时，这就不是节点的锅——建议换节点会把用户引向错误方向。
+        if report.localNetworkLooksDown {
+            let detail = [
+                counts,
+                reason,
+                "但同期直连也有 \(report.directFailures)/\(report.directAttempts) 次失败，"
+                    + "说明本机网络当时不通（断网、休眠或切换网络），**换节点无用**"
+            ].joined(separator: "；")
+            recordRuntimeEvent(level: .warning, title: "本机网络不通，期间建连大量失败", detail: detail)
+            return
+        }
+
         let detail = [
-            String(format: "%@ 在 %.0f 分钟内 %d/%d 次建连失败（%.0f%%）",
-                   name,
-                   max(report.windowEnd.timeIntervalSince(report.windowStart), 1) / 60,
-                   report.failures, report.attempts, report.failureRate * 100),
-            "主要原因：\(report.dominantReason)（共 \(report.distinctReasonCount) 类）",
+            counts,
+            reason,
+            "同期直连 \(report.directAttempts) 次中失败 \(report.directFailures) 次，本机网络正常",
             "多为节点或线路问题，可到代理页测速后换一个节点"
         ].joined(separator: "；")
         recordRuntimeEvent(level: .warning, title: "节点建连失败偏多", detail: detail)
+    }
+
+    /// 时间跨度的可读写法。**不足 1 分钟必须写秒**：`%.0f 分钟` 会把 20 秒四舍五入成
+    /// 「0 分钟内」，真机 2026-09-03 07:20 就出过这种读不懂的记录。
+    static func spanText(from start: Date, to end: Date) -> String {
+        let seconds = max(end.timeIntervalSince(start), 0)
+        if seconds < 60 { return String(format: "%.0f 秒", max(seconds, 1)) }
+        return String(format: "%.0f 分钟", seconds / 60)
     }
 
     private static func physicalByteTotal() -> UInt64? {
@@ -4513,10 +4681,10 @@ final class AppState {
         }
         // 跨度必须写进去：两种形状的窗口差 30 倍，「超时 10 次」在 2 分钟里和在 1 小时里
         // 是完全不同的两件事，不带跨度的计数没法判断严重程度。
-        let span = max(report.windowEnd.timeIntervalSince(report.windowStart), 1) / 60
+        let span = Self.spanText(from: report.windowStart, to: report.windowEnd)
         let detail = [
-            String(format: "%.0f 分钟内：节点域名解析超时 %d 次（这类会让整条代理停摆），普通域名 %d 次",
-                   span, report.outboundServerDomainStalls, report.generalStalls),
+            "\(span)内：节点域名解析超时 \(report.outboundServerDomainStalls) 次"
+                + "（这类会让整条代理停摆），普通域名 \(report.generalStalls) 次",
             "涉及 \(report.distinctTargetCount) 个不同目标（目标本身不记录）",
             throughput
         ].joined(separator: "；")

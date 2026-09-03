@@ -405,9 +405,22 @@ public struct OutboundFailureReport: Equatable, Sendable {
     public let distinctReasonCount: Int
     /// 出现次数最多的失败原因（已去掉地址与端口）。
     public let dominantReason: String
+    /// 同窗口内直连出站的成败。直连不经过节点。
+    public let directAttempts: Int
+    public let directFailures: Int
 
     public var failureRate: Double {
         attempts > 0 ? Double(failures) / Double(attempts) : 0
+    }
+
+    /// 直连也在大面积失败 ⇒ **问题在本机网络，不在节点**。
+    ///
+    /// 真机 2026-09-03 07:32–07:51：机器睡着没网，连 `dial udp 223.5.5.5:53` 都
+    /// `no route to internet`，3,216 行失败全被算到当时选中的节点头上，
+    /// 还建议用户"换一个节点"——换了也没用，那是把用户引向错误方向，
+    /// 比不报还糟。样本太少不下结论（宁可当作节点问题，那是原有行为）。
+    public var localNetworkLooksDown: Bool {
+        directAttempts >= 5 && Double(directFailures) / Double(directAttempts) >= 0.5
     }
 }
 
@@ -423,6 +436,10 @@ public struct OutboundFailureDetector: Sendable {
         var attempts: [String: Int] = [:]
         var failures: [String: Int] = [:]
         var reasons: [String: [String: Int]] = [:]
+        /// 同窗口内**直连**出站的成败。直连不经过节点，它要是也在大面积失败，
+        /// 问题就不在节点上——这是区分「节点坏了」与「本机没网」的判据。
+        var directAttempts = 0
+        var directFailures = 0
     }
 
     private let windowDuration: TimeInterval
@@ -459,6 +476,12 @@ public struct OutboundFailureDetector: Sendable {
         return tag
     }
 
+    /// 是不是**直连**出站。只认 direct：reject/block 是规则主动拒绝（广告拦截），
+    /// 与网络可达性无关，混进来会把"广告拦得多"误判成"本机没网"。
+    public static func isDirectOutbound(_ line: CoreLogLine) -> Bool {
+        line.message.contains("outbound/direct[")
+    }
+
     /// 成功建连。内核对每条成功的出站连接都写一行 `outbound connection to <host>`。
     public static func isSuccessfulAttempt(_ line: CoreLogLine) -> Bool {
         line.message.contains("outbound connection to")
@@ -475,13 +498,25 @@ public struct OutboundFailureDetector: Sendable {
         return failureMarkers.contains { text.contains($0) }
     }
 
+    /// 建连失败的特征串。
+    ///
+    /// **`no route to internet` 是补进来的，而且非补不可**：真机 2026-09-03
+    /// 断网那 19 分钟里 2,907 条直连失败**一条都没被认出来**（旧表只有
+    /// `no route to host`，sing-box 实际写的是 `no route to internet`）。
+    /// 没有它，「直连也在挂 ⇒ 不是节点的锅」这个判据永远不会触发。
+    ///
+    /// 刻意**不收**两类：`operation not permitted` 是规则主动拒绝（广告拦截每命中一次
+    /// 就是一条，收进来会让开着拦截的用户天天收到误报）；`context deadline exceeded`
+    /// 是解析超时，已由 `DNSStallDetector` 专门统计，收进来会同一件事报两遍。
     private static let failureMarkers = [
         "failed to create session",
         "i/o timeout",
         "connection refused",
         "connection reset by peer",
         "network is unreachable",
-        "no route to host"
+        "no route to host",
+        "no route to internet",
+        "use of closed network connection"
     ]
 
     /// 归一化失败原因，用于聚类展示。
@@ -506,23 +541,50 @@ public struct OutboundFailureDetector: Sendable {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty && $0 != "<addr>" && !$0.hasPrefix("dial tcp") && !$0.hasPrefix("read tcp") }
         guard let last = segments.last, !last.isEmpty else { return "未知原因" }
-        return last
+        return Self.trimReasonPunctuation(last)
+    }
+
+    /// 削掉尾段残留的收尾标点。
+    ///
+    /// 内核对 A/AAAA 并发查询的失败写成
+    /// `(exchange6: … no route to internet | exchange4: … no route to internet)`，
+    /// 按 `": "` 切分取尾段时**右括号会跟着留下来**，于是
+    /// `no route to internet` 与 `no route to internet)` 被当成两类原因。
+    /// 真机 2026-09-03 计数 2,849 vs 191——同一个原因劈成两半，
+    /// 还把「共 N 类」也虚增了。
+    static func trimReasonPunctuation(_ reason: String) -> String {
+        var text = Substring(reason)
+        while let last = text.last, last == ")" || last == "]" || last == "." || last == "," {
+            // 只削**多余**的收尾符号：自身成对的不动（`(A | B)` 这种整体尾段要保留原样）。
+            if last == ")" && text.filter({ $0 == "(" }).count >= text.filter({ $0 == ")" }).count { break }
+            if last == "]" && text.filter({ $0 == "[" }).count >= text.filter({ $0 == "]" }).count { break }
+            text = text.dropLast()
+        }
+        let trimmed = String(text).trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ? reason : trimmed
     }
 
     public mutating func ingest(_ line: CoreLogLine, at date: Date) -> OutboundFailureReport? {
         let success = Self.isSuccessfulAttempt(line)
         let failure = Self.isFailedAttempt(line)
-        guard success || failure, let tag = Self.outboundTag(in: line.message) else {
-            return flush(at: date)
-        }
+        guard success || failure else { return flush(at: date) }
+        let isDirect = Self.isDirectOutbound(line)
+        let tag = Self.outboundTag(in: line.message)
+        // 既不是直连、也翻不出节点 tag（reject/block 等）：与两个口径都无关，跳过。
+        guard isDirect || tag != nil else { return flush(at: date) }
 
         let expired = flush(at: date)
         var current = window ?? Window(startedAt: date, lastAt: date)
-        current.attempts[tag, default: 0] += 1
-        if failure {
-            current.failures[tag, default: 0] += 1
-            let reason = Self.normalizedReason(from: line.message)
-            current.reasons[tag, default: [:]][reason, default: 0] += 1
+        if isDirect {
+            current.directAttempts += 1
+            if failure { current.directFailures += 1 }
+        } else if let tag {
+            current.attempts[tag, default: 0] += 1
+            if failure {
+                current.failures[tag, default: 0] += 1
+                let reason = Self.normalizedReason(from: line.message)
+                current.reasons[tag, default: [:]][reason, default: 0] += 1
+            }
         }
         current.lastAt = date
         window = current
@@ -562,7 +624,9 @@ public struct OutboundFailureDetector: Sendable {
             failures: worst.value,
             attempts: current.attempts[worst.key] ?? worst.value,
             distinctReasonCount: reasons.count,
-            dominantReason: reasons.max { $0.value < $1.value }?.key ?? "未知原因"
+            dominantReason: reasons.max { $0.value < $1.value }?.key ?? "未知原因",
+            directAttempts: current.directAttempts,
+            directFailures: current.directFailures
         )
     }
 

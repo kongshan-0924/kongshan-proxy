@@ -27,7 +27,8 @@ struct MessagesView: View {
             // 让用户知道清除不会毁掉证据——否则「全部清除」看起来就是不可逆的销毁。
             HStack(spacing: 4) {
                 Image(systemName: "archivebox")
-                Text("警告与错误另存于 \(state.diagnosticsArchivePath)，不受「全部清除」影响")
+                Text("警告与错误另存于 \(state.diagnosticsArchivePath)；"
+                     + "运行指标每分钟记一行到 \(state.metricsArchivePath)。两者都不受「全部清除」影响")
             }
             .font(.caption)
             .foregroundStyle(.secondary)

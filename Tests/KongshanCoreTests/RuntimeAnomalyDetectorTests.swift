@@ -395,6 +395,107 @@ final class RuntimeAnomalyDetectorTests: XCTestCase {
         XCTAssertNil(detector.finish(at: origin.addingTimeInterval(11), physicalBytes: 0))
     }
 
+    /// 直连也在大面积失败 ⇒ 问题在本机网络，不在节点。
+    ///
+    /// 真机 2026-09-03 07:32–07:51：机器睡着没网，连 `dial udp 223.5.5.5:53` 都
+    /// `no route to internet`，3,216 行失败全被算到当时选中的节点头上，
+    /// 报告还建议"换一个节点"——换了也没用，把用户引向了错误方向。
+    func testDirectFailuresMarkTheProblemAsLocalNetwork() throws {
+        var detector = OutboundFailureDetector()
+        for index in 0..<25 {
+            _ = detector.ingest(
+                failureLine(tag: "node-x", host: "a.invalid",
+                            reason: "failed to create session: dial tcp 203.0.113.5:443: no route to internet"),
+                at: origin.addingTimeInterval(Double(index))
+            )
+            _ = detector.ingest(
+                CoreLogLine.parse(
+                    "[9\(index) 0ms] connection: open connection to dns.invalid:53 using "
+                    + "outbound/direct[direct]: dial udp 203.0.113.1:53: no route to internet"
+                ),
+                at: origin.addingTimeInterval(Double(index))
+            )
+        }
+        let report = try XCTUnwrap(detector.finish(at: origin.addingTimeInterval(30)))
+        XCTAssertTrue(report.localNetworkLooksDown, "直连全挂时不能归咎于节点")
+        XCTAssertEqual(report.directAttempts, 25)
+        XCTAssertEqual(report.directFailures, 25)
+    }
+
+    /// 直连正常时仍然判为节点问题——这是原有行为，不能被上一条带跑。
+    func testHealthyDirectKeepsTheBlameOnTheNode() throws {
+        var detector = OutboundFailureDetector()
+        for index in 0..<25 {
+            _ = detector.ingest(
+                failureLine(tag: "node-x", host: "a.invalid", reason: "failed to create session: EOF"),
+                at: origin.addingTimeInterval(Double(index))
+            )
+            _ = detector.ingest(
+                CoreLogLine.parse(
+                    "[8\(index) 0ms] outbound/direct[direct]: outbound connection to b.invalid:443"
+                ),
+                at: origin.addingTimeInterval(Double(index))
+            )
+        }
+        let report = try XCTUnwrap(detector.finish(at: origin.addingTimeInterval(30)))
+        XCTAssertFalse(report.localNetworkLooksDown)
+        XCTAssertEqual(report.directFailures, 0)
+    }
+
+    /// 直连样本太少时不下结论：宁可维持"节点问题"这个原有判断。
+    func testTooFewDirectSamplesDoNotFlipTheVerdict() throws {
+        var detector = OutboundFailureDetector()
+        for index in 0..<25 {
+            _ = detector.ingest(
+                failureLine(tag: "node-x", host: "a.invalid", reason: "failed to create session: EOF"),
+                at: origin.addingTimeInterval(Double(index))
+            )
+        }
+        _ = detector.ingest(
+            CoreLogLine.parse(
+                "[70 0ms] connection: open connection to c.invalid:443 using "
+                + "outbound/direct[direct]: dial tcp 203.0.113.2:443: no route to host"
+            ),
+            at: origin.addingTimeInterval(26)
+        )
+        let report = try XCTUnwrap(detector.finish(at: origin.addingTimeInterval(30)))
+        XCTAssertFalse(report.localNetworkLooksDown, "1 次直连失败不足以推翻判断")
+    }
+
+    /// 真机 2026-09-03 断网期间 2,907 条直连失败一条都没被旧特征表认出来，
+    /// 「直连也在挂」这个判据因此形同虚设。
+    func testFailureMarkersRecognizeRealWorldNoRouteToInternet() {
+        let line = CoreLogLine.parse(
+            "[123 1ms] connection: open connection to 203.0.113.9:443 using "
+            + "outbound/direct[direct]: dial tcp 203.0.113.9:443: no route to internet"
+        )
+        XCTAssertTrue(OutboundFailureDetector.isFailedAttempt(line))
+        XCTAssertTrue(OutboundFailureDetector.isDirectOutbound(line))
+
+        // 规则拒绝不算失败，否则开着广告拦截的用户天天收到误报。
+        let rejected = CoreLogLine.parse(
+            "[124 0ms] connection: open connection to ads.invalid:443 using "
+            + "outbound/block[reject]: operation not permitted"
+        )
+        XCTAssertFalse(OutboundFailureDetector.isFailedAttempt(rejected))
+    }
+
+    /// 内核对 A/AAAA 并发失败写成 `(exchange6: … | exchange4: … no route to internet)`，
+    /// 取尾段时右括号会跟着留下来，把同一原因劈成两类。
+    /// 真机 2026-09-03 计数：`no route to internet` 2,849 次、带括号的 191 次。
+    func testReasonDropsTrailingBracketLeftByParallelQueries() {
+        let message = "open connection to a.invalid:443 using outbound/direct[direct]: "
+            + "lookup a.invalid: (exchange6: dial udp 203.0.113.1:53: no route to internet"
+            + " | exchange4: dial udp 203.0.113.1:53: no route to internet)"
+        XCTAssertEqual(
+            OutboundFailureDetector.normalizedReason(from: message),
+            "no route to internet"
+        )
+        // 成对的括号不能被削掉，否则会把本来完整的尾段咬坏。
+        XCTAssertEqual(OutboundFailureDetector.trimReasonPunctuation("(a | b)"), "(a | b)")
+        XCTAssertEqual(OutboundFailureDetector.trimReasonPunctuation("connection refused"), "connection refused")
+    }
+
     /// DNS 停摆统计同样要能在内核重启时清空，否则"重启前后各两次"会被并成一簇持续故障。
     func testDNSStallResetClearsWindow() {
         var detector = DNSStallDetector(windowDuration: 60, minimumStalls: 1)
