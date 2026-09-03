@@ -5098,3 +5098,50 @@ v0.1.97 是把**本机代理入口**改绑到 0.0.0.0，同端口。副作用是
 **本地独有的标签 `v0.1.83`–`v0.1.89` 与 `baseline-20260721` 保持原样**：
 它们标记的是 WIP 而非发布，推上去会凭空多出一批没有产物的版本；
 删除又违反「远端只增不删、本地历史不改写」的保留策略。两头都不动是对的。
+
+### 2026-09-03 23:15 — 只读排查：Codex 连不上，实为出口 IP 触发 Cloudflare challenge
+
+**本轮问题**：用户换网络回来后 ChatGPT 桌面端的 Codex 一直连不上，报
+`404 Not Found, url: https://chatgpt.com/backend-api/codex/responses, cf-ray: …-NRT`，
+代理开着、网页正常。全程只读，未改任何配置。
+
+**检查范围**：`runtime-events.json`、helper 的 `sing-box-tun.log`（TUN 在跑，
+用户目录那份最后写入停在 16:16）、`scutil --proxy`、经代理的 curl 对照测试。
+
+**关键证据位置**
+- `sing-box-tun.log` 23:08–23:10：多条 `outbound/anytls[node-f27001f4…]: outbound
+  connection to chatgpt.com:443`，**无一条 ERROR** ⇒ 连接本身是通的，不是连不上。
+- 经代理 `curl -D -` 取响应头：`HTTP/2 403` + **`cf-mitigated: challenge`** + `server: cloudflare`。
+- 出口 IP `23.249.17.72`，Tokyo / Prime Security Corp（AS400618），机房 IP。
+
+**结论**
+
+同一出口下的对照测试是干净的判据：
+
+| 站点 | 状态 |
+| --- | --- |
+| chatgpt.com / openai.com / claude.ai | **403（cf-mitigated: challenge）** |
+| api.openai.com/v1/models | 401（正常，只是没带 key） |
+| cloudflare.com | 200 |
+| google.com/generate_204 | 204 |
+
+链路与 Cloudflare 本身都正常，是这几个站点对该出口 IP 单独下了挑战。浏览器能过是因为
+它会完成人机验证，Codex 是程序化请求做不了，于是拿到 403/404。**不是代理故障，
+也与本轮的任何代码改动无关。**
+
+**与换网无关**：节点 tag 从 `node-0646c812` 变成了 `node-f27001f4`，但出口 IP 仍是
+13:32 截图里那个 `23.249.17.72`——出口没变，所以换网是巧合，是 IP 信誉变了。
+处置只有换节点一条，已给出验证命令（`curl -o /dev/null -w '%{http_code}'` 打
+chatgpt.com，200/307 即通）。
+
+**顺带发现两处真问题**
+
+1. 当前节点本身不健康：23:08:55 告警「Japan 10 在 10 分钟内 172/521 次建连失败（33%）」，
+   原因 `no route to internet`。
+2. **`localNetworkLooksDown` 的 50% 阈值过硬**：同一条告警里直连 1452/3004 = **48.3%**
+   失败，却因为差 1.7 个百分点而被判成「节点问题、本机网络正常」；
+   而 22:48、22:58 两条正好 50.0% 就判成了「本机网络不通」。48% 的直连失败显然已经不正常。
+   判据应改为分级（如 >25% 即提示本机网络可疑），而不是一刀切 50%。**本轮未改**。
+
+**未验证部分**：没有实际换节点验证「换一个出口就能通」——那需要改用户当前选中的节点，
+属于状态变更，留给用户决定；也没有验证是哪一类 IP 段会被放行。
