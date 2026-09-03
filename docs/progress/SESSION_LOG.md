@@ -5145,3 +5145,82 @@ chatgpt.com，200/307 即通）。
 
 **未验证部分**：没有实际换节点验证「换一个出口就能通」——那需要改用户当前选中的节点，
 属于状态变更，留给用户决定；也没有验证是哪一类 IP 段会被放行。
+
+### 2026-09-03 23:40 — 只读排查：Codex 连不上，牵出系统代理还原的静默漏项
+
+**本轮问题**：用户换网络后 ChatGPT 桌面端的 Codex 一直连不上，报
+`404 Not Found ... /backend-api/codex/responses, cf-ray: ...-NRT`；用户称代理开着、网页正常。
+排查中用户又反馈：手动关掉代理后仍不通，去系统设置检查发现代理还开着，关掉才正常。
+**全程只读，未改任何配置；用户明确要求不要开代理。**
+
+**检查范围**：`runtime-events.json`、`diagnostics.ndjson`、`metrics.ndjson`、
+helper 的 `sing-box-tun.log`、`scutil --proxy` / `--dns`、
+`networksetup -getwebproxy/-getsecurewebproxy/-getsocksfirewallproxy`（逐个网络服务）、
+经中转端口的 curl 对照测试、`AppState.setMode/start/stop` 与 `SystemProxyManager.restoreFromDisk` 源码。
+
+#### 结论一：Codex 连不上是出口 IP 被 Cloudflare 挑战，不是代理故障
+
+内核日志显示 23:08–23:10 有多条 `outbound/anytls[...]: outbound connection to chatgpt.com:443`
+且**无一条 ERROR**——连接本身是通的。经中转端口 curl 对照：
+
+| 目标 | 状态 |
+| --- | --- |
+| chatgpt.com | 403，响应头带 `cf-mitigated: challenge` |
+| openai.com | 403 |
+| claude.ai | 403 |
+| api.openai.com | 401（正常，只是没带 key） |
+| cloudflare.com | 200 |
+| google.com/generate_204 | 204 |
+
+链路正常，是 OpenAI/Anthropic 对该出口 IP 触发了 Cloudflare 挑战。浏览器能过是因为它会做人机验证，
+Codex 是程序化请求做不了，于是拿到 403/404。出口 `23.249.17.72`，Tokyo / Prime Security Corp（AS400618）。
+
+用户换节点后出口变成 `23.249.17.80`——**同一 /24、同一 ASN、同一机房**，挑战照旧。
+换到其他网段后未能复测（此时代理已被关闭，curl 全部 000）。
+
+#### 结论二（本轮真正的缺陷）：系统代理还原会静默跳过快照中已不在当前列表的服务
+
+`networksetup` 逐服务检查发现：服务 **`Shadowrocket`** 的 HTTP/HTTPS/SOCKS 三项全为 `Enabled: Yes`，
+且 `Server: 127.0.0.1  Port: 36815`——**正是空山的中转端口**（`settings.json` 的 `proxyRelayPort` 为 36815）。
+不是该 App 自己的配置，是空山写入后未还原的残留。而同期 Wi-Fi 三项均为 No、DNS 无 TUN 残留
+（`192.168.2.101`，未指向 `172.19.0.1`），说明还原只漏了这一条服务。
+
+根因在 `SystemProxyManager.restoreFromDisk`：
+
+```swift
+for service in snapshot.services where currentServices.contains(service.name)
+```
+
+快照里有、但还原那一刻已不在 `-listallnetworkservices` 输出里的服务，会被**静默丢弃**——
+不抛错、不进 `restoreFailures`、不产生告警，随后 `proxy-recovery.json` 照常删除。
+VPN 类虚拟服务（Shadowrocket 就是）在断开时会短暂从列表消失，正好踩中。
+`enable` 用 `enabledServices`（跳过 `*` 禁用项）、`restore` 用 `allServices` 的不对称是刻意的且有注释，
+**不是**本次的问题所在。
+
+事件序列（`runtime-events.json`）：
+`23:24:24 内核已停止(用户关闭系统代理)` → `23:24:25 内核已启动(TUN)` → `23:24:27 内核已停止(用户关闭TUN)`，
+全程**无任何还原失败告警**，`metrics.ndjson` 在 23:25:23 起 `mode=off`——状态机本身没卡住。
+
+放大伤害的一环：`stop()` 只做 `proxyRelay.setTarget(port: nil)`，稳定 listener 保留到 App 退出
+（有注释、是设计）。于是 36815 仍在 LISTEN 但没有后端——连接被接受后立刻断开，
+表现成"端口通着却什么都打不开"，比直接连不上更难判断。
+
+**已排除的两条假设**（都查了源码，不成立）：
+- 以为 `sshProxyTargets` 非空会让「只开 TUN」也去启用系统代理——`start()` 里的判据是
+  `usesSystemProxy = modes.contains(.systemProxy)`，SSH 只影响 `needsRelay`（中转层），不碰系统代理。
+- 以为 23:24:24 那次 `stop()` 没走还原——`stoppingModes.contains(.systemProxy)` 当时为 true，
+  还原确实被调用且未抛错；漏的是它内部对单条服务的静默跳过。
+
+#### 未验证
+
+- 换到**其他网段**的节点后 Cloudflare 是否放行：用户已换但此时代理关闭，未能复测。
+- 「服务在还原瞬间从列表消失」只是与现象吻合的推断，**未复现**：没有抓到 23:24:24 那一刻
+  `-listallnetworkservices` 的实际输出。也可能是别的原因让该服务名当时匹配不上。
+- 残留未清除：`Shadowrocket` 服务的代理设置仍指向 36815。该服务当前无 IP、不影响上网，
+  但重新激活就会把流量送进空端口。已给出手动清除命令，未代为执行（改系统设置）。
+
+#### 待修
+
+`restoreFromDisk` 对快照中"当前列表里没有"的服务应照样尝试还原，失败再收进 `restoreFailures`；
+且只要有服务未还原成功，就**不能删除** `proxy-recovery.json`——否则下次启动的
+`recoverIfNeeded` 也救不回来。用户尚未答复是否现在修。
