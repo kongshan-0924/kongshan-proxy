@@ -5458,3 +5458,42 @@ CPU 调用栈自动采样 + 界面打磨），24 个文件。
 - **可复用判据**（不必等 Codex 重连）：
   `dd if=/dev/zero bs=1 count=0 seek=262144 of=/tmp/u.bin && curl -x http://127.0.0.1:36815 -X POST --data-binary @/tmp/u.bin -o /dev/null -w "%{time_total}s\n" --max-time 40 https://speed.cloudflare.com/__up`
   ——正常应 < 2s，当前 13.4s。
+
+### 2026-09-04 10:35 — 只读：开着代理+TUN 切配置必失败、界面与内核分叉
+
+- **本轮问题**：用户在 AI 组与节点选择都选了 LA-DMIT，网页分流测试却显示出口是东京 xTom；
+  来回切节点后才恢复。追问后用户补充：一开始开着系统代理 + TUN 直接切配置**一直切不过去**，
+  关掉两者后才切成功。
+- **检查范围**：当前 config.json 的组/规则/默认选择、helper TUN 日志按分钟统计各域名实际出站、
+  `runtime-events.json` 10:13–10:14 段、`AppState.setActiveConfig` / `hotReloadAfterNodeChange` /
+  `start(modes:)` 的 enable 调用点、`SystemProxyManager.execute` 的瞬时错误重试预算、
+  `networksetup -listallnetworkservices` 实测。
+- **关键证据**：
+  1. **出口时间线**：10:00–10:13 所有 AI 域名走 `node-192e0f46`（**旧订阅**的 anytls 节点，端口 6901，
+     当前 config.json 里已不存在该 tag）；10:14 起走 `node-d447e01a`；10:17 起走 `node-330c0b96`（现状）。
+     即内核在 10:14 之前一直跑着旧配置。
+  2. **两次切换都失败并回滚**（runtime-events）：
+     `10:13:34 当前配置已重载` → `10:13:37 当前配置应用失败，已回滚：启用系统代理失败且自动恢复失败：
+     networksetup 执行失败（8）：Unable to find item in network database`；10:13:42/10:13:44 同样一遍。
+     随后 `10:13:48 内核已停止（用户停止接管）` → `10:14:05 内核已启动（系统代理）` → `10:14:10 系统代理 + TUN`，
+     这才生效——与用户"关掉代理和 TUN 后才切成功"完全吻合。
+  3. **失败链路**：`setActiveConfig` → `hotReloadAfterNodeChange` → `applyRoutingSettings("当前配置")`
+     → 重启内核（TUN 需重建）→ `start(modes:)` 第 842 行**无条件** `systemProxyManager.enable(port:)`
+     → `execute()` 撞上瞬时错误 exit 8 → 重试预算仅 `200ms + 400ms`（`retryDelays`）耗尽 → 抛错
+     → `enable()` 的 catch 里 `restoreFromDisk()` 的 `-listallnetworkservices` 同样撞上 → `rollbackFailed`
+     → 整次应用失败 → 内核回滚到旧配置。TUN 拆建会让 SystemConfiguration 的服务列表抖动，
+     0.6 秒的重试预算扛不住，所以"开着 TUN 切配置"几乎必然失败。
+  4. **UI 回滚是有的**：`setActiveConfig` 在失败时会把 activeConfigID/groupSelections/selectedNodeID/delays
+     一并回滚。用户看到的"选了 LA-DMIT 却走东京"，是发生在切换失败与手动重启接管之间的窗口期。
+  5. **排除**：本机网络服务只有 4 个（LAN / USB 10/100/1000 LAN / Thunderbolt Bridge / Wi-Fi），
+     现在全部可寻址；上一条里"服务重名/不可寻址"的说法是我自己的 shell 循环按空格拆散服务名造成的假象，**作废**。
+- **结论**：切配置本身没坏，坏在**应用路径无条件重写系统代理**，而 TUN 重建期间 `networksetup`
+  的瞬时错误超出 0.6 秒重试预算，导致整次应用失败回滚。
+- **建议修法（未实施，等用户确认）**：
+  1. **主修**：`SystemProxyManager.enable()` 先读回当前设置，与目标（同 host/port/bypass）一致就跳过写入。
+     切配置时中转端口不变（36815 固定），这条路径根本不需要动 networksetup，失败面直接消失。
+     注意：跳过写入时**不得**用"当前=我们自己"的值覆盖已有快照，否则丢失用户原始设置。
+  2. **兜底**：把 `retryDelays` 从 200/400ms 扩到约 3 秒（如 200/400/800/1600ms），并让回滚路径里的
+     `-listallnetworkservices` 走同一重试。
+  3. **可选**：TUN 重建后等服务列表连续两次读取一致再动 networksetup。
+- **未验证**：上述改法尚未实现与测试；TUN 重建到服务列表稳定的实际耗时未测量（只知 0.6 秒不够）。
