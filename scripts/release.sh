@@ -89,11 +89,41 @@ system_proxy_is_off() {
     scutil --proxy | awk '/Enable :/ && $3 != 0 { bad=1 } END { exit bad }'
 }
 
+# 代理 / DNS 快照里**只剩当前不存在的网络服务**时，这不是"旧版没释放干净"，
+# 而是 v0.1.99 起的待还原保留：服务（拔掉的 USB 网卡、退出的 VPN 虚拟服务）不在列表里就写不回去，
+# 快照必须留着等它回来。旧实现一律要求文件消失，于是只要有一个服务暂时不在，就**永远装不上新版**
+# ——真机 2026-09-04：网络服务里 `LAN` 消失、`Shadowrocket` 出现，安装被卡在这里。
+#
+# `tun-recovery.json` 不在放宽之列：它存的是内核运行记录、没有服务列表，
+# 存在就意味着 TUN 真的没收干净，必须照旧要求消失。
 recovery_snapshots_are_gone() {
     local support="$HOME/Library/Application Support/kongshan"
+    [[ ! -e "$support/tun-recovery.json" ]] || return 1
+
+    local current
+    current=$(/usr/sbin/networksetup -listallnetworkservices 2>/dev/null) || return 1
+
     local residue
-    for residue in proxy-recovery.json dns-recovery.json tun-recovery.json; do
-        [[ ! -e "$support/$residue" ]] || return 1
+    for residue in proxy-recovery.json dns-recovery.json; do
+        local path="$support/$residue"
+        [[ -e "$path" ]] || continue
+        KONGSHAN_CURRENT_SERVICES="$current" /usr/bin/python3 -c '
+import json, os, sys
+
+current = {
+    line.lstrip("*").strip()
+    for line in os.environ.get("KONGSHAN_CURRENT_SERVICES", "").splitlines()
+    if line.strip() and not line.startswith("An asterisk")
+}
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    # 读不动就当没释放干净，按老规矩拦下。
+    sys.exit(1)
+names = {s.get("name") for s in data.get("services", []) if isinstance(s, dict)}
+# 快照里还留着「当前就在列表里」的服务 = 确实没还原干净，拦下。
+sys.exit(1 if (names & current) else 0)
+' "$path" || return 1
     done
     return 0
 }
