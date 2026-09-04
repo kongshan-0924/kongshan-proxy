@@ -5636,3 +5636,11 @@ TUN 重建期间任何一条撞上瞬时错误就整次回滚。短路后这条�
 修法：`recovery_snapshots_are_gone()` 改为——`tun-recovery.json` 照旧要求消失（它存的是内核运行记录、
 无服务列表，存在即真的没收干净）；代理 / DNS 快照则解析出服务名，**只有当其中还有服务仍在当前列表里**
 才判为"没释放干净"。正负例都实测过：当前快照（只剩 `LAN`）放行；构造一份含 `Wi-Fi` 的快照被拦下。
+
+**门禁修复的第二次翻车（19:55）**：改完门禁后 install 又挂在
+`recovery_snapshots_are_gone:local:9: path: inconsistent type for assignment`——
+zsh 里 `$path` 是**绑定 PATH 的特殊数组变量**，`local path=...` 赋标量直接报错。
+改名为 `snapshot` 后，用「复制脚本、截掉末尾 case 分发再 source」的方式实测函数本身：
+当前现场放行、构造含 `Wi-Fi` 的快照被拦下，正负例都对。
+两次失败的安装都停在替换之前（脚本设计如此），`/Applications` 始终是完好的 v0.1.99；
+但每次尝试都会先让旧版退出，中间有两段无代理窗口，已手动拉回。

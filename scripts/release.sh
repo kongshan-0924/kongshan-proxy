@@ -105,8 +105,10 @@ recovery_snapshots_are_gone() {
 
     local residue
     for residue in proxy-recovery.json dns-recovery.json; do
-        local path="$support/$residue"
-        [[ -e "$path" ]] || continue
+        # 变量名不能叫 path：zsh 里 $path 是绑定 PATH 的特殊数组，赋标量会报
+        # `inconsistent type for assignment`，真机 2026-09-04 安装时就栽在这。
+        local snapshot="$support/$residue"
+        [[ -e "$snapshot" ]] || continue
         KONGSHAN_CURRENT_SERVICES="$current" /usr/bin/python3 -c '
 import json, os, sys
 
@@ -123,7 +125,7 @@ except Exception:
 names = {s.get("name") for s in data.get("services", []) if isinstance(s, dict)}
 # 快照里还留着「当前就在列表里」的服务 = 确实没还原干净，拦下。
 sys.exit(1 if (names & current) else 0)
-' "$path" || return 1
+' "$snapshot" || return 1
     done
     return 0
 }
