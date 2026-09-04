@@ -5684,3 +5684,26 @@ zsh 里 `$path` 是**绑定 PATH 的特殊数组变量**，`local path=...` 赋�
 安装后首次启动按设计记了**一对 `[info]`**（新存档第一次写入）；随后**手动退出并重启 App 实测**：
 事件总数 164 → 164，**零新增**，待还原相关新增 0 条。跨启动判重在真机上生效。
 历史上已记下的 6 条 `[warning]` 不会被追溯清理，属于既有记录。
+
+### 2026-09-04 21:35 — v0.1.101 发布到 GitHub
+
+**本轮任务**：用户「清理工作区，然后打上tag，构建，合并分支，推送」。
+
+**逐项落实**：
+- **清理工作区**：`git status` 本来就干净，无需清理。**未删 `.build/`（652 MB）**——它被 gitignore，
+  且 `require_verification_stamp` 要拿 `.build/kongshan.app` 核对 CDHash，删掉会让发布戳失效并触发全量重建。
+  `dist/` 已按保留策略只留最新一个 `kongshan-0.1.101.dmg`。
+- **合并分支**：**没有可合的分支**。`git branch -a` 只有 `main` 与 `origin/main`
+  （此前两个 squash 合并过的分支已删）。如实说明，未凭空造合并。
+- **构建**：验证戳原本绑在 `e484e02`，而 HEAD 已是 `4ec6882`（真机验证的记录提交），
+  按门禁必须重新 `prepare`——已重跑，M4 CPU 门禁 / 签名 / DMG 校验全过，戳绑定 `4ec6882`。
+- **打 tag + 推送**：`scripts/release.sh publish` 一次完成——新建 `v0.1.101`、
+  推 `main`（`5d2d0d9..4ec6882`，17 个提交）、推 tag、建 Release 并上传 DMG。
+  https://github.com/kongshan-0924/kongshan-proxy/releases/tag/v0.1.101
+
+**验证**：`main...origin/main` 已同步无落差；Release 列表显示 `kongshan 0.1.101  Latest  v0.1.101`；
+资产 `kongshan-0.1.101.dmg` 24,898,978 字节；工作区仍干净。
+**保留策略核对**：只在本地的 tag `v0.1.83`~`v0.1.89` **仍未被推上去**（`publish` 只推当次那一个 tag），符合约定。
+
+**说明**：v0.1.99 与 v0.1.100 当时只构建安装、未发布，本次也**未补发**——
+它们的 DMG 已按"本地只留最新"清掉，补发得重新构建历史提交。需要的话再说。
