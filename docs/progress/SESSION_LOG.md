@@ -5594,3 +5594,33 @@ TUN 重建期间任何一条撞上瞬时错误就整次回滚。短路后这条�
 **补记（18:55）**：`prepare` 重跑通过（M4 门禁过、签名与 DMG 校验过），
 产物仍是 `dist/kongshan-0.1.100.dmg` 但**内容已变**：SHA-256 a96e8bdf…（旧的 879634a3… 作废），
 验证戳绑定 `e8b26ab`。仍未 install，留给用户手动执行。
+
+### 2026-09-04 19:10 — 只读巡检 + 补齐连接页合流的回归测试
+
+**本轮任务**：用户「检查一下最新的运行情况，还有什么问题吗，有的话一起修复了」，随后「构建最新的版本给我安装」。
+
+**巡检结论（本机仍跑 v0.1.99）**：
+- **v0.1.99 的三个新机制在真机上都按设计工作了**：08:57/08:58 记录「系统代理 / 系统 DNS 有待还原的
+  网络服务：Shadowrocket」（快照保留、等服务回来复位）；08:58:11「已清理残留的系统代理设置…
+  LAN、USB 10/100/1000 LAN、Thunderbolt Bridge」与「已清理残留的系统 DNS 设置…LAN」——残留清扫真的兜住了。
+- **连接页是新的 CPU 热点**：最近 6 小时连接页可见，CPU 小时均值 1.5~7.7%、峰值 12.6%，
+  活跃连接 120~164，主线程仅占 48%——另一半在后台。根因：`connectionStream()` 与
+  `connectionDetailsStream()` **订阅同一个 `/connections` 端点**，同一份 payload 每秒被
+  `JSONSerialization` 解析两遍。**已在 `e8b26ab` 合流修掉**（`connectionFeedStream` 一次解析同时给出
+  总量与明细；连接页接管期间仪表盘那条订阅不启动）。
+- **DNS 偶发超时**：今天 4 次「解析持续超时」+ 2 次「长期零星超时」，18 次失败全部打在
+  `dial tcp 223.5.5.5:443`（`dns-cn` 是 DoH）。域名都是国内目标（ios.rqd.qq.com、honeycomb.wpscdn.cn、
+  icloud.com.cn、feishu.cn 等）与 www.apple.com。**当场实测 DoH 10/10 成功、均值 55ms，UDP 53 也 10/10**，
+  说明是偶发拥塞不是解析器坏。**未改**：sing-box 的一条 DNS 规则只能指一个 server，要"修"就得把
+  `dns-cn` 从 DoH 换成 UDP，那是隐私取舍、且证据不足以支撑，留待观察。
+- 内核日志今天 11:00 后错误：193 次 `block: operation not permitted`（广告拦截，正常）、
+  33 次 vless 建连超时、13 次直连超时。CPU 自动采样目录 `samples/` 不存在＝v0.1.99 上线后没触发过 CPU 异常。
+
+**本轮改动**：只补测试，未动实现。`e8b26ab` 的合流当时**没有任何测试引用 `ConnectionFeed`**，
+而"两条订阅同时跑"只会让 CPU 悄悄翻倍、"合流后忘了喂总量"只会让会话流量静静少算，两者都不报错。补：
+- `ClashStreamingTests.testConnectionFeedCarriesTotalsAndDetailsFromOneParse`：一份 payload 同时产出
+  与 `connectionStream` 完全一致的累计量快照 + 明细。
+- `ConnectionFeedWiringTests`（2 条）：钉住「连接页接管时仪表盘那条 `/connections` 不启动、关闭时交还」，
+  以及「喂累计量必须排在窗口可见性早退之前」。
+
+**验证**：全量 `swift test` **605 执行 / 2 跳过 / 0 失败**。

@@ -56,6 +56,41 @@ final class ClashStreamingTests: XCTestCase {
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer runtime-secret")
     }
 
+    /// 连接页与仪表盘合用一条 `/connections`：这条流**必须同时带上累计量**，
+    /// 否则连接页开着时仪表盘那条订阅被关掉，会话累计流量就断了——
+    /// 而 `SessionTrafficAccumulator` 是靠绝对值喂的，断掉不会报错、只会静静地少算。
+    func testConnectionFeedCarriesTotalsAndDetailsFromOneParse() async throws {
+        let payload = """
+        {"downloadTotal":1000,"uploadTotal":2000,"memory":3145728,"connections":[\
+        {"id":"a","metadata":{"host":"example.com","destinationPort":"443","network":"tcp"},\
+        "upload":10,"download":20,"rule":"DomainSuffix","rulePayload":"example.com","chains":["node-x","mixed-in"]},\
+        {"id":"b","metadata":{"destinationIP":"203.0.113.8","destinationPort":"8443","network":"udp"},\
+        "upload":1,"download":2,"rule":"Final","rulePayload":"","chains":["direct"]}]}
+        """
+        let fixture = StreamFixture(payloads: [Data(payload.utf8)])
+        let client = makeClient(fixture: fixture)
+
+        let feed = try await first(await client.connectionFeedStream())
+
+        // 累计量与 connectionStream 给出的完全一致——合流后它是唯一来源。
+        XCTAssertEqual(
+            feed.snapshot,
+            ConnectionSnapshot(
+                connectionCount: 2,
+                memory: 3_145_728,
+                uploadTotal: 2_000,
+                downloadTotal: 1_000
+            )
+        )
+        XCTAssertEqual(feed.details.count, 2)
+        XCTAssertEqual(feed.details.first?.id, "a")
+        XCTAssertEqual(feed.details.first?.host, "example.com:443")
+
+        let request = try XCTUnwrap(fixture.requests.first)
+        let components = try XCTUnwrap(URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false))
+        XCTAssertEqual(components.path, "/connections")
+    }
+
     func testLogStreamUsesLevelAndMapsWarnPayload() async throws {
         let fixture = StreamFixture(payloads: [Data(#"{"type":"warn","payload":"route fallback"}"#.utf8)])
         let receivedAt = Date(timeIntervalSince1970: 1_234)
