@@ -300,6 +300,28 @@ public actor SystemProxyManager {
         try beginTransaction()
         defer { transactionInProgress = false }
 
+        // 已经是「我们接管、且端口与绕过列表完全一致」时直接返回，一条写入都不发。
+        //
+        // 切配置 / 换节点会重新走一遍 `start()` → `enable()`，而中转端口是固定的
+        // （见 `RuntimeSecrets.availableHighPort`），绕过列表通常也没变。原实现无条件
+        // 先 restore、再 capture、再 enable：4 个网络服务就要跑几十条 networksetup。
+        // TUN 重建期间服务列表正在抖动，其中**任何一条**撞上瞬时错误就整次失败回滚——
+        // 真机 2026-09-04 10:13 连续两次「当前配置应用失败，已回滚」，用户必须先关掉
+        // 系统代理和 TUN 才切得动配置。短路后这条路径上一次写入都没有，失败面随之消失。
+        //
+        // 短路时**必须保留原有快照**：它记的是用户接管前的原始设置。若重新 capture，
+        // 写进去的会是"当前＝指向我们自己"，还原时就再也回不到用户的原值了。
+        // `restoreFailureMarkerURL` 这一条不能省：设置"写回去但不落地"时，当前状态同样是
+        // 指向我们自己、标记和快照也都在，与正常的切配置**从状态上无法区分**。少了这条，
+        // 「还原失败时不能带着坏快照继续接管」这个性质会被短路悄悄绕过去
+        // （`TakeoverResidueTests.testProxyRestoreReadsBackAndKeepsSnapshotWhenSettingDidNotStick`）。
+        if try await storage.readIfPresent(from: takeoverMarkerURL) != nil,
+           try await storage.readIfPresent(from: recoveryURL) != nil,
+           try await storage.readIfPresent(from: restoreFailureMarkerURL) == nil,
+           try await takeoverIsCurrent(port: port, bypassDomains: bypassDomains) {
+            return
+        }
+
         // 上次的快照还在：先把能还原的还原掉。只剩「服务此刻不在列表里」的待还原项时不能拒绝
         // 启用——那会让用户永远开不了代理；把它们带进本次快照，服务回来时照样复位。
         // 真有还原失败（服务在、写不回去）才拒绝，错误原样抛出，用户能看到是哪个服务。
@@ -402,6 +424,13 @@ public actor SystemProxyManager {
         recoveryURL.deletingLastPathComponent().appending(path: "proxy-takeover.marker")
     }
 
+    /// 「上一次还原没能落地」的标记。只用来挡住 `enable()` 的幂等短路——
+    /// 还原一旦真的失败，就必须走完整流程把错误如实抛给用户，而不是因为"现在恰好指向我们"
+    /// 就当作成功返回。还原完全成功时删除。
+    private var restoreFailureMarkerURL: URL {
+        recoveryURL.deletingLastPathComponent().appending(path: "proxy-restore-failed.marker")
+    }
+
     static func pointsAtLoopback(_ endpoint: ProxyEndpointState, port: Int) -> Bool {
         guard endpoint.enabled, endpoint.port == port else { return false }
         return ["127.0.0.1", "localhost", "::1"].contains(endpoint.server.lowercased())
@@ -493,6 +522,28 @@ public actor SystemProxyManager {
         transactionInProgress = true
     }
 
+    /// 当前所有启用中的网络服务是否都已指向 `127.0.0.1:port`，且绕过列表与目标一致。
+    ///
+    /// **只读不写**。任何一项不符就返回 false，交回完整流程——包括"新出现了一个还没接管的
+    /// 网络服务"这种情况（它的三项代理都不指向我们，第一项判定就会 false）。
+    /// `bypassDomains` 为 nil 表示本次不改绕过列表，那就不参与比对。
+    private func takeoverIsCurrent(port: Int, bypassDomains: [String]?) async throws -> Bool {
+        let services = SystemProxyCommands.enabledServices(
+            from: try await execute(["-listallnetworkservices"]).stdout
+        )
+        guard !services.isEmpty else { return false }
+        for service in services {
+            let current = try await capture(service: service)
+            guard Self.pointsAtLoopback(current.http, port: port),
+                  Self.pointsAtLoopback(current.https, port: port),
+                  Self.pointsAtLoopback(current.socks, port: port) else {
+                return false
+            }
+            if let bypassDomains, current.bypassDomains != bypassDomains { return false }
+        }
+        return true
+    }
+
     private func capture(service: String) async throws -> NetworkServiceProxySnapshot {
         let http = try SystemProxyCommands.proxyState(
             from: try await execute(["-getwebproxy", service]).stdout
@@ -576,6 +627,7 @@ public actor SystemProxyManager {
 
         if retained.isEmpty {
             try FileManager.default.removeItem(at: recoveryURL)
+            try? FileManager.default.removeItem(at: restoreFailureMarkerURL)
             return ProxyRestoreOutcome(restored: restored, pending: [])
         }
         if retained != snapshot.services {
@@ -588,6 +640,8 @@ public actor SystemProxyManager {
             try await storage.writeAtomically(try encoder.encode(retrySnapshot), to: recoveryURL)
         }
         guard failures.isEmpty else {
+            // 只有"服务在、就是写不回去"才算失败；服务不在列表里（pending）是等它回来，不写标记。
+            try? await storage.writeAtomically(Data("1".utf8), to: restoreFailureMarkerURL)
             throw SystemProxyError.commandFailed(
                 exitCode: -1,
                 message: "部分网络服务代理恢复失败，已保留快照重试：\(failures.joined(separator: "；"))"
@@ -627,9 +681,14 @@ public actor SystemProxyManager {
     /// 3 秒内连报两次「当前配置应用失败，已回滚」。
     private static let transientNetworkDatabaseError = "unable to find item in network database"
 
-    /// 只重试上面那一种消息，且次数有限。服务若是真被删掉了，多花约 0.6 秒后照样如实报错——
+    /// 只重试上面那一种消息，且次数有限。服务若是真被删掉了，多花约 3 秒后照样如实报错——
     /// 不能让「配置错了」被伪装成「网络在抖」。
-    private static let retryDelays: [Duration] = [.milliseconds(200), .milliseconds(400)]
+    ///
+    /// 预算从 0.6 秒（200+400ms）扩到约 3 秒：真机 2026-09-04 10:13 开着 TUN 切配置时，
+    /// TUN 拆建让服务列表抖了好几秒，0.6 秒的预算连着两次都没扛过去，配置切换直接回滚。
+    private static let retryDelays: [Duration] = [
+        .milliseconds(200), .milliseconds(400), .milliseconds(800), .milliseconds(1600)
+    ]
 
     private func execute(_ arguments: [String]) async throws -> ProcessResult {
         var attempt = 0

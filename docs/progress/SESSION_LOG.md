@@ -5497,3 +5497,47 @@ CPU 调用栈自动采样 + 界面打磨），24 个文件。
      `-listallnetworkservices` 走同一重试。
   3. **可选**：TUN 重建后等服务列表连续两次读取一致再动 networksetup。
 - **未验证**：上述改法尚未实现与测试；TUN 重建到服务列表稳定的实际耗时未测量（只知 0.6 秒不够）。
+
+### 2026-09-04 11:05 — v0.1.100：修复「开着代理+TUN 切配置必失败」
+
+**本轮任务**：用户「先修好，不用替换本地的安装程序，等我手动执行」。
+
+**回滚点**：修改前 HEAD `0ba76a9`；本地已安装的 v0.1.99 不动，安装包放 dist 由用户手动执行。
+
+**改动**（三处，全部在 KongshanCore）：
+1. `SystemProxyManager.enable()` 加幂等短路：已有接管标记 + 快照，且所有启用中的网络服务三项代理
+   都已指向 `127.0.0.1:<port>`、绕过列表也一致时**直接返回，一条写入都不发**，并保留原快照不覆盖。
+   新增 `takeoverIsCurrent(port:bypassDomains:)`（只读，复用既有的 `pointsAtLoopback`）。
+2. `SystemProxyManager.retryDelays` 从 `200/400ms`（0.6s）扩到 `200/400/800/1600ms`（约 3s）。
+3. `SystemDNSManager.execute` 此前**完全没有瞬时错误重试**，补上与代理完全一致的一套。
+   理由写进注释：两者在 `start()` 里前后脚跑、撞同一段服务列表抖动，只修代理它就是下一个失败点。
+
+**为什么这么修**：切配置会重走 `start()` → `enable()`，而中转端口固定（`RuntimeSecrets.availableHighPort`）、
+绕过列表通常没变；原实现却无条件 restore + capture + enable，4 个网络服务几十条 `networksetup`，
+TUN 重建期间任何一条撞上瞬时错误就整次回滚。短路后这条路径上没有写入，失败面直接消失；
+重试预算是兜底。
+
+**新增测试**（5 条）：
+- `testEnableSkipsEveryWriteWhenTakeoverAlreadyMatches`：断言零写入 **且快照字节不变**
+  （防止有人把短路实现成"重新 capture 再比对"，那会把用户原始设置覆盖成指向我们自己）。
+- `testEnableStillWritesWhenPortDiffers`：端口不同时短路不得生效。
+- `testTransientErrorSurvivesMultiSecondServiceListChurn`：连续 4 次瞬时失败要被吸收。
+- `testTransientNetworkDatabaseErrorIsRetried` / `testUnrelatedDNSFailureIsNotRetried`（DNS 侧）。
+- 既有 `testTransientRetriesAreBoundedAndStillSurfaceTheError` 的断言随预算从 3 次改为 5 次调用。
+
+**验证**：`SystemProxyManagerTests` 16 项、`SystemDNSManagerTests` 11 项全过；全量结果见末尾补记。
+
+**中途发现并修掉的自伤**：第一版短路把一个**故意的安全性质**绕过去了——
+`TakeoverResidueTests.testProxyRestoreReadsBackAndKeepsSnapshotWhenSettingDidNotStick` 挂了：
+"networksetup 返回 0 但设置不落地"时，当前状态同样是指向我们自己、标记与快照也都在，
+**与正常切配置从状态上无法区分**，于是短路生效、`enable()` 静默成功，而原本该拒绝接管并指名服务报错。
+修法：新增 `proxy-restore-failed.marker`——`restoreFromDisk` 真失败（服务在、就是写不回去）时写下，
+完全还原成功时删除；短路多加一条"没有这个标记"的前提。纯 pending（服务不在列表里）不算失败、不写标记。
+新增 `testShortCircuitStepsAsideWhenLastRestoreFailed` 钉住这条前提。
+
+**验证**：全量 `swift test` **601 执行 / 2 跳过 / 0 失败**。
+（中途有一次 `SingBoxProcessTests.testLogWriteFailureIsReportedWithoutStoppingCore` 超时，
+单独跑与复跑全量都通过，是机器负载下的偶发，不是本轮改动所致。）
+
+**未验证**：真机上"开着代理+TUN 切配置"是否已经不再失败——需要用户装上 v0.1.100 后实测。
+本轮按用户要求**不替换本地安装**。

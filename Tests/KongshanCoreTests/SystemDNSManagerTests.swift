@@ -265,6 +265,81 @@ final class SystemDNSManagerTests: XCTestCase {
 
 /// 模拟 networksetup 的 DNS 相关子命令。set 会真的更新内部映射，
 /// 让 reassert 的「已指向我们」判断走真实读回来的值。
+extension SystemDNSManagerTests {
+    /// DNS 这步与系统代理前后脚跑，撞同一段服务列表抖动。
+    /// 只给代理加重试的话它就成了下一个失败点——真机 2026-09-04 10:13
+    /// 开着 TUN 切配置连续两次回滚，就是这条链路上的写入被瞬时错误打断。
+    func testTransientNetworkDatabaseErrorIsRetried() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "kongshan-dns-retry-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runner = FlakyDNSSetup(failures: 4)
+        let manager = SystemDNSManager(
+            storage: Storage(rootDirectory: root),
+            runner: runner.run(arguments:timeout:)
+        )
+
+        try await manager.enable(server: "172.19.0.1")
+
+        let listCalls = await runner.calls(matching: "-listallnetworkservices")
+        XCTAssertEqual(listCalls, 5, "四次瞬时失败要被吸收，第五次成功")
+    }
+
+    /// 重试有界，且只认那一种消息。
+    func testUnrelatedDNSFailureIsNotRetried() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "kongshan-dns-retry-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runner = FlakyDNSSetup(failures: .max, stderr: "** Error: some other failure")
+        let manager = SystemDNSManager(
+            storage: Storage(rootDirectory: root),
+            runner: runner.run(arguments:timeout:)
+        )
+
+        do {
+            try await manager.enable(server: "172.19.0.1")
+            XCTFail("非瞬时错误必须立即抛出")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("some other failure"))
+        }
+        let listCalls = await runner.calls(matching: "-listallnetworkservices")
+        XCTAssertEqual(listCalls, 1, "别的失败不许重试")
+    }
+}
+
+/// 前 `failures` 次调用返回指定失败，之后一切正常。
+private actor FlakyDNSSetup {
+    private var remainingFailures: Int
+    private let stderr: String
+    private var seen: [[String]] = []
+
+    init(failures: Int, stderr: String = "** Error: Unable to find item in network database.") {
+        self.remainingFailures = failures
+        self.stderr = stderr
+    }
+
+    func calls(matching argument: String) -> Int {
+        seen.filter { $0.first == argument }.count
+    }
+
+    func run(arguments: [String], timeout: TimeInterval) async throws -> ProcessResult {
+        seen.append(arguments)
+        guard remainingFailures > 0 else {
+            return ProcessResult(exitCode: 0, stdout: output(for: arguments), stderr: "")
+        }
+        remainingFailures -= 1
+        return ProcessResult(exitCode: 8, stdout: "", stderr: stderr)
+    }
+
+    private func output(for arguments: [String]) -> String {
+        switch arguments.first {
+        case "-listallnetworkservices": "Wi-Fi"
+        case "-getdnsservers": "There aren't any DNS Servers set on Wi-Fi.\n"
+        default: ""
+        }
+    }
+}
+
 private actor DNSSetupRecorder {
     private let recoveryURL: URL
     private var services: [String]

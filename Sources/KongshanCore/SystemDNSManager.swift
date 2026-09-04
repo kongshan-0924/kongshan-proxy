@@ -373,15 +373,31 @@ public actor SystemDNSManager {
         servers.isEmpty ? "空（DHCP）" : servers.joined(separator: " ")
     }
 
+    /// 与 `SystemProxyManager` 同一套瞬时错误重试，**必须保持一致**：两者在
+    /// `start()` 里前后脚跑（先系统代理、后系统 DNS），撞的是同一段服务列表抖动。
+    /// 只给代理加重试的话，DNS 这步就成了下一个失败点，配置照样切不动。
+    private static let transientNetworkDatabaseError = "unable to find item in network database"
+
+    /// 有界重试，约 3 秒。服务真被删了照样如实报错，不把「配置错了」伪装成「网络在抖」。
+    private static let retryDelays: [Duration] = [
+        .milliseconds(200), .milliseconds(400), .milliseconds(800), .milliseconds(1600)
+    ]
+
     private func execute(_ arguments: [String]) async throws -> ProcessResult {
-        let result = try await runner(arguments, timeout)
-        guard result.exitCode == 0 else {
-            let message = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-            throw SystemDNSError.commandFailed(
-                exitCode: result.exitCode,
-                message: message.isEmpty ? result.stdout.trimmingCharacters(in: .whitespacesAndNewlines) : message
-            )
+        var attempt = 0
+        while true {
+            let result = try await runner(arguments, timeout)
+            guard result.exitCode != 0 else { return result }
+            let stderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            let message = stderr.isEmpty
+                ? result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+                : stderr
+            guard attempt < Self.retryDelays.count,
+                  message.lowercased().contains(Self.transientNetworkDatabaseError) else {
+                throw SystemDNSError.commandFailed(exitCode: result.exitCode, message: message)
+            }
+            try await Task.sleep(for: Self.retryDelays[attempt])
+            attempt += 1
         }
-        return result
     }
 }

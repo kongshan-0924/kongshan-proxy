@@ -92,7 +92,7 @@ final class SystemProxyManagerTests: XCTestCase {
         XCTAssertEqual(listCalls, 3)
     }
 
-    /// 重试必须有界。服务若是真被删了，多花约 0.6 秒后照样如实报错——
+    /// 重试必须有界。服务若是真被删了，多花约 3 秒后照样如实报错——
     /// 不能把「配置错了」伪装成「网络在抖」，那会让用户永远查不到真因。
     func testTransientRetriesAreBoundedAndStillSurfaceTheError() async throws {
         let root = temporaryDirectory()
@@ -113,7 +113,120 @@ final class SystemProxyManagerTests: XCTestCase {
             )
         }
         let listCalls = await runner.calls(matching: "-listallnetworkservices")
-        XCTAssertEqual(listCalls, 3, "一次原始调用 + 两次重试，不能无限重试")
+        XCTAssertEqual(listCalls, 5, "一次原始调用 + 四次重试，不能无限重试")
+    }
+
+    /// TUN 拆建会让网络服务列表抖好几秒，0.6 秒的旧预算扛不住：真机 2026-09-04 10:13
+    /// 开着系统代理 + TUN 切配置，连续两次「当前配置应用失败，已回滚」，
+    /// 用户必须先关掉代理和 TUN 才切得动。预算扩到约 3 秒后这段抖动要能被吸收。
+    func testTransientErrorSurvivesMultiSecondServiceListChurn() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runner = FlakyNetworkSetup(failures: 4)
+        let manager = SystemProxyManager(
+            storage: Storage(rootDirectory: root),
+            runner: runner.run(arguments:timeout:)
+        )
+
+        try await manager.enable(port: 32_123)
+
+        let listCalls = await runner.calls(matching: "-listallnetworkservices")
+        XCTAssertEqual(listCalls, 5, "四次瞬时失败要被吸收，第五次成功")
+    }
+
+    /// 幂等短路：已经接管且端口/绕过一致时，`enable()` 一条写入都不许发。
+    ///
+    /// 这是「开着 TUN 切配置必失败」的主修：切配置会重走 start() → enable()，而中转端口固定、
+    /// 绕过列表通常没变。原实现无条件 restore + capture + enable，几十条 networksetup 里
+    /// 任何一条撞上服务列表抖动就整次回滚。短路后这条路径上没有写入，失败面直接消失。
+    func testEnableSkipsEveryWriteWhenTakeoverAlreadyMatches() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        // 现场：已接管（标记在）、快照记着用户接管前的原始设置。
+        let originalSnapshot = ProxyRecoverySnapshot(services: [
+            NetworkServiceProxySnapshot(
+                name: "Wi-Fi",
+                http: ProxyEndpointState(enabled: true, server: "user-proxy.local", port: 8080),
+                https: ProxyEndpointState(enabled: false, server: "", port: 0),
+                socks: ProxyEndpointState(enabled: false, server: "", port: 0),
+                bypassDomains: ["user.example"]
+            )
+        ])
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let snapshotData = try encoder.encode(originalSnapshot)
+        let recoveryURL = root.appending(path: "proxy-recovery.json")
+        try snapshotData.write(to: recoveryURL)
+        try Data("1".utf8).write(to: root.appending(path: "proxy-takeover.marker"))
+
+        let bypass = ["localhost", "*.local"]
+        let runner = TakenOverNetworkSetup(port: 36_815, bypass: bypass)
+        let manager = SystemProxyManager(
+            storage: Storage(rootDirectory: root),
+            runner: runner.run(arguments:timeout:)
+        )
+
+        try await manager.enable(port: 36_815, bypassDomains: bypass)
+
+        let mutations = await runner.mutations
+        XCTAssertTrue(mutations.isEmpty, "已接管且一致时不许写 networksetup，实际写了：\(mutations)")
+        XCTAssertEqual(
+            try Data(contentsOf: recoveryURL), snapshotData,
+            "快照必须原样保留——重新 capture 会把「当前＝指向我们自己」写进去，用户的原始设置就永久丢了"
+        )
+    }
+
+    /// 上次还原没落地时，短路必须让路——否则「还原失败就不能带着坏快照继续接管」这个性质
+    /// 会被悄悄绕过：那种现场下当前状态同样指向我们自己，与正常切配置从状态上分不出来。
+    func testShortCircuitStepsAsideWhenLastRestoreFailed() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        try encoder.encode(ProxyRecoverySnapshot(services: []))
+            .write(to: root.appending(path: "proxy-recovery.json"))
+        try Data("1".utf8).write(to: root.appending(path: "proxy-takeover.marker"))
+        try Data("1".utf8).write(to: root.appending(path: "proxy-restore-failed.marker"))
+
+        let bypass = ["localhost"]
+        let runner = TakenOverNetworkSetup(port: 36_815, bypass: bypass)
+        let manager = SystemProxyManager(
+            storage: Storage(rootDirectory: root),
+            runner: runner.run(arguments:timeout:)
+        )
+
+        try await manager.enable(port: 36_815, bypassDomains: bypass)
+
+        let mutations = await runner.mutations
+        XCTAssertFalse(mutations.isEmpty, "上次还原失败过就必须走完整流程，不许短路")
+    }
+
+    /// 端口不一致时短路不得生效，否则换了中转端口系统代理还指着旧端口。
+    func testEnableStillWritesWhenPortDiffers() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        try encoder.encode(ProxyRecoverySnapshot(services: []))
+            .write(to: root.appending(path: "proxy-recovery.json"))
+        try Data("1".utf8).write(to: root.appending(path: "proxy-takeover.marker"))
+
+        // 现场里在跑的是 1080，本次要启用 36815。
+        let runner = TakenOverNetworkSetup(port: 1080, bypass: ["localhost"])
+        let manager = SystemProxyManager(
+            storage: Storage(rootDirectory: root),
+            runner: runner.run(arguments:timeout:)
+        )
+
+        try await manager.enable(port: 36_815, bypassDomains: ["localhost"])
+
+        let mutations = await runner.mutations
+        XCTAssertTrue(
+            mutations.contains { $0.contains("36815") },
+            "端口变了必须真正写下去，实际：\(mutations)"
+        )
     }
 
     /// 只重试那一种消息。别的失败原样抛出，不许拖慢也不许掩盖。
@@ -493,6 +606,41 @@ private actor FlakyNetworkSetup {
         case "-getwebproxy", "-getsecurewebproxy", "-getsocksfirewallproxy":
             "Enabled: No\nServer: \nPort: 0\nAuthenticated Proxy Enabled: 0\n"
         default: ""
+        }
+    }
+}
+
+
+/// 模拟「系统代理已经指向我们自己」的现场，用于验证 `enable()` 的幂等短路。
+private actor TakenOverNetworkSetup {
+    private let port: Int
+    private let bypass: [String]
+    private var seen: [[String]] = []
+
+    init(port: Int, bypass: [String]) {
+        self.port = port
+        self.bypass = bypass
+    }
+
+    var mutations: [[String]] {
+        seen.filter { $0.first?.hasPrefix("-set") == true }
+    }
+
+    func run(arguments: [String], timeout: TimeInterval) async throws -> ProcessResult {
+        seen.append(arguments)
+        return ProcessResult(exitCode: 0, stdout: output(for: arguments), stderr: "")
+    }
+
+    private func output(for arguments: [String]) -> String {
+        switch arguments.first {
+        case "-listallnetworkservices":
+            "An asterisk (*) denotes that a network service is disabled.\nWi-Fi"
+        case "-getwebproxy", "-getsecurewebproxy", "-getsocksfirewallproxy":
+            "Enabled: Yes\nServer: 127.0.0.1\nPort: \(port)\nAuthenticated Proxy Enabled: 0\n"
+        case "-getproxybypassdomains":
+            bypass.joined(separator: "\n") + "\n"
+        default:
+            ""
         }
     }
 }
