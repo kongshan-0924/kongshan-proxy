@@ -5402,3 +5402,29 @@ CPU 调用栈自动采样 + 界面打磨），24 个文件。
   之后 14 分钟零发生，与本问题无关；代理环境变量全空；36815 有 kongshan 正常监听；系统代理无残留。
 - **未验证**：换到其它出口段的节点是否能绕过挑战（属配置变更，用户只要求排查，未动）。
   判据可用：`curl -x http://127.0.0.1:36815 -sI https://chatgpt.com/backend-api/me | grep cf-mitigated` 无输出即通过。
+
+### 2026-09-04 08:45 — 只读：换节点后仍有对话重连；核查「Codex 优化是否被移除」
+
+- **本轮问题**：用户换了 AI 组节点后，Codex 两个对话一个正常、一个持续重连；并质疑此前针对 Codex 的优化是否被我改掉。
+- **检查范围**：`git log -S codex/chatgpt/openai --all`、`git diff 5d2d0d9 d353bdb -- ConfigGenerator.swift`、
+  `RuntimeSecrets.availableHighPort` 与 `LocalTCPRelay.start` 调用链、`AppState` 里 `proxyRelay.setTarget` 全部调用点、
+  helper TUN 日志按节点/入口/进程拆分、两条入口的 curl 对照、`lsof` 看 codex 进程连接。
+- **关键证据**：
+  1. **两处 Codex 相关优化都还在，且正在生效**：`10e6a15`（固定本地 mixed 端口）现为
+     `RuntimeSecrets.availableHighPort(preferred:)` ← `LocalTCPRelay.start(preferredPort:)`，注释原文即写明是为
+     「ChatGPT.app 内嵌的 codex 服务、Chrome 会缓存代理地址，换端口会导致反复正在重新连接」；实测端口 36815，
+     `scutil --proxy` 三项均指向它。`8e7a9b3`（TUN 切换保持端点不变）的 `proxyRelay.setTarget(port:)` 5 处调用俱在，
+     08:06:57→08:07:08 切 TUN 后端口未变。
+  2. **v0.1.99 对 ConfigGenerator 只做了新增**（`in-addr.arpa`/`ip6.arpa`、`_dns-sd._udp` 两条 DNS 规则），无删除。
+     `git log -S` 显示代码里从未存在针对 chatgpt/openai 域名的硬编码规则（唯一字符串匹配是 PolicyGroupsView 的 AI 组图标）。
+  3. **换节点没有解决挑战**：新出口 `188.253.116.74` 对 `chatgpt.com/backend-api/me` 仍 403 + `cf-mitigated: challenge`；
+     切换前的 `139.162.11.148` 同样。**两条入口结果一致**（经系统代理 403、经 TUN 403），说明与走哪条路无关，只与出口 IP 有关。
+  4. **节点切换本身是生效的**：旧节点 `node-31b4851e` 承载 chatgpt 止于 08:28，新节点 `node-192e0f46` 自 08:29 起接手。
+  5. **一个进程两条入口**：codex app-server（PID 54192）同时持有 4 条 TUN 连接（172.19.0.1→240.0.0.22:443 fake-ip）
+     与 2 条系统代理连接（→127.0.0.1:36815）。08:29:47–08:30:23 有 6 次「连接 5–8 秒后被客户端主动 abort」的重试循环，
+     08:31 后已停止。
+- **结论**：不是版本回退，也不是接管方式问题——**Cloudflare 对 OpenAI/Anthropic 域的机房 IP 判定是动态的**，
+  09-03 是东京 23.249.17.72，今天是新加坡 139.162.11.148 与 188.253.116.74，三个都被挑战。
+  能正常的那个对话靠的是已建立/已通过挑战的连接，新发起的请求每次撞 403，于是另一个对话不停重连。
+- **未验证**：哪个对话具体走哪条连接（日志无「连接 ID ↔ 对话」关联，无法直接归因）；
+  订阅里是否存在未被挑战的出口段（需逐个切 AI 组实测，属配置变更，未做）。
