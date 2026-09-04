@@ -29,6 +29,18 @@ public struct TrafficSample: Codable, Equatable, Sendable {
     }
 }
 
+/// 一次 `/connections` 推送的完整内容：总量快照 + 每条连接的明细。
+/// 两者来自同一份 payload，**只解析一次**（见 `connectionFeedStream`）。
+public struct ConnectionFeed: Equatable, Sendable {
+    public let snapshot: ConnectionSnapshot
+    public let details: [ConnectionDetail]
+
+    public init(snapshot: ConnectionSnapshot, details: [ConnectionDetail]) {
+        self.snapshot = snapshot
+        self.details = details
+    }
+}
+
 public struct ConnectionSnapshot: Equatable, Sendable {
     public let connectionCount: Int
     public let memory: UInt64
@@ -326,7 +338,12 @@ public actor ClashAPIClient {
 
     /// 连接详情的 WebSocket 推送流。监控页用它替代 1.5s 轮询：
     /// 推送由内核按 `interval` 主动发，省掉客户端的轮询请求 + 减少 UI 抖动。
-    public func connectionDetailsStream(intervalMilliseconds: Int = 1000) -> AsyncThrowingStream<[ConnectionDetail], Error> {
+    ///
+    /// **同时回传总量快照**，因为它和 `connectionStream()` 订阅的是同一个 `/connections` 端点、
+    /// 收到的是同一份 payload。两条流各跑一遍 `JSONSerialization` 就是把 120~160 条连接的
+    /// JSON 每秒解析两次：真机 2026-09-04 连接页开着时 CPU 均值 3~7.7%、主线程只占 48%
+    /// ——另一半正是这份重复解析。合流后连接页开着时只有一条订阅。
+    public func connectionFeedStream(intervalMilliseconds: Int = 1000) -> AsyncThrowingStream<ConnectionFeed, Error> {
         guard let request = webSocketRequest(
             path: ["connections"],
             queryItems: [URLQueryItem(name: "interval", value: String(intervalMilliseconds))]
@@ -338,7 +355,16 @@ public actor ClashAPIClient {
                   let connections = payload["connections"] as? [[String: Any]] else {
                 throw ClashAPIError.invalidPayload
             }
-            return connections.map(ConnectionDetail.init(payload:))
+            let details = connections.map(ConnectionDetail.init(payload:))
+            return ConnectionFeed(
+                snapshot: ConnectionSnapshot(
+                    connectionCount: details.count,
+                    memory: (payload["memory"] as? NSNumber)?.uint64Value ?? 0,
+                    uploadTotal: (payload["uploadTotal"] as? NSNumber)?.int64Value ?? 0,
+                    downloadTotal: (payload["downloadTotal"] as? NSNumber)?.int64Value ?? 0
+                ),
+                details: details
+            )
         }
     }
 

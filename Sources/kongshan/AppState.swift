@@ -490,6 +490,11 @@ final class AppState {
     /// 两次自诊断采样之间流入的内核日志行数。异常时段的归因线索之一：
     /// 日志洪峰是本项目历史上实测的最高负载来源（v0.1.61：平均 6.36%、峰值 15.9%）。
     @ObservationIgnored private var logLinesSinceDiagnosticsTick = 0
+    /// 连接页那条流正在兼供总量：此时不要再单开仪表盘的 `/connections` 订阅。
+    @ObservationIgnored private var connectionsFeedActive = false
+    /// 仪表盘的 `/connections` 订阅单独存放，才能在连接页开合时精确接管 / 交还，
+    /// 不用把流量流和版本查询一起重启。
+    @ObservationIgnored private var dashboardConnectionTask: Task<Void, Never>?
     /// CPU 异常持续时给自己采调用栈，见 `CPUSampleCapture`。目录在 init 里按 storage 定。
     @ObservationIgnored private var cpuSampleCapture: CPUSampleCapture
     /// 真正执行 `/usr/bin/sample` 的闭包；测试替换成假的，不真起进程。
@@ -1832,6 +1837,11 @@ final class AppState {
     /// 改用 WebSocket 推送后由内核按 1s 间隔主动推，省掉轮询请求，对笔记本电池更友好。
     func startConnectionsMonitoring() {
         guard connectionsTask == nil else { return }
+        // 由本页这条流兼供总量，先把仪表盘那条 /connections 订阅收掉，避免同一份 payload
+        // 每秒被解析两遍。页面关闭时在 stopConnectionsMonitoring 里交还。
+        connectionsFeedActive = true
+        dashboardConnectionTask?.cancel()
+        dashboardConnectionTask = nil
         connectionsTask = Task { [weak self] in
             while !Task.isCancelled {
                 // self 没了说明 App 已释放：直接结束循环。留着会变成没人能取消的空转任务。
@@ -1845,11 +1855,15 @@ final class AppState {
                     continue
                 }
                 do {
-                    let stream = await client.connectionDetailsStream()
-                    for try await details in stream {
+                    let stream = await client.connectionFeedStream()
+                    for try await feed in stream {
                         guard !Task.isCancelled else { break }
+                        // 这条流兼供总量：连接页开着时仪表盘那条 /connections 订阅是关掉的
+                        // （同一份 payload 不解析两遍，见 connectionFeedStream 的说明）。
+                        // 会话累计量是权威数据，必须每一帧都喂。
+                        self.receiveConnectionSnapshot(feed.snapshot)
                         // 速率跟踪必须每一帧都喂，否则速率算不准；排序和赋值可以省。
-                        let tracked = self.connectionRateTracker.update(details, at: self.now())
+                        let tracked = self.connectionRateTracker.update(feed.details, at: self.now())
                         guard self.windowContentIsVisible else { continue }
                         let sorted = tracked
                             .sorted { ($0.download + $0.upload) > ($1.download + $1.upload) }
@@ -1871,6 +1885,9 @@ final class AppState {
         connectionsTask = nil
         connectionRateTracker.reset()
         connections = []   // 离开监控页即清空，下次进入重新拉取
+        // 总量的供给交还给仪表盘那条订阅——否则页面一关，会话累计流量就没人喂了。
+        connectionsFeedActive = false
+        resumeDashboardMonitoringIfNeeded()
     }
 
     /// 一键关闭全部连接。
@@ -3584,10 +3601,13 @@ final class AppState {
     private func resumeDashboardMonitoringIfNeeded() {
         guard !dashboardMonitorConsumers.isEmpty,
               status == .on,
-              let client = clashAPIClient,
-              dashboardTasks.isEmpty else {
+              let client = clashAPIClient else {
             return
         }
+        // `/connections` 那条单独判断：连接页开合时要能精确接管 / 交还，
+        // 不能因为流量流还在跑就整体跳过。
+        defer { resumeDashboardConnectionStreamIfNeeded(client: client) }
+        guard dashboardTasks.isEmpty else { return }
 
         let trafficTask = Task { [weak self] in
             do {
@@ -3605,7 +3625,18 @@ final class AppState {
                 }
             }
         }
-        let connectionTask = Task { [weak self] in
+        let versionTask = Task { [weak self] in
+            guard let version = try? await client.version(), !Task.isCancelled else { return }
+            self?.coreVersion = version
+        }
+        dashboardTasks = [trafficTask, versionTask]
+    }
+
+    /// 仪表盘的 `/connections` 订阅。连接页开着时**不开**——那条流已经在供总量了，
+    /// 同一份 payload 每秒解析两遍正是连接页 CPU 偏高的后台那一半。
+    private func resumeDashboardConnectionStreamIfNeeded(client: ClashAPIClient) {
+        guard !connectionsFeedActive, dashboardConnectionTask == nil else { return }
+        dashboardConnectionTask = Task { [weak self] in
             do {
                 let stream = await client.connectionStream()
                 for try await snapshot in stream {
@@ -3622,11 +3653,6 @@ final class AppState {
                 }
             }
         }
-        let versionTask = Task { [weak self] in
-            guard let version = try? await client.version(), !Task.isCancelled else { return }
-            self?.coreVersion = version
-        }
-        dashboardTasks = [trafficTask, connectionTask, versionTask]
     }
 
     private func suspendDashboardMonitoring() {
@@ -3636,6 +3662,8 @@ final class AppState {
         // 只有真正收到数据（receiveTraffic）才回到起始间隔。
         dashboardTasks.forEach { $0.cancel() }
         dashboardTasks.removeAll()
+        dashboardConnectionTask?.cancel()
+        dashboardConnectionTask = nil
     }
 
     /// **不看 `isLogsVisible`**。这条流不只喂日志页，还是 DNS 停摆与出站失败两个检测器的
@@ -3778,7 +3806,7 @@ final class AppState {
         }
     }
 
-    private func receiveConnectionSnapshot(_ snapshot: ConnectionSnapshot) {
+    func receiveConnectionSnapshot(_ snapshot: ConnectionSnapshot) {
         // 会话累计流量。这条流是唯一的权威来源，无论仪表盘是否可见都要喂——
         // 断一秒就永久少一秒的量，不像速率那样只是显示滞后。
         sessionTraffic.record(

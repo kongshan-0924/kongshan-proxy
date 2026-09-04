@@ -5546,3 +5546,47 @@ TUN 重建期间任何一条撞上瞬时错误就整次回滚。短路后这条�
 产物 `dist/kongshan-0.1.100.dmg`（SHA-256 879634a3…），验证戳绑定提交 `617aa4f`。
 **未执行 install**：按用户要求留给手动执行 `zsh scripts/release.sh install`。
 本机仍在跑 v0.1.99。
+
+### 2026-09-04 17:30 — 只读检查最新运行情况 + 修掉连接页的重复订阅
+
+**本轮任务**：用户「检查一下最新的运行情况，还有什么问题吗，有的话一起修复了」。
+
+**回滚点**：修改前 HEAD `c41d88c`（v0.1.100 已构建未安装）。本机仍在跑 v0.1.99。
+
+#### 检查结果（数据来自 metrics/diagnostics/runtime-events 与 helper TUN 日志）
+
+- **v0.1.99 的三个新机制真机全部生效**（08:57–08:58 一组事件为证）：
+  「系统代理/DNS 有待还原的网络服务：Shadowrocket」（服务不在列表时保留快照）、
+  「已清理残留的系统代理设置…LAN、USB 10/100/1000 LAN、Thunderbolt Bridge」、
+  「已清理残留的系统 DNS 设置…LAN」。上一轮设计的两条自愈路径都按预期跑了。
+- **新的 CPU 热点是连接页**：最近 6 小时页面一直停在「连接」，每小时均值 1.5~7.7%、峰值 12.6%，
+  活跃连接 121~164。CPU 事件记录主线程只占 **48%**——另一半在后台线程。
+  根因：`connectionStream()`（仪表盘总量）与 `connectionDetailsStream()`（连接页明细）
+  **订阅的是同一个 `/connections` 端点**，各跑一遍 `JSONSerialization`，同一份 payload 每秒解析两遍。
+- **上传已恢复正常**：256 KB 上传 1.28s（≈200 KB/s）；上一轮那个坏节点是 13.4s。换节点解决了。
+- **DNS 偶发超时不是解析器坏**：今天 4 次「持续超时」+2 次「长期零星」，失败全部打在
+  `223.5.5.5:443`（dns-cn 的 DoH），域名都是国内直连域（ios.rqd.qq.com / www.apple.com /
+  honeycomb.wpscdn.cn 等）。**当场实测 DoH 10/10 成功、均值 55ms**，UDP 53 也 10/10。判定为突发性抖动，未改配置。
+- **当前节点在退化**：16:00 后 39 次 `vless: dial tcp <节点 IP>:443: i/o timeout`（16 时 16 次、17 时 23 次）。
+  属节点质量，非软件问题；「节点建连失败偏多」检测器已正常报出。
+- CPU 自动采样目录不存在＝v0.1.99 上线后没触发过 12% 持续 45 秒的异常。
+
+#### 修复（并入尚未安装的 v0.1.100）
+
+`ClashAPIClient.connectionDetailsStream` → `connectionFeedStream`，返回新类型 `ConnectionFeed`
+（`snapshot` + `details`，一次解析出两者）。`AppState` 把仪表盘的 `/connections` 订阅拆到
+独立的 `dashboardConnectionTask`：连接页打开时置 `connectionsFeedActive`、收起该订阅并由连接页那条流
+兼供总量（`receiveConnectionSnapshot` 改为 internal）；关闭时交还。
+新增 `resumeDashboardConnectionStreamIfNeeded(client:)`。
+
+**新增测试** `testConnectionsPageServesTotalsFromASingleConnectionsSubscription`：
+先开连接页再开仪表盘，断言 `/connections` 请求数 **== 1**、`sessionTotal` 由连接页那条流喂到 3000、
+关闭页面后请求数变为 2（供给已交还）。配套夹具 `ConnectionsFeedFixture`。
+
+**验证**：全量 `swift test` **602 执行 / 2 跳过 / 0 失败**。
+
+**未验证**：真机上连接页 CPU 实际降幅——需装上后再看 `metrics.ndjson` 里 `page=连接` 的 cpu 中位数
+（当前基线：均值 3~7.7%、主线程占 48%）。
+
+**刻意不做**：不改 DNS 配置（实测解析器当下健康，突发抖动没有可靠判据）；
+不降低连接页刷新频率（那是拿可用性换 CPU，而重复解析属于纯浪费，先把浪费去掉）。

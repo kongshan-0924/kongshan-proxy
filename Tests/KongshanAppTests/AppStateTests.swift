@@ -1936,6 +1936,39 @@ final class AppStateTests: XCTestCase {
         )
     }
 
+    /// 连接页和仪表盘订阅的是同一个 `/connections` 端点。两条流各跑一遍 JSON 解析，
+    /// 就是把 120~160 条连接的 payload 每秒解析两次——真机 2026-09-04 连接页开着时
+    /// CPU 均值 3~7.7%、主线程只占 48%，另一半正是这份重复解析。
+    /// 连接页开着时必须只有**一条** `/connections` 订阅，且总量由它兼供。
+    func testConnectionsPageServesTotalsFromASingleConnectionsSubscription() async throws {
+        let streams = ConnectionsFeedFixture()
+        let fixture = try await makeModeFixture(
+            initialMode: .systemProxy,
+            clashClientFactory: { controller, secret in
+                ClashAPIClient(controller: controller, secret: secret, streamFactory: streams.stream(for:))
+            }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        // 先开连接页，再开仪表盘：仪表盘不得另开一条 /connections。
+        fixture.state.startConnectionsMonitoring()
+        try await waitUntil { fixture.state.connections.count == 2 }
+        fixture.state.startDashboardMonitoring()
+        try await waitUntil { fixture.state.sessionTotal > 0 }
+
+        XCTAssertEqual(
+            streams.requestCount(path: "/connections"), 1,
+            "连接页开着时同一份 payload 不许被两条流各解析一遍"
+        )
+        XCTAssertEqual(fixture.state.sessionTotal, 3_000, "总量必须由连接页那条流兼供")
+        XCTAssertEqual(fixture.state.activeConnectionCount, 2)
+
+        // 页面关掉后，总量的供给要交还给仪表盘那条订阅，否则会话累计流量就没人喂了。
+        fixture.state.stopConnectionsMonitoring()
+        try await waitUntil { streams.requestCount(path: "/connections") == 2 }
+        fixture.state.stopDashboardMonitoring()
+    }
+
     private func makeModeFixture(
         initialMode: ProxyMode,
         tunStartError: Error? = nil,
@@ -3113,5 +3146,33 @@ extension AppStateTests {
         XCTAssertTrue(AppState.isGloballyRoutableIPv6(0x24, 0x0e), "240e:: 电信全局段")
         XCTAssertTrue(AppState.isGloballyRoutableIPv6(0x20, 0x01), "2001:: 全局单播")
         XCTAssertTrue(AppState.isGloballyRoutableIPv6(0x26, 0x20))
+    }
+}
+
+
+/// `/connections` 推送一份带总量的 payload 后保持流不结束，模拟内核持续推送。
+private final class ConnectionsFeedFixture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedRequests: [URLRequest] = []
+
+    func requestCount(path: String) -> Int {
+        lock.withLock { storedRequests.filter { $0.url?.path == path }.count }
+    }
+
+    func stream(for request: URLRequest) -> AsyncThrowingStream<Data, Error> {
+        lock.withLock { storedRequests.append(request) }
+        return AsyncThrowingStream { continuation in
+            switch request.url?.path {
+            case "/connections":
+                continuation.yield(Data(#"""
+                {"downloadTotal":2000,"uploadTotal":1000,"memory":4194304,"connections":[                {"id":"a","upload":10,"download":20,"start":"2026-09-04T09:00:00Z","rule":"final",                "chains":["direct"],"metadata":{"host":"a.example","destinationPort":"443","network":"tcp"}},                {"id":"b","upload":30,"download":40,"start":"2026-09-04T09:00:00Z","rule":"final",                "chains":["direct"],"metadata":{"host":"b.example","destinationPort":"443","network":"tcp"}}]}
+                """#.utf8))
+                // 不 finish：模拟内核持续推送，避免流结束触发重订。
+            case "/traffic":
+                continuation.yield(Data(#"{"up":1,"down":2}"#.utf8))
+            default:
+                continuation.finish()
+            }
+        }
     }
 }
