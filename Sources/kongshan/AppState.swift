@@ -434,6 +434,7 @@ final class AppState {
     }
     /// 已记过事件的待还原服务（按"系统代理"/"系统 DNS"分），见 `notePendingTakeover`。
     @ObservationIgnored private var notedPendingTakeovers: [String: [String]] = [:]
+    @ObservationIgnored private var notedPendingTakeoversLoaded = false
     @ObservationIgnored private var currentConfig: Data?
     @ObservationIgnored private var dashboardTasks: [Task<Void, Never>] = []
     @ObservationIgnored private var dashboardMonitorConsumers: Set<DashboardMonitorConsumer> = []
@@ -891,13 +892,13 @@ final class AppState {
             var restoreFailures: [String] = []
             do {
                 let proxyOutcome = try await systemProxyManager.restore()
-                notePendingTakeover(kind: "系统代理", proxyOutcome.pending, trigger: "启动失败回滚")
+                await notePendingTakeover(kind: "系统代理", proxyOutcome.pending, trigger: "启动失败回滚")
             } catch {
                 restoreFailures.append("系统代理（系统设置 → 网络 → 详细信息 → 代理）")
             }
             do {
                 let dnsOutcome = try await systemDNSManager.restore()
-                notePendingTakeover(kind: "系统 DNS", dnsOutcome.pending, trigger: "启动失败回滚")
+                await notePendingTakeover(kind: "系统 DNS", dnsOutcome.pending, trigger: "启动失败回滚")
             } catch {
                 restoreFailures.append("系统 DNS（系统设置 → 网络 → 详细信息 → DNS）")
             }
@@ -947,7 +948,7 @@ final class AppState {
         if !(status == .on && activeModes.contains(.systemProxy)) {
             do {
                 let outcome = try await systemProxyManager.recoverIfNeeded()
-                notePendingTakeover(kind: "系统代理", outcome.pending, trigger: trigger)
+                await notePendingTakeover(kind: "系统代理", outcome.pending, trigger: trigger)
             } catch {
                 appendWarning("\(trigger)时恢复系统代理失败：\(error.localizedDescription)")
             }
@@ -955,7 +956,7 @@ final class AppState {
         if !(status == .on && activeModes.contains(.tun)) {
             do {
                 let outcome = try await systemDNSManager.recoverIfNeeded()
-                notePendingTakeover(kind: "系统 DNS", outcome.pending, trigger: trigger)
+                await notePendingTakeover(kind: "系统 DNS", outcome.pending, trigger: trigger)
             } catch {
                 appendWarning("\(trigger)时恢复系统 DNS 失败：\(error.localizedDescription)")
             }
@@ -999,20 +1000,53 @@ final class AppState {
     }
 
     /// 快照里有服务此刻不在网络服务列表中（VPN 类虚拟服务随其 App 启停出现/消失）：还原不了，
-    /// 但也不算失败——快照已保留，服务重新出现时（启动/换网）自动复位。记一条不会被清掉的事件。
-    private func notePendingTakeover(kind: String, _ pending: [String], trigger: String) {
+    /// 但也不算失败——快照已保留，服务重新出现时（启动/换网）自动复位。
+    ///
+    /// **`.info` 而不是 `.warning`**：这是设计中的等待状态，不是需要用户处理的故障。
+    ///
+    /// 判重状态**必须落盘**。原来只存在内存里，服务长期缺席时每次启动都重报一次：
+    /// 真机 2026-09-04 的 `LAN` 服务从系统里消失后，20:01 / 20:06 / 20:08 三次启动各刷了一对，
+    /// 而那个服务可能再也不会回来——消息页会被永久占位。
+    /// internal 而非 private：跨启动不再重复这条性质断了不会有任何报错，只会慢慢把消息页刷满，需回归覆盖。
+    func notePendingTakeover(kind: String, _ pending: [String], trigger: String) async {
+        await loadNotedPendingTakeoversIfNeeded()
         guard !pending.isEmpty else {
+            // 服务回来并复位后要清掉记录，否则它下次再缺席时就不报了。
+            guard notedPendingTakeovers[kind] != nil else { return }
             notedPendingTakeovers[kind] = nil
+            await persistNotedPendingTakeovers()
             return
         }
-        // 服务长期缺席时启动、每次换网都会再报同一批——只在这批服务变化时记一次，别把消息页刷满。
         guard notedPendingTakeovers[kind] != pending else { return }
         notedPendingTakeovers[kind] = pending
+        await persistNotedPendingTakeovers()
         recordRuntimeEvent(
-            level: .warning,
+            level: .info,
             title: "\(kind)有待还原的网络服务",
             detail: "\(trigger)时这些网络服务不在系统的网络服务列表中，其\(kind)设置暂未还原（快照已保留，服务重新出现时自动复位）：\(pending.joined(separator: "、"))"
         )
+    }
+
+    private var notedPendingTakeoversURL: URL {
+        storage.rootDirectory.appending(path: "pending-takeover-noted.json")
+    }
+
+    /// 懒加载：`notePendingTakeover` 会在 `initialize()` 之外的路径（崩溃清理、回滚）被调到，
+    /// 放在启动流程里读盘会漏掉那些路径，反而在最需要判重的场景上失效。
+    private func loadNotedPendingTakeoversIfNeeded() async {
+        guard !notedPendingTakeoversLoaded else { return }
+        notedPendingTakeoversLoaded = true
+        guard let data = try? await storage.readIfPresent(from: notedPendingTakeoversURL),
+              let decoded = try? JSONDecoder().decode([String: [String]].self, from: data) else {
+            return
+        }
+        notedPendingTakeovers = decoded
+    }
+
+    private func persistNotedPendingTakeovers() async {
+        // 写失败只会退化成"下次启动重报一次"，不值得打扰用户，也不该影响还原流程。
+        guard let data = try? JSONEncoder().encode(notedPendingTakeovers) else { return }
+        try? await storage.writeAtomically(data, to: notedPendingTakeoversURL)
     }
 
     /// 回滚路径上的接管还原。失败**必须**回传给调用方拼进错误信息——旧实现用 `try?` 吞掉，
@@ -1022,13 +1056,13 @@ final class AppState {
         var failures: [String] = []
         do {
             let outcome = try await systemProxyManager.restore()
-            notePendingTakeover(kind: "系统代理", outcome.pending, trigger: "回滚")
+            await notePendingTakeover(kind: "系统代理", outcome.pending, trigger: "回滚")
         } catch {
             failures.append("系统代理（系统设置 → 网络 → 详细信息 → 代理）：\(error.localizedDescription)")
         }
         do {
             let outcome = try await systemDNSManager.restore()
-            notePendingTakeover(kind: "系统 DNS", outcome.pending, trigger: "回滚")
+            await notePendingTakeover(kind: "系统 DNS", outcome.pending, trigger: "回滚")
         } catch {
             failures.append("系统 DNS（系统设置 → 网络 → 详细信息 → DNS）：\(error.localizedDescription)")
         }
@@ -1084,7 +1118,7 @@ final class AppState {
         if stoppingModes.contains(.systemProxy) {
             do {
                 let proxyOutcome = try await systemProxyManager.restore()
-                notePendingTakeover(kind: "系统代理", proxyOutcome.pending, trigger: "停止")
+                await notePendingTakeover(kind: "系统代理", proxyOutcome.pending, trigger: "停止")
             } catch {
                 restoreFailures.append("系统代理（系统设置 → 网络 → 详细信息 → 代理）：\(error.localizedDescription)")
             }
@@ -1096,7 +1130,7 @@ final class AppState {
             // 先把系统 DNS 还原（此刻 TUN 还在，解析不断档），再停内核。
             do {
                 let dnsOutcome = try await systemDNSManager.restore()
-                notePendingTakeover(kind: "系统 DNS", dnsOutcome.pending, trigger: "停止")
+                await notePendingTakeover(kind: "系统 DNS", dnsOutcome.pending, trigger: "停止")
             } catch {
                 restoreFailures.append("系统 DNS（系统设置 → 网络 → 详细信息 → DNS）：\(error.localizedDescription)")
             }
@@ -4174,7 +4208,7 @@ final class AppState {
         if modes.contains(.systemProxy) {
             do {
                 let proxyOutcome = try await systemProxyManager.restore()
-                notePendingTakeover(kind: "系统代理", proxyOutcome.pending, trigger: "内核崩溃清理")
+                await notePendingTakeover(kind: "系统代理", proxyOutcome.pending, trigger: "内核崩溃清理")
             } catch {
                 cleanupMessages.append("系统代理恢复失败：\(error.localizedDescription)")
             }
@@ -4187,7 +4221,7 @@ final class AppState {
             }
             do {
                 let dnsOutcome = try await systemDNSManager.restore()
-                notePendingTakeover(kind: "系统 DNS", dnsOutcome.pending, trigger: "内核崩溃清理")
+                await notePendingTakeover(kind: "系统 DNS", dnsOutcome.pending, trigger: "内核崩溃清理")
             } catch {
                 cleanupMessages.append("系统 DNS 恢复失败：\(error.localizedDescription)")
             }
