@@ -5379,3 +5379,26 @@ CPU 调用栈自动采样 + 界面打磨），24 个文件。
 - **关键证据**：`ls ~/.Trash/` 直接报 `Operation not permitted`（macOS TCC 保护废纸篓，本 shell 无权读）；`find` 那条带 `2>/dev/null`，同样的权限错误被吞掉，所以"只找到 /Applications/kongshan.app"不构成证据。
 - **结论**：脚本 161→167 行在 `set -euo pipefail` 下先 `mv 旧版 → ~/.Trash/...` 再 `mv 暂存 → /Applications`，`mv` 失败会直接中止安装；安装已完成且 `/Applications/kongshan.app` 为 0.1.99，故备份必然已落地。**不是备份缺失，是我这边看不见。**
 - **未验证**：无法直接列出该文件（TCC）。用户在访达里打开废纸篓可自行确认；配置备份 `kongshan-config-0.1.99-20260904-020446.tar.gz` 是可见且已核对过的。
+
+### 2026-09-04 08:25 — 只读：开着 TUN 时 Codex 仍超时的原因
+
+- **本轮问题**：v0.1.99 已装、TUN + 系统代理都开着，Codex 仍反复「正在重新连接 5/5」直至超时。
+- **检查范围**：`scutil --proxy`、逐服务 `networksetup -get*proxy`、`ifconfig`/`netstat -rn`、`lsof -iTCP:36815`、
+  `runtime-events.json`、`logs/sing-box.log` 与 `/Library/Application Support/kongshan/helper/sing-box-tun.log`、
+  `config.json` 的 chatgpt 路由规则、代理环境变量、经 36815 的分站点 curl 对照。
+- **关键证据**：
+  1. **Codex 不走 TUN，走的是系统代理**：CodexBar（PID 13622）与 ChatGPT.app 的 Codex Helper（PID 54173）
+     各有 6 条 ESTABLISHED 挂在 `127.0.0.1:36815`。macOS 应用优先读系统代理设置，TUN 只兜住不读代理设置的流量，
+     两条路最后汇进同一个 sing-box、同一个节点——所以开不开 TUN 对 Codex 没有区别。
+  2. **隧道本身是好的**：同一时刻同一链路 cloudflare.com 200（0.62s）、google generate_204 204（0.17s）、
+     `api.openai.com/v1/models` **401**（正常的缺凭据响应，说明请求确实到达 OpenAI）。
+  3. **被拦的是特定域**：`chatgpt.com/`、`chatgpt.com/backend-api/me`、`chatgpt.com/backend-api/sentinel/chat-requirements`、
+     `claude.ai/` 全部 **403 + `cf-mitigated: challenge`**（cf-ray 落 SIN）。出口 IP `139.162.11.148`（Linode 新加坡机房段）。
+  4. **chatgpt.com 由规则送进 AI 策略组**，不是仪表盘主节点：日志显示承载它的是 `node-31b4851e…`（anytls），
+     而 `settings.json` 的主节点是 `0646C812…`。在仪表盘换节点对 Codex 无效。
+- **结论**：不是代理坏了，也不是 TUN 没生效——是 **AI 组当前出口的机房 IP 被 Cloudflare 在 OpenAI/Anthropic 域上判为需人机验证**。
+  Codex 拿不到可用响应就重试，表现为反复重连直至超时。与 2026-09-03 那次同因不同 IP（当时出口 23.249.17.72 东京）。
+- **已排除**：08:07 那 926 条 `direct: network is unreachable` 全部集中在切 TUN + 物理网络变更的那一分钟，
+  之后 14 分钟零发生，与本问题无关；代理环境变量全空；36815 有 kongshan 正常监听；系统代理无残留。
+- **未验证**：换到其它出口段的节点是否能绕过挑战（属配置变更，用户只要求排查，未动）。
+  判据可用：`curl -x http://127.0.0.1:36815 -sI https://chatgpt.com/backend-api/me | grep cf-mitigated` 无输出即通过。
