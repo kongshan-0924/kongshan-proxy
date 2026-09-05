@@ -435,6 +435,8 @@ final class AppState {
     /// 已记过事件的待还原服务（按"系统代理"/"系统 DNS"分），见 `notePendingTakeover`。
     @ObservationIgnored private var notedPendingTakeovers: [String: [String]] = [:]
     @ObservationIgnored private var notedPendingTakeoversLoaded = false
+    /// 本次运行是否已经说明过"走了一次性授权"。见 startTUN 的 .fallback 分支。
+    @ObservationIgnored private var notedFallbackAuthorization = false
     @ObservationIgnored private var currentConfig: Data?
     @ObservationIgnored private var dashboardTasks: [Task<Void, Never>] = []
     @ObservationIgnored private var dashboardMonitorConsumers: Set<DashboardMonitorConsumer> = []
@@ -4529,20 +4531,50 @@ final class AppState {
     /// 决策与执行分离：`shouldRestoreSystemProxy` 是纯判断，可单测每条约束；
     /// 真正的启动与网络等待留在 `restoreTakeoverIfNeeded`。
     enum AutoRestoreDecision: Equatable {
-        case restoreSystemProxy
+        /// 按快照恢复到关机前的那一组接管方式。
+        case restore(Set<ProxyMode>)
         case skipDisabled
         case skipNotLoginLaunch
         case skipNoSnapshot
-        case skipTUNSnapshot
+        /// 快照里有 TUN，但免密码助手此刻不可用——恢复 TUN 会在登录时弹密码框，不能这么干。
+        case skipTUNNeedsHelper
+        /// 当前跑的不是 `/Applications` 里那份，而 `/Applications` 里确实装着一份。
+        /// 这种"开机自启拉起了构建目录副本"的现场真机出现过（2026-09-06 00:40）：
+        /// 它会接管系统网络，却因为不是安装助手时的那份而用不了免密码助手，每次开 TUN 都弹密码。
+        case skipForeignBundle
     }
 
-    var autoRestoreDecision: AutoRestoreDecision {
+    /// 当前运行的 bundle 是不是"该跑的那一份"。
+    /// `/Applications` 里没装时不判（开发/便携运行是合法场景）；装了就必须是它。
+    /// 测试与 M4 校验跑的是构建目录副本，用与单实例保护同一个旁路开关放行。
+    nonisolated static func isCanonicalBundle(
+        bundleURL: URL = Bundle.main.bundleURL,
+        installedURL: URL = URL(fileURLWithPath: "/Applications/kongshan.app"),
+        fileManager: FileManager = .default,
+        verifierBypass: Bool = AppIdentity.releaseVerificationSupportDirectory() != nil
+    ) -> Bool {
+        if verifierBypass { return true }
+        guard fileManager.fileExists(atPath: installedURL.path) else { return true }
+        return bundleURL.standardizedFileURL.path == installedURL.standardizedFileURL.path
+    }
+
+    /// 纯判断，不含副作用，便于单测每条约束。**助手是否可用要另外查**（异步），
+    /// 由 `autoRestoreDecision(helperIsHealthy:)` 合成最终决策。
+    func autoRestoreDecision(
+        helperIsHealthy: Bool,
+        isCanonicalBundle: Bool = AppState.isCanonicalBundle()
+    ) -> AutoRestoreDecision {
         guard autoRestoreOnLaunch else { return .skipDisabled }
+        // 放在最前面：非正装副本连"该不该接管"都不该参与判断。
+        guard isCanonicalBundle else { return .skipForeignBundle }
         guard loginItemStatus == .enabled else { return .skipNotLoginLaunch }
         guard !lastActiveModes.isEmpty else { return .skipNoSnapshot }
-        if lastActiveModes.contains(.tun) { return .skipTUNSnapshot }
-        guard lastActiveModes.contains(.systemProxy) else { return .skipNoSnapshot }
-        return .restoreSystemProxy
+        let modes = Set(lastActiveModes)
+        // TUN 要走特权助手。助手不可用时**整组都不恢复**，而不是只恢复系统代理——
+        // 只恢复一半会让用户处在与关机前不同的网络姿态却毫无察觉（这条约束一直保留）。
+        // 更不能退到 osascript 兜底：那会在开机自启时凭空弹一个密码框。
+        if modes.contains(.tun), !helperIsHealthy { return .skipTUNNeedsHelper }
+        return .restore(modes)
     }
 
     /// 测试用：注入登录项状态（真实值来自 SMAppService，单测不能依赖宿主注册情况）。
@@ -4568,14 +4600,27 @@ final class AppState {
         // 决策见 `autoRestoreDecision`：只在开机自启场景恢复（手动打开应用不该顺带改动
         // 系统网络设置），且第一阶段只恢复系统代理——快照含 TUN 时整体跳过而非只恢复一半，
         // 部分恢复会让用户处在与关机前不同的网络姿态却毫无察觉。
-        switch autoRestoreDecision {
-        case .restoreSystemProxy:
-            break
-        case .skipTUNSnapshot:
+        let modes: Set<ProxyMode>
+        switch autoRestoreDecision(helperIsHealthy: await helperIsHealthy()) {
+        case let .restore(snapshot):
+            modes = snapshot
+        case .skipTUNNeedsHelper:
             recordRuntimeEvent(
+                level: .warning,
                 title: "已跳过自动恢复接管",
-                detail: "上次使用了 TUN，当前版本只自动恢复系统代理；请手动开启"
+                detail: "上次使用了 TUN，但免密码助手当前不可用；自动恢复不会弹密码框，请手动开启（或到设置里重新安装助手）"
             )
+            await notifyAutoRestoreFailure(reason: "免密码助手不可用，未自动恢复 TUN")
+            return
+        case .skipForeignBundle:
+            recordRuntimeEvent(
+                level: .warning,
+                title: "未自动恢复接管：运行的不是已安装副本",
+                detail: "当前运行的是 \(Bundle.main.bundleURL.path)，而 /Applications 里装着另一份。"
+                    + "这一份用不了免密码助手（开 TUN 会反复要密码），也不该替已安装版接管网络。"
+                    + "请退出它并从「应用程序」里打开 kongshan。"
+            )
+            await notifyAutoRestoreFailure(reason: "运行的不是 /Applications 里那份")
             return
         case .skipDisabled, .skipNotLoginLaunch, .skipNoSnapshot:
             return
@@ -4591,8 +4636,9 @@ final class AppState {
             return
         }
 
-        recordRuntimeEvent(title: "正在自动恢复接管", detail: "系统代理（开机自启）")
-        await start(modes: [.systemProxy])
+        let names = modes.map(\.displayName).sorted().joined(separator: " + ")
+        recordRuntimeEvent(title: "正在自动恢复接管", detail: "\(names)（开机自启）")
+        await start(modes: modes)
 
         // 登录场景下主窗口不显示，`errorMessage` 这类 UI 提示没人看得见；
         // 失败必须走系统通知，否则用户开机即断网却毫无线索。
@@ -5108,6 +5154,22 @@ final class AppState {
             try? await helperClient.recoverIfNeeded()
             record = try await helperClient.start(config: config)
         case .fallback:
+            // 免密码助手不可用时才走这条——它每次都会弹系统密码框。
+            // 必须说清楚原因：用户看到的是"装过助手了怎么又要密码"，而线索只在这里。
+            //
+            // **每次运行只记一条、且不发通知**：密码框本身已经是最醒目的提示，
+            // 再推一条通知只是重复打扰；每次开 TUN 都记一条则会把消息页刷满
+            // （待还原提示刚踩过这个坑）。
+            if !notedFallbackAuthorization {
+                notedFallbackAuthorization = true
+                recordRuntimeEvent(
+                    level: .warning,
+                    title: "本次 TUN 使用一次性授权",
+                    detail: "免密码助手不可用（未安装、或当前运行的 App 副本不是安装助手时的那一个），"
+                        + "改用系统授权启动 TUN，因此需要输入密码。到设置页重新安装助手可恢复免密码。",
+                    announce: false
+                )
+            }
             record = try await privilegedLauncher.start(config: config)
         }
         activeTUNBackend = backend

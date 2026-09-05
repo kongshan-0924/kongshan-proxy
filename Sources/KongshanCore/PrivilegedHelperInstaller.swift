@@ -296,7 +296,8 @@ public enum PrivilegedHelperInstaller {
         "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
-    private static let prompt = "kongshan 需要管理员权限安装/卸载免密码助手"
+    /// 同 `PrivilegedLauncher.prompt`：请求者名称由系统显示，只有这句正文可控。
+    private static let prompt = "空山代理TUN助手需要管理员权限安装/卸载免密码助手"
 
     private static func appleScript(command: String) -> String {
         let escaped = command

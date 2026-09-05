@@ -118,7 +118,10 @@ public enum OSAScriptAuthorizer {
 }
 
 public enum PrivilegedCommandBuilder {
-    private static let prompt = "kongshan 需要管理员权限启动 TUN"
+    /// 授权弹窗的正文。macOS 这条路径（`do shell script … with administrator privileges`）
+    /// **不允许自定义弹窗里的请求者名称**——那一栏由系统按发起进程显示（osascript）。
+    /// 能改的只有这句正文，所以把身份写在正文开头，用户至少看得出是谁在要权限。
+    private static let prompt = "空山代理TUN助手需要管理员权限启动 TUN"
 
     public static func start(binaryURL: URL, fifoURL: URL, logURL: URL) -> String {
         let binary = shellQuote(binaryURL.path)

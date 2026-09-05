@@ -11,7 +11,7 @@ final class PrivilegedLauncherTests: XCTestCase {
         )
 
         XCTAssertTrue(script.hasPrefix("do shell script \""))
-        XCTAssertTrue(script.contains("with prompt \"kongshan 需要管理员权限启动 TUN\""))
+        XCTAssertTrue(script.contains("with prompt \"空山代理TUN助手需要管理员权限启动 TUN\""))
         XCTAssertTrue(script.hasSuffix("with administrator privileges"))
         XCTAssertTrue(script.contains("/bin/cat"))
         XCTAssertTrue(script.contains("run -c /dev/stdin"))

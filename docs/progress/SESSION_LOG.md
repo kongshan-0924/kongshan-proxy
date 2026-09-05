@@ -5727,3 +5727,47 @@ zsh 里 `$path` 是**绑定 PATH 的特殊数组变量**，`local path=...` 赋�
   但压缩后图片又回到上下文里，78 MB 的请求体在任何链路上都超出客户端的放弃窗口。
   唯一根治方向在 Codex 侧：换新会话；工作流上让生成的图落成文件、用路径引用而不是把 base64 贴回对话。
 - **未验证**：Codex 是否有未公开的上下文裁剪开关；换新会话后是否恢复正常（需用户实测）。
+
+### 2026-09-06 01:20 — v0.1.102：开机恢复含 TUN、授权原因可见、非正装副本不接管、弹窗正文改名
+
+**本轮任务**：用户三条——(1) 开机自启后代理和 TUN 都没自动开，要恢复重启前的模式；
+(2) 输过密码、重启后开 TUN 仍要密码；(3) 授权弹窗里的名称改成「空山代理tun助手」。
+
+**回滚点**：改动前 HEAD `12ae599`；本机在跑的是 v0.1.101。
+
+#### 现场勘察（开机 00:35:59，本轮在 00:44 起查）
+
+- **(1) 属实，且是设计限制**：`autoRestoreDecision` 原本在 `lastActiveModes` 含 `.tun` 时返回
+  `.skipTUNSnapshot`，00:40:40 的事件原文就是「上次使用了 TUN，当前版本只自动恢复系统代理；请手动开启」。
+  功能确实加过，但只覆盖系统代理。
+- **(4) 意外发现，且很可能是 (2) 的真因**：**开机自启拉起的是 `<项目>/.build/kongshan.app`**（PID 688，
+  父进程 launchd，`launchctl list` 里 `application.com.kaysen.kongshan…` 就是它），
+  而 **`/Applications/kongshan.app` 根本没在跑**；当前的 sing-box（PID 1153）也是 `.build` 里那个。
+  助手 plist 指向 `/Library/Application Support/kongshan/helper/KongshanHelper`、写于 09-05 14:42，
+  今晚未被改写（说明今晚没重装助手）；`HelperInstallLocation.isAllowed` 禁止从家目录 bundle 安装助手，
+  所以助手只可能是从 `/Applications` 装的 → `.build` 副本用不了它 → 每次开 TUN 退到 osascript 弹密码。
+  **未直接验证**：`trust.json` 是 root-only 0600，本轮未用 sudo 读，上述最后一环是推断。
+- **(3)**：两处提权都走 `do shell script … with administrator privileges`。
+  **macOS 不允许自定义弹窗里的请求者名称**（由系统按发起进程显示），能改的只有 `with prompt` 正文。
+
+#### 改动
+
+1. `AutoRestoreDecision` 重做：`.restoreSystemProxy` → `.restore(Set<ProxyMode>)`，按快照原样恢复；
+   新增 `.skipTUNNeedsHelper`（快照含 TUN 但助手不可用 → **整组不恢复**并通知；坚持原有的
+   "不做部分恢复"约束，且绝不在登录时凭空弹密码框）与 `.skipForeignBundle`。
+   决策函数改为 `autoRestoreDecision(helperIsHealthy:isCanonicalBundle:)`，纯判断、可单测。
+2. 新增 `AppState.isCanonicalBundle(...)`：`/Applications` 里装了就必须是它，没装则不判
+   （开发/便携运行合法），M4 校验用与单实例保护同一个旁路开关放行。
+3. `startTUN` 的 `.fallback` 分支记一条「本次 TUN 使用一次性授权」说明原因——
+   **每次运行只记一条且 `announce: false`**（密码框本身已够醒目；每次都记会重蹈待还原提示的噪音）。
+4. 两处 `prompt` 改为「空山代理TUN助手…」。
+
+**新增/更新测试**：`AutoRestoreOnLaunchTests` 15 条（含助手可用时恢复 TUN、只有 TUN 的快照、
+助手不可用整组跳过、非正装副本跳过、`isCanonicalBundle` 的三种边界）；
+新增 `AuthorizationPromptTests` 守住两处正文以产品名开头；
+`PrivilegedLauncherTests` 的正文断言随之更新；`AppStateTests` 的通知计数因改为不通知而恢复为 1。
+
+**验证**：全量 `swift test` **616 执行 / 3 跳过 / 0 失败**。
+
+**未验证**：真机上开机自启是否真的恢复 TUN、以及非正装副本防护是否按预期拦下——
+需要装上 v0.1.102 并重启机器观察。
