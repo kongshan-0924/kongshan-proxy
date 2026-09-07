@@ -491,7 +491,8 @@ final class SystemProxyManagerTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: recoveryURL.path))
     }
 
-    func testUpdateBypassUsesOnlySnapshotServicesAndDoesNotRewriteRecoveryFile() async throws {
+    /// 只动快照里的服务，且**只动此刻还在系统列表里的那些**；不重写快照，也不碰三项端点。
+    func testUpdateBypassOnlyTouchesPresentSnapshotServicesAndDoesNotRewriteRecoveryFile() async throws {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let storage = Storage(rootDirectory: root)
@@ -499,7 +500,10 @@ final class SystemProxyManagerTests: XCTestCase {
         let recoveryURL = root.appending(path: "proxy-recovery.json")
         let recoveryData = try JSONEncoder().encode(activeSnapshot)
         try await storage.writeAtomically(recoveryData, to: recoveryURL)
-        let runner = NetworkSetupRecorder(recoveryURL: recoveryURL)
+        let runner = NetworkSetupRecorder(
+            recoveryURL: recoveryURL,
+            services: ["Wi-Fi", "Thunderbolt Bridge"]
+        )
         let manager = SystemProxyManager(storage: storage, runner: runner.run(arguments:timeout:))
 
         try await manager.updateBypassDomains(
@@ -509,6 +513,8 @@ final class SystemProxyManagerTests: XCTestCase {
 
         let arguments = await runner.arguments
         XCTAssertEqual(arguments, [
+            // 先取当前列表求交，缺席的服务一律跳过（见 updateBypassDomains 的说明）。
+            ["-listallnetworkservices"],
             ["-setproxybypassdomains", "Wi-Fi", "localhost", "*.local", "10.0.0.0/8"],
             ["-setproxybypassdomains", "Thunderbolt Bridge", "localhost", "*.local", "10.0.0.0/8"]
         ])
@@ -518,7 +524,8 @@ final class SystemProxyManagerTests: XCTestCase {
         })
     }
 
-    func testUpdateBypassFailureRollsEverySnapshotServiceBack() async throws {
+    /// 失败时把**所有已写过的在场服务**回滚回旧值。
+    func testUpdateBypassFailureRollsEveryPresentSnapshotServiceBack() async throws {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let storage = Storage(rootDirectory: root)
@@ -527,7 +534,8 @@ final class SystemProxyManagerTests: XCTestCase {
         try await storage.writeAtomically(try JSONEncoder().encode(activeSnapshot), to: recoveryURL)
         let runner = NetworkSetupRecorder(
             recoveryURL: recoveryURL,
-            failOnceFor: ["-setproxybypassdomains", "Thunderbolt Bridge", "new.local"]
+            failOnceFor: ["-setproxybypassdomains", "Thunderbolt Bridge", "new.local"],
+            services: ["Wi-Fi", "Thunderbolt Bridge"]
         )
         let manager = SystemProxyManager(storage: storage, runner: runner.run(arguments:timeout:))
 
@@ -540,6 +548,7 @@ final class SystemProxyManagerTests: XCTestCase {
 
         let arguments = await runner.arguments
         XCTAssertEqual(arguments, [
+            ["-listallnetworkservices"],
             ["-setproxybypassdomains", "Wi-Fi", "new.local"],
             ["-setproxybypassdomains", "Thunderbolt Bridge", "new.local"],
             ["-setproxybypassdomains", "Wi-Fi", "old.local"],
@@ -595,13 +604,16 @@ final class SystemProxyManagerTests: XCTestCase {
 private actor NetworkSetupRecorder {
     private let recoveryURL: URL
     private var failOnceFor: [String]?
+    /// 当前系统里有哪些网络服务。默认沿用原来的两条；需要验证"多服务"行为的用例自己指定。
+    private let services: [String]
     private(set) var arguments: [[String]] = []
     private(set) var mutationArguments: [[String]] = []
     private(set) var snapshotExistedBeforeFirstMutation = false
 
-    init(recoveryURL: URL, failOnceFor: [String]? = nil) {
+    init(recoveryURL: URL, failOnceFor: [String]? = nil, services: [String] = ["Wi-Fi", "*Disabled LAN"]) {
         self.recoveryURL = recoveryURL
         self.failOnceFor = failOnceFor
+        self.services = services
     }
 
     func run(arguments: [String], timeout: TimeInterval) async throws -> ProcessResult {
@@ -622,11 +634,8 @@ private actor NetworkSetupRecorder {
     private func output(for arguments: [String]) -> String {
         switch arguments.first {
         case "-listallnetworkservices":
-            """
-            An asterisk (*) denotes that a network service is disabled.
-            Wi-Fi
-            *Disabled LAN
-            """
+            (["An asterisk (*) denotes that a network service is disabled."] + services)
+                .joined(separator: "\n")
         case "-getwebproxy":
             "Enabled: No\nServer: old.local\nPort: 8080\nAuthenticated Proxy Enabled: 0\n"
         case "-getsecurewebproxy":

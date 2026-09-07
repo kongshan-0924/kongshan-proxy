@@ -5923,3 +5923,31 @@ App 随后自行恢复运行（PID 73606），代理与 TUN 正常。
   2. 顺带复核所有按快照服务名批量写 networksetup 的地方，统一"写前先与当前列表求交"。
   3. 可选：`bypass` 更新失败不该推翻整次配置应用——内核已经接受新配置了，降级为告警更合理。
 - **未验证**：修好后真机是否一次通过（需实现并安装后由用户实测）。
+
+### 2026-09-07 20:50 — v0.1.104：修掉「切配置必然失败」
+
+**本轮任务**：用户「先修复吧，最后给我命令我来执行替换」。
+
+**回滚点**：改动前 HEAD `e3b6287`；本机在跑 v0.1.103，本轮**不安装**。
+
+**改动（一处，KongshanCore）**：`SystemProxyManager.updateBypassDomains(to:rollbackTo:)`
+在写入前先取 `-listallnetworkservices` 与快照服务名求交，缺席的跳过；求交后为空则直接返回。
+与 `restoreFromDisk` 的既有做法保持一致。
+
+**审计结果**：全仓只有这一处按快照服务名批量写 networksetup 而没有求交。
+`SystemProxyManager.restoreFromDisk`（617-627）与 `SystemDNSManager.restoreFromDisk`（320-330）本来就做了求交；
+`enable` / `reassert` / DNS 侧的其余循环都是从**当前列表**推导服务名，不受影响。
+
+**测试**：
+- 新增 `BypassUpdateAbsentServiceTests`（2 条）：缺席服务不被下命令且整体成功；全部缺席时是空操作。
+- **验证过测试不是空转**：临时 `git stash` 掉修复后重跑，两条都失败，报错为
+  `rollbackFailed(enableError: "networksetup 执行失败（8）：** Error: Unable to find item in network database.", restoreError: 同)`
+  ——与真机事件逐字相同，且耗时 12.6 秒（正是重试白等的时间，真机是 8 秒）。
+- 两条老用例钉的是旧契约（对快照里全部服务写入），按新契约更新并改名：
+  `testUpdateBypassOnlyTouchesPresentSnapshotServicesAndDoesNotRewriteRecoveryFile`、
+  `testUpdateBypassFailureRollsEveryPresentSnapshotServiceBack`；
+  `NetworkSetupRecorder` 增加可配置的 `services` 参数（默认不变）。
+
+**验证**：全量 `swift test` **624 执行 / 2 跳过 / 0 失败**。
+
+**未验证**：真机切配置是否一次通过——需用户安装 v0.1.104 后实测。本轮按要求只构建、不安装。

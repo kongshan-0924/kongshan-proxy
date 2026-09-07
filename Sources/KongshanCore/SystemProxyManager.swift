@@ -504,7 +504,23 @@ public actor SystemProxyManager {
         guard snapshot.version == 1 else {
             throw SystemProxyError.unsupportedSnapshotVersion(snapshot.version)
         }
-        let services = snapshot.services.map(\.name)
+        // 快照里可能留着「此刻不在系统列表中」的服务——那是 v0.1.99 起的**待还原保留**
+        // （随 App 启停出现/消失的 VPN 虚拟服务，如 Shadowrocket）。对这类服务写 networksetup
+        // **必然**失败，而它报的恰好是 `Unable to find item in network database.`——
+        // 与真正的瞬时抖动是同一句话，于是被重试逻辑当成抖动白等约 3 秒；
+        // 随后回滚循环对同一批服务再跑一遍、再撞一次、再等 3 秒，最后整次配置应用被推翻。
+        // 真机 2026-09-04 起 5 次「当前配置应用失败，已回滚」全部由此而来，且**每次必现**——
+        // 之前几轮把它误判成网络抖动，修的又都是 `enable()`（切配置根本不走那条路）。
+        //
+        // 与 `restoreFromDisk` 保持一致：写之前先与当前列表求交，缺席的跳过。
+        // 它们本来就无从更新，等服务回来时会由完整接管流程重新写入。
+        let currentServices = Set(
+            SystemProxyCommands.allServices(
+                from: try await execute(["-listallnetworkservices"]).stdout
+            )
+        )
+        let services = snapshot.services.map(\.name).filter { currentServices.contains($0) }
+        guard !services.isEmpty else { return }
 
         do {
             for command in SystemProxyCommands.updateBypass(services: services, domains: domains) {
