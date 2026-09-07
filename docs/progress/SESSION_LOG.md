@@ -5889,3 +5889,37 @@ App 随后自行恢复运行（PID 73606），代理与 TUN 正常。
 ① 开着代理直接切配置——应明显变快且不再出现「当前配置应用失败，已回滚」；
 ② 关掉代理测一次速——若仍全部失败，警告条会直接写出主要原因（多半是"无法解析节点域名"）。
 ③ 消息页的「内核已启动」从这一版起会带上耗时，可用来判断切模式到底慢在哪。
+
+### 2026-09-07 20:30 — 只读：定位「切配置必失败」的真正根因（v0.1.103 仍复现）
+
+- **本轮问题**：装上 v0.1.103 后，用户切配置依然失败（20:10:17 已重载 → 20:10:25 应用失败，已回滚）。
+- **检查范围**：14:44 之后的全部运行事件、接管标记与快照文件、逐服务代理状态、
+  `performRoutingApplication` / `reloadTUNConfiguration` / `updateBypassDomains` 的代码路径、
+  快照服务名与当前网络服务列表的差集、对缺席服务的 networksetup 实测。
+- **关键证据**：
+  1. **切配置根本不走 `enable()`**。`performRoutingApplication` 在内核重载成功后走的是
+     `systemProxyManager.updateBypassDomains(to:rollbackTo:)`（AppState.swift:2419-2441）。
+     **v0.1.103 的增量优化加在 `enable()` 上，这条路径压根没用到它**——所以毫无效果。
+  2. **`updateBypassDomains` 遍历的是快照里的服务名，不与当前列表求交**
+     （SystemProxyManager.swift:507 `snapshot.services.map(\.name)`）。
+  3. **快照里有一个当前不存在的服务**：快照 `[LAN, USB 10/100/1000 LAN, Thunderbolt Bridge, Wi-Fi, Shadowrocket]`，
+     当前列表只有前四个——`Shadowrocket` 正是 v0.1.99「待还原保留」刻意留下的那一条。
+  4. **对缺席服务执行 networksetup 必然失败**（实测）：
+     `networksetup -getproxybypassdomains "Shadowrocket"` → `** Error: Unable to find item in network database.`
+     ——与失败事件里的报错**逐字相同**。
+  5. **重试逻辑把这个必然失败误判成瞬时抖动**：该消息正是 `transientNetworkDatabaseError`，
+     于是每次白白重试 4 次（200+400+800+1600ms ≈ 3 秒）；随后回滚循环又对同一批服务重跑一遍、
+     再撞一次、再烧 3 秒 → 抛 `rollbackFailed` → 整次配置应用回滚。这解释了 20:10:17→20:10:25 的 **8 秒**。
+  6. **时间线吻合**：`Shadowrocket` 首次进入待还原是 09-04 08:57:13；
+     全部 5 次「应用失败，已回滚」都在其之后（09-04 10:13 ×2、09-07 08:07、08:21、20:10）。
+     v0.1.99 的待还原保留**引入**了这个必然失败。
+- **结论**：不是网络抖动、不是唤醒时序，是**确定性缺陷**——
+  只要快照里存在一个当前不在系统列表中的网络服务，每一次切配置都必然失败并回滚。
+  之前三轮（v0.1.100 短路、v0.1.103 增量、重试预算 0.6→3 秒）全部作用在 `enable()` 上，
+  没有一处碰到真正出问题的 `updateBypassDomains`；**重试预算越大，反而失败得越慢**。
+- **修法（未实施，用户本轮只要分析）**：
+  1. `updateBypassDomains` 与当前 `-listallnetworkservices` 求交后再写，缺席的服务跳过
+     （与 `restoreFromDisk` 对待 pending 的做法一致）；回滚循环同样处理。
+  2. 顺带复核所有按快照服务名批量写 networksetup 的地方，统一"写前先与当前列表求交"。
+  3. 可选：`bypass` 更新失败不该推翻整次配置应用——内核已经接受新配置了，降级为告警更合理。
+- **未验证**：修好后真机是否一次通过（需实现并安装后由用户实测）。
