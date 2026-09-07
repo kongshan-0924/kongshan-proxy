@@ -178,6 +178,71 @@ final class SystemProxyManagerTests: XCTestCase {
         )
     }
 
+    /// 切配置几乎总会改绕过域名列表。这时**只发绕过那一条**，不许重新 restore/capture/enable：
+    /// 完整流程是 4 个网络服务约 68 次 networksetup 调用，好几秒，而且每一条都可能撞上
+    /// 服务列表抖动的瞬时错误（真机 2026-09-07 08:07 与 08:21 各回滚了一次）。
+    func testOnlyBypassIsRewrittenWhenNothingElseChanged() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        let snapshotData = try encoder.encode(ProxyRecoverySnapshot(services: [
+            NetworkServiceProxySnapshot(
+                name: "Wi-Fi",
+                http: ProxyEndpointState(enabled: true, server: "user-proxy.local", port: 8080),
+                https: ProxyEndpointState(enabled: false, server: "", port: 0),
+                socks: ProxyEndpointState(enabled: false, server: "", port: 0),
+                bypassDomains: ["user.example"]
+            )
+        ]))
+        let recoveryURL = root.appending(path: "proxy-recovery.json")
+        try snapshotData.write(to: recoveryURL)
+        try Data("1".utf8).write(to: root.appending(path: "proxy-takeover.marker"))
+
+        // 现场：端口已经是 36815，绕过列表是旧的。
+        let runner = TakenOverNetworkSetup(port: 36_815, bypass: ["localhost"])
+        let manager = SystemProxyManager(
+            storage: Storage(rootDirectory: root),
+            runner: runner.run(arguments:timeout:)
+        )
+
+        try await manager.enable(port: 36_815, bypassDomains: ["localhost", "*.cn"])
+
+        let mutations = await runner.mutations
+        XCTAssertEqual(mutations.count, 1, "只该发一条绕过命令，实际：\(mutations)")
+        XCTAssertEqual(mutations.first?.first, "-setproxybypassdomains")
+        XCTAssertTrue(mutations.first?.contains("*.cn") == true)
+        XCTAssertEqual(
+            try Data(contentsOf: recoveryURL), snapshotData,
+            "增量更新不许动快照——它记的是用户接管前的原始设置"
+        )
+    }
+
+    /// 有服务不指向本机回环（比如新插的网卡还没接管）时，必须回到完整流程去采集并接管它。
+    func testFallsBackToFullFlowWhenAServiceIsNotOurs() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try JSONEncoder().encode(ProxyRecoverySnapshot(services: []))
+            .write(to: root.appending(path: "proxy-recovery.json"))
+        try Data("1".utf8).write(to: root.appending(path: "proxy-takeover.marker"))
+
+        // 现场里的服务代理是关着的（不指向我们）→ 不能走增量。
+        let runner = NetworkSetupRecorder(recoveryURL: root.appending(path: "proxy-recovery.json"))
+        let manager = SystemProxyManager(
+            storage: Storage(rootDirectory: root),
+            runner: runner.run(arguments:timeout:)
+        )
+
+        try await manager.enable(port: 36_815, bypassDomains: ["localhost"])
+
+        let mutations = await runner.mutationArguments
+        XCTAssertTrue(
+            mutations.contains { $0.first == "-setwebproxy" },
+            "完整流程必须真正写下端点，实际：\(mutations)"
+        )
+    }
+
     /// 上次还原没落地时，短路必须让路——否则「还原失败就不能带着坏快照继续接管」这个性质
     /// 会被悄悄绕过：那种现场下当前状态同样指向我们自己，与正常切配置从状态上分不出来。
     func testShortCircuitStepsAsideWhenLastRestoreFailed() async throws {

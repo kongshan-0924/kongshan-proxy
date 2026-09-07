@@ -315,10 +315,18 @@ public actor SystemProxyManager {
         // 指向我们自己、标记和快照也都在，与正常的切配置**从状态上无法区分**。少了这条，
         // 「还原失败时不能带着坏快照继续接管」这个性质会被短路悄悄绕过去
         // （`TakeoverResidueTests.testProxyRestoreReadsBackAndKeepsSnapshotWhenSettingDidNotStick`）。
+        // v0.1.103：从"完全一致才短路"放宽为**增量更新**。切配置几乎总会改绕过域名列表，
+        // 旧短路因此几乎从不命中，每次仍要跑完整的 restore + capture + enable
+        // （4 个网络服务 ≈ 68 次 networksetup 进程调用，好几秒，而且每一条都可能撞上
+        // 服务列表抖动的瞬时错误）——真机 2026-09-07 08:07 与 08:21 又各回滚了一次。
+        // 现在只写"和目标不一致"的那几条：只改绕过时是 4 次调用。
         if try await storage.readIfPresent(from: takeoverMarkerURL) != nil,
            try await storage.readIfPresent(from: recoveryURL) != nil,
            try await storage.readIfPresent(from: restoreFailureMarkerURL) == nil,
-           try await takeoverIsCurrent(port: port, bypassDomains: bypassDomains) {
+           let commands = try await incrementalTakeoverCommands(port: port, bypassDomains: bypassDomains) {
+            for command in commands {
+                _ = try await execute(command.arguments)
+            }
             return
         }
 
@@ -522,26 +530,53 @@ public actor SystemProxyManager {
         transactionInProgress = true
     }
 
-    /// 当前所有启用中的网络服务是否都已指向 `127.0.0.1:port`，且绕过列表与目标一致。
+    /// 已经在接管中时，算出"把现状调整到目标"所需的**最小命令集**；
+    /// 返回 nil 表示当前不是我们在接管的状态，调用方须走完整流程。
     ///
-    /// **只读不写**。任何一项不符就返回 false，交回完整流程——包括"新出现了一个还没接管的
-    /// 网络服务"这种情况（它的三项代理都不指向我们，第一项判定就会 false）。
-    /// `bypassDomains` 为 nil 表示本次不改绕过列表，那就不参与比对。
-    private func takeoverIsCurrent(port: Int, bypassDomains: [String]?) async throws -> Bool {
+    /// 判据是"每个启用中的网络服务，三项代理都指向本机回环"——端口不必相同（端口变了就补写）。
+    /// 只读阶段不写任何东西；命令集为空即代表完全一致、一条都不用发。
+    ///
+    /// **不重新 capture、不动快照**：快照记的是用户接管前的原始设置，
+    /// 接管期间重新采集会把"当前＝指向我们自己"写进去，还原时就再也回不到原值。
+    /// 新出现的、还没接管的网络服务会让判据失败（它的端点不指向回环），
+    /// 从而回到完整流程去采集并接管它——这正是我们要的。
+    private func incrementalTakeoverCommands(
+        port: Int,
+        bypassDomains: [String]?
+    ) async throws -> [NetworkSetupCommand]? {
         let services = SystemProxyCommands.enabledServices(
             from: try await execute(["-listallnetworkservices"]).stdout
         )
-        guard !services.isEmpty else { return false }
+        guard !services.isEmpty else { return nil }
+
+        var commands: [NetworkSetupCommand] = []
         for service in services {
             let current = try await capture(service: service)
-            guard Self.pointsAtLoopback(current.http, port: port),
-                  Self.pointsAtLoopback(current.https, port: port),
-                  Self.pointsAtLoopback(current.socks, port: port) else {
-                return false
+            guard Self.pointsAtLoopbackAnyPort(current.http),
+                  Self.pointsAtLoopbackAnyPort(current.https),
+                  Self.pointsAtLoopbackAnyPort(current.socks) else {
+                return nil
             }
-            if let bypassDomains, current.bypassDomains != bypassDomains { return false }
+            let portMatches = current.http.port == port
+                && current.https.port == port
+                && current.socks.port == port
+            if !portMatches {
+                commands.append(contentsOf: SystemProxyCommands.enable(services: [service], port: port))
+            }
+            if let bypassDomains, current.bypassDomains != bypassDomains {
+                commands.append(contentsOf: SystemProxyCommands.updateBypass(
+                    services: [service],
+                    domains: bypassDomains
+                ))
+            }
         }
-        return true
+        return commands
+    }
+
+    /// 端点是否指向本机回环（不限端口）。端口是否要改由调用方另判。
+    static func pointsAtLoopbackAnyPort(_ endpoint: ProxyEndpointState) -> Bool {
+        guard endpoint.enabled else { return false }
+        return ["127.0.0.1", "localhost", "::1"].contains(endpoint.server.lowercased())
     }
 
     private func capture(service: String) async throws -> NetworkServiceProxySnapshot {

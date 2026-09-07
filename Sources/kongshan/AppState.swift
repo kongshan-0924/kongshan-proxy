@@ -437,6 +437,8 @@ final class AppState {
     @ObservationIgnored private var notedPendingTakeoversLoaded = false
     /// 本次运行是否已经说明过"走了一次性授权"。见 startTUN 的 .fallback 分支。
     @ObservationIgnored private var notedFallbackAuthorization = false
+    /// 一轮批量测速里各类失败原因的计数，用于结束时汇总。
+    @ObservationIgnored private var delayFailureReasons: [String: Int] = [:]
     @ObservationIgnored private var currentConfig: Data?
     @ObservationIgnored private var dashboardTasks: [Task<Void, Never>] = []
     @ObservationIgnored private var dashboardMonitorConsumers: Set<DashboardMonitorConsumer> = []
@@ -771,6 +773,9 @@ final class AppState {
         crashRestartLimiter.reset()
         status = .starting
         errorMessage = nil
+        // 启动耗时写进事件：用户抱怨"切模式太慢"时，得先有数才知道该优化哪一段。
+        // 用单调时钟，不受系统时间调整影响。
+        let startBegan = ContinuousClock.now
         // TUN 需要 root，因此只要集合里含 TUN，整个内核就走提权启动；
         // 同时开启时 mixed inbound 也由这个 root 进程提供。
         let usesTun = modes.contains(.tun)
@@ -870,9 +875,10 @@ final class AppState {
                 // 诊断快照不是运行前置条件。写失败不能把已经健康的代理停掉。
                 appendWarning("代理已启动，但诊断快照写入失败：\(error.localizedDescription)")
             }
+            let elapsed = startBegan.duration(to: .now)
             recordRuntimeEvent(
                 title: "内核已启动",
-                detail: runtimeModeDescription(modes),
+                detail: "\(runtimeModeDescription(modes))；耗时 \(Self.elapsedText(elapsed))",
                 currentPID: startedPID
             )
             markRuntimeStarted()
@@ -1982,8 +1988,27 @@ final class AppState {
     private func applyDelay(_ result: DelayResult, to id: UUID) {
         switch result {
         case let .success(value): delays[id] = value
-        case .failure: delays.updateValue(nil, forKey: id)
+        case let .failure(reason):
+            delays.updateValue(nil, forKey: id)
+            // 界面上只能显示"超时"两个字，用户分不清是节点死了还是本机连域名都解析不出来。
+            // 单节点测速把真实原因带出来。
+            errorMessage = "测速失败：\(Self.readableDelayFailure(reason))"
         }
+    }
+
+    /// 把底层报错整理成用户能据以行动的一句话。
+    /// TCP 握手用的是 Network 框架，域名解析不出来时报的是 `DNSError`/`-65554` 这类，
+    /// 直接甩给用户没有意义——尤其"代理没开时全部超时"多半就是节点域名在本地解析不了。
+    static func readableDelayFailure(_ reason: String) -> String {
+        let lower = reason.lowercased()
+        if lower.contains("dns") || lower.contains("hostname") || lower.contains("-65554")
+            || lower.contains("nodename nor servname") {
+            return "无法解析节点域名（本机 DNS 解析不了；代理未开启时常见）"
+        }
+        if lower.contains("refused") { return "节点服务器拒绝连接" }
+        if lower.contains("no route") || lower.contains("unreachable") { return "本机到该节点没有路由" }
+        if reason == "超时" { return "握手超时（3 秒内没连上）" }
+        return reason
     }
 
     func testAllDelays() async {
@@ -2027,11 +2052,14 @@ final class AppState {
     private func testDelays(_ testable: [ProxyNode]) async -> Bool {
         guard !isTestingAllDelays, !testable.isEmpty else { return false }
         isTestingAllDelays = true
+        delayFailureReasons.removeAll(keepingCapacity: true)
         speedTestProgress = SpeedTestProgress(completed: 0, total: testable.count)
         defer {
             isTestingAllDelays = false
             if Task.isCancelled {
                 appendWarning("测速已取消，已保留 \(speedTestProgress.completed) 个结果")
+            } else {
+                summarizeDelayFailures(total: testable.count)
             }
         }
 
@@ -2140,13 +2168,26 @@ final class AppState {
         return !Task.isCancelled
     }
 
+    /// 一轮测速几乎全挂时，把主要原因说出来。
+    /// "全部超时"最常见的真因是节点域名在本机解析不了（代理没开时尤其如此），
+    /// 而界面上每一行都只写"超时"，用户只会以为节点全死了、反复换节点也没用。
+    private func summarizeDelayFailures(total: Int) {
+        let failures = delayFailureReasons.values.reduce(0, +)
+        guard total > 0, failures >= max(3, total * 3 / 5) else { return }
+        guard let (reason, count) = delayFailureReasons.max(by: { $0.value < $1.value }) else { return }
+        appendWarning("测速 \(failures)/\(total) 个节点失败，主要原因：\(reason)（\(count) 个）")
+    }
+
     private func publishDelayResults(_ results: [(UUID, DelayResult)]) {
         guard !results.isEmpty else { return }
         var updated = delays
         for (id, result) in results {
             switch result {
             case let .success(value): updated[id] = value
-            case .failure: updated.updateValue(nil, forKey: id)
+            case let .failure(reason):
+                updated.updateValue(nil, forKey: id)
+                // 原因在这里被丢掉过：一屏"超时"看不出是节点问题还是本机问题。
+                delayFailureReasons[Self.readableDelayFailure(reason), default: 0] += 1
             }
         }
         if updated != delays { delays = updated }
@@ -3326,6 +3367,15 @@ final class AppState {
             }
             return fields.joined(separator: " | ")
         }.joined(separator: "\n")
+    }
+
+    /// 毫秒级耗时文案。事件里要能一眼看出是 0.4 秒还是 4 秒。
+    static func elapsedText(_ duration: Duration) -> String {
+        let ms = Double(duration.components.seconds) * 1000
+            + Double(duration.components.attoseconds) / 1e15
+        return ms < 1000
+            ? String(format: "%.0f 毫秒", ms)
+            : String(format: "%.1f 秒", ms / 1000)
     }
 
     private func runtimeModeDescription(_ modes: Set<ProxyMode>) -> String {
