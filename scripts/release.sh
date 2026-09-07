@@ -85,6 +85,11 @@ wait_until() {
     "$@"
 }
 
+direct_network_is_reachable() {
+    curl --fail --silent --show-error --max-time 10 --noproxy '*' \
+        https://www.apple.com/library/test/success.html >/dev/null 2>&1
+}
+
 system_proxy_is_off() {
     scutil --proxy | awk '/Enable :/ && $3 != 0 { bad=1 } END { exit bad }'
 }
@@ -182,7 +187,10 @@ install_verified() {
     if scutil --dns | grep -Eq 'nameserver\[[0-9]+\] : (172\.19\.0\.1|fdfe:dcba:9876::1)'; then
         fail "系统 DNS 仍指向 kongshan TUN；未替换"
     fi
-    curl --fail --silent --show-error --max-time 10 --noproxy '*' https://www.apple.com/library/test/success.html >/dev/null \
+    # 拆掉 TUN 之后解析器要几秒才切回来，单次探测会误判：真机 2026-09-07 09:2x
+    # 这里报 `Resolving timed out after 10002 ms` 中止了安装，而十几秒后同一条探测 200 且解析只要 35ms。
+    # 与上面几项检查一致，改成反复取样直到成立、超时才判失败。
+    wait_until 60 direct_network_is_reachable \
         || fail "直连网络检查失败；未替换"
     backup_configuration "$expected"
 
