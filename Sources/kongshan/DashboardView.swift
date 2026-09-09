@@ -488,6 +488,21 @@ private struct ExitIPMetricBox: View {
                         .foregroundStyle(dnsStatusTint(report.dns.status))
                 }
                 .help(report.dns.detail)
+                // 风险与 IP 类型：这一行直接回答"这个出口会不会被目标站点为难"。
+                // 机房 IP + 中高风险，基本就是 Cloudflare 挑战的前兆。
+                if let reputation = report.reputation, let risk = reputation.risk {
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(Theme.riskTint(risk))
+                            .frame(width: 6, height: 6)
+                        Text(Theme.riskSummary(reputation))
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(Theme.riskTint(risk))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    .help("出口 IP 风险评估，数据来自 \(IPReputationService.sourceName)")
+                }
             }
         } else {
             Text(state.isRefreshingExitDiagnostics ? "检测中…" : (state.exitDiagnosticsError == nil ? "待检测" : "获取失败"))

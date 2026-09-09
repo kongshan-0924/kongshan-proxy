@@ -13,6 +13,7 @@ struct ExitAnalysisView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 exitGroup
+                reputationGroup
                 reachabilityGroup
                 dnsGroup
             }
@@ -71,6 +72,9 @@ struct ExitAnalysisView: View {
                     row("IP 地址", value: report.exit.ip, monospaced: true, selectable: true)
                     row("位置", value: report.exit.location)
                     row("归属", value: report.exit.organization.isEmpty ? "未知" : report.exit.organization)
+                    if let asn = report.reputation?.asnText {
+                        row("ASN", value: asn)
+                    }
                     row("检测于", value: report.checkedAt.formatted(date: .omitted, time: .standard))
                 } else if state.isRefreshingExitDiagnostics {
                     ProgressView().controlSize(.small)
@@ -79,6 +83,56 @@ struct ExitAnalysisView: View {
                 }
             }
             .padding(4)
+        }
+    }
+
+    // MARK: - 风险评估
+
+    @ViewBuilder
+    private var reputationGroup: some View {
+        if let reputation = state.exitDiagnostics?.reputation,
+           reputation.fraudScore != nil || !reputation.labels.isEmpty {
+            GroupBox {
+                VStack(alignment: .leading, spacing: 10) {
+                    header("IP 风险评估", symbol: "shield.lefthalf.filled", tint: .purple)
+
+                    if let score = reputation.fraudScore, let risk = reputation.risk {
+                        HStack(spacing: 10) {
+                            Text("\(score)%")
+                                .font(.title2.weight(.semibold).monospacedDigit())
+                                .foregroundStyle(Theme.riskTint(risk))
+                            Text(risk.title)
+                                .font(.callout.weight(.medium))
+                                .foregroundStyle(Theme.riskTint(risk))
+                            Spacer(minLength: 8)
+                        }
+                        // 进度条让"57 分"有直观位置感；纯数字看不出离两端多远。
+                        ProgressView(value: Double(min(max(score, 0), 100)), total: 100)
+                            .tint(Theme.riskTint(risk))
+                    }
+
+                    if !reputation.labels.isEmpty {
+                        HStack(spacing: 6) {
+                            ForEach(reputation.labels, id: \.self) { label in
+                                Text(label)
+                                    .font(.caption.weight(.medium))
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 3)
+                                    .background(.quaternary.opacity(0.6), in: Capsule())
+                            }
+                            Spacer(minLength: 0)
+                        }
+                    }
+
+                    // 必须写明来源与局限：各家算法差异极大，把它当唯一判据会误导。
+                    Text("评分来自 \(IPReputationService.sourceName)，检测时会把当前出口 IP 发给该服务。"
+                        + "不同厂商算法差异很大，只作参考——真正管用的判据是上面的站点可达性。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(4)
+            }
         }
     }
 
@@ -289,6 +343,11 @@ struct ExitAnalysisView: View {
             lines.append("出口 IP：\(report.exit.ip)")
             lines.append("位置：\(report.exit.location)")
             lines.append("归属：\(report.exit.organization)")
+            if let reputation = report.reputation {
+                if let asn = reputation.asnText { lines.append("ASN：\(asn)") }
+                let summary = Theme.riskSummary(reputation)
+                if !summary.isEmpty { lines.append("风险评估：\(summary)（来源 \(IPReputationService.sourceName)）") }
+            }
             lines.append("DNS：\(dnsTitle(report.dns.status))——\(report.dns.detail)")
             if !report.resolvers.isEmpty {
                 lines.append("解析器：" + report.resolvers.map(\.ip).joined(separator: "、"))

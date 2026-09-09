@@ -33,6 +33,25 @@ enum Theme {
         return s.isEmpty ? "—" : s
     }
 
+    /// 风险等级配色。与延迟同一套语义：绿=好、橙=当心、红=差。
+    static func riskTint(_ level: IPRiskLevel) -> Color {
+        switch level {
+        case .low: .green
+        case .medium: .orange
+        case .high: .red
+        }
+    }
+
+    /// 「57% 中度风险 · 机房 IP」。没有标签时只留前半。
+    static func riskSummary(_ info: IPReputationInfo) -> String {
+        var parts: [String] = []
+        if let score = info.fraudScore, let risk = info.risk {
+            parts.append("\(score)% \(risk.title)")
+        }
+        if !info.labels.isEmpty { parts.append(info.labels.joined(separator: " · ")) }
+        return parts.joined(separator: " · ")
+    }
+
     static func protocolTint(_ value: ProxyProtocol) -> Color {
         switch value {
         case .shadowsocks: .blue

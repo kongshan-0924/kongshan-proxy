@@ -16,6 +16,8 @@ final class RenderSnapshotTests: XCTestCase {
         try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
 
         let state = makeState()
+        // 出口与风险信息尽早摆好：仪表盘那张「当前出口 IP」卡片要能验证到风险行。
+        state.applyExitAnalysisSnapshotFixture()
 
         render(
             DashboardView().environment(state),
@@ -87,7 +89,6 @@ final class RenderSnapshotTests: XCTestCase {
         )
 
         // 出口分析页：出口信息 + 站点可达性自测 + DNS 解析器明细。
-        state.applyExitAnalysisSnapshotFixture()
         render(
             ExitAnalysisView().environment(state),
             name: "exit-analysis",
@@ -103,6 +104,8 @@ final class RenderSnapshotTests: XCTestCase {
         )
 
         let running = makeState()
+        // 同上：宽/窄仪表盘要能验证「当前出口 IP」卡片上的风险行。
+        running.applyExitAnalysisSnapshotFixture()
         running.status = .on
 
         render(

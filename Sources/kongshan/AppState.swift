@@ -392,6 +392,14 @@ final class AppState {
                 status: .clear,
                 detail: "解析器与出口在同一地区，未发现把查询送回本地 ISP 的迹象。"
             ),
+            reputation: IPReputationInfo(
+                ip: "23.249.17.74",
+                asn: 400618,
+                asOrganization: "Prime Security Corp.",
+                fraudScore: 57,
+                isResidential: false,
+                isBroadcast: true
+            ),
             checkedAt: Date(timeIntervalSince1970: 1_820_000_000)
         )
         let targets = SiteReachabilityProbe.defaultTargets
