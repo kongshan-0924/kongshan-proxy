@@ -94,6 +94,39 @@ extension AppState {
     }
 }
 
+/// 容量条：左端 0、右端满，填充按比例取宽，颜色由调用方按语义给。
+///
+/// **不用 `ProgressView`**：macOS 上它的线性样式走系统强调色，`.tint(_:)` 不生效——
+/// 出口分析的风险分「57%」是橙的、条却是灰的；配置页的用量 98% 也照样灰着。
+/// 最显眼的元素反而不表达状态，等于没画。两条 Capsule 才能把颜色真正落上去。
+struct CapacityBar: View {
+    let fraction: Double
+    let tint: Color
+    var height: CGFloat = 6
+
+    var body: some View {
+        let clamped = min(max(fraction, 0), 1)
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Capsule().fill(.quaternary)
+                Capsule()
+                    .fill(tint)
+                    .frame(width: max(proxy.size.width * clamped, clamped > 0 ? 3 : 0))
+            }
+        }
+        .frame(height: height)
+    }
+}
+
+/// 用量条配色：过 85% 提醒、过 95% 告警。与延迟/风险同一套语义色。
+extension Theme {
+    static func usageTint(_ fraction: Double) -> Color {
+        if fraction >= 0.95 { return .red }
+        if fraction >= 0.85 { return .orange }
+        return .accentColor
+    }
+}
+
 /// 带色点的状态徽标。颜色之外同时保留文字，不单靠颜色表达状态。
 /// 只有淡色填充，没有描边——邮件/访达的标签就是这个样子。
 struct StatusBadge: View {

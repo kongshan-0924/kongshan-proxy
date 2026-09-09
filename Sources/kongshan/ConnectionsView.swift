@@ -104,11 +104,13 @@ struct ConnectionsView: View {
     @ViewBuilder
     private func content(list: [ConnectionLiveDetail], nodeNames: [String: String]) -> some View {
         if state.status != .on {
-            ContentUnavailableView(
-                "代理未开启",
-                systemImage: "bolt.slash",
-                description: Text("开启系统代理或 TUN 后，这里会显示实时活跃连接。")
-            )
+            ContentUnavailableView {
+                Label("代理未开启", systemImage: "bolt.slash")
+            } description: {
+                Text("开启系统代理或 TUN 后，这里会显示实时活跃连接。")
+            } actions: {
+                Button("前往仪表盘") { state.requestPage(.dashboard) }
+            }
         } else if state.connections.isEmpty {
             ContentUnavailableView("暂无活跃连接", systemImage: "point.3.connected.trianglepath.dotted")
         } else if list.isEmpty {

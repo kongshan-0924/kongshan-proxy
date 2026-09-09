@@ -23,11 +23,15 @@ struct DashboardView: View {
                 DashboardTrafficGroup()
 
                 if state.nodes.isEmpty {
-                    ContentUnavailableView(
-                        "还没有节点",
-                        systemImage: "point.3.connected.trianglepath.dotted",
-                        description: Text("请在“配置”页导入 Clash 订阅或添加手动 Hysteria2。")
-                    )
+                    // 空态直接给出口，不让用户自己去侧栏找「配置」在哪。
+                    ContentUnavailableView {
+                        Label("还没有节点", systemImage: "point.3.connected.trianglepath.dotted")
+                    } description: {
+                        Text("导入 Clash 订阅，或手动添加一个 Hysteria2 节点。")
+                    } actions: {
+                        Button("前往配置页") { state.requestPage(.nodes) }
+                            .buttonStyle(.borderedProminent)
+                    }
                     .frame(maxWidth: .infinity, minHeight: 150)
                 }
             }
@@ -55,54 +59,65 @@ struct DashboardView: View {
 
     // MARK: - 状态与控制
 
+    /// 状态点 + 状态文字 + 出站徽标；第二行节点 · 协议 · 延迟 · 配置。
+    private var identityColumn: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(state.statusTint)
+                    .frame(width: 9, height: 9)
+    Text(state.statusText)
+        .font(.title3.weight(.semibold))
+    if state.isOn {
+        StatusBadge(text: "出站 · \(state.outboundMode.displayName)", tint: state.statusTint)
+    }
+            }
+            HStack(spacing: 6) {
+    if let selected = state.selectedNode {
+        Text(selected.name)
+            .font(.callout)
+            .lineLimit(1)
+        ProtocolTag(value: selected.protocolType)
+        if let delay = state.delays[selected.id] {
+            DelayLabel(milliseconds: delay)
+        }
+    } else {
+        Text("未启用或未选择节点")
+            .font(.callout)
+            .foregroundStyle(.secondary)
+    }
+    // 当前配置紧挨节点：这两条是同一个问题的两半——"用哪个配置里的哪个节点"。
+    // 原来配置单占一张指标卡，既占位置又和节点隔着半屏。
+    if let config = activeConfig {
+        Divider().frame(height: 12)
+        Text(config.name)
+            .font(.callout)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .help("当前生效配置")
+        Text("\(config.nodeCount) 个节点")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+    }
+            }
+    }
+    }
+
     private var statusGroup: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .center, spacing: 14) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 8) {
-                            Circle()
-                                .fill(state.statusTint)
-                                .frame(width: 9, height: 9)
-                            Text(state.statusText)
-                                .font(.title3.weight(.semibold))
-                            if state.isOn {
-                                StatusBadge(text: "出站 · \(state.outboundMode.displayName)", tint: state.statusTint)
-                            }
-                        }
-                        HStack(spacing: 6) {
-                            if let selected = state.selectedNode {
-                                Text(selected.name)
-                                    .font(.callout)
-                                    .lineLimit(1)
-                                ProtocolTag(value: selected.protocolType)
-                                if let delay = state.delays[selected.id] {
-                                    DelayLabel(milliseconds: delay)
-                                }
-                            } else {
-                                Text("未启用或未选择节点")
-                                    .font(.callout)
-                                    .foregroundStyle(.secondary)
-                            }
-                            // 当前配置紧挨节点：这两条是同一个问题的两半——"用哪个配置里的哪个节点"。
-                            // 原来配置单占一张指标卡，既占位置又和节点隔着半屏。
-                            if let config = activeConfig {
-                                Divider().frame(height: 12)
-                                Text(config.name)
-                                    .font(.callout)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                                    .help("当前生效配置")
-                                Text("\(config.nodeCount) 个节点")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
+                // 窄窗口下「节点 · 配置」和「上传 / 下载」挤不进一行时换行，
+                // 而不是两边一起截成「香港 IE…」「cdn.…de.org」——那种谁也没让步的截断最难看。
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .center, spacing: 14) {
+                        identityColumn
+                        Spacer(minLength: 24)
+                        DashboardLiveRatePair()
                     }
-
-                    Spacer()
-
-                    DashboardLiveRatePair()
+                    VStack(alignment: .leading, spacing: 10) {
+                        identityColumn
+                        DashboardLiveRatePair()
+                    }
                 }
 
                 Divider()

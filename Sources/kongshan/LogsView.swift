@@ -74,6 +74,8 @@ struct LogsView: View {
                     } label: {
                         Label("清空显示", systemImage: "trash")
                     }
+                    // 控制台 / 终端的「清屏」都是 ⌘K。
+                    .keyboardShortcut("k", modifiers: .command)
                     .disabled(state.liveLogs.isEmpty)
                     .help("清空当前显示的日志，不影响磁盘上的日志文件")
 
@@ -130,15 +132,23 @@ struct LogsView: View {
             .background(Color(nsColor: .textBackgroundColor))
             .overlay {
                 if filteredLogs.isEmpty {
-                    ContentUnavailableView(
-                        filterText.isEmpty ? (state.isOn ? "等待内核日志" : "代理未启动") : "未匹配到相关日志",
-                        systemImage: filterText.isEmpty ? "doc.text.magnifyingglass" : "magnifyingglass",
-                        description: Text(
-                            filterText.isEmpty
-                                ? (state.isOn ? "内核产生日志后将实时显示，内存最多保留 2000 行。" : "开启代理后才会连接实时日志推送。")
-                                : "请尝试搜索其他关键字。"
+                    if !filterText.isEmpty {
+                        ContentUnavailableView.search(text: filterText)
+                    } else if state.isOn {
+                        ContentUnavailableView(
+                            "等待内核日志",
+                            systemImage: "doc.text.magnifyingglass",
+                            description: Text("内核产生日志后将实时显示，内存最多保留 2000 行。")
                         )
-                    )
+                    } else {
+                        ContentUnavailableView {
+                            Label("代理未启动", systemImage: "doc.text.magnifyingglass")
+                        } description: {
+                            Text("开启代理后才会连接实时日志推送。")
+                        } actions: {
+                            Button("前往仪表盘") { state.requestPage(.dashboard) }
+                        }
+                    }
                 }
                 if pausesAutomaticScroll {
                     VStack {

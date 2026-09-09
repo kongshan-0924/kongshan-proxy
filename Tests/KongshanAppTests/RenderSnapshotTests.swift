@@ -88,6 +88,14 @@ final class RenderSnapshotTests: XCTestCase {
             size: CGSize(width: 740, height: 420)
         )
 
+        // 出口分析**空态**：本轮事故的根源就是从没渲染过它——三张 GroupBox 各自缩成一团。
+        // 现在是一个 ContentUnavailableView + 「开始检测」，必须有图为证。
+        let bare = makeState()
+        render(
+            ExitAnalysisView().environment(bare),
+            name: "exit-analysis-empty",
+            size: CGSize(width: 920, height: 640)
+        )
         // 出口分析页：出口信息 + 站点可达性自测 + DNS 解析器明细。
         render(
             ExitAnalysisView().environment(state),

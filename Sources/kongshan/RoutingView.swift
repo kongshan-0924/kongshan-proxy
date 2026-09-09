@@ -40,22 +40,24 @@ struct RoutingView: View {
         // 分组只算一次：副标题的「N 个目标」与下面的列表都要用，三千多条各分一遍纯属白工。
         let targetGroups = keyword.isEmpty ? groups(of: subscriptionRules) : []
 
-        GeometryReader { proxy in
-            VStack(spacing: 0) {
-                // 上半部分是低频配置表单：封顶 55% 高度。
-                // 四个分区全展开也不会把规则浏览器挤没；折叠后规则列表自动长大。
-                Form {
-                    switchesSection(hasSubscriptionRules: !subscriptionRules.isEmpty)
-                    perAppSection
-                    forcedProxySection
-                    sshProxySection
-                    routeTesterSection
-                }
-                .formStyle(.grouped)
-                .frame(maxHeight: proxy.size.height * 0.55)
-                Divider()
-                subscriptionRulesContent(subscriptionRules, matched: matched, targetGroups: targetGroups, keyword: keyword)
+        // 上半是可改的表单、下半是只读的规则浏览，用原生 `VSplitView` 分开：
+        // 分割线可拖，用户想看表单就拉大、想翻规则就拉小。
+        // 之前是 GeometryReader 把表单硬切在 55% 高度——表单内容常常正好在一张分区卡片
+        // 中间被截断，下面紧跟一条 Divider 和列表标题，看上去像卡片塌了一半。
+        VSplitView {
+            Form {
+                switchesSection(hasSubscriptionRules: !subscriptionRules.isEmpty)
+                perAppSection
+                forcedProxySection
+                sshProxySection
+                routeTesterSection
             }
+            .formStyle(.grouped)
+            // 默认高度按「规则开关 + 分应用代理」两块完整露出来定：分应用分区默认展开，
+            // 切口落在它中间最难看。再多的分区用户拖分割线或折叠。
+            .frame(minHeight: 180, idealHeight: 380)
+            subscriptionRulesContent(subscriptionRules, matched: matched, targetGroups: targetGroups, keyword: keyword)
+                .frame(minHeight: 140, maxHeight: .infinity)
         }
         .navigationTitle("规则")
         .navigationSubtitle(subtitle(total: subscriptionRules.count, matched: matched.count, groups: targetGroups.count, keyword: keyword))

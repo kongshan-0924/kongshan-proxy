@@ -488,6 +488,14 @@ final class AppState {
     @ObservationIgnored private var visiblePageTitle: String?
 
     /// 由主窗口在页面切换时调用。窗口关闭时传 nil。
+    /// 由主窗口消费的一次性跳转请求。空态里的「前往配置页」这类按钮不持有侧栏 selection，
+    /// 只能在这里挂个号；`MainWindowView` 看到就切页并清掉。
+    var requestedPage: SidebarPage?
+
+    func requestPage(_ page: SidebarPage) {
+        requestedPage = page
+    }
+
     func noteVisiblePage(_ title: String?) {
         visiblePageTitle = title
     }
@@ -3389,6 +3397,17 @@ final class AppState {
     /// 取证存档在磁盘上的位置，显示给用户看。用 `~` 缩写，界面上不铺开完整家目录。
     var diagnosticsArchivePath: String {
         Self.abbreviatedHomePath(diagnosticsJournal.fileURL)
+    }
+
+    /// 在访达里选中两份存档。文件还不存在（从未记过）时退到所在目录，别弹一个空选择。
+    func revealArchivesInFinder() {
+        let urls = [diagnosticsJournal.fileURL, metricsJournal.fileURL]
+        let existing = urls.filter { FileManager.default.fileExists(atPath: $0.path) }
+        if existing.isEmpty {
+            NSWorkspace.shared.activateFileViewerSelecting([diagnosticsJournal.fileURL.deletingLastPathComponent()])
+        } else {
+            NSWorkspace.shared.activateFileViewerSelecting(existing)
+        }
     }
 
     static func abbreviatedHomePath(_ url: URL) -> String {

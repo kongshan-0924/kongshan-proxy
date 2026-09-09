@@ -9,15 +9,25 @@ import SwiftUI
 struct ExitAnalysisView: View {
     @Environment(AppState.self) private var state
 
+    /// 三种形态：什么都没有 → 一个空态 + 主按钮；正在跑第一次 → 进度；有任一结果 → 报告。
+    /// 之前空态是三张各自缩成一团的 GroupBox 分别写「点右上角…」，宽窄不一、飘在画面中央。
+    private var hasAnyResult: Bool {
+        state.exitDiagnostics != nil || !state.siteProbes.isEmpty || state.exitDiagnosticsError != nil
+    }
+
+    private var isRunningFirstPass: Bool {
+        !hasAnyResult && (state.isRefreshingExitDiagnostics || state.isProbingSites)
+    }
+
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                exitGroup
-                reputationGroup
-                reachabilityGroup
-                dnsGroup
+        Group {
+            if isRunningFirstPass {
+                firstPassProgress
+            } else if !hasAnyResult {
+                emptyState
+            } else {
+                report
             }
-            .padding(20)
         }
         .navigationTitle("出口分析")
         .navigationSubtitle(subtitle)
@@ -28,6 +38,7 @@ struct ExitAnalysisView: View {
                 } label: {
                     Label("重新自测", systemImage: "checkmark.shield")
                 }
+                .keyboardShortcut("r", modifiers: [.command, .shift])
                 .disabled(state.isProbingSites)
                 .help("直接请求这些站点，看当前出口会不会被拦")
 
@@ -36,7 +47,9 @@ struct ExitAnalysisView: View {
                 } label: {
                     Label("刷新出口", systemImage: "arrow.clockwise")
                 }
+                .keyboardShortcut("r", modifiers: .command)
                 .disabled(state.isRefreshingExitDiagnostics)
+                .help("重新检测出口 IP、归属、风险与 DNS")
 
                 Button {
                     NSPasteboard.general.clearContents()
@@ -51,6 +64,56 @@ struct ExitAnalysisView: View {
             if state.isOn, state.exitDiagnostics == nil {
                 Task { await state.refreshExitDiagnostics() }
             }
+        }
+    }
+
+    private var report: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                exitGroup
+                reputationGroup
+                reachabilityGroup
+                dnsGroup
+            }
+            // 报告是给人读的，限在可读列宽内居中；宽窗口下四张卡拉到 1800pt 宽，
+            // 每行只有开头几个字、右边全是空，反而比窄着更难看。
+            .frame(maxWidth: 720)
+            .frame(maxWidth: .infinity)
+            .padding(20)
+        }
+    }
+
+    private var emptyState: some View {
+        ContentUnavailableView {
+            Label("还没有检测", systemImage: "globe.asia.australia")
+        } description: {
+            Text(state.isOn
+                 ? "查出口 IP 的归属与风险，直接请求 ChatGPT、Claude 等站点看会不会被拦，并核对 DNS 有没有泄漏。"
+                 : "代理未开启，现在测到的是本机直连出口。开启代理后再测，结果才反映节点。")
+        } actions: {
+            Button("开始检测") { runFullCheck() }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+        }
+    }
+
+    private var firstPassProgress: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+                .controlSize(.regular)
+            Text("正在检测出口与站点可达性…")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// 两项检测一起跑：站点自测和出口检测互不依赖，串行等一个再等一个只是让用户多等。
+    private func runFullCheck() {
+        Task {
+            async let exit: Void = state.refreshExitDiagnostics()
+            async let probes: Void = state.refreshSiteProbes()
+            _ = await (exit, probes)
         }
     }
 
@@ -78,10 +141,18 @@ struct ExitAnalysisView: View {
                     row("检测于", value: report.checkedAt.formatted(date: .omitted, time: .standard))
                 } else if state.isRefreshingExitDiagnostics {
                     ProgressView().controlSize(.small)
+                } else if let error = state.exitDiagnosticsError {
+                    // 失败要说清楚、要能就地重试；把人支去右上角找按钮是把责任推回给用户。
+                    inlineAction(message: error, tint: .red, title: "重试") {
+                        Task { await state.refreshExitDiagnostics() }
+                    }
                 } else {
-                    emptyHint(state.exitDiagnosticsError ?? "点右上角「刷新出口」开始检测")
+                    inlineAction(message: "还没检测出口。", title: "检测出口") {
+                        Task { await state.refreshExitDiagnostics() }
+                    }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
     }
@@ -111,7 +182,9 @@ struct ExitAnalysisView: View {
                         // **不用 `ProgressView`**：macOS 上它的线性样式走系统强调色，
                         // `.tint(_:)` 不生效——分数文字是橙的、条却是灰的，最显眼的那个元素
                         // 反而不表达风险等级。自绘两条 Capsule 才能把颜色真正落上去。
-                        riskBar(score: score, tint: Theme.riskTint(risk))
+                        CapacityBar(fraction: Double(score) / 100, tint: Theme.riskTint(risk))
+                            .accessibilityLabel("风险评分")
+                            .accessibilityValue("\(score) 分，满分 100")
                     }
 
                     if !reputation.labels.isEmpty {
@@ -134,6 +207,7 @@ struct ExitAnalysisView: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(4)
             }
         }
@@ -163,7 +237,9 @@ struct ExitAnalysisView: View {
                     if state.isProbingSites {
                         ProgressView().controlSize(.small)
                     } else {
-                        emptyHint("点右上角「重新自测」开始")
+                        inlineAction(message: "还没自测。", title: "开始自测") {
+                            Task { await state.refreshSiteProbes() }
+                        }
                     }
                 } else {
                     ForEach(state.siteProbes) { result in
@@ -176,6 +252,7 @@ struct ExitAnalysisView: View {
                     }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
     }
@@ -213,22 +290,6 @@ struct ExitAnalysisView: View {
         case let .rejected(code): "被拒（\(code)）"
         case .failed: "连不上"
         }
-    }
-
-    /// 风险条。左端 0、右端 100，填充按分数取宽，颜色跟着风险等级走。
-    private func riskBar(score: Int, tint: Color) -> some View {
-        let fraction = Double(min(max(score, 0), 100)) / 100
-        return GeometryReader { proxy in
-            ZStack(alignment: .leading) {
-                Capsule().fill(.quaternary)
-                Capsule()
-                    .fill(tint)
-                    .frame(width: max(proxy.size.width * fraction, 3))
-            }
-        }
-        .frame(height: 6)
-        .accessibilityLabel("风险评分")
-        .accessibilityValue("\(score) 分，满分 100")
     }
 
     private func tint(for outcome: SiteProbeOutcome) -> Color {
@@ -285,9 +346,10 @@ struct ExitAnalysisView: View {
                         }
                     }
                 } else {
-                    emptyHint("出口检测完成后才有 DNS 结论")
+                    emptyHint("出口检测完成后才有 DNS 结论。")
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .padding(4)
         }
     }
@@ -345,6 +407,24 @@ struct ExitAnalysisView: View {
             .font(monospaced ? .callout.monospaced() : .callout)
             .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
+        }
+    }
+
+    /// 卡片内的局部空态：一句话 + 一个就地按钮。
+    private func inlineAction(
+        message: String,
+        tint: Color = .secondary,
+        title: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        HStack(spacing: 10) {
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(tint == .secondary ? AnyShapeStyle(.tertiary) : AnyShapeStyle(tint))
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            Button(title, action: action)
+                .controlSize(.small)
         }
     }
 

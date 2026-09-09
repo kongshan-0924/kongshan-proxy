@@ -68,6 +68,12 @@ struct MainWindowView: View {
             .onChange(of: selection) { _, page in
                 state.noteVisiblePage((page ?? .dashboard).title)
             }
+            // 空态按钮（「前往配置页」等）发来的跳转请求：切页、清号。
+            .onChange(of: state.requestedPage) { _, page in
+                guard let page else { return }
+                selection = page
+                state.requestedPage = nil
+            }
         }
         .toolbar {
             ToolbarItem(placement: .navigation) {
@@ -289,12 +295,12 @@ enum SidebarPage: String, CaseIterable, Identifiable {
         switch self {
         case .dashboard: "gauge.with.needle"
         case .nodes: "square.stack.3d.up"
-        case .policyGroups: "slider.horizontal.2.square.badge.arrow.down"
+        case .policyGroups: "network"
         case .routing: "arrow.triangle.branch"
         case .exitAnalysis: "globe.asia.australia"
         case .sharing: "wifi.router"
         case .connections: "point.3.filled.connected.trianglepath.dotted"
-        case .logs: "text.alignleft"
+        case .logs: "doc.plaintext"
         case .messages: "bell.badge"
         case .settings: "gearshape"
         }
@@ -341,8 +347,9 @@ struct NodesView: View {
                 } label: {
                     Label("刷新全部", systemImage: "arrow.clockwise")
                 }
+                .keyboardShortcut("r", modifiers: .command)
                 .disabled(state.subscriptions.isEmpty || state.isBusy)
-                .help("重新下载全部订阅")
+                .help("重新下载全部订阅（⌘R）")
 
                 Button {
                     showingManualNode = true
@@ -414,9 +421,12 @@ struct NodesView: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                     if let usage = item.usage, let used = usage.usedBytes, let total = usage.totalBytes, total > 0 {
-                        ProgressView(value: min(Double(used) / Double(total), 1))
+                        let fraction = Double(used) / Double(total)
+                        CapacityBar(fraction: fraction, tint: Theme.usageTint(fraction), height: 5)
                             .frame(maxWidth: 260)
-                            .tint(Double(used) / Double(total) > 0.85 ? .orange : .accentColor)
+                            .padding(.top, 2)
+                            .accessibilityLabel("已用流量")
+                            .accessibilityValue("\(Int((min(fraction, 1) * 100).rounded()))%")
                     }
                 }
                 Spacer(minLength: 8)
@@ -424,6 +434,7 @@ struct NodesView: View {
             }
             .padding(.vertical, 4)
             .contentShape(Rectangle())
+            .contextMenu { rowMenuItems(item) }
         }
         .buttonStyle(.plain)
         .disabled(state.isBusy)
@@ -445,19 +456,26 @@ struct NodesView: View {
         return parts.joined(separator: " · ")
     }
 
+    /// 行菜单的内容。省略号按钮与右键菜单共用：右键是 macOS 列表的肌肉记忆，
+    /// 只给一个 22pt 的小按钮等于让用户先找靶子再点。
+    @ViewBuilder
+    private func rowMenuItems(_ item: AppState.ConfigItem) -> some View {
+        if !item.isLocal, let source = state.subscriptions.first(where: { $0.id == item.id }) {
+            Button("重命名…") { renamingSource = source }
+            Button("立即更新") { Task { await state.refreshSubscription(id: source.id) } }
+            Toggle("参与定时更新", isOn: Binding(
+                get: { source.autoUpdate },
+                set: { enabled in Task { await state.setSubscriptionAutoUpdate(id: source.id, enabled: enabled) } }
+            ))
+            Divider()
+        }
+        Button("删除", role: .destructive) { pendingDelete = item }
+    }
+
     @ViewBuilder
     private func rowMenu(_ item: AppState.ConfigItem) -> some View {
         Menu {
-            if !item.isLocal, let source = state.subscriptions.first(where: { $0.id == item.id }) {
-                Button("重命名…") { renamingSource = source }
-                Button("立即更新") { Task { await state.refreshSubscription(id: source.id) } }
-                Toggle("参与定时更新", isOn: Binding(
-                    get: { source.autoUpdate },
-                    set: { enabled in Task { await state.setSubscriptionAutoUpdate(id: source.id, enabled: enabled) } }
-                ))
-                Divider()
-            }
-            Button("删除", role: .destructive) { pendingDelete = item }
+            rowMenuItems(item)
         } label: {
             Image(systemName: "ellipsis.circle")
         }

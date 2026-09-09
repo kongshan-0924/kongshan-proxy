@@ -74,8 +74,9 @@ struct PolicyGroupsView: View {
                         Label("测速全部", systemImage: "gauge.with.needle")
                     }
                 }
+                .keyboardShortcut("r", modifiers: .command)
                 .disabled(state.testableNodes.isEmpty)
-                .help(state.isTestingAllDelays ? "取消正在进行的测速" : "对当前配置的全部节点测速")
+                .help(state.isTestingAllDelays ? "取消正在进行的测速（⌘R）" : "对当前配置的全部节点测速（⌘R）")
 
                 Button {
                     state.startFastestTest(in: currentGroup.name)

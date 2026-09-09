@@ -46,17 +46,20 @@ struct MessagesView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
                 Divider()
-                HStack(spacing: 6) {
-                    Image(systemName: "archivebox")
-                    Text("警告与错误另存于 \(state.diagnosticsArchivePath)；"
-                         + "运行指标每分钟记一行到 \(state.metricsArchivePath)。两者都不受「全部清除」影响")
+                // 原来把两条完整路径塞进一行，中间截断后剩下 `/var/fo…ndjson` 这种谁也读不懂的碎片。
+                // 状态栏只说结论，路径交给按钮——访达里一看就全明白。
+                HStack(spacing: 8) {
+                    Label("警告、错误与运行指标另有存档，不受「全部清除」影响", systemImage: "archivebox")
                         .lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer(minLength: 0)
+                        .truncationMode(.tail)
+                        .help("警告与错误：\(state.diagnosticsArchivePath)\n运行指标：\(state.metricsArchivePath)")
+                    Spacer(minLength: 8)
+                    Button("在访达中显示") { state.revealArchivesInFinder() }
+                        .buttonStyle(.link)
+                        .font(.caption)
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .textSelection(.enabled)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 6)
                 .background(.bar)
