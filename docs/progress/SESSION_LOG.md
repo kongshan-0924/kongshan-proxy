@@ -6258,3 +6258,31 @@ git 把后半段当成 pathspec 报「未匹配任何 Git 已知文件」，提�
   **09-07 23:57**，v0.1.104 修复（`a428e73`，09-07 20:40）之后 **09-08 起归零**，
   两整天零发生。`enable()` 读的是实时服务列表，无同类问题。
 - **本轮改动**：4 处修复 + 5 个新测试 + 5 张新快照 + 渲染器两处修正；版本 0.1.106 → **0.1.107**。
+
+## 2026-09-10 00:15 — v0.1.107 构建、推送、安装、清理
+
+- **门禁**：`scripts/release.sh prepare` 通过。M4 空闲 **CPU 均值 0.340%**（限 1.0%），
+  单次最高 0.7%（限 5.0%），RSS 峰值 71 MB。签名 `valid on disk` + `satisfies its
+  Designated Requirement`（App 与内嵌 KongshanHelper 各一遍），DMG 校验和 VALID。
+  SHA-256 `b48392360cf18fb11f277c177f54e88a450626ac994772bf64961ace48bbed47`，
+  App CDHash `60cd7a06220d843ecbfdaa711c94d19f46abe68e`。
+- **推送**：`9e0f2f2` + 此前积压的 13 个提交一并推到 `origin/main`（推送前落后 13 个），
+  标签 `v0.1.107` 已推。**没有建 GitHub Release**——v0.1.102~v0.1.106 都只打 tag 不发 Release
+  （线上最新 Release 仍是 v0.1.101），本轮沿用该惯例；`.build/release-verified.txt` 与
+  `.build/kongshan.app` 均保留，需要时 `release.sh publish` 可直接跑。
+- **安装**：`release.sh install` 完成。配置备份
+  `kongshan-config-0.1.107-20260910-001244.tar.gz`（SHA-256 `ccceddbc…`），
+  旧版回滚副本在 `~/.Trash/kongshan-0.1.106-before-0.1.107-20260910-001244.app`。
+  安装后 `/Applications/kongshan.app` = 0.1.107，PID 21051，RSS 86 MB，CPU 0.0%，fd 34 个，
+  无 `.kongshan-stage-*` 残留。
+- **安装后自愈生效（真机佐证）**：启动巡检抓到 **Thunderbolt Bridge** 的代理仍指向本机 36815、
+  DNS 仍指向 TUN 地址 172.19.0.1（两者都并未在接管），已自动清掉并各记一条 warning。
+  Wi-Fi 侧三项代理全 No、DNS 为 192.168.2.101，干净。
+- **清理**：工作区 **749M → 196M**。删了 `dist/kongshan-0.1.106.dmg`（本地 dist 只留最新）、
+  `.build/arm64-apple-macosx`（553 MB 编译中间产物，`swift build` 会重建）、全部 `.DS_Store`。
+  **没动**的：`~/Library/Application Support/kongshan-backups/`（22 份共 15 MB，是安装回滚点，属用户数据）、
+  `logs/`（6.8 MB）、`metrics.ndjson`（2.7 MB，自带两代轮转）、`~/.Trash` 里的旧版副本。
+- **已知未修（低优先，留档）**：`SubscriptionService` / `RuleSetService` 下载订阅与规则集时
+  **没有响应体积上限**，走的是 `URLSession.data(from:)` 整份入内存。订阅源是用户自己添加的，
+  不构成安全问题，但恶意或故障的服务端返回超大响应会把内存顶上去。
+- **本轮改动**：VERSION 0.1.106 → 0.1.107；无运行时代码改动（代码改动见上一条记录）。
