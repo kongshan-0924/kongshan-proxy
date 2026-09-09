@@ -6286,3 +6286,28 @@ git 把后半段当成 pathspec 报「未匹配任何 Git 已知文件」，提�
   **没有响应体积上限**，走的是 `URLSession.data(from:)` 整份入内存。订阅源是用户自己添加的，
   不构成安全问题，但恶意或故障的服务端返回超大响应会把内存顶上去。
 - **本轮改动**：VERSION 0.1.106 → 0.1.107；无运行时代码改动（代码改动见上一条记录）。
+
+## 2026-09-10 00:24 — 发布 GitHub Release v0.1.107
+
+- **本轮要求**：用户说「推送github」。git 侧上一轮已推完（main + tag），所以这句指的是
+  上一条记录里明确留着没做的 GitHub Release。
+- **没能用 `release.sh publish`**：该脚本要求 `验证戳提交 == HEAD`，而上一轮在 prepare
+  之后又提交了一个纯 SESSION_LOG 的文档提交（`cb8017d`），HEAD 因此比戳多一格。
+  脚本还要求 `tag 指向 HEAD`——把 `v0.1.107` 移到 `cb8017d` 等于**删标签再建**，
+  违反「Releases/tags 只增不删」的约定，所以没有移动标签，改为手工核对门禁的**实质项**：
+  - 版本 0.1.107 与 `VERSION` 一致
+  - DMG SHA-256 与戳内 `b48392…` 逐字节一致（DMG 自验证后未被改动）
+  - App CDHash 与戳内 `60cd7a06220d843ecbfdaa711c94d19f46abe68e` 一致
+  - `v0.1.107` 正指向被验证的提交 `9e0f2f2`
+  - HEAD 相对该提交的差异：仅 `docs/progress/SESSION_LOG.md` +28 行，**零代码改动**
+  实质项全过后用 `gh release create` 直接建，参数与脚本一致
+  （`--title "kongshan 0.1.107" --generate-notes --latest`，资产名 `kongshan-0.1.107.dmg`）。
+- **结果**：<https://github.com/kongshan-0924/kongshan-proxy/releases/tag/v0.1.107>
+  非草稿、非预发布、标记为 Latest；资产 `kongshan-0.1.107.dmg` 25019931 字节，state=uploaded。
+- **端到端校验**：从 GitHub 把已发布的 DMG 下载回来重算摘要——
+  线上 / 本地 / 验证戳三者的 SHA-256 完全相同（`b48392360cf18fb11f277c177f54e88a450626ac994772bf64961ace48bbed47`）。
+- **历史 Release 未受影响**：v0.1.101 / 0.1.98 / 0.1.97 / 0.1.96 / 0.1.92 均在，符合只增不删。
+- **遗留提醒**：`release.sh publish` 的「戳提交 == HEAD」判据，遇上「prepare 之后补一条文档记录」
+  这种正常节奏就会卡住。要么记录先写后 prepare，要么让该判据允许「HEAD 与戳提交之间只有文档改动」。
+  本轮未改脚本。
+- **本轮改动**：无代码改动，仅发布与记录。
