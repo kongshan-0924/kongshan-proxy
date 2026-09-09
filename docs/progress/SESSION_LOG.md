@@ -6355,3 +6355,16 @@ git 把后半段当成 pathspec 报「未匹配任何 Git 已知文件」，提�
 - **未做**：流量图空态高度不动（开关代理时高度跳变更扰人）；`ContentUnavailableView` 里的
   `.borderedProminent` 在离屏渲染里不显蓝（非 key 窗口不着强调色），真机正常。
 - **本轮改动**：9 个源文件 + 1 个测试文件；VERSION 0.1.107 → 0.1.108。
+
+## 2026-09-10 01:10 — v0.1.108 门禁通过并安装
+
+- **门禁**：`release.sh prepare` 通过（冷编译）。M4 空闲 **CPU 均值 0.320%**（限 1.0%），单次最高 0.7%，
+  RSS 峰值 73 MB；M1→M3 链式验证与全量测试通过；签名与 DMG 校验 VALID。
+  SHA-256 `e454c902590a0bdc20090c5f4dac0f4473adde66540818aabe51f3b8eecfc655`，
+  App CDHash `e45c570c6892e57e9f7b3a6a4df5ccbc7ac4081c`。
+- **安装**：代理关闭、无内核在跑时替换。配置备份 `kongshan-config-0.1.108-20260910-010840.tar.gz`
+  （SHA-256 `02e9a691…`），旧版回滚副本 `~/.Trash/kongshan-0.1.107-before-0.1.108-20260910-010840.app`。
+  安装后 `/Applications/kongshan.app` = 0.1.108，PID 25817，RSS 85 MB，CPU 0.0%，无 `.kongshan-stage-*` 残留。
+- **推送**：仅推 `origin/main`；**未打 tag、未建 Release**——本轮用户没提，留给用户决定
+  （验证戳绑定当前提交，`release.sh publish` 随时可用）。
+- **本轮改动**：无代码改动，仅发布与记录。
