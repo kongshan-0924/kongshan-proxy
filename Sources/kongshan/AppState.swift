@@ -96,6 +96,7 @@ final class AppState {
     typealias ClashClientFactory = @Sendable (URL, String) -> ClashAPIClient
     typealias NowProvider = @Sendable () -> Date
     typealias ExitDiagnosticsProvider = @Sendable (String) async throws -> ExitDiagnosticsReport
+    typealias SiteProbeProvider = @Sendable () async -> [SiteProbeResult]
     typealias TCPPingProvider = @Sendable (String, Int) async -> DelayResult
     private static let delayPublishBatchSize = 24
     private static let bulkURLTestConcurrency = 16
@@ -188,6 +189,12 @@ final class AppState {
     private(set) var exitDiagnostics: ExitDiagnosticsReport?
     private(set) var exitDiagnosticsError: String?
     private(set) var isRefreshingExitDiagnostics = false
+
+    /// 站点可达性自测的结果。与出口 IP 分开存：出口信息回答"这是个什么 IP"，
+    /// 这里回答"这个 IP 现在到底能不能用"——后者才是用户真正要的答案。
+    private(set) var siteProbes: [SiteProbeResult] = []
+    private(set) var siteProbesCheckedAt: Date?
+    private(set) var isProbingSites = false
     private(set) var isTestingAllDelays = false
     private(set) var speedTestProgress = SpeedTestProgress()
     @ObservationIgnored private var speedTestTask: Task<Void, Never>?
@@ -355,6 +362,48 @@ final class AppState {
     /// 仅供离屏渲染自查使用。
     var snapshotSourceID: UUID?
 
+    /// 仅供离屏渲染自查：摆出一份"出口已检测 + 自测跑过 + 有 Cloudflare 挑战"的现场。
+    /// 挑战那一条是重点——这一页存在的理由就是把它跟"节点不通"区分开。
+    func applyExitAnalysisSnapshotFixture() {
+        exitDiagnostics = ExitDiagnosticsReport(
+            exit: ExitIPInfo(
+                ip: "23.249.17.74",
+                country: "Japan",
+                city: "Tokyo",
+                organization: "Prime Security Corp."
+            ),
+            resolvers: [
+                DNSResolverInfo(
+                    ip: "223.5.5.5",
+                    country: "China",
+                    city: "Hangzhou",
+                    organization: "Alibaba Cloud",
+                    isMullvadDNS: false
+                ),
+                DNSResolverInfo(
+                    ip: "8.8.8.8",
+                    country: "United States",
+                    city: nil,
+                    organization: "Google LLC",
+                    isMullvadDNS: false
+                )
+            ],
+            dns: DNSLeakAssessment(
+                status: .clear,
+                detail: "解析器与出口在同一地区，未发现把查询送回本地 ISP 的迹象。"
+            ),
+            checkedAt: Date(timeIntervalSince1970: 1_820_000_000)
+        )
+        let targets = SiteReachabilityProbe.defaultTargets
+        siteProbes = [
+            SiteProbeResult(target: targets[0], outcome: .challenged(statusCode: 403, mitigation: "challenge"), elapsedMilliseconds: 186),
+            SiteProbeResult(target: targets[1], outcome: .challenged(statusCode: 403, mitigation: "challenge"), elapsedMilliseconds: 174),
+            SiteProbeResult(target: targets[2], outcome: .ok(statusCode: 204), elapsedMilliseconds: 168),
+            SiteProbeResult(target: targets[3], outcome: .ok(statusCode: 200), elapsedMilliseconds: 612)
+        ]
+        siteProbesCheckedAt = Date(timeIntervalSince1970: 1_820_000_000)
+    }
+
     @ObservationIgnored private let storage: Storage
     @ObservationIgnored private let subscriptionService: SubscriptionService
     @ObservationIgnored private let ruleSetService: RuleSetService
@@ -400,6 +449,7 @@ final class AppState {
     @ObservationIgnored private let clashClientFactory: ClashClientFactory
     @ObservationIgnored private let now: NowProvider
     @ObservationIgnored private let exitDiagnosticsProvider: ExitDiagnosticsProvider
+    @ObservationIgnored private let siteProbeProvider: SiteProbeProvider
     @ObservationIgnored private let tcpPingProvider: TCPPingProvider
     @ObservationIgnored private let kernelLogStore: KernelLogStore
     @ObservationIgnored private let subscriptionUpdateScheduler: SubscriptionUpdateScheduler
@@ -538,6 +588,7 @@ final class AppState {
         healthVerifier: HealthVerifier? = nil,
         clashClientFactory: ClashClientFactory? = nil,
         exitDiagnosticsProvider: ExitDiagnosticsProvider? = nil,
+        siteProbeProvider: SiteProbeProvider? = nil,
         tcpPingProvider: TCPPingProvider? = nil,
         lanResolverProbe: LANResolverProbing? = nil,
         now: @escaping NowProvider = Date.init,
@@ -592,6 +643,9 @@ final class AppState {
         }
         self.exitDiagnosticsProvider = exitDiagnosticsProvider ?? { remoteDoH in
             try await ExitDiagnosticsService().run(remoteDoH: remoteDoH)
+        }
+        self.siteProbeProvider = siteProbeProvider ?? {
+            await SiteReachabilityProbe.run()
         }
         self.tcpPingProvider = tcpPingProvider ?? { host, port in
             await TCPPinger.ping(host: host, port: port)
@@ -653,6 +707,35 @@ final class AppState {
         } catch {
             exitDiagnosticsError = "出口诊断失败：\(error.localizedDescription)"
         }
+    }
+
+    /// 站点可达性自测。**不因失败而清空上一次结果**——网络抖一下就把整页清空，
+    /// 用户会以为"刚才的结论没了"，而这正是他要拿去对比换节点前后的东西。
+    func refreshSiteProbes() async {
+        guard !isProbingSites else { return }
+        isProbingSites = true
+        defer { isProbingSites = false }
+        let results = await siteProbeProvider()
+        siteProbes = results
+        siteProbesCheckedAt = now()
+    }
+
+    /// 自测结论的一句话总结。区分三种情形，因为给用户的建议完全不同：
+    /// 全通 / 只有特定站点被挑战（换节点有用）/ 基准站也不通（换节点没用，是链路问题）。
+    var siteProbeSummary: String? {
+        guard !siteProbes.isEmpty else { return nil }
+        let challenged = siteProbes.filter { if case .challenged = $0.outcome { return true } else { return false } }
+        let baselines = siteProbes.filter { $0.target.impact.hasPrefix("基准") }
+        let baselineDown = baselines.filter { !$0.outcome.isUsable }
+        if !baselineDown.isEmpty {
+            return "基准站点也不通（\(baselineDown.map(\.target.name).joined(separator: "、"))），"
+                + "说明当前链路本身有问题，换节点未必有用"
+        }
+        if !challenged.isEmpty {
+            return "\(challenged.map(\.target.name).joined(separator: "、"))"
+                + " 被 Cloudflare 判定需要人机验证——这是出口 IP 的信誉问题，换一个不同网段的节点通常能解决"
+        }
+        return "全部可达，当前出口没有被这些站点拦截"
     }
 
     var isOn: Bool {

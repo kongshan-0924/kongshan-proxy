@@ -86,6 +86,14 @@ final class RenderSnapshotTests: XCTestCase {
             size: CGSize(width: 740, height: 420)
         )
 
+        // 出口分析页：出口信息 + 站点可达性自测 + DNS 解析器明细。
+        state.applyExitAnalysisSnapshotFixture()
+        render(
+            ExitAnalysisView().environment(state),
+            name: "exit-analysis",
+            size: CGSize(width: 820, height: 900)
+        )
+
         // 对照组：确认 .sidebar 样式的 List 在 cacheDisplay 下是否本来就抓不到内容。
         render(
             List { Label("Dashboard", systemImage: "gauge.with.dots.needle.67percent") }

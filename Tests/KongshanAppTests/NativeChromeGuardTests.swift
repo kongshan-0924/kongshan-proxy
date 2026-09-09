@@ -83,15 +83,43 @@ final class NativeChromeGuardTests: XCTestCase {
         XCTAssertTrue(dashboard.contains("transaction.animation = nil"), "图表必须关动画")
     }
 
-    /// 指标网格是**六张卡、列数只取 6 的因数**。用 `.adaptive` 会在某些宽度下排成
-    /// 4 或 5 列，最后一行缺两个角——用户 2026-09-03 反馈的「首页有两个空的」。
+    /// 指标网格：**列数候选必须整除卡片数**，否则最后一行缺角——
+    /// 用户 2026-09-03 反馈的「首页有两个空的」就是 `.adaptive` 排出 4/5 列造成的。
+    ///
+    /// 这里不再硬编码卡片名单，而是直接从源码数出网格里的卡片数，再验证每个列数候选都能整除它。
+    /// 加卡、减卡时这条会自动跟着变——名单式断言只会在改动时报"缺少某某卡"，帮不上判断。
     func testDashboardMetricsGridNeverLeavesAGaggedRow() throws {
         let dashboard = try source("DashboardView.swift")
         XCTAssertFalse(dashboard.contains("GridItem(.adaptive"), "自适应列会排出缺角的最后一行")
         XCTAssertTrue(dashboard.contains("count: metricColumns"))
-        // 会随流量变化的四张卡各自是独立视图（Observation 只失效自己），见 DashboardObservationScopeTests。
-        for box in ["ExitIPMetricBox", "ConnectionsMetricBox", "CoreMemoryMetricBox", "runtimeBox", "activeConfigBox", "SelfUsageMetricBox"] {
-            XCTAssertTrue(dashboard.contains(box), "缺少指标卡 \(box)")
+
+        // 网格体：LazyVGrid 的尾随闭包到 `.background {` 之间。
+        let gridStart = try XCTUnwrap(dashboard.range(of: "count: metricColumns"))
+        let gridEnd = try XCTUnwrap(dashboard.range(of: ".background {", range: gridStart.upperBound..<dashboard.endIndex))
+        let body = dashboard[gridStart.upperBound..<gridEnd.lowerBound]
+        let cardCount = body
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { line in
+                guard !line.isEmpty, !line.hasPrefix("//"), !line.hasPrefix(")"), !line.hasPrefix("]") else { return false }
+                return line.hasSuffix("()") || line.hasSuffix("Box")
+            }
+            .count
+        XCTAssertGreaterThan(cardCount, 0, "没数出任何指标卡，断言本身失效了")
+
+        let candidates = try XCTUnwrap(
+            dashboard.range(of: "let candidates: [Int] = [").map { range -> [Int] in
+                let tail = dashboard[range.upperBound...]
+                let inside = tail.prefix { $0 != "]" }
+                return inside.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+            }
+        )
+        XCTAssertFalse(candidates.isEmpty, "没解析出列数候选")
+        for candidate in candidates {
+            XCTAssertEqual(
+                cardCount % candidate, 0,
+                "\(cardCount) 张卡排 \(candidate) 列会缺角；候选列数必须整除卡片数"
+            )
         }
     }
 

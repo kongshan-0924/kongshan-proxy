@@ -18,6 +18,7 @@ struct MainWindowView: View {
                     sidebarRow(.routing)
                 }
                 Section("其他") {
+                    sidebarRow(.exitAnalysis)
                     sidebarRow(.sharing)
                     sidebarRow(.connections)
                     sidebarRow(.logs)
@@ -40,6 +41,8 @@ struct MainWindowView: View {
                     PolicyGroupsView()
                 case .routing:
                     RoutingView()
+                case .exitAnalysis:
+                    ExitAnalysisView()
                 case .sharing:
                     SharingView()
                 case .connections:
@@ -81,9 +84,13 @@ struct MainWindowView: View {
         // 只提供快捷键，不参与布局与渲染。
         .background {
             HStack(spacing: 0) {
+                // 只给前 9 页绑 ⌘1~⌘9。第 10 页起不能再绑：`Character("10")` 不是单字符，
+                // `Character(_:)` 会直接 trap——加一页就崩，且崩在启动路径上。
                 ForEach(Array(SidebarPage.allCases.enumerated()), id: \.element) { index, page in
-                    Button(page.title) { selection = page }
-                        .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: .command)
+                    if let key = SidebarPage.shortcutKey(at: index) {
+                        Button(page.title) { selection = page }
+                            .keyboardShortcut(key, modifiers: .command)
+                    }
                 }
             }
             .frame(width: 0, height: 0)
@@ -240,11 +247,14 @@ private struct NativeNoticeToolbarItem: View {
     }
 }
 
-private enum SidebarPage: String, CaseIterable, Identifiable {
+/// internal 而非 private：`shortcutKey(at:)` 的越界保护断了会**直接崩在主窗口构建路径**上
+/// （`Character("10")` 会 trap），必须能被测试直接覆盖。
+enum SidebarPage: String, CaseIterable, Identifiable {
     case dashboard
     case nodes
     case policyGroups
     case routing
+    case exitAnalysis
     case sharing
     case connections
     case logs
@@ -259,6 +269,7 @@ private enum SidebarPage: String, CaseIterable, Identifiable {
         case .nodes: "配置"
         case .policyGroups: "代理"
         case .routing: "规则"
+        case .exitAnalysis: "出口分析"
         case .sharing: "共享"
         case .connections: "连接"
         case .logs: "内核日志"
@@ -267,12 +278,20 @@ private enum SidebarPage: String, CaseIterable, Identifiable {
         }
     }
 
+    /// ⌘1~⌘9。超出的页不绑快捷键——`Character("10")` 不是单字符，构造会 trap。
+    /// internal 而非 private：这条性质断了会**直接崩在启动路径**上，需回归覆盖。
+    static func shortcutKey(at index: Int) -> KeyEquivalent? {
+        guard (0..<9).contains(index) else { return nil }
+        return KeyEquivalent(Character("\(index + 1)"))
+    }
+
     var symbol: String {
         switch self {
         case .dashboard: "gauge.with.needle"
         case .nodes: "square.stack.3d.up"
         case .policyGroups: "slider.horizontal.2.square.badge.arrow.down"
         case .routing: "arrow.triangle.branch"
+        case .exitAnalysis: "globe.asia.australia"
         case .sharing: "wifi.router"
         case .connections: "point.3.filled.connected.trianglepath.dotted"
         case .logs: "text.alignleft"

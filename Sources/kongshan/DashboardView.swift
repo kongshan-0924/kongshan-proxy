@@ -70,8 +70,8 @@ struct DashboardView: View {
                                 StatusBadge(text: "出站 · \(state.outboundMode.displayName)", tint: state.statusTint)
                             }
                         }
-                        if let selected = state.selectedNode {
-                            HStack(spacing: 6) {
+                        HStack(spacing: 6) {
+                            if let selected = state.selectedNode {
                                 Text(selected.name)
                                     .font(.callout)
                                     .lineLimit(1)
@@ -79,11 +79,24 @@ struct DashboardView: View {
                                 if let delay = state.delays[selected.id] {
                                     DelayLabel(milliseconds: delay)
                                 }
+                            } else {
+                                Text("未启用或未选择节点")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
                             }
-                        } else {
-                            Text("未启用或未选择节点")
-                                .font(.callout)
-                                .foregroundStyle(.secondary)
+                            // 当前配置紧挨节点：这两条是同一个问题的两半——"用哪个配置里的哪个节点"。
+                            // 原来配置单占一张指标卡，既占位置又和节点隔着半屏。
+                            if let config = activeConfig {
+                                Divider().frame(height: 12)
+                                Text(config.name)
+                                    .font(.callout)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .help("当前生效配置")
+                                Text("\(config.nodeCount) 个节点")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
 
@@ -147,10 +160,11 @@ struct DashboardView: View {
 
     /// 接管方式、当前节点与出站模式已并入状态区，这里只保留观测类指标。
     ///
-    /// 六张卡，列数**只取 6 的因数**（6/3/2/1）。`.adaptive` 会在某些宽度下排成 4 或 5 列，
-    /// 最后一行就缺两个角——用户反馈的「首页有两个空的」正是这个。
+    /// 四张卡，列数**只取 4 的因数**（4/2/1）。`.adaptive` 会在某些宽度下排出缺角的最后一行——
+    /// 用户 2026-09-03 反馈的「首页有两个空的」正是那个。
     ///
-    /// 会变的卡各自是独立视图（见文件头）；运行时长与当前配置只读低频状态，留在这里。
+    /// 从六张减到四张：内核内存与空山占用都是内存、合成一张；当前配置移进上方状态卡贴着节点。
+    /// 会变的卡各自是独立视图（见文件头）；运行时长只读低频状态，留在这里。
     private var metrics: some View {
         LazyVGrid(
             columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: metricColumns),
@@ -158,10 +172,8 @@ struct DashboardView: View {
         ) {
             ExitIPMetricBox()
             ConnectionsMetricBox()
-            CoreMemoryMetricBox()
+            MemoryMetricBox()
             runtimeBox
-            activeConfigBox
-            SelfUsageMetricBox()
         }
         .background {
             GeometryReader { proxy in
@@ -178,25 +190,13 @@ struct DashboardView: View {
         }
     }
 
-    private var activeConfigBox: some View {
-        MetricBox(symbol: "doc.badge.gearshape", tint: .indigo, caption: "当前配置") {
-            Text(activeConfig?.name ?? "无")
-        } corner: {
-            if let config = activeConfig {
-                Text("\(config.nodeCount) 个节点")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
     private var activeConfig: AppState.ConfigItem? {
         state.configItems.first { $0.id == state.activeConfigID }
     }
 
-    /// 只取 6 的因数，任何宽度下最后一行都排满。
+    /// 只取 4 的因数，任何宽度下最后一行都排满。
     private func updateMetricColumns(_ width: CGFloat) {
-        let candidates: [Int] = [6, 3, 2]
+        let candidates: [Int] = [4, 2]
         var next = 1
         for count in candidates {
             let needed: CGFloat = CGFloat(count) * 170 + CGFloat(count - 1) * 12
@@ -525,46 +525,36 @@ private struct ConnectionsMetricBox: View {
     }
 }
 
-private struct CoreMemoryMetricBox: View {
+/// 内核与 App 自身的内存合成一张卡：两者都是"占了多少内存"，分成两张既占位置又要用户自己对照。
+/// 顺序固定为「内核 / 空山」，与 caption 一致。
+private struct MemoryMetricBox: View {
     @Environment(AppState.self) private var state
 
     var body: some View {
-        MetricBox(symbol: "memorychip", tint: .pink, caption: "内核内存") {
-            Text(Theme.bytesOrDash(Int64(clamping: state.coreMemory)))
+        MetricBox(symbol: "memorychip", tint: .pink, caption: "内存（内核 / 空山）") {
+            Text(text)
         } corner: {
-            if state.coreVersion != "—" {
-                // 内核的 /version 返回的就带名字（`sing-box 1.13.14`），
-                // 不要再加「内核」前缀——真机上会读成「内核 sing-box 1.13.14」。
-                Text(state.coreVersion)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .help("内置 sing-box 版本")
-            }
-        }
-    }
-}
-
-/// 空山自身的占用。与「内核内存」是两回事（那是 sing-box），标签已写明。
-/// 数据来自每分钟一次的运行指标，不额外采样。
-private struct SelfUsageMetricBox: View {
-    @Environment(AppState.self) private var state
-
-    var body: some View {
-        MetricBox(symbol: "cpu", tint: .brown, caption: "空山占用") {
             if let metrics = state.lastMetrics {
+                // 空山自身的 CPU。放在角上而不是正文：它和内存不是一回事，但同属"本机开销"。
                 Text(String(format: "%.1f%%", metrics.cpu))
-            } else {
-                Text("—")
-            }
-        } corner: {
-            if let metrics = state.lastMetrics {
-                Text("\(metrics.rss) MB")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .help("内存占用，每分钟更新一次")
+                    .help("空山自身 CPU 占用，每分钟更新一次")
             }
         }
+        .help(helpText)
+    }
+
+    private var text: String {
+        let core = Theme.bytesOrDash(Int64(clamping: state.coreMemory))
+        let app = state.lastMetrics.map { "\($0.rss) MB" } ?? "—"
+        return "\(core) / \(app)"
+    }
+
+    private var helpText: String {
+        // 内核的 /version 返回的就带名字（`sing-box 1.13.14`），不要再加「内核」前缀。
+        let version = state.coreVersion == "—" ? "" : "；内核版本 \(state.coreVersion)"
+        return "左：sing-box 内核占用（实时）。右：空山自身占用（每分钟更新）\(version)"
     }
 }
 
