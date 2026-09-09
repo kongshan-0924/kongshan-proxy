@@ -283,9 +283,26 @@ struct ConnectionsView: View {
         }
     }
 
+    /// 入站标签。内核给的 `chains` 第一项永远是它（`["node-x","mixed-in"]` 反转后到队首）。
+    private static let inboundTags: Set<String> = ["mixed-in", "tun-in"]
+
     private func chainText(_ conn: ConnectionLiveDetail, nodeNames: [String: String]) -> String {
+        Self.chainDisplayText(conn, nodeNames: nodeNames)
+    }
+
+    /// 非 private 且是静态的：这段取舍（丢入站、换节点名、拼规则）有真实的判断在里面，
+    /// 要能被单测直接盯住，见 `ConnectionChainTextTests`。
+    static func chainDisplayText(_ conn: ConnectionLiveDetail, nodeNames: [String: String]) -> String {
+        // **丢掉入站标签**。它每条连接都一样、零信息量，却要占掉 `mixed-in →` 这么宽，
+        // 再叠上 `.truncationMode(.middle)`，被挤掉的恰好是最该看的策略组名——
+        // 真机截图里成了 `mixed…务`、`mi…点选择`、`…者服务`，等于整列白占。
+        // 完整链路（含入站）在右键的「查看完整命中链路」里，那儿才是它该待的地方。
+        var tags = conn.chains
+        if tags.count > 1, let first = tags.first, Self.inboundTags.contains(first) {
+            tags.removeFirst()
+        }
         // 策略组名（`🚀 节点选择` 等）本来就可读，只把 `node-<uuid>` 换成节点名。
-        let chain = conn.chains
+        let chain = tags
             .map { nodeNames[$0] ?? $0 }
             .joined(separator: " → ")
         if conn.rule.isEmpty { return chain }

@@ -107,8 +107,11 @@ struct ExitAnalysisView: View {
                             Spacer(minLength: 8)
                         }
                         // 进度条让"57 分"有直观位置感；纯数字看不出离两端多远。
-                        ProgressView(value: Double(min(max(score, 0), 100)), total: 100)
-                            .tint(Theme.riskTint(risk))
+                        //
+                        // **不用 `ProgressView`**：macOS 上它的线性样式走系统强调色，
+                        // `.tint(_:)` 不生效——分数文字是橙的、条却是灰的，最显眼的那个元素
+                        // 反而不表达风险等级。自绘两条 Capsule 才能把颜色真正落上去。
+                        riskBar(score: score, tint: Theme.riskTint(risk))
                     }
 
                     if !reputation.labels.isEmpty {
@@ -210,6 +213,22 @@ struct ExitAnalysisView: View {
         case let .rejected(code): "被拒（\(code)）"
         case .failed: "连不上"
         }
+    }
+
+    /// 风险条。左端 0、右端 100，填充按分数取宽，颜色跟着风险等级走。
+    private func riskBar(score: Int, tint: Color) -> some View {
+        let fraction = Double(min(max(score, 0), 100)) / 100
+        return GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Capsule().fill(.quaternary)
+                Capsule()
+                    .fill(tint)
+                    .frame(width: max(proxy.size.width * fraction, 3))
+            }
+        }
+        .frame(height: 6)
+        .accessibilityLabel("风险评分")
+        .accessibilityValue("\(score) 分，满分 100")
     }
 
     private func tint(for outcome: SiteProbeOutcome) -> Color {

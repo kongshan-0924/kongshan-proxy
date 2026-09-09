@@ -650,7 +650,9 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
     }
 }
 
-private struct SettingsView: View {
+/// 非 private：`RenderSnapshotTests` 要单独渲染这一页。设置页是全应用最长的表单，
+/// 只经由 `MainWindowView` 间接覆盖的话，改布局时看不出它哪里塌了。
+struct SettingsView: View {
     @Environment(AppState.self) private var state
     @State private var dnsDraft = DNSSettings.defaults
     @State private var subscriptionUpdateDraft = SubscriptionUpdateSettings.defaults

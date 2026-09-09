@@ -17,8 +17,11 @@ import Security
 
 let helperVersion = "0.1.0"
 
-/// 日志文件（root 拥有、0644，App 普通用户可读以查看 TUN 日志）。
-/// 日志只含 sing-box 运行日志，不含凭据（secret 只在内存、config 经 stdin 不落盘）。
+/// 日志文件（root 拥有、**0640 root:admin**，App 所属的管理员账户可读以查看 TUN 日志）。
+/// 日志只含 sing-box 运行日志，不含凭据（secret 只在内存、config 经 stdin 不落盘），
+/// 但**含用户访问过的全部域名**——那是浏览记录，不该给本机其它账户看。
+/// 曾经是 0644：目录虽是 0711（列不出内容），路径却是公开的，同机的非管理员账户
+/// 直接 `cat` 就能读到全部域名。改 0640 后仅 root 与 admin 组可读，App 走 admin 组照常读。
 let logURL = URL(fileURLWithPath: HelperConstants.stateDirectory + "/sing-box-tun.log")
 /// 日志体积上限。超限则启动时截断保留尾部，防无限增长。
 let logByteLimit = 5 * 1024 * 1024
@@ -204,10 +207,11 @@ func verifySingBoxSignature(at url: URL, pinnedCDHashHex: String?) throws {
 func startSingBox(at url: URL, configData: Data, pinnedCDHashHex: String?) throws -> Int32 {
     try verifySingBoxSignature(at: url, pinnedCDHashHex: pinnedCDHashHex)
 
-    // 日志文件：O_CREAT|O_APPEND，0644 让 App 可读（日志不含凭据）。
-    let logFD = open(logURL.path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, mode_t(0o644))
+    // 日志文件：O_CREAT|O_APPEND，0640 root:admin —— 见 `logURL` 处的说明。
+    let logFD = open(logURL.path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, mode_t(0o640))
     guard logFD >= 0 else { throw HelperError.logOpenFailed }
     defer { close(logFD) }
+    applyLogOwnership(fd: logFD)
 
     // 新建 pipe：读端给 sing-box stdin，写端后台灌入已校验的 configData。
     var pipeFDs: [Int32] = [0, 0]
@@ -543,6 +547,20 @@ func checkClientLiveness() {
     }
 }
 
+/// 把日志固定成 root:admin 0640。
+///
+/// **不靠目录的组继承**：BSD 语义下新文件继承父目录的组，而父目录的组取决于
+/// 安装路径与安装方式，靠它保证安全属性太脆。这里显式 fchown 到 admin 组。
+/// admin 组不存在（理论上不会）就退回 0600——宁可 App 读不到日志，也不留世界可读。
+func applyLogOwnership(fd: Int32) {
+    guard let group = getgrnam("admin") else {
+        _ = fchmod(fd, mode_t(0o600))
+        return
+    }
+    _ = fchown(fd, 0, group.pointee.gr_gid)
+    _ = fchmod(fd, mode_t(0o640))
+}
+
 /// 启动前若日志超限，截断保留尾部，防无限增长。
 func rotateLogIfNeeded() {
     guard let attrs = try? FileManager.default.attributesOfItem(atPath: logURL.path),
@@ -572,7 +590,7 @@ func rotateLogIfNeeded() {
         }
         return offset
     }
-    try? FileManager.default.setAttributes([.posixPermissions: NSNumber(value: Int16(0o644))], ofItemAtPath: logURL.path)
+    applyLogOwnership(fd: fd)
 }
 
 // MARK: - socket 服务（§2b.1）

@@ -6140,3 +6140,121 @@ git 把后半段当成 pathspec 报「未匹配任何 Git 已知文件」，提�
 - **未验证**：未实测当前隧道的真实吞吐（本轮代理是关的，未擅自开启）；
   `remote: invalid listen` 的具体成因未深究（远端所报，本地无更多线索）。
 - **本轮改动**：仅新增基准测试文件，未改任何运行时行为。
+
+## 2026-09-09 21:20 — 排查（只读）：跑着跑着就超时、另一个对话没事
+
+- **本轮问题**：用户追问「现在就是，跑着跑着就超时了，另一个对话就没事，为什么总感觉出现问题，之前好好的」，
+  附另一个 Claude Code 会话卡在 `Request failed · Retrying (2/10) · 12m 7s` 的截图。
+- **前提变化**：上一轮代理是关的，本轮用户已开启（sing-box PID 2590，21:07:41 起，root，TUN `utun6`=172.19.0.1），
+  上一轮欠的「实测隧道吞吐」这一硬判据本轮补上了。
+- **实测（当前 vless 节点 179.253.249.94，21:07 刚切）**：
+  - 下行 10 MB：中转层 36815 = 4.79 MB/s，内核 mixed 48196 = 4.71 MB/s（两者等速）
+  - 上行 5 MB × 3 轮交替：中转 2.27/2.28/2.71，内核 2.39/2.63/2.58 MB/s（两者等速）
+  - 上行 3 MB × 8：1.12~1.72 MB/s，无长尾
+  - 小请求 × 20（generate_204）：120~130 ms，两次 300~365 ms，无失败
+  - api.anthropic.com × 5：HTTP 401（正常鉴权拒绝＝通了），握手 0.42~0.46 s，总 0.65~0.69 s
+  - `curl -I api.anthropic.com`：`cf-ray: ...-LAX`，**无 `cf-mitigated`** → 当前出口未被 Cloudflare 挑战
+- **决定性发现——协议层结构差异**：故障期用的是 **anytls** 节点，anytls 是 **session 复用**协议，
+  多条逻辑 stream 跑在同一条到节点的 TCP session 上；当前 vless 节点 `multiplex=None`，每条连接独立。
+  日志把两级失败分得很清楚：
+  - `failed to create session: ...`（建 session 失败）：`connection refused` 227 次、`EOF` 36 次、
+    `reset by peer` 15 次、节点域名 lookup 失败 120 次
+  - `failed to create stream: use of closed network connection` **11 次**——这一类是
+    **session 已死、新流挂不上去**，其中 3 次直接打在 `api.anthropic.com:443` 上（21:00:40 / 21:04:20 / 21:06:57，各卡 3.0 s），
+    另有 20:53:35 一次 `api.anthropic.com` 建 session 时被 `212.87.192.23:5767` reset by peer（卡 5.95 s）
+  - **这解释了「一个对话超时、另一个没事」**：共享 session 一死，骑在上面的流全部同时腰斩；
+    重试期间新流拿到已关闭的 session 继续失败；而另一个会话若在 session 重建后才发请求，走的是新 session，正常。
+- **「之前好好的」的时间线**：`failed to create stream` 首次出现 **09-09 09:00:43**，末次 21:06:57；
+  session 级失败按小时 04 点 242 次、15 点 41 次、20 点 117 次、21 点 3 次——**阵发性劣化，从今天早上开始**。
+- **20:47~20:48 的 108 次节点域名解析失败是换网所致**：失败记录的源地址是 `172.16.15.241`，
+  当前机器只有 `en0=192.168.0.101` 和 `utun6=172.19.0.1`，无 172.16.x 接口 → 当时在另一个网络，
+  切网瞬间旧接口路由消失（`no route to host` / `use of closed network connection`），非软件缺陷。
+- **顺带发现（待修）**：App 侧 `~/Library/Application Support/kongshan/logs/sing-box.log` 停在 **21:07:31**，
+  而内核仍在写 `/Library/Application Support/kongshan/helper/sing-box-tun.log`（21:15 仍在增长，8 分钟 12640 行）。
+  helper 用 `posix_spawn_file_actions_adddup2` 把内核 stdout/stderr 定向到 helper 目录下的固定文件
+  （`Sources/KongshanHelper/main.swift:22,208,231-232`），TUN/root 模式下 App 那份日志不再更新。
+  **影响**：TUN 开着时 App 日志页与既往几轮的日志分析都只看得到切换前的数据。尚未确认是设计如此还是缺陷。
+- **一次未复现的异常**：切节点后第一次 5 MB 上行走中转层耗时 17.2 s（0.29 MB/s），同批次内核直连 1.86 s；
+  但随后 11 次采样（3 轮交替 + 8 次单测）全部正常，**未复现，本轮不做归因**。
+  sing-box 日志显示该连接建连仅 286 ms，慢在数据传输段。
+- **结论**：不是近期改动、不是中转层（上下行两条路等速）、不是 DNS、当前出口未被 Cloudflare 挑战。
+  根因是**故障期那批 anytls 节点的 session 反复被重置**，而 anytls 的 session 复用把单点故障放大成
+  「该 session 上所有会话同时断」。21:07 换到无复用的 vless 节点后，12640 行日志里只有 2 条广告拦截 + 1 条 TLS record 错误。
+- **本轮改动**：无，纯只读排查。
+
+## 2026-09-10 00:05 — v0.1.107：全量代码审计 + 全模块测试
+
+- **本轮任务**：用户要求「全部审计一遍代码，风险/性能/内容与资源泄漏等 bug 都修，
+  然后所有模块做一遍功能、性能、UI 布局测试，修完合并、打 tag、构建、推送、
+  出报告、替换安装、清理工作区」。
+- **审计范围**：149 个 Swift 文件（源码 23.9k 行 + 测试 16.5k 行）。按类别扫：
+  文件句柄与 fd、Timer/DispatchSource、未取消的 Task、无界集合、URLSession 生命周期、
+  强制解包与下标越界、`@unchecked Sendable`、主线程阻塞、凭据落盘与文件权限、
+  `while true` 的退出条件、SwiftUI body 里的重活。
+
+### 修掉的问题（4 项）
+
+1. **`KernelLogStore.rotateExternalFileIfNeeded` 的 fd 泄漏**
+   （`Sources/KongshanCore/KernelLogStore.swift:232`）。
+   `let writer = try FileHandle(forWritingTo:)` 之后是 `try writer.truncate(atOffset: 0)`
+   再 `try writer.close()`——**truncate 抛错时 close 永远不执行**，句柄泄漏。
+   同一个函数里上面的 `reader` 用的是 `defer { try? reader.close() }`，写法本来就不一致。
+   改为 `defer`。
+2. **helper 内核日志世界可读（隐私）**（`Sources/KongshanHelper/main.swift`）。
+   `/Library/Application Support/kongshan/helper/sing-box-tun.log` 是 **0644 root:admin**，
+   而它逐条记录用户访问过的**全部域名**。目录是 0711（列不出内容），但路径是公开的，
+   `cat` 直接能读。**本机实测确有第二个账户 `wangyuhao`（uid 1706700995，不在 admin 组）**，
+   它能读到 kaysen 的完整浏览记录。新增 `applyLogOwnership(fd:)`：显式
+   `fchown(fd, 0, admin.gid)` + `fchmod(fd, 0o640)`，建文件与轮转后各调一次。
+   **不靠目录组继承**——继承的组取决于安装路径，靠它保证安全属性太脆；
+   admin 组不存在则退回 0600（宁可 App 读不到日志，也不留世界可读）。
+   `KernelLogStore.exportText` 对读不到的文件是 `try?` + `continue`，降级安全。
+3. **IP 风险条不显示风险颜色**（`Sources/kongshan/ExitAnalysisView.swift:110`）。
+   代码写了 `ProgressView(...).tint(Theme.riskTint(risk))`，**但 macOS 上线性
+   `ProgressView` 走系统强调色，`.tint` 不生效**——离屏渲染实测：分数「57%」是橙的、
+   进度条却是灰的，最显眼的那个元素反而不表达风险等级。改为自绘两条 `Capsule`。
+4. **连接页链路列把策略组名截成废话**（`Sources/kongshan/ConnectionsView.swift`）。
+   内核 `chains` 第一项永远是入站标签（`mixed-in` / `tun-in`，见既有测试
+   `ClashStreamingTests.swift:66` 的真实载荷 `"chains":["node-x","mixed-in"]`），
+   每条连接都一样、零信息量，却占着宽度；叠上 `.truncationMode(.middle)` 后
+   被挤掉的恰好是最该看的策略组名——渲染实测成了 `mixed…务`、`mi…点选择`、`…者服务`。
+   `chainDisplayText` 丢掉入站标签（只剩一项时不丢），完整链路仍在右键详情里。
+
+### 提出后被自己证伪的假设（记下来，免得下次再走一遍）
+
+- **「`RelayPair` 只处理 `.failed`、不处理 `.waiting`，内核重启时客户端会无限挂着」——否。**
+  写了 `.waiting → cancel()` 的补丁和测试，**测试对旧实现同样通过**，说明补丁无效。
+  于是写独立探针实测（scratchpad/nwprobe）：回环死端口上 NWConnection 确实
+  **停在 `.waiting(ECONNREFUSED)` 8 秒不转 `.failed`**（前提成立），
+  但 `receive` 回调**立刻带 ECONNREFUSED 返回**，`pump(from: backend, to: client)`
+  走 `cancel()` 已经快速断开了。补丁撤回。
+  测试保留为回归护栏并改正注释——这条路径**只有这一层保险**：谁重排了 pump 的
+  启动顺序、或让 backend 的 receive 晚于首个 send 挂上，客户端就会真的挂住。
+- **「`lastNotifiedAt: [String: Date]` 无界增长」——否。** 13 处插值标题用的都是
+  `\(kind)` / `\(operation)`，取值来自枚举，键集有界。
+- **「App 的日志镜像在 TUN 下断了」——否。** 两条特权路径各写各的：helper 路径写
+  helper 目录并由 helper 自己在存活检查循环里轮转；`PrivilegedLauncher`（osascript 回退）
+  写 App 目录并由 `startExternalRotationMonitoring` 轮转。`exportText` 两份都读。
+  上一轮看到的「App 那份停在 21:07」只是内核当时切到了 helper 路径。
+- **「RSS 从 64 MB 涨到 189 MB 且不回落 = 内存泄漏」——否。** 跨 7 天看，
+  每天都是 27~45 MB 基线 / 129~220 MB 峰值，**无单调增长**，是活动水位不是泄漏。
+
+### 测试
+
+- **功能**：`swift test` 全量 **645 项通过**（基线 640，本轮新增 5：连接链路文案 4 + 中转层护栏 1），
+  3 项 skip，40.5 秒。
+- **UI 布局**：离屏渲染从 24 张扩到 **29 张**。补了此前从未进过快照的三页——
+  **连接、消息、设置**（`SettingsView` 由 `private` 改为 internal，理由写在声明处）。
+  同时修了渲染器两个让快照「测了个寂寞」的问题：
+  1. `NSHostingView` 不显式定尺时，`Table`（连接页）用自身固有尺寸，
+     **无论请求 1000×640 还是 620×560 都渲染成 400×141pt**，两张快照像素完全一样。
+     改为在 rootView 上加 `.frame(width:height:)`。
+  2. 连接页 `onAppear` 会启动监控循环并清空列表，render 前摆好的 fixture 会被冲掉。
+     `render` 新增 `afterLayout` 钩子（+0.3 秒注入，循环两轮间隔 1.5 秒，0.8 秒抓图时数据还在）。
+  上面第 3、4 条 UI 缺陷就是靠这两处修正才看见的。
+- **性能**：`scripts/release.sh prepare` 内含 M4 门禁（M1→M2→M3 链式 + 空闲 CPU 均值 ≤1.0% /
+  单次 ≤5.0%），结果见下一条记录。
+- **真机佐证**：`diagnostics.ndjson` 显示「当前配置应用失败，已回滚」最后一次是
+  **09-07 23:57**，v0.1.104 修复（`a428e73`，09-07 20:40）之后 **09-08 起归零**，
+  两整天零发生。`enable()` 读的是实时服务列表，无同类问题。
+- **本轮改动**：4 处修复 + 5 个新测试 + 5 张新快照 + 渲染器两处修正；版本 0.1.106 → **0.1.107**。

@@ -138,7 +138,7 @@ public actor KernelLogStore {
     /// （`HelperConstants.stateDirectory`），不在 App 的 logs 目录里。
     /// 导出时若不去那边读，TUN 全程的内核日志就一条都拿不到——
     /// 真机 2026-09-02 复盘时才发现，30 小时 TUN 会话在导出里完全是空白。
-    /// 文件是 0644、目录 `--x`，App 有读权限。
+    /// 文件是 0640 root:admin、目录 `--x`，App 以管理员账户运行时有读权限；读不到就跳过这一段。
     public static let defaultExternalTUNLogURL = URL(
         fileURLWithPath: "/Library/Application Support/kongshan/helper/sing-box-tun.log"
     )
@@ -230,8 +230,8 @@ public actor KernelLogStore {
             )
 
             let writer = try FileHandle(forWritingTo: fileURL)
+            defer { try? writer.close() }
             try writer.truncate(atOffset: 0)
-            try writer.close()
         } catch {
             errorHandler("TUN 日志轮转失败：\(error.localizedDescription)")
         }

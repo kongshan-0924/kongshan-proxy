@@ -362,6 +362,51 @@ final class AppState {
     /// 仅供离屏渲染自查使用。
     var snapshotSourceID: UUID?
 
+    /// 仅供离屏渲染自查：摆出一屏活跃连接。
+    ///
+    /// 连接页此前从未进过快照，空态渲染出来只有一句"暂无活跃连接"——表格的列宽、
+    /// 长域名截断、链路标签换行这些真正会塌的地方一个都没覆盖到。
+    func applyConnectionsSnapshotFixture() {
+        let now = Date()
+        let rows: [(String, String?, String, [String], String, Int64, Int64, Int64, Int64)] = [
+            ("api.anthropic.com", "Claude", "RuleSet(ai)", ["mixed-in", "🤖 AI 服务", "🇭🇰 香港 IEPL 01"],
+             "tcp", 4_812_004, 61_240_880, 128_400, 1_940_000),
+            ("chatgpt.com", "Code Helper (Renderer)", "RuleSet(ai)", ["mixed-in", "🤖 AI 服务", "🇭🇰 香港 IEPL 01"],
+             "tcp", 962_100, 14_002_330, 41_200, 610_000),
+            ("registry.npmjs.org", "node", "RuleSet(developer)", ["mixed-in", "💻 开发者服务", "🇯🇵 东京 BGP"],
+             "tcp", 88_400, 240_881_002, 12_000, 8_420_000),
+            ("very-long-subdomain.assets.cdn.example-company-network.com", "Safari",
+             "DomainSuffix(example-company-network.com)", ["mixed-in", "🐟 漏网之鱼", "🇺🇸 洛杉矶 CN2"],
+             "tcp", 12_004, 1_204_880, 900, 74_000),
+            ("mtalk.google.com", nil, "RuleSet(proxy)", ["mixed-in", "🚀 节点选择", "🇸🇬 新加坡 01"],
+             "tcp", 4_200, 9_880, 0, 0),
+            ("stun.l.google.com", "FaceTime", "RuleSet(proxy)", ["mixed-in", "🚀 节点选择", "🇸🇬 新加坡 01"],
+             "udp", 620_400, 4_881_200, 88_000, 402_000),
+            ("weather-data.apple.com", "weatherd", "RuleSet(apple)", ["mixed-in", "🎯 全球直连", "direct"],
+             "tcp", 8_800, 122_400, 0, 4_100)
+        ]
+        connections = rows.enumerated().map { index, row in
+            let (host, process, rule, chains, network, upload, download, upRate, downRate) = row
+            var meta: [String: Any] = ["host": host, "network": network]
+            if let process { meta["process"] = process }
+            return ConnectionLiveDetail(
+                connection: ConnectionDetail(payload: [
+                    "id": "snapshot-\(index)",
+                    "metadata": meta,
+                    "rule": rule,
+                    "rulePayload": "",
+                    "chains": Array(chains.reversed()),
+                    "upload": upload,
+                    "download": download,
+                    "start": ISO8601DateFormatter().string(from: now.addingTimeInterval(-Double(index * 47 + 12)))
+                ]),
+                uploadRate: upRate,
+                downloadRate: downRate
+            )
+        }
+        activeConnectionCount = connections.count
+    }
+
     /// 仅供离屏渲染自查：摆出一份"出口已检测 + 自测跑过 + 有 Cloudflare 挑战"的现场。
     /// 挑战那一条是重点——这一页存在的理由就是把它跟"节点不通"区分开。
     func applyExitAnalysisSnapshotFixture() {

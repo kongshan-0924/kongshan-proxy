@@ -145,6 +145,34 @@ final class RenderSnapshotTests: XCTestCase {
             name: "dashboard-wide",
             size: CGSize(width: 1240, height: 700)
         )
+        // 此前三页从未进过快照：连接、消息、设置。设置页尤其长，塌了没人看得见。
+        render(
+            ConnectionsView().environment(running),
+            name: "connections",
+            size: CGSize(width: 1000, height: 640),
+            afterLayout: { running.applyConnectionsSnapshotFixture() }
+        )
+        render(
+            ConnectionsView().environment(running),
+            name: "connections-narrow",
+            size: CGSize(width: 620, height: 560),
+            afterLayout: { running.applyConnectionsSnapshotFixture() }
+        )
+        render(
+            MessagesView().environment(state),
+            name: "messages",
+            size: CGSize(width: 820, height: 640)
+        )
+        render(
+            SettingsView().environment(state),
+            name: "settings",
+            size: CGSize(width: 820, height: 900)
+        )
+        render(
+            SettingsView().environment(state),
+            name: "settings-narrow",
+            size: CGSize(width: 620, height: 900)
+        )
         render(
             LogsView().environment(state),
             name: "logs-narrow",
@@ -268,10 +296,28 @@ final class RenderSnapshotTests: XCTestCase {
 
     /// 用真实 NSWindow + NSHostingView 承载再 cacheDisplay，
     /// 这样 ScrollView 内容和 AppKit 原生控件（开关、分段控件）都能正确出图。
-    private func render(_ view: some View, name: String, size: CGSize, dark: Bool = false) {
+    /// `afterLayout` 在窗口起来之后、抓图之前跑。
+    ///
+    /// 连接页需要它：`onAppear` 会启动监控循环，而循环第一轮发现没有内核就把列表清空
+    /// （`startConnectionsMonitoring`），在 render 之前摆好的 fixture 会被冲掉。
+    /// 循环两轮之间睡 1.5 秒，所以在 0.3 秒时补回来，0.8 秒抓图时数据还在。
+    private func render(
+        _ view: some View,
+        name: String,
+        size: CGSize,
+        dark: Bool = false,
+        afterLayout: (@MainActor () -> Void)? = nil
+    ) {
         // cacheDisplay 只画视图层，窗口背景不会进位图，必须在内容里显式铺一层底色。
+        // 显式定尺，不靠 NSHostingView 自己撑开：`Table`（连接页）会用自身的固有尺寸，
+        // 于是无论窗口多大都渲染成 400×141pt——两张不同宽度的连接页快照像素完全一样，
+        // 等于什么都没测到。加上 `.frame` 后所有页都按请求的尺寸布局。
         let hosting = NSHostingView(
-            rootView: AnyView(view.background(Color(nsColor: .windowBackgroundColor)))
+            rootView: AnyView(
+                view
+                    .frame(width: size.width, height: size.height)
+                    .background(Color(nsColor: .windowBackgroundColor))
+            )
         )
         hosting.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         let window = NSWindow(
@@ -288,6 +334,9 @@ final class RenderSnapshotTests: XCTestCase {
         defer { window.orderOut(nil) }
 
         hosting.layoutSubtreeIfNeeded()
+        if let afterLayout {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { MainActor.assumeIsolated(afterLayout) }
+        }
         RunLoop.current.run(until: Date().addingTimeInterval(0.8))
         hosting.layoutSubtreeIfNeeded()
 

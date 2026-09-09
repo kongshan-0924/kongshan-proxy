@@ -50,6 +50,88 @@ final class LocalTCPRelayTests: XCTestCase {
         replacement.stop()
     }
 
+    /// 后端没人监听时必须**立刻断开**，不能挂着。
+    ///
+    /// 真机场景：切配置、切模式、内核崩溃都会有一段 sing-box 不在监听的窗口。
+    /// 这里守的是一个**不显眼但要命**的实现细节：`RelayPair.handle` 只处理 `.failed`，
+    /// 而回环死端口上 NWConnection 停在 `.waiting(ECONNREFUSED)` **永不转 `.failed`**
+    /// （实测 8 秒仍是 waiting）。真正救场的是 `pump(from: backend, to: client)`
+    /// 那个 `receive` —— 它会立刻带 ECONNREFUSED 回调，走 `cancel()`。
+    /// 也就是说这条路径**只有一层保险**：谁要是重排了 pump 的启动顺序、
+    /// 或让 backend 的 receive 晚于首个 send 才挂上，客户端就会一直挂着，
+    /// 表现为浏览器转圈、Claude/Codex 请求超时。这个测试就是那层保险的看门人。
+    /// 给 socket 留 6 秒读超时：断得快才过，挂着的话只能等满 6 秒。
+    func testDeadBackendClosesClientImmediatelyInsteadOfHanging() async throws {
+        let deadPort = try Self.reservedThenReleasedPort()
+
+        let relay = LocalTCPRelay()
+        let publicPort = try await relay.start(preferredPort: nil)
+        defer { relay.stop() }
+        relay.setTarget(port: deadPort)
+
+        let outcome = try await probeBackendlessTarget(port: publicPort)
+        XCTAssertTrue(
+            outcome.closedByPeer,
+            "中转应主动断开，而不是让读操作超时（errno \(outcome.errnoValue)）"
+        )
+        XCTAssertLessThan(outcome.elapsed, 3, "断开必须是立刻的，实测 \(outcome.elapsed) 秒")
+    }
+
+    private struct BackendlessOutcome {
+        let closedByPeer: Bool
+        let elapsed: TimeInterval
+        let errnoValue: Int32
+    }
+
+    private func probeBackendlessTarget(port: UInt16) async throws -> BackendlessOutcome {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(with: Result { try Self.blockingProbe(port: port) })
+            }
+        }
+    }
+
+    private static func blockingProbe(port: UInt16) throws -> BackendlessOutcome {
+        let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+        guard descriptor >= 0 else { throw SocketTestError("socket") }
+        defer { close(descriptor) }
+
+        // 留足读超时：修好了就该秒断，没修好才会等满这 6 秒。
+        var timeout = timeval(tv_sec: 6, tv_usec: 0)
+        _ = setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        _ = setsockopt(descriptor, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+
+        var address = Self.loopback(port: port)
+        let connected = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard connected == 0 else { throw SocketTestError("connect errno \(errno)") }
+
+        let started = Date()
+        let payload = Data("ping".utf8)
+        _ = payload.withUnsafeBytes { buffer in
+            Darwin.send(descriptor, buffer.baseAddress, buffer.count, 0)
+        }
+
+        var buffer = [UInt8](repeating: 0, count: 64)
+        let count = Darwin.recv(descriptor, &buffer, buffer.count, 0)
+        return BackendlessOutcome(
+            closedByPeer: count == 0,
+            elapsed: Date().timeIntervalSince(started),
+            errnoValue: count < 0 ? errno : 0
+        )
+    }
+
+    /// 拿一个「刚刚还在监听、现在已经没人」的端口——正是内核重启窗口里后端的状态。
+    private static func reservedThenReleasedPort() throws -> UInt16 {
+        let server = try ReplyServer(reply: Data("unused".utf8))
+        let port = server.port
+        server.stop()
+        return port
+    }
+
     private func request(port: UInt16) async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
