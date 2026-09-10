@@ -6384,3 +6384,23 @@ git 把后半段当成 pathspec 报「未匹配任何 Git 已知文件」，提�
   4 戳+文档+代码 拒绝 · 5 戳=文档提交而 HEAD 含代码 拒绝 · 6 戳+`scripts/` 改动 拒绝 ·
   7 戳在旁支（非祖先）拒绝 · 8 HEAD 落后于戳 拒绝。
   脚本本身 `zsh -n` 语法检查通过。项目无 shell 测试框架，故以临时仓库直接驱动该函数验证。
+
+- **门禁（改脚本后重跑 prepare）**：通过。M4 空闲 **CPU 均值 0.400%**（限 1.0%），RSS 峰值 73 MB；
+  M1→M3 链式验证与全量测试通过；App 与内嵌 helper 签名 `valid on disk` + `satisfies its
+  Designated Requirement`；DMG 校验和 VALID。
+  SHA-256 `c3fa653051ec79521484b34358d6e9da9846152a1d4a5e2069b0e43726f2cd75`，
+  App CDHash `e45c570c6892e57e9f7b3a6a4df5ccbc7ac4081c`。
+- **产物可复现性（意外收获）**：本次 CDHash 与 v0.1.108 上一轮构建**完全相同**——
+  即 app 二进制是逐字节可复现的，DMG 摘要不同只源于打包时间戳。
+  因此**已安装的那份与发布件是同一产物**，不需要为发布再装一遍（实测比对：
+  `/Applications/kongshan.app` 的 CDHash = 戳内 CDHash = `e45c570c…`）。
+- **发布（这次全程走脚本，没有任何绕过）**：`release.sh publish` 一步完成——
+  校验戳（HEAD == 戳，严格相等直接过）→ 建标签 `v0.1.108` → 推 `origin/main`（`1e49877..4fb1a2a`）
+  → 推标签 → `gh release create`。
+  <https://github.com/kongshan-0924/kongshan-proxy/releases/tag/v0.1.108>
+  非草稿、非预发布、Latest；资产 `kongshan-0.1.108.dmg` 25068266 字节，state=uploaded。
+- **端到端校验**：从 GitHub 下载已发布 DMG 重算摘要——线上 / 本地 / 验证戳三者 SHA-256 完全相同。
+- **历史 Release 未受影响**：0.1.107 / 0.1.101 / 0.1.98 / 0.1.97 均在，符合只增不删。
+- **未做**：本轮没清理 `.build`（工作区 745M，其中约 553M 是重跑 prepare 产生的编译中间产物）——
+  用户本轮只要求发布，清理未提；`swift build` 可随时重建，需要时再清。
+- **本轮改动**：`scripts/release.sh` 一处（验证戳判据）；VERSION 未变（仍 0.1.108）。
