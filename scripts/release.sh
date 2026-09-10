@@ -54,11 +54,40 @@ prepare() {
     print -- "App CDHash $cdhash"
 }
 
+# 验证戳绑定的提交与 HEAD 之间**只差文档**时放行。
+#
+# 本项目的固定节奏是「prepare 跑完 → 把门禁数值（CPU、SHA-256、CDHash）补进 SESSION_LOG
+# → 再 publish」。那条记录必须等 prepare 出结果才写得出来，于是 HEAD 必然比戳多一个
+# 纯文档提交，而严格相等的判据每次都会卡死——v0.1.107 就是因此绕过脚本手工发布的，
+# 绕过意味着这一整套门禁当次全部失效，比放宽危险得多。
+#
+# 放宽只针对 `docs/`：构建产物由代码决定，docs 改动不可能改变它。
+# 只要差异里出现任何一个非 docs 路径（含 scripts/ 自己），就说明产物已不对应 HEAD 的代码，
+# 照旧拒绝。HEAD 还必须是戳提交的后代，防止切了分支却拿着旧戳发布。
+stamp_commit_covers_head() {
+    local stamped=$1
+    local head=$(git rev-parse HEAD)
+    [[ "$stamped" == "$head" ]] && return 0
+    git merge-base --is-ancestor "$stamped" "$head" 2>/dev/null || return 1
+    local -a changed
+    changed=(${(f)"$(git diff --name-only "$stamped..$head")"})
+    (( ${#changed} )) || return 1
+    local f
+    for f in $changed; do
+        [[ "$f" == docs/* ]] || return 1
+    done
+    return 0
+}
+
 require_verification_stamp() {
     local stamp="$project_dir/.build/release-verified.txt"
     [[ -f "$stamp" ]] || fail "缺少验证戳，请先运行 scripts/release.sh prepare"
     read -r stamped_commit stamped_version stamped_digest stamped_cdhash < "$stamp"
-    [[ "$stamped_commit" == $(git rev-parse HEAD) ]] || fail "提交在验证后发生变化，请重新 prepare"
+    stamp_commit_covers_head "$stamped_commit" \
+        || fail "提交在验证后发生变化（非文档改动），请重新 prepare"
+    if [[ "$stamped_commit" != $(git rev-parse HEAD) ]]; then
+        print -- "注意：HEAD 比验证戳多出纯文档提交；产物构建自 $stamped_commit，代码与 HEAD 一致"
+    fi
     [[ "$stamped_version" == $(version) ]] || fail "版本在验证后发生变化，请重新 prepare"
     local dmg="$project_dir/dist/kongshan-$stamped_version.dmg"
     [[ "$stamped_digest" == $(shasum -a 256 "$dmg" | awk '{print $1}') ]] \
