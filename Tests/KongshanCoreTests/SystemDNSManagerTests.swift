@@ -1,0 +1,399 @@
+import Foundation
+import XCTest
+@testable import KongshanCore
+
+final class SystemDNSManagerTests: XCTestCase {
+    func testServersParsingHandlesNoServersMessageAndLists() {
+        XCTAssertEqual(
+            SystemDNSCommands.servers(from: "There aren't any DNS Servers set on Wi-Fi.\n"),
+            []
+        )
+        XCTAssertEqual(
+            SystemDNSCommands.servers(from: "8.8.8.8\n1.1.1.1\n"),
+            ["8.8.8.8", "1.1.1.1"]
+        )
+        XCTAssertEqual(
+            SystemDNSCommands.set(service: "Wi-Fi", servers: []),
+            ["-setdnsservers", "Wi-Fi", "Empty"]
+        )
+        XCTAssertEqual(
+            SystemDNSCommands.set(service: "Wi-Fi", servers: ["8.8.8.8", "1.1.1.1"]),
+            ["-setdnsservers", "Wi-Fi", "8.8.8.8", "1.1.1.1"]
+        )
+    }
+
+    func testTunSettingsDeriveDNSServerAddressInsideTunSubnet() {
+        XCTAssertEqual(TunSettings.defaults.dnsServerAddress, "172.19.0.1")
+        var custom = TunSettings.defaults
+        custom.addresses = ["10.66.0.1/24", "fdfe::1/126"]
+        XCTAssertEqual(custom.dnsServerAddress, "10.66.0.1")
+        custom.addresses = ["not-an-address"]
+        XCTAssertEqual(custom.dnsServerAddress, "172.19.0.1")
+    }
+
+    func testEnableSnapshotsBeforeMutatingThenRestoreWritesBackAndDeletesSnapshot() async throws {
+        let root = temporaryDNSDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recorder = DNSSetupRecorder(
+            recoveryURL: root.appending(path: "dns-recovery.json"),
+            services: ["Wi-Fi", "Thunderbolt Bridge"],
+            dnsByService: ["Wi-Fi": ["8.8.8.8", "1.1.1.1"]]
+        )
+        let manager = SystemDNSManager(
+            storage: Storage(rootDirectory: root),
+            runner: recorder.run(arguments:timeout:)
+        )
+
+        try await manager.enable(server: "172.19.0.2")
+
+        let snapshotBeforeMutation = await recorder.snapshotExistedBeforeFirstMutation
+        XCTAssertTrue(snapshotBeforeMutation, "必须先落盘快照再修改系统 DNS")
+        var mutations = await recorder.mutationArguments
+        XCTAssertEqual(mutations, [
+            ["-setdnsservers", "Wi-Fi", "172.19.0.2"],
+            ["-setdnsservers", "Thunderbolt Bridge", "172.19.0.2"]
+        ])
+
+        try await manager.restore()
+
+        mutations = await recorder.mutationArguments
+        XCTAssertEqual(Array(mutations.dropFirst(2)), [
+            ["-setdnsservers", "Wi-Fi", "8.8.8.8", "1.1.1.1"],
+            ["-setdnsservers", "Thunderbolt Bridge", "Empty"]
+        ])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: manager.recoveryURL.path))
+    }
+
+    func testEnableRollsBackOnFailureAndRecoversStaleSnapshotInsteadOfRefusing() async throws {
+        let root = temporaryDNSDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recoveryURL = root.appending(path: "dns-recovery.json")
+        let recorder = DNSSetupRecorder(
+            recoveryURL: recoveryURL,
+            services: ["Wi-Fi", "Thunderbolt Bridge"],
+            dnsByService: ["Wi-Fi": ["9.9.9.9"]],
+            failOnceFor: ["-setdnsservers", "Thunderbolt Bridge", "172.19.0.2"]
+        )
+        let manager = SystemDNSManager(
+            storage: Storage(rootDirectory: root),
+            runner: recorder.run(arguments:timeout:)
+        )
+
+        // 第二个服务写入失败 → 整体回滚：Wi-Fi 恢复原值，快照删除。
+        do {
+            try await manager.enable(server: "172.19.0.2")
+            XCTFail("Expected enable to fail")
+        } catch {
+            // expected
+        }
+        let mutations = await recorder.mutationArguments
+        XCTAssertTrue(mutations.contains(["-setdnsservers", "Wi-Fi", "9.9.9.9"]))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: recoveryURL.path))
+
+        // 残留快照存在时不再拒绝：先把能还原的还原掉，只剩"服务此刻不在列表"的待还原项就带进本次快照。
+        // 拒绝会让用户永远开不了——真机 2026-09-03 的「Shadowrocket」服务随其 App 启停出现/消失。
+        let stale = DNSRecoverySnapshot(services: [
+            DNSServiceSnapshot(name: "Wi-Fi", servers: ["9.9.9.9"]),
+            DNSServiceSnapshot(name: "Shadowrocket", servers: ["1.1.1.1"])
+        ])
+        try JSONEncoder().encode(stale).write(to: recoveryURL)
+        try await manager.enable(server: "172.19.0.2")
+        let afterEnable = await recorder.mutationArguments
+        XCTAssertTrue(afterEnable.contains(["-setdnsservers", "Wi-Fi", "9.9.9.9"]), "在列表里的旧快照项先还原")
+        let carried = try JSONDecoder().decode(DNSRecoverySnapshot.self, from: Data(contentsOf: recoveryURL))
+        XCTAssertEqual(Set(carried.services.map(\.name)), ["Wi-Fi", "Thunderbolt Bridge", "Shadowrocket"])
+        XCTAssertEqual(
+            carried.services.first { $0.name == "Shadowrocket" }?.servers,
+            ["1.1.1.1"],
+            "不在列表的待还原项并入新快照，服务回来时照样复位"
+        )
+    }
+
+    func testReassertOnlyTouchesStaleServicesAndExtendsSnapshotForRestore() async throws {
+        let root = temporaryDNSDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recorder = DNSSetupRecorder(
+            recoveryURL: root.appending(path: "dns-recovery.json"),
+            services: ["Wi-Fi"],
+            dnsByService: ["Wi-Fi": ["8.8.8.8"]]
+        )
+        let manager = SystemDNSManager(
+            storage: Storage(rootDirectory: root),
+            runner: recorder.run(arguments:timeout:)
+        )
+        try await manager.enable(server: "172.19.0.2")
+
+        // 模拟接入 iPhone USB：新服务出现且 DNS 是 DHCP 默认。
+        await recorder.setServices(["Wi-Fi", "iPhone USB"])
+        try await manager.reassert(server: "172.19.0.2")
+
+        var mutations = await recorder.mutationArguments
+        XCTAssertEqual(Array(mutations.dropFirst(1)), [
+            ["-setdnsservers", "iPhone USB", "172.19.0.2"]
+        ], "已指向我们的 Wi-Fi 不应被重复设置")
+
+        // 还原时新服务也要一并复位（写回 Empty）。
+        try await manager.restore()
+        mutations = await recorder.mutationArguments
+        XCTAssertEqual(Array(mutations.dropFirst(2)), [
+            ["-setdnsservers", "Wi-Fi", "8.8.8.8"],
+            ["-setdnsservers", "iPhone USB", "Empty"]
+        ])
+    }
+
+    func testReassertAndRestoreWithoutSnapshotDoNothing() async throws {
+        let root = temporaryDNSDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recorder = DNSSetupRecorder(
+            recoveryURL: root.appending(path: "dns-recovery.json"),
+            services: ["Wi-Fi"]
+        )
+        let manager = SystemDNSManager(
+            storage: Storage(rootDirectory: root),
+            runner: recorder.run(arguments:timeout:)
+        )
+
+        try await manager.reassert(server: "172.19.0.2")
+        try await manager.restore()
+        try await manager.recoverIfNeeded()
+
+        let arguments = await recorder.arguments
+        XCTAssertTrue(arguments.isEmpty, "没有活动快照时不得执行任何 networksetup 命令")
+    }
+
+    /// 切网络配置后快照里的服务可能此刻不在列表里。恢复只处理仍存在的服务，
+    /// **但已消失的服务不能被静默丢掉**（真机 2026-09-03 系统代理侧就是这样漏掉「Shadowrocket」的）：
+    /// 留在快照里作为待还原项，等它回来再复位；期间不向它发任何命令。
+    func testRecoverKeepsStaleServicesPendingWithoutTouchingThem() async throws {
+        let root = temporaryDNSDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        try await storage.prepare()
+        let recoveryURL = root.appending(path: "dns-recovery.json")
+        // 快照含 Wi-Fi + Thunderbolt Bridge，但 recorder 的 -listallnetworkservices 只返回 Wi-Fi。
+        let snapshot = DNSRecoverySnapshot(services: [
+            DNSServiceSnapshot(name: "Wi-Fi", servers: ["8.8.8.8"]),
+            DNSServiceSnapshot(name: "Thunderbolt Bridge", servers: [])
+        ])
+        try await storage.writeAtomically(JSONEncoder().encode(snapshot), to: recoveryURL)
+        let recorder = DNSSetupRecorder(
+            recoveryURL: recoveryURL,
+            services: ["Wi-Fi"],
+            dnsByService: ["Wi-Fi": ["172.19.0.2"]]
+        )
+        let manager = SystemDNSManager(storage: storage, runner: recorder.run(arguments:timeout:))
+
+        let outcome = try await manager.recoverIfNeeded()
+
+        XCTAssertEqual(outcome.restored, ["Wi-Fi"])
+        XCTAssertEqual(outcome.pending, ["Thunderbolt Bridge"])
+        let mutations = await recorder.mutationArguments
+        XCTAssertEqual(mutations, [["-setdnsservers", "Wi-Fi", "8.8.8.8"]])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: recoveryURL.path), "有待还原的服务时快照必须保留")
+        let retained = try JSONDecoder().decode(DNSRecoverySnapshot.self, from: Data(contentsOf: recoveryURL))
+        XCTAssertEqual(retained.services.map(\.name), ["Thunderbolt Bridge"], "已复位的服务不必再留")
+        let arguments = await recorder.arguments
+        XCTAssertFalse(arguments.contains { $0.contains("Thunderbolt Bridge") }, "不应向已消失的服务发命令")
+    }
+
+    func testRecoverKeepsFailedDNSServiceThenRetries() async throws {
+        let root = temporaryDNSDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        let recoveryURL = root.appending(path: "dns-recovery.json")
+        let snapshot = DNSRecoverySnapshot(services: [
+            DNSServiceSnapshot(name: "Wi-Fi", servers: ["8.8.8.8"])
+        ])
+        try await storage.writeAtomically(try JSONEncoder().encode(snapshot), to: recoveryURL)
+        let recorder = DNSSetupRecorder(
+            recoveryURL: recoveryURL,
+            services: ["Wi-Fi"],
+            failOnceFor: ["-setdnsservers", "Wi-Fi", "8.8.8.8"]
+        )
+        let manager = SystemDNSManager(storage: storage, runner: recorder.run(arguments:timeout:))
+
+        do {
+            try await manager.recoverIfNeeded()
+            XCTFail("Expected partial restore failure")
+        } catch let error as SystemDNSError {
+            guard case .commandFailed(let code, _) = error else {
+                return XCTFail("Expected .commandFailed, got \(error)")
+            }
+            XCTAssertEqual(code, -1)
+        }
+        let retry = try JSONDecoder().decode(
+            DNSRecoverySnapshot.self,
+            from: Data(contentsOf: recoveryURL)
+        )
+        XCTAssertEqual(retry.services, snapshot.services)
+
+        try await manager.recoverIfNeeded()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: recoveryURL.path))
+    }
+
+    func testRecoverRestoresDisabledButExistingDNSService() async throws {
+        let root = temporaryDNSDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        let recoveryURL = root.appending(path: "dns-recovery.json")
+        try await storage.writeAtomically(
+            try JSONEncoder().encode(DNSRecoverySnapshot(services: [
+                DNSServiceSnapshot(name: "Disabled LAN", servers: ["1.1.1.1"])
+            ])),
+            to: recoveryURL
+        )
+        let recorder = DNSSetupRecorder(
+            recoveryURL: recoveryURL,
+            services: ["*Disabled LAN"]
+        )
+        let manager = SystemDNSManager(storage: storage, runner: recorder.run(arguments:timeout:))
+
+        try await manager.recoverIfNeeded()
+
+        let mutations = await recorder.mutationArguments
+        XCTAssertEqual(mutations, [["-setdnsservers", "Disabled LAN", "1.1.1.1"]])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: recoveryURL.path))
+    }
+
+    private func temporaryDNSDirectory() -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appending(path: "kongshan-dns-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+}
+
+/// 模拟 networksetup 的 DNS 相关子命令。set 会真的更新内部映射，
+/// 让 reassert 的「已指向我们」判断走真实读回来的值。
+extension SystemDNSManagerTests {
+    /// DNS 这步与系统代理前后脚跑，撞同一段服务列表抖动。
+    /// 只给代理加重试的话它就成了下一个失败点——真机 2026-09-04 10:13
+    /// 开着 TUN 切配置连续两次回滚，就是这条链路上的写入被瞬时错误打断。
+    func testTransientNetworkDatabaseErrorIsRetried() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "kongshan-dns-retry-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runner = FlakyDNSSetup(failures: 4)
+        let manager = SystemDNSManager(
+            storage: Storage(rootDirectory: root),
+            runner: runner.run(arguments:timeout:)
+        )
+
+        try await manager.enable(server: "172.19.0.1")
+
+        let listCalls = await runner.calls(matching: "-listallnetworkservices")
+        XCTAssertEqual(listCalls, 5, "四次瞬时失败要被吸收，第五次成功")
+    }
+
+    /// 重试有界，且只认那一种消息。
+    func testUnrelatedDNSFailureIsNotRetried() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "kongshan-dns-retry-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runner = FlakyDNSSetup(failures: .max, stderr: "** Error: some other failure")
+        let manager = SystemDNSManager(
+            storage: Storage(rootDirectory: root),
+            runner: runner.run(arguments:timeout:)
+        )
+
+        do {
+            try await manager.enable(server: "172.19.0.1")
+            XCTFail("非瞬时错误必须立即抛出")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("some other failure"))
+        }
+        let listCalls = await runner.calls(matching: "-listallnetworkservices")
+        XCTAssertEqual(listCalls, 1, "别的失败不许重试")
+    }
+}
+
+/// 前 `failures` 次调用返回指定失败，之后一切正常。
+private actor FlakyDNSSetup {
+    private var remainingFailures: Int
+    private let stderr: String
+    private var seen: [[String]] = []
+
+    init(failures: Int, stderr: String = "** Error: Unable to find item in network database.") {
+        self.remainingFailures = failures
+        self.stderr = stderr
+    }
+
+    func calls(matching argument: String) -> Int {
+        seen.filter { $0.first == argument }.count
+    }
+
+    func run(arguments: [String], timeout: TimeInterval) async throws -> ProcessResult {
+        seen.append(arguments)
+        guard remainingFailures > 0 else {
+            return ProcessResult(exitCode: 0, stdout: output(for: arguments), stderr: "")
+        }
+        remainingFailures -= 1
+        return ProcessResult(exitCode: 8, stdout: "", stderr: stderr)
+    }
+
+    private func output(for arguments: [String]) -> String {
+        switch arguments.first {
+        case "-listallnetworkservices": "Wi-Fi"
+        case "-getdnsservers": "There aren't any DNS Servers set on Wi-Fi.\n"
+        default: ""
+        }
+    }
+}
+
+private actor DNSSetupRecorder {
+    private let recoveryURL: URL
+    private var services: [String]
+    private var dnsByService: [String: [String]]
+    private var failOnceFor: [String]?
+    private(set) var arguments: [[String]] = []
+    private(set) var mutationArguments: [[String]] = []
+    private(set) var snapshotExistedBeforeFirstMutation = false
+
+    init(
+        recoveryURL: URL,
+        services: [String],
+        dnsByService: [String: [String]] = [:],
+        failOnceFor: [String]? = nil
+    ) {
+        self.recoveryURL = recoveryURL
+        self.services = services
+        self.dnsByService = dnsByService
+        self.failOnceFor = failOnceFor
+    }
+
+    func setServices(_ services: [String]) {
+        self.services = services
+    }
+
+    func run(arguments: [String], timeout: TimeInterval) async throws -> ProcessResult {
+        self.arguments.append(arguments)
+        if failOnceFor == arguments {
+            failOnceFor = nil
+            return ProcessResult(exitCode: 7, stdout: "", stderr: "simulated dns failure")
+        }
+        switch arguments.first {
+        case "-listallnetworkservices":
+            let listing = (["An asterisk (*) denotes that a network service is disabled."] + services)
+                .joined(separator: "\n")
+            return ProcessResult(exitCode: 0, stdout: listing, stderr: "")
+        case "-getdnsservers":
+            let service = arguments.count > 1 ? arguments[1] : ""
+            let servers = dnsByService[service] ?? []
+            let output = servers.isEmpty
+                ? "There aren't any DNS Servers set on \(service).\n"
+                : servers.joined(separator: "\n")
+            return ProcessResult(exitCode: 0, stdout: output, stderr: "")
+        case "-setdnsservers":
+            if mutationArguments.isEmpty {
+                snapshotExistedBeforeFirstMutation = FileManager.default.fileExists(atPath: recoveryURL.path)
+            }
+            mutationArguments.append(arguments)
+            let service = arguments.count > 1 ? arguments[1] : ""
+            let values = Array(arguments.dropFirst(2))
+            dnsByService[service] = values == ["Empty"] ? [] : values
+            return ProcessResult(exitCode: 0, stdout: "", stderr: "")
+        default:
+            return ProcessResult(exitCode: 0, stdout: "", stderr: "")
+        }
+    }
+}

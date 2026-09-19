@@ -1,0 +1,46 @@
+#!/bin/zsh
+# 公开仓库只接受 scripts/release.sh publish 导出的快照。
+#
+# 完整开发历史（内部文档、真机排查记录、真实环境细节）一旦推上公开仓库就撤不回来，
+# 这里兜住手滑的 `git push public main`：推往公开仓库时要求
+#   1. 由发布脚本发起（KONGSHAN_PUBLIC_EXPORT=1）；
+#   2. 每个新提交的作者与提交者都是 noreply 身份；
+#   3. 每个新提交的内容与说明都通过私有信息闸门（scripts/leak_guard.py）；
+#   4. 不删除公开仓库上的分支或标签（Release 与标签只增不删）。
+# 发布脚本会把本文件链接为 .git/hooks/pre-push。
+set -u
+remote_name=$1
+remote_url=${(L)2}
+case $remote_url in
+    (*kongshan-0924/kongshan-proxy|*kongshan-0924/kongshan-proxy.git|*kongshan-0924/kongshan-proxy/) ;;
+    (*) exit 0 ;;
+esac
+
+reject() {
+    print -u2 -- "拒绝推送到公开仓库：$*"
+    exit 1
+}
+
+[[ ${KONGSHAN_PUBLIC_EXPORT:-0} == 1 ]] \
+    || reject "只能由 scripts/release.sh publish 推送经闸门检查的快照"
+root=$(git rev-parse --show-toplevel)
+[[ -s "$root/docs/private/leak-denylist.txt" ]] || reject "缺少私有黑名单，闸门不完整"
+noreply=48129787+kongshan-0924@users.noreply.github.com
+zero=0000000000000000000000000000000000000000
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [[ $local_sha != $zero ]] || reject "不允许删除 $remote_ref"
+    if [[ $(git cat-file -t "$local_sha") == tag ]]; then
+        tagger=$(git cat-file tag "$local_sha" | sed -n 's/^tagger .*<\(.*\)>.*/\1/p')
+        [[ $tagger == $noreply ]] || reject "$remote_ref 的打标签者不是 noreply 身份"
+    fi
+    tip=$(git rev-parse "$local_sha^{commit}")
+    # 公开仓库还没有的提交——开发历史若被误推，这里会列出全部开发提交并在身份检查上失败。
+    for c in ${(f)"$(git rev-list "$tip" --not --remotes="$remote_name")"}; do
+        [[ $(git log -1 --format=%ae "$c") == $noreply && $(git log -1 --format=%ce "$c") == $noreply ]] \
+            || reject "提交 ${c[1,12]} 的作者或提交者不是 noreply 身份"
+        python3 "$root/scripts/leak_guard.py" --tree "$c^{tree}" --message "$(git log -1 --format=%B "$c")" >/dev/null \
+            || reject "提交 ${c[1,12]} 未通过私有信息闸门"
+    done
+done
+exit 0

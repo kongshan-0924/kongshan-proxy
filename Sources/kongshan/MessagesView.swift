@@ -1,0 +1,191 @@
+import KongshanCore
+import SwiftUI
+
+/// 消息中心：集中展示错误与警告。工具栏通知按钮只显示最新一条，完整列表在这里。
+/// 警告与运行事件两个分段。2026-09-17 并入「日志」页：
+/// 警告、运行事件、内核输出是同一条时间线的三个粒度，分成两页会让用户在两处找同一件事。
+/// 分段控件与标题由容器 `RecordsPageView` 提供，本视图只负责内容与自己的副标题/工具栏——
+/// 这样 `RuntimeEventDetailTests` 钉死的三条（只看问题 toggle、visibleEvents、事件详情渲染）
+/// 仍然落在本文件里，不必改测试。
+struct MessagesView: View {
+    @Environment(AppState.self) private var state
+    @Binding var tab: Tab
+    /// 运行事件里绝大多数是 info（启动/停止/换网）。排查时真正要看的是 warning 与 error，
+    /// 200 条里往往只有几条。与内核日志页的「只看问题」同一个用意。
+    @AppStorage("messages.events.problemsOnly") private var eventProblemsOnly = false
+
+    enum Tab: String, CaseIterable {
+        case warnings = "警告"
+        case events = "事件"
+    }
+
+    var body: some View {
+        Group {
+            if tab == .warnings { warningList } else { eventList }
+        }
+        .navigationSubtitle(subtitle)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    state.dismissError()
+                    state.clearWarnings()
+                    state.clearRuntimeEvents()
+                } label: {
+                    Label("全部清除", systemImage: "trash")
+                }
+                .disabled(state.errorMessage == nil && state.warnings.isEmpty && state.runtimeEvents.isEmpty)
+                .help("清空消息页；告警与指标的存档不受影响")
+            }
+        }
+        // 让用户知道清除不会毁掉证据——否则「全部清除」看起来就是不可逆的销毁。
+        // 放在底栏：邮件/访达的状态信息都在窗口底部那一条。
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 0) {
+                Divider()
+                // 原来把两条完整路径塞进一行，中间截断后剩下 `/var/fo…ndjson` 这种谁也读不懂的碎片。
+                // 状态栏只说结论，路径交给按钮——访达里一看就全明白。
+                HStack(spacing: 8) {
+                    Label("警告、错误与运行指标另有存档，不受「全部清除」影响", systemImage: "archivebox")
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .help("警告与错误：\(state.diagnosticsArchivePath)\n运行指标：\(state.metricsArchivePath)")
+                    Spacer(minLength: 8)
+                    Button("在访达中显示") { state.revealArchivesInFinder() }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+                .background(.bar)
+            }
+        }
+    }
+
+    private var subtitle: String {
+        switch tab {
+        case .warnings:
+            let count = (state.errorMessage != nil ? 1 : 0) + state.warnings.count
+            return count == 0 ? "没有未处理的消息" : "\(count) 条"
+        case .events:
+            return eventProblemsOnly
+                ? "\(visibleEvents.count) / \(state.runtimeEvents.count) 条"
+                : "\(state.runtimeEvents.count) 条"
+        }
+    }
+
+    private var warningList: some View {
+        List {
+            if let error = state.errorMessage {
+                messageRow(text: error, symbol: "exclamationmark.octagon.fill", tint: .red)
+            }
+            ForEach(Array(state.warnings.enumerated()), id: \.offset) { _, warning in
+                messageRow(text: warning, symbol: "exclamationmark.triangle.fill", tint: .orange)
+            }
+        }
+        .listStyle(.inset)
+        .overlay {
+            if state.errorMessage == nil && state.warnings.isEmpty {
+                ContentUnavailableView(
+                    "暂无消息",
+                    systemImage: "checkmark.circle",
+                    description: Text("代理运行中出现错误或警告时会显示在这里。")
+                )
+            }
+        }
+    }
+
+    /// 一次算好再交给列表：`ForEach` 在 body 里过滤等于每次重绘都重算一遍。
+    private var visibleEvents: [RuntimeEvent] {
+        eventProblemsOnly ? state.runtimeEvents.filter { $0.level != .info } : state.runtimeEvents
+    }
+
+    private var eventList: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Toggle("只看问题", isOn: $eventProblemsOnly)
+                    .toggleStyle(.checkbox)
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            Divider()
+            List {
+                ForEach(visibleEvents.reversed()) { event in
+                    eventRow(event)
+                }
+            }
+            .listStyle(.inset)
+            .overlay {
+                if visibleEvents.isEmpty {
+                    ContentUnavailableView(
+                        eventProblemsOnly ? "没有问题事件" : "暂无运行事件",
+                        systemImage: eventProblemsOnly ? "checkmark.circle" : "clock.arrow.circlepath",
+                        description: eventProblemsOnly
+                            ? Text("当前 \(state.runtimeEvents.count) 条记录里没有警告或错误。")
+                            : nil
+                    )
+                }
+            }
+        }
+    }
+
+    private func eventRow(_ event: RuntimeEvent) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: eventSymbol(event.level))
+                .foregroundStyle(eventTint(event.level))
+                .frame(width: 16)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(event.title)
+                    .font(.body.weight(.medium))
+                if let detail = event.detail {
+                    Text(detail)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                HStack(spacing: 8) {
+                    Text(event.timestamp.formatted(date: .abbreviated, time: .standard))
+                    if event.previousPID != nil || event.currentPID != nil {
+                        Text("PID \(event.previousPID.map { String($0) } ?? "-") → \(event.currentPID.map { String($0) } ?? "-")")
+                    }
+                }
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.tertiary)
+            }
+            .textSelection(.enabled)
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func eventSymbol(_ level: RuntimeEvent.Level) -> String {
+        switch level {
+        case .info: "clock.arrow.circlepath"
+        case .warning: "exclamationmark.triangle.fill"
+        case .error: "exclamationmark.octagon.fill"
+        }
+    }
+
+    private func eventTint(_ level: RuntimeEvent.Level) -> Color {
+        switch level {
+        case .info: .blue
+        case .warning: .orange
+        case .error: .red
+        }
+    }
+
+    private func messageRow(text: String, symbol: String, tint: Color) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: symbol)
+                .foregroundStyle(tint)
+                .frame(width: 16)
+                .padding(.top, 2)
+            Text(text)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.vertical, 4)
+    }
+}
