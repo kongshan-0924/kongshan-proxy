@@ -122,13 +122,13 @@ final class SelfDiagnosticsWiringTests: XCTestCase {
 
         for i in 0..<30 {
             state.inspectForOutboundFailure(
-                CoreLogLine.parse("[1 2ms] outbound/anytls[\(tag)]: outbound connection to s\(i).example.invalid:443")
+                CoreLogLine.parse("[\(1_000 + i) 2ms] outbound/anytls[\(tag)]: outbound connection to s\(i).example.invalid:443")
             )
             clock.advance(1)
         }
         for i in 0..<10 {
             state.inspectForOutboundFailure(CoreLogLine.parse(
-                "[2 1.8s] connection: open connection to f\(i).example.invalid:443 using outbound/anytls[\(tag)]: failed to create session: dial tcp 203.0.113.9:8030: connect: connection refused"
+                "[\(2_000 + i) 1.8s] connection: open connection to f\(i).example.invalid:443 using outbound/anytls[\(tag)]: failed to create session: dial tcp 203.0.113.9:8030: connect: connection refused"
             ))
             clock.advance(1)
         }
@@ -147,5 +147,66 @@ final class SelfDiagnosticsWiringTests: XCTestCase {
         XCTAssertTrue(detail.contains("connection refused"), "要给出主要原因，实际：\(detail)")
         XCTAssertFalse(detail.contains("203.0.113.9"), "不得暴露服务器地址：\(detail)")
         XCTAssertFalse(detail.contains(tag), "不得暴露原始出站 tag：\(detail)")
+    }
+}
+
+/// 告警的判定文案与合并。
+extension SelfDiagnosticsWiringTests {
+    private func failureReport(
+        at start: Date, reason: String, directAttempts: Int = 0, directFailures: Int = 0, tag: String = "node-coalesce"
+    ) -> OutboundFailureReport {
+        OutboundFailureReport(
+            windowStart: start, windowEnd: start.addingTimeInterval(600), outboundTag: tag,
+            failures: 30, attempts: 30, distinctReasonCount: 1, dominantReason: reason,
+            directAttempts: directAttempts, directFailures: directFailures
+        )
+    }
+
+    /// 0 次直连证明不了本机网络正常（真机 2026-09-29 每条都这么写）。
+    func testNoDirectSamplesNeverClaimsTheLocalNetworkIsFine() throws {
+        let clock = TestClock(Date(timeIntervalSince1970: 1_790_000_000))
+        let state = makeState(clock: clock)
+        state.record(failureReport(at: clock.current, reason: "i/o timeout"))
+        let event = try XCTUnwrap(state.runtimeEvents.last { $0.title == "节点建连失败偏多" })
+        let detail = event.detail ?? ""
+        XCTAssertTrue(detail.contains("样本不足"), detail)
+        XCTAssertFalse(detail.contains("本机网络正常"), detail)
+    }
+
+    func testUnreachableWithoutDirectSamplesIsReportedAsLocalNetwork() throws {
+        let clock = TestClock(Date(timeIntervalSince1970: 1_790_000_000))
+        let state = makeState(clock: clock)
+        state.record(failureReport(at: clock.current, reason: "network is unreachable"))
+        let event = try XCTUnwrap(state.runtimeEvents.last)
+        XCTAssertEqual(event.title, "本机网络不通，期间建连大量失败")
+        XCTAssertTrue(event.detail?.contains("换节点无用") == true)
+    }
+
+    /// 同一次断网每 10 分钟结算一次，旧实现两小时报 12~14 条；现在 1 小时内只记一次，之后再报时注明合并数。
+    func testRepeatedOutageAlertsAreCoalescedWithinAnHour() throws {
+        let clock = TestClock(Date(timeIntervalSince1970: 1_790_000_000))
+        let state = makeState(clock: clock)
+        for _ in 0..<6 {
+            state.record(failureReport(at: clock.current, reason: "network is unreachable"))
+            clock.advance(600)
+        }
+        let outage = state.runtimeEvents.filter { $0.title == "本机网络不通，期间建连大量失败" }
+        XCTAssertEqual(outage.count, 1, "一小时内只记一次")
+        state.record(failureReport(at: clock.current, reason: "network is unreachable"))
+        let after = state.runtimeEvents.filter { $0.title == "本机网络不通，期间建连大量失败" }
+        XCTAssertEqual(after.count, 2)
+        XCTAssertTrue(after.last?.detail?.contains("另有 5 条，已合并") == true, after.last?.detail ?? "")
+    }
+
+    /// 节点告警按「节点 + 原因」合并；换了原因或换了节点照常报。
+    func testNodeAlertsCoalescePerNodeAndReason() {
+        let clock = TestClock(Date(timeIntervalSince1970: 1_790_000_000))
+        let state = makeState(clock: clock)
+        state.record(failureReport(at: clock.current, reason: "i/o timeout", directAttempts: 20))
+        clock.advance(600)
+        state.record(failureReport(at: clock.current, reason: "i/o timeout", directAttempts: 20))
+        state.record(failureReport(at: clock.current, reason: "connection refused", directAttempts: 20))
+        state.record(failureReport(at: clock.current, reason: "i/o timeout", directAttempts: 20, tag: "node-other"))
+        XCTAssertEqual(state.runtimeEvents.filter { $0.title == "节点建连失败偏多" }.count, 3)
     }
 }

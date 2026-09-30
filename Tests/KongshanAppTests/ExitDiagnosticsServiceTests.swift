@@ -6,7 +6,9 @@ import XCTest
 final class ExitDiagnosticsServiceTests: XCTestCase {
     func testRunLoadsExitAndThreeUniqueDNSResolverSamples() async throws {
         let recorder = URLRecorder()
-        let service = ExitDiagnosticsService { request in
+        // 显式给空的信誉评分：默认实现会真的去请求第三方评分服务（每次跑测试都把本机出口 IP 发出去，
+        // 连不上时还要等满 10 秒超时）。
+        let service = ExitDiagnosticsService(loader: { request in
             let url = try XCTUnwrap(request.url)
             await recorder.append(url)
             if url.path == "/config" {
@@ -16,7 +18,7 @@ final class ExitDiagnosticsServiceTests: XCTestCase {
                 return Data(#"{"ip":"203.0.113.8","country":"Japan","city":"Tokyo","organization":"Example ISP"}"#.utf8)
             }
             return Data(#"[{"ip":"1.1.1.1","country":"Netherlands","city":"Amsterdam","organization":"Cloudflare, Inc.","mullvad_dns":false}]"#.utf8)
-        }
+        }, reputationProvider: { nil })
 
         let report = try await service.run(remoteDoH: "https://cloudflare-dns.com/dns-query")
 
@@ -33,7 +35,10 @@ final class ExitDiagnosticsServiceTests: XCTestCase {
     }
 
     func testRunPropagatesConfigFailure() async {
-        let service = ExitDiagnosticsService { _ in throw URLError(.cannotConnectToHost) }
+        let service = ExitDiagnosticsService(
+            loader: { _ in throw URLError(.cannotConnectToHost) },
+            reputationProvider: { nil }
+        )
 
         do {
             _ = try await service.run(remoteDoH: "https://dns.google/dns-query")

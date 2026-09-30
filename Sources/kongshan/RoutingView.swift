@@ -188,6 +188,11 @@ struct CustomRoutingRulesView: View {
                     .controlSize(.small)
             }
 
+            Text(perAppScopeNote)
+                .font(.caption)
+                .foregroundStyle(perAppScopeIsLimited ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.tertiary))
+                .fixedSize(horizontal: false, vertical: true)
+
             if state.processRules.isEmpty {
                 Text("还没有分应用规则。选择一个正在运行的 App 后添加。")
                     .font(.caption)
@@ -219,6 +224,22 @@ struct CustomRoutingRulesView: View {
             sectionHeader("分应用代理", symbol: "app.badge.checkmark",
                           hint: "按可执行进程名优先分流", count: state.processRules.count, expanded: perAppExpanded)
         }
+    }
+
+    /// 按进程分流只对经 TUN 进入内核的流量生效：遵循系统代理的 App 先连空山的本地入口，
+    /// 内核看到的来源进程是空山自己（真机 2026-09-28：两者同开时 54% 的连接走这条入口）。
+    /// 开着系统代理又已有分应用规则时用醒目颜色提示，免得用户以为规则坏了。
+    private var perAppScopeIsLimited: Bool {
+        !state.processRules.isEmpty && state.activeModes.contains(.systemProxy)
+    }
+
+    private var perAppScopeNote: String {
+        if perAppScopeIsLimited {
+            return "当前开着系统代理：浏览器等遵循系统代理的 App 会先连到空山的本地入口，内核认不出来源，"
+                + "上面的规则管不到它们。要按 App 分流，请只开 TUN。"
+        }
+        return "只对经 TUN 接管的流量生效。同时开着系统代理时，遵循系统代理的 App 会经空山的本地入口进入内核，"
+            + "不受这些规则约束。"
     }
 
     // MARK: - 强制代理

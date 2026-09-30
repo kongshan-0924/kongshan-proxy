@@ -26,10 +26,11 @@ final class DetectorInputAlwaysOnTests: XCTestCase {
         )
     }
 
-    private func failureEntry(_ host: String) -> CoreLogEntry {
+    /// 每条连接一个 ID：检测器按连接 ID 去重，共用 ID 会被当成同一条连接。
+    private func failureEntry(_ host: String, id: Int = 123_456) -> CoreLogEntry {
         CoreLogEntry(
             level: .error,
-            message: "[123456 3.19s] connection: open connection to \(host) using "
+            message: "[\(id) 3.19s] connection: open connection to \(host) using "
                 + "outbound/anytls[node-placeholder]: failed to create session: EOF",
             receivedAt: Date()
         )
@@ -43,7 +44,7 @@ final class DetectorInputAlwaysOnTests: XCTestCase {
         state.stopLogMonitoring()   // 日志页关闭
 
         for index in 0..<30 {
-            state.receiveLog(failureEntry("api.example.invalid:\(443 + index % 3)"))
+            state.receiveLog(failureEntry("api.example.invalid:\(443 + index % 3)", id: 200_000 + index))
         }
 
         XCTAssertTrue(state.liveLogs.isEmpty, "日志页关着时不该把行攒进界面列表")
@@ -88,7 +89,7 @@ final class DetectorInputAlwaysOnTests: XCTestCase {
             let parsed = CoreLogLine.parse(line)
             let recognized = DNSStallDetector.isResolutionStall(parsed)
                 || OutboundFailureDetector.isFailedAttempt(parsed)
-                || OutboundFailureDetector.isSuccessfulAttempt(parsed)
+                || OutboundFailureDetector.isAttemptLine(parsed)
             XCTAssertTrue(recognized, "样本本身就没被检测器认出，测试写错了：\(line.prefix(70))")
         }
 

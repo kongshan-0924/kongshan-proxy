@@ -545,14 +545,151 @@ final class RuntimeAnomalyDetectorTests: XCTestCase {
 
     // MARK: - 出站失败率
 
+    /// 每条连接一个 ID：检测器按连接 ID 去重，共用 ID 会被当成同一条连接。
+    private var nextConnectionID = 100
+
     private func successLine(tag: String, host: String) -> CoreLogLine {
-        CoreLogLine.parse("[100 2ms] outbound/anytls[\(tag)]: outbound connection to \(host):443")
+        nextConnectionID += 1
+        return CoreLogLine.parse("[\(nextConnectionID) 2ms] outbound/anytls[\(tag)]: outbound connection to \(host):443")
     }
 
     private func failureLine(tag: String, host: String, reason: String = "failed to create session: dial tcp 203.0.113.9:8030: i/o timeout") -> CoreLogLine {
-        CoreLogLine.parse(
-            "[101 1.8s] connection: open connection to \(host):443 using outbound/anytls[\(tag)]: \(reason)"
+        nextConnectionID += 1
+        return CoreLogLine.parse(
+            "[\(nextConnectionID) 1.8s] connection: open connection to \(host):443 using outbound/anytls[\(tag)]: \(reason)"
         )
+    }
+
+    // MARK: - 按连接计数（真实日志的行序）
+
+    /// 内核在**拨号开始时**就写 `outbound connection to`，失败的连接随后再写一行 ERROR
+    /// （真机 2026-09-28 样本 388/388）。一条失败连接只算一次尝试、一次失败——
+    /// 旧实现按行累加，算成两次尝试，失败率减半。
+    func testFailedConnectionCountsOnceDespiteItsAttemptLine() throws {
+        var detector = OutboundFailureDetector(
+            windowDuration: 60, minimumAttempts: 5, minimumFailures: 5, minimumFailureRate: 0.1
+        )
+        for i in 0..<10 {
+            let id = 5_000 + i
+            _ = detector.ingest(
+                CoreLogLine.parse("[\(id) 2ms] outbound/vless[node-x]: outbound connection to f\(i).example.invalid:443"),
+                at: origin.addingTimeInterval(Double(i))
+            )
+            _ = detector.ingest(
+                CoreLogLine.parse(
+                    "[\(id) 5.0s] connection: open connection to f\(i).example.invalid:443 using "
+                    + "outbound/vless[node-x]: dial tcp 203.0.113.9:443: i/o timeout"
+                ),
+                at: origin.addingTimeInterval(Double(i) + 0.5)
+            )
+        }
+        let report = try XCTUnwrap(detector.flush(at: origin.addingTimeInterval(61)))
+        XCTAssertEqual(report.attempts, 10)
+        XCTAssertEqual(report.failures, 10)
+        XCTAssertEqual(report.failureRate, 1.0, accuracy: 0.001)
+    }
+
+    /// vless 成功的连接会写**两行** `outbound connection to`（真机 577 条成功连接各两行），同样只算一次。
+    func testVLESSSuccessWritingTwoLinesCountsOnce() throws {
+        var detector = OutboundFailureDetector(
+            windowDuration: 60, minimumAttempts: 10, minimumFailures: 3, minimumFailureRate: 0.1
+        )
+        for i in 0..<20 {
+            let id = 6_000 + i
+            _ = detector.ingest(
+                CoreLogLine.parse("[\(id) 16ms] outbound/vless[node-v]: outbound connection to s\(i).example.invalid:443"),
+                at: origin.addingTimeInterval(Double(i))
+            )
+            _ = detector.ingest(
+                CoreLogLine.parse("[\(id) 303ms] outbound/vless[node-v]: outbound connection to s\(i).example.invalid:443"),
+                at: origin.addingTimeInterval(Double(i) + 0.3)
+            )
+        }
+        for i in 0..<5 {
+            let id = 7_000 + i
+            _ = detector.ingest(
+                CoreLogLine.parse("[\(id) 2ms] outbound/vless[node-v]: outbound connection to f\(i).example.invalid:443"),
+                at: origin.addingTimeInterval(Double(30 + i))
+            )
+            _ = detector.ingest(
+                CoreLogLine.parse(
+                    "[\(id) 2.1s] connection: open connection to f\(i).example.invalid:443 using "
+                    + "outbound/vless[node-v]: dial tcp 203.0.113.9:443: connection refused"
+                ),
+                at: origin.addingTimeInterval(Double(30 + i) + 0.5)
+            )
+        }
+        let report = try XCTUnwrap(detector.flush(at: origin.addingTimeInterval(61)))
+        XCTAssertEqual(report.attempts, 25)
+        XCTAssertEqual(report.failures, 5)
+        XCTAssertEqual(report.failureRate, 0.2, accuracy: 0.001, "按行累加时只有 5/50 = 10%")
+    }
+
+    private func report(reason: String, directAttempts: Int, directFailures: Int) -> OutboundFailureReport {
+        OutboundFailureReport(
+            windowStart: origin, windowEnd: origin.addingTimeInterval(600), outboundTag: "node-x",
+            failures: 30, attempts: 30, distinctReasonCount: 1, dominantReason: reason,
+            directAttempts: directAttempts, directFailures: directFailures
+        )
+    }
+
+    /// 真机 2026-09-29：只开系统代理、直连 0 次，节点 `network is unreachable` 却被当成节点问题。
+    /// 这类原因出在本机协议栈，直连样本不足时应判为本机网络。
+    func testLocalReasonWithoutDirectSamplesBlamesTheLocalNetwork() {
+        for reason in ["network is unreachable", "no route to internet"] {
+            let r = report(reason: reason, directAttempts: 0, directFailures: 0)
+            XCTAssertTrue(r.localNetworkLooksDown, reason)
+            XCTAssertTrue(r.failureReasonSaysLocalNetworkDown, reason)
+            XCTAssertFalse(r.directSaysLocalNetworkDown, reason)
+        }
+    }
+
+    /// 直连样本够且正常：某节点报本机不可达，多半是它的地址（如 IPv6）在当前网络走不通，仍算节点侧。
+    func testLocalReasonWithHealthyDirectKeepsTheBlameOnTheNode() {
+        let r = report(reason: "network is unreachable", directAttempts: 20, directFailures: 0)
+        XCTAssertFalse(r.localNetworkLooksDown)
+    }
+
+    func testOrdinaryReasonWithoutDirectSamplesStaysOnTheNode() {
+        let r = report(reason: "i/o timeout", directAttempts: 0, directFailures: 0)
+        XCTAssertFalse(r.localNetworkLooksDown)
+        XCTAssertFalse(r.hasEnoughDirectSamples)
+    }
+
+    /// 真机 2026-09-26 11:53：断网还没恢复，直连真实失败约 93%，旧口径算成 48%（封顶 50%），
+    /// 判为「本机网络正常」并建议换节点。按连接计数后必须判为本机网络问题。
+    func testPartialOutageWithRealisticLinesBlamesTheLocalNetwork() throws {
+        var detector = OutboundFailureDetector()
+        var offset = 0.0
+        func feed(_ text: String) {
+            _ = detector.ingest(CoreLogLine.parse(text), at: origin.addingTimeInterval(offset))
+            offset += 0.1
+        }
+        for i in 0..<9 {
+            feed("[\(8_000 + i) 2ms] outbound/direct[direct]: outbound connection to d\(i).example.invalid:443")
+        }
+        for i in 0..<125 {
+            let id = 8_100 + i
+            feed("[\(id) 1ms] outbound/direct[direct]: outbound connection to e\(i).example.invalid:443")
+            feed(
+                "[\(id) 3ms] connection: open connection to e\(i).example.invalid:443 using "
+                + "outbound/direct[direct]: dial tcp 203.0.113.7:443: no route to internet"
+            )
+        }
+        for i in 0..<60 {
+            let id = 9_000 + i
+            feed("[\(id) 1ms] outbound/vless[node-x]: outbound connection to n\(i).example.invalid:443")
+            feed(
+                "[\(id) 2ms] connection: open connection to n\(i).example.invalid:443 using "
+                + "outbound/vless[node-x]: dial tcp 203.0.113.9:443: no route to internet"
+            )
+        }
+        let report = try XCTUnwrap(detector.finish(at: origin.addingTimeInterval(offset)))
+        XCTAssertEqual(report.directAttempts, 134)
+        XCTAssertEqual(report.directFailures, 125)
+        XCTAssertEqual(report.attempts, 60)
+        XCTAssertEqual(report.failures, 60)
+        XCTAssertTrue(report.localNetworkLooksDown, "直连 93% 失败时问题在本机网络，不在节点")
     }
 
     func testOutboundFailureReportsWorstNodeWithRateAndReason() throws {

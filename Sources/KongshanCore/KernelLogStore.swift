@@ -1,14 +1,22 @@
 import Darwin
 import Foundation
 
-public enum KernelLogSource: Equatable, Sendable {
+public enum KernelLogSource: Hashable, Sendable {
     case system
     case tun
+    /// TUN 内核日志的**折叠副本**，由 App 从 Clash API 日志流写入。
+    ///
+    /// 助手启动的 TUN 内核把日志直写进助手目录（`defaultExternalTUNLogURL`），App 无法逐行过滤；
+    /// 断网刷屏时那份文件几分钟就被截断一轮，断网前后的上下文随之丢失（真机 2026-09-26）。
+    /// 这份副本经 `KernelLogFolder` 折叠，才留得住复盘要看的那一段。
+    /// 与 `.tun` 分开：`.tun` 是未装助手时的回退路径，由内核进程在外部直接追加。
+    case tunStream
 
     fileprivate var fileName: String {
         switch self {
         case .system: "sing-box.log"
         case .tun: "sing-box-tun.log"
+        case .tunStream: "sing-box-tun-stream.log"
         }
     }
 }
@@ -23,7 +31,14 @@ public actor KernelLogStore {
     private let maxFileBytes: Int
     private let externalTUNLogURL: URL
     private let errorHandler: @Sendable (String) -> Void
+    private let now: @Sendable () -> Date
     private var bufferedLines: [String] = []
+    /// 每个来源一台折叠器：刷屏状态跨调用保持。
+    private var folders: [KernelLogSource: KernelLogFolder] = [:]
+    /// 管道分块送来的半行，按「来源 + 管道」分开拼：stdout 与 stderr 的块会交错到达。
+    private var partialLines: [String: String] = [:]
+    /// 半行的长度上限。超过仍无换行就当整行处理，防止异常输出把内存撑大。
+    private static let maxPartialLineBytes = 64 * 1_024
     private var externalMonitorSource: KernelLogSource?
     private var externalMonitor: DispatchSourceFileSystemObject?
     /// 缓存写文件句柄，避免每条日志都 open/seek/close。
@@ -37,13 +52,15 @@ public actor KernelLogStore {
         maxBufferedLines: Int = KernelLogStore.defaultBufferedLineLimit,
         maxFileBytes: Int = KernelLogStore.defaultFileByteLimit,
         externalTUNLogURL: URL = KernelLogStore.defaultExternalTUNLogURL,
-        errorHandler: @escaping @Sendable (String) -> Void = { _ in }
+        errorHandler: @escaping @Sendable (String) -> Void = { _ in },
+        now: @escaping @Sendable () -> Date = Date.init
     ) {
         self.directory = directory
         self.maxBufferedLines = max(1, maxBufferedLines)
         self.maxFileBytes = max(1, maxFileBytes)
         self.externalTUNLogURL = externalTUNLogURL
         self.errorHandler = errorHandler
+        self.now = now
     }
 
     deinit {
@@ -53,11 +70,76 @@ public actor KernelLogStore {
         }
     }
 
+    /// 用户态内核的管道输出。`readabilityHandler` 给的是**数据块**而不是行：
+    /// 一块可能含多行，也可能在行中间截断。先拼成整行再交给折叠器，末尾的半行留到下一块。
     public func append(_ line: SingBoxLogLine) throws {
-        try append(line.text, source: .system)
+        let channel = line.stream == .standardOutput ? "stdout" : "stderr"
+        let key = "\(KernelLogSource.system.fileName)#\(channel)"
+        var lines = ((partialLines.removeValue(forKey: key) ?? "") + line.text)
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+        let tail = lines.removeLast()
+        if !tail.isEmpty {
+            if tail.utf8.count > Self.maxPartialLineBytes {
+                lines.append(tail)
+            } else {
+                partialLines[key] = tail
+            }
+        }
+        try write(lines: lines, source: .system, at: now())
     }
 
+    /// 整段文本（按行切分，末尾不带换行也视为完整的一行）。
     public func append(_ text: String, source: KernelLogSource) throws {
+        var lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        if lines.last == "" { lines.removeLast() }
+        try write(lines: lines, source: source, at: now())
+    }
+
+    /// TUN 内核日志流的副本（见 `KernelLogSource.tunStream`）。按内核日志的格式落盘，
+    /// 时间取 App 收到该行的时刻——日志流本身不带时间。
+    public func appendStream(_ entries: [CoreLogEntry]) throws {
+        guard !entries.isEmpty else { return }
+        var folder = folders[.tunStream] ?? KernelLogFolder()
+        var output: [String] = []
+        for entry in entries {
+            let line = KernelLogFolder.timestamp(entry.receivedAt) + " " + entry.level.fileLabel + " " + entry.message
+            output += folder.process(line, at: entry.receivedAt)
+        }
+        folders[.tunStream] = folder
+        try writeRaw(output, source: .tunStream)
+    }
+
+    /// 内核停止时调用：写出拼了一半的尾行，仍在折叠就补一条总结。
+    /// 不调用也不丢数据——只是总结要等下一代内核的第一行才写出。
+    public func finish(source: KernelLogSource) throws {
+        let prefix = "\(source.fileName)#"
+        let pending = partialLines.keys.filter { $0.hasPrefix(prefix) }.sorted()
+        var lines: [String] = []
+        for key in pending {
+            if let tail = partialLines.removeValue(forKey: key) { lines.append(tail) }
+        }
+        let date = now()
+        var folder = folders[source] ?? KernelLogFolder()
+        var output: [String] = []
+        for line in lines { output += folder.process(line, at: date) }
+        output += folder.finish(at: date)
+        folders[source] = folder
+        try writeRaw(output, source: source)
+    }
+
+    private func write(lines: [String], source: KernelLogSource, at date: Date) throws {
+        guard !lines.isEmpty else { return }
+        var folder = folders[source] ?? KernelLogFolder()
+        var output: [String] = []
+        for line in lines { output += folder.process(line, at: date) }
+        folders[source] = folder
+        try writeRaw(output, source: source)
+    }
+
+    private func writeRaw(_ lines: [String], source: KernelLogSource) throws {
+        guard !lines.isEmpty else { return }
+        let text = lines.joined(separator: "\n") + "\n"
         appendToBuffer(text)
         try FileManager.default.createDirectory(
             at: directory,
@@ -144,21 +226,27 @@ public actor KernelLogStore {
     )
 
     public func exportText() throws -> String {
-        var urls = [
-            directory.appending(path: "sing-box.log.1"),
-            directory.appending(path: "sing-box.log"),
-            directory.appending(path: "sing-box-tun.log.1"),
-            directory.appending(path: "sing-box-tun.log")
+        let ownFiles = [
+            "sing-box.log.1", "sing-box.log",
+            "sing-box-tun.log.1", "sing-box-tun.log",
+            "sing-box-tun-stream.log.1", "sing-box-tun-stream.log"
         ]
-        urls.append(externalTUNLogURL)
+        var sources: [(url: URL, limit: Int, title: String)] = ownFiles.map {
+            (directory.appending(path: $0), maxFileBytes, $0)
+        }
+        // 助手那份由内核直写、未经折叠，而 `sing-box-tun-stream.log` 已有同一内核的折叠副本：
+        // 只取尾部 1 MB，用来补上日志流连上之前的启动输出与致命错误。
+        sources.append((
+            externalTUNLogURL,
+            min(maxFileBytes, 1_024 * 1_024),
+            "\(externalTUNLogURL.lastPathComponent)（助手原始输出，仅尾部）"
+        ))
         var sections: [String] = []
-        for url in urls {
-            let name = url.lastPathComponent
-            guard FileManager.default.fileExists(atPath: url.path) else { continue }
-            // helper 那份可能有几十 MB，导出只取尾部，避免把导出文件撑爆。
-            guard let data = try? readTail(of: url, limit: maxFileBytes) else { continue }
+        for source in sources {
+            guard FileManager.default.fileExists(atPath: source.url.path) else { continue }
+            guard let data = try? readTail(of: source.url, limit: source.limit) else { continue }
             let content = String(decoding: data, as: UTF8.self)
-            sections.append("===== \(name) =====\n\(content)")
+            sections.append("===== \(source.title) =====\n\(content)")
         }
         if sections.isEmpty { return "kongshan 日志导出\n（没有可用的内核日志）\n" }
         return sections.joined(separator: "\n")
@@ -259,5 +347,17 @@ public actor KernelLogStore {
             handle = newHandle
         }
         try handle.write(contentsOf: data)
+    }
+}
+
+extension CoreLogLevel {
+    /// 与内核日志文件一致的级别标签（`KernelLogFolder` 靠 ` ERROR ` 识别失败行）。
+    var fileLabel: String {
+        switch self {
+        case .debug: "DEBUG"
+        case .info: "INFO"
+        case .warning: "WARN"
+        case .error: "ERROR"
+        }
     }
 }

@@ -643,6 +643,9 @@ final class AppState {
     /// 尚未并入 `liveLogs` 的日志行，以及负责并入的定时任务。见 `receiveLog`。
     @ObservationIgnored private var pendingLogs: [LiveLogEntry] = []
     @ObservationIgnored private var logFlushTask: Task<Void, Never>?
+    /// TUN 内核日志流的待写副本（见 `mirrorTUNLogIfNeeded`），按秒成批落盘。
+    @ObservationIgnored private var pendingTUNLogMirror: [CoreLogEntry] = []
+    @ObservationIgnored private var tunLogMirrorTask: Task<Void, Never>?
     /// 断流重连（睡眠唤醒后 WebSocket 必断）。指数退避，收到数据即复位。
     @ObservationIgnored private var dashboardRetryTask: Task<Void, Never>?
     @ObservationIgnored private var dashboardRetryDelay: Double = 2
@@ -688,6 +691,12 @@ final class AppState {
     /// 合并重复唤醒事件的窗口。取 120 秒：真机观察到的伪唤醒间隔在 80~100 秒。
     private static let wakeEventCoalescingWindow: TimeInterval = 120
     @ObservationIgnored private var outboundFailureDetector = OutboundFailureDetector()
+    /// 系统代理设置变化的监听与去抖，见 `systemProxySettingsChanged`。
+    @ObservationIgnored private var proxyChangeObserver: SystemProxyChangeObserver?
+    @ObservationIgnored private var proxyResidueSweepTask: Task<Void, Never>?
+    /// 同类告警的合并状态，见 `recordCoalescedAlert`。
+    @ObservationIgnored private var lastCoalescedAlertAt: [String: Date] = [:]
+    @ObservationIgnored private var suppressedAlertCounts: [String: Int] = [:]
     /// 两次自诊断采样之间流入的内核日志行数。异常时段的归因线索之一：
     /// 日志洪峰是本项目历史上实测的最高负载来源（v0.1.61：平均 6.36%、峰值 15.9%）。
     @ObservationIgnored private var logLinesSinceDiagnosticsTick = 0
@@ -818,6 +827,10 @@ final class AppState {
             }
         }
         if monitorsSystemEvents {
+            let observer = SystemProxyChangeObserver { [weak self] in
+                Task { @MainActor [weak self] in self?.systemProxySettingsChanged() }
+            }
+            if observer.start() { proxyChangeObserver = observer }
             // 睡眠唤醒后核心可能进入拒绝连接的假死态（sing-box#1709），网络也可能已切换。
             observerBag.add(to: NSWorkspace.shared.notificationCenter, NSWorkspace.shared.notificationCenter.addObserver(
                 forName: NSWorkspace.didWakeNotification,
@@ -1348,7 +1361,7 @@ final class AppState {
 
     /// 返回本次清掉的服务名（代理、DNS 各一组），供「网络自检与修复」汇报。
     @discardableResult
-    func sweepTakeoverResidue(trigger: String) async -> (proxy: [String], dns: [String]) {
+    func sweepTakeoverResidue(trigger: String, includeDNS: Bool = true) async -> (proxy: [String], dns: [String]) {
         var clearedProxy: [String] = []
         var clearedDNS: [String] = []
         if !(status == .on && activeModes.contains(.systemProxy)), let port = preferredRelayPort {
@@ -1366,7 +1379,7 @@ final class AppState {
                 appendWarning("\(trigger)时检查系统代理残留失败：\(error.localizedDescription)")
             }
         }
-        if !(status == .on && activeModes.contains(.tun)) {
+        if includeDNS, !(status == .on && activeModes.contains(.tun)) {
             do {
                 let cleared = try await systemDNSManager.sweepResidue(server: tunSettings.dnsServerAddress)
                 clearedDNS = cleared
@@ -1561,6 +1574,7 @@ final class AppState {
         // 窗口远没到期。真机 2026-09-02 22:41 节点 276 次建连全失败、52 秒后被关掉，
         // 旧实现直接丢弃，消息页一条记录都没有。
         finishAnomalyWindows()
+        await finishTUNLogMirror()
         recordRuntimeEvent(title: "内核已停止", detail: reason, previousPID: previousPID)
         if !restoreFailures.isEmpty {
             // 快照已保留，重开 App 会自动重试；但在那之前网络是坏的，必须明确告知怎么手工恢复。
@@ -4390,9 +4404,9 @@ final class AppState {
 
     /// 这行是否**可能**被任一检测器用到。只做子串判断、不解析，宁可放宽也不能漏：
     /// 判据必须覆盖 `DNSStallDetector.isResolutionStall` 与
-    /// `OutboundFailureDetector.isSuccessfulAttempt/isFailedAttempt` 认的全部形态。
+    /// `OutboundFailureDetector.isAttemptLine/isFailedAttempt` 认的全部形态。
     /// 「connection to」同时覆盖 `open connection to`（尝试/失败）与
-    /// `outbound connection to`（成功计数），后者是失败率的分母，漏掉会让比例失真。
+    /// `outbound connection to`（尝试计数），后者是失败率的分母，漏掉会让比例失真。
     static func mayConcernDetectors(_ message: String) -> Bool {
         message.contains("connection to") || message.contains("context deadline exceeded")
     }
@@ -4403,6 +4417,7 @@ final class AppState {
     func receiveLog(_ entry: CoreLogEntry) {
         logRetryDelay = 2
         logLinesSinceDiagnosticsTick += 1
+        mirrorTUNLogIfNeeded(entry)
         // 日志页关着时走廉价路径：先用最便宜的判据挡掉绝大多数行，命中了才解析。
         // 这条流为了留证而常开，不该顺带把 CPU 也常开——`LiveLogEntry` 每行要分配一个 UUID
         // 并做完整解析（host/category），而内核忙时一秒几十行。
@@ -4441,6 +4456,69 @@ final class AppState {
         pendingLogs.removeAll(keepingCapacity: true)
         if liveLogs.count > KernelLogStore.defaultBufferedLineLimit {
             liveLogs.removeFirst(liveLogs.count - KernelLogStore.defaultBufferedLineLimit)
+        }
+    }
+
+    private static let tunLogMirrorInterval = Duration.seconds(1)
+    /// 落盘卡住时的积压上限。超出部分横竖来不及写，丢最旧的，不让内存跟着涨。
+    private static let tunLogMirrorBacklogLimit = 20_000
+
+    /// TUN 内核的输出由助手直写进它自己的目录，App 无法逐行过滤；断网刷屏时那份文件几分钟就被
+    /// 截断一轮，断网前后的上下文随之丢失（真机 2026-09-26）。这里用本来就常开的日志流，
+    /// 在 App 目录里留一份经 `KernelLogFolder` 折叠的副本（`sing-box-tun-stream.log`）。
+    ///
+    /// 只开系统代理时内核由 App 自己起，输出本来就经 App 落盘（同样折叠），不再抄一份。
+    /// internal 而非 private：接线断了不会报错，只会安静地不再留日志，需回归覆盖。
+    func mirrorTUNLogIfNeeded(_ entry: CoreLogEntry) {
+        guard activeModes.contains(.tun) else { return }
+        pendingTUNLogMirror.append(entry)
+        if pendingTUNLogMirror.count > Self.tunLogMirrorBacklogLimit {
+            pendingTUNLogMirror.removeFirst(pendingTUNLogMirror.count - Self.tunLogMirrorBacklogLimit)
+        }
+        scheduleTUNLogMirrorFlush()
+    }
+
+    private func scheduleTUNLogMirrorFlush() {
+        guard tunLogMirrorTask == nil else { return }
+        tunLogMirrorTask = Task { [weak self] in
+            // 被取消（内核停止时要求立刻写）就提前醒来，照常落盘。
+            try? await Task.sleep(for: Self.tunLogMirrorInterval)
+            await self?.flushTUNLogMirror()
+        }
+    }
+
+    /// 取走当前批次落盘。任务在写完**之后**才清空，保证批次按顺序写入；
+    /// 写的期间又攒了新行，就再排下一批。
+    private func flushTUNLogMirror() async {
+        let batch = pendingTUNLogMirror
+        pendingTUNLogMirror.removeAll(keepingCapacity: true)
+        if !batch.isEmpty {
+            do {
+                try await kernelLogStore.appendStream(batch)
+            } catch {
+                let message = "内核日志写入失败：\(error.localizedDescription)"
+                if warnings.last != message { appendWarning(message) }
+            }
+        }
+        tunLogMirrorTask = nil
+        if !pendingTUNLogMirror.isEmpty { scheduleTUNLogMirrorFlush() }
+    }
+
+    /// 内核停止时：写完剩下的行，折叠中的话补一条总结。
+    /// internal 同 `mirrorTUNLogIfNeeded`，测试需要等它落盘后再读文件。
+    func finishTUNLogMirror() async {
+        while let running = tunLogMirrorTask {
+            running.cancel()
+            await running.value
+            // 正常情况下任务结束前已自行置空；万一没有（如 self 已释放），这里兜住，免得空转。
+            if tunLogMirrorTask == running { tunLogMirrorTask = nil }
+        }
+        if !pendingTUNLogMirror.isEmpty { await flushTUNLogMirror() }
+        do {
+            try await kernelLogStore.finish(source: .tunStream)
+        } catch {
+            let message = "内核日志写入失败：\(error.localizedDescription)"
+            if warnings.last != message { appendWarning(message) }
         }
     }
 
@@ -5421,6 +5499,17 @@ final class AppState {
         set { lastActiveModes = newValue }
     }
 
+    /// 测试用：标记为「正在以这些方式接管」，不触发任何接管动作。
+    func setRunningForTesting(modes: Set<ProxyMode>) {
+        activeModes = modes
+        status = .on
+    }
+
+    /// 测试用：直接设定当前接管方式，不触发任何接管动作。
+    func setActiveModesForTesting(_ modes: Set<ProxyMode>) {
+        activeModes = modes
+    }
+
     /// 测试用：模拟"带着这些接管方式正常退出"。传入的是**实时 activeModes**，
     /// 因为快照正是从它取的——直接塞快照字段测不到取值逻辑。
     func recordActiveModesSnapshotForTesting(exitingWith modes: Set<ProxyMode>) async {
@@ -5673,23 +5762,79 @@ final class AppState {
 
         // 直连也在大面积失败时，这就不是节点的锅——建议换节点会把用户引向错误方向。
         if report.localNetworkLooksDown {
+            let evidence = report.directSaysLocalNetworkDown
+                ? "但同期直连也有 \(report.directFailures)/\(report.directAttempts) 次失败"
+                : "失败原因是本机网络不可达（同期直连 \(report.directAttempts) 次，样本不足）"
             let detail = [
                 counts,
                 reason,
-                "但同期直连也有 \(report.directFailures)/\(report.directAttempts) 次失败，"
-                    + "说明本机网络当时不通（断网、休眠或切换网络），**换节点无用**"
+                evidence + "，说明本机网络当时不通（断网、休眠或切换网络），**换节点无用**"
             ].joined(separator: "；")
-            recordRuntimeEvent(level: .warning, title: "本机网络不通，期间建连大量失败", detail: detail)
+            recordCoalescedAlert(key: "本机网络不通", cooldown: Self.outageAlertCooldown,
+                                 title: "本机网络不通，期间建连大量失败", detail: detail)
             return
         }
 
+        // 直连样本不够时不能说「本机网络正常」——0 次直连什么也证明不了。
+        let directNote = report.hasEnoughDirectSamples
+            ? "同期直连 \(report.directAttempts) 次中失败 \(report.directFailures) 次，本机网络正常"
+            : "同期直连仅 \(report.directAttempts) 次，样本不足，无法据此判断本机网络"
         let detail = [
             counts,
             reason,
-            "同期直连 \(report.directAttempts) 次中失败 \(report.directFailures) 次，本机网络正常",
+            directNote,
             "多为节点或线路问题，可到代理页测速后换一个节点"
         ].joined(separator: "；")
-        recordRuntimeEvent(level: .warning, title: "节点建连失败偏多", detail: detail)
+        recordCoalescedAlert(key: "节点|\(report.outboundTag)|\(report.dominantReason)",
+                             cooldown: Self.nodeAlertCooldown,
+                             title: "节点建连失败偏多", detail: detail)
+    }
+
+    private static let proxyChangeDebounce = Duration.seconds(2)
+
+    /// 系统代理设置变了（SCDynamicStore 通知）：去抖后清一次残留。
+    ///
+    /// 启动、换网、停止、自检之外冒出来的残留原先没人管——真机 2026-09-29 重启后代理又指回 36815，
+    /// 一直留到次日手动自检（见 `SystemProxyChangeObserver`）。我们自己写代理时同样会触发通知，
+    /// 去抖 2 秒后按「此刻是否在接管」判断：接管中或正在启停一律不动；没在接管就只清指向本机中转端口的设置。
+    func systemProxySettingsChanged() {
+        guard proxyResidueSweepTask == nil else { return }
+        proxyResidueSweepTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.proxyChangeDebounce)
+            await self?.sweepAfterProxyChange()
+        }
+    }
+
+    /// internal：测试直接调用，跳过去抖。
+    func sweepAfterProxyChange() async {
+        proxyResidueSweepTask = nil
+        guard isReady, !isBusy, !(status == .on && activeModes.contains(.systemProxy)) else { return }
+        _ = await sweepTakeoverResidue(trigger: "系统代理设置被改动", includeDNS: false)
+    }
+
+    /// 同一件事持续发生时，检测窗口每 10 分钟结算一次就会报一次：
+    /// 真机 2026-09-26 断网两小时报了 14 条、09-29 报了 12 条，同一句话刷满消息页。
+    /// 同类告警在冷却期内只记一次；冷却后再报时注明合并了多少条，不丢「还在持续」这个信息。
+    static let outageAlertCooldown: TimeInterval = 3_600
+    static let nodeAlertCooldown: TimeInterval = 1_800
+
+    /// internal：合并逻辑断了只会安静地重新刷屏，需回归覆盖。
+    func recordCoalescedAlert(key: String, cooldown: TimeInterval, title: String, detail: String) {
+        let at = now()
+        if let last = lastCoalescedAlertAt[key], at.timeIntervalSince(last) < cooldown {
+            suppressedAlertCounts[key, default: 0] += 1
+            return
+        }
+        var text = detail
+        if let merged = suppressedAlertCounts.removeValue(forKey: key), merged > 0 {
+            text += "；此前 \(Self.cooldownText(cooldown)) 内同类提示另有 \(merged) 条，已合并"
+        }
+        lastCoalescedAlertAt[key] = at
+        recordRuntimeEvent(level: .warning, title: title, detail: text)
+    }
+
+    private static func cooldownText(_ seconds: TimeInterval) -> String {
+        seconds >= 3_600 ? "\(Int(seconds / 3_600)) 小时" : "\(Int(seconds / 60)) 分钟"
     }
 
     /// 时间跨度的可读写法。**不足 1 分钟必须写秒**：`%.0f 分钟` 会把 20 秒四舍五入成

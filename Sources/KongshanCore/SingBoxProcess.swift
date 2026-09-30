@@ -20,6 +20,9 @@ public actor SingBoxProcess {
     private var process: Process?
     private var outputPipe: Pipe?
     private var errorPipe: Pipe?
+    /// 日志块的单一消费者入口，见 `startLogDrain`。
+    private var logContinuation: AsyncStream<SingBoxLogLine>.Continuation?
+    private var logDrainTask: Task<Void, Never>?
     private var stopping = false
 
     public init(
@@ -69,6 +72,7 @@ public actor SingBoxProcess {
         process.standardOutput = outputPipe
         process.standardError = errorPipe
 
+        startLogDrain()
         stream(outputPipe, as: .standardOutput)
         stream(errorPipe, as: .standardError)
         process.terminationHandler = { [weak self] process in
@@ -109,28 +113,51 @@ public actor SingBoxProcess {
         }
         await Task.detached { [process] in process.waitUntilExit() }.value
         clearStreams()
+        // 等这一代的日志收尾（尾行、折叠总结）写完再返回：「先停再启」时下一代的日志
+        // 才不会和上一代的收尾交错。
+        await logDrainTask?.value
+        logDrainTask = nil
         self.process = nil
         stopping = false
     }
 
+    /// 日志块交给**单一消费者**按到达顺序落盘。
+    ///
+    /// 旧实现每块日志各开一个 `Task` 去调 actor，而 actor 不保证这些调用按创建顺序执行。
+    /// 日志存储现在要把块拼成整行再折叠刷屏（`KernelLogFolder`），块一乱序就会把两行拼坏。
+    /// 流结束（内核退出、`clearStreams`）时让存储写出尾行与折叠总结。
+    private func startLogDrain() {
+        logContinuation?.finish()
+        logContinuation = nil
+        guard let store = logStore else { return }
+        let errorHandler = logErrorHandler
+        let (lines, continuation) = AsyncStream.makeStream(of: SingBoxLogLine.self)
+        logContinuation = continuation
+        logDrainTask = Task {
+            for await line in lines {
+                do {
+                    try await store.append(line)
+                } catch {
+                    errorHandler(error.localizedDescription)
+                }
+            }
+            do {
+                try await store.finish(source: .system)
+            } catch {
+                errorHandler(error.localizedDescription)
+            }
+        }
+    }
+
     private func stream(_ pipe: Pipe, as stream: SingBoxLogLine.Stream) {
         let handler = logHandler
-        let store = logStore
-        let errorHandler = logErrorHandler
+        let continuation = logContinuation
         pipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
             let line = SingBoxLogLine(stream: stream, text: String(decoding: data, as: UTF8.self))
             handler(line)
-            if let store {
-                Task {
-                    do {
-                        try await store.append(line)
-                    } catch {
-                        errorHandler(error.localizedDescription)
-                    }
-                }
-            }
+            continuation?.yield(line)
         }
     }
 
@@ -147,5 +174,7 @@ public actor SingBoxProcess {
         errorPipe?.fileHandleForReading.readabilityHandler = nil
         outputPipe = nil
         errorPipe = nil
+        logContinuation?.finish()
+        logContinuation = nil
     }
 }

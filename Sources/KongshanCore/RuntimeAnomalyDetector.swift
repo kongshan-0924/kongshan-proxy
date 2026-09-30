@@ -420,8 +420,28 @@ public struct OutboundFailureReport: Equatable, Sendable {
     /// 还建议用户"换一个节点"——换了也没用，那是把用户引向错误方向，
     /// 比不报还糟。样本太少不下结论（宁可当作节点问题，那是原有行为）。
     public var localNetworkLooksDown: Bool {
-        directAttempts >= 5 && Double(directFailures) / Double(directAttempts) >= 0.5
+        directSaysLocalNetworkDown || failureReasonSaysLocalNetworkDown
     }
+
+    /// 直连样本够用（≥5 次）时，以直连的成败为准。
+    public var hasEnoughDirectSamples: Bool { directAttempts >= 5 }
+
+    public var directSaysLocalNetworkDown: Bool {
+        hasEnoughDirectSamples && Double(directFailures) / Double(directAttempts) >= 0.5
+    }
+
+    /// 直连样本不够时，看失败原因本身：`network is unreachable`（本机协议栈没有路由）与
+    /// `no route to internet`（sing-box 找不到默认网卡）都出在本机，与节点无关。
+    ///
+    /// 真机 2026-09-29 17:29–19:41：只开系统代理、直连 0 次，节点连续 12 个窗口
+    /// `network is unreachable`，每条告警都写「本机网络正常，可换一个节点」。
+    /// 直连样本够用时不走这条：直连正常而某节点报本机不可达，多半是该节点地址（如 IPv6）
+    /// 在当前网络下走不通，那仍是节点这一侧的问题。
+    public var failureReasonSaysLocalNetworkDown: Bool {
+        !hasEnoughDirectSamples && Self.localNetworkReasons.contains(dominantReason)
+    }
+
+    static let localNetworkReasons: Set<String> = ["network is unreachable", "no route to internet"]
 }
 
 /// 按出站 tag 聚合会话建立失败。纯逻辑，日志行由调用方喂入。
@@ -440,6 +460,16 @@ public struct OutboundFailureDetector: Sendable {
         /// 问题就不在节点上——这是区分「节点坏了」与「本机没网」的判据。
         var directAttempts = 0
         var directFailures = 0
+        /// 本窗口已计过尝试 / 失败的连接 ID：**一条连接只算一次尝试、至多一次失败**。
+        ///
+        /// 内核对一条连接会写多行：拨号**开始**时就写 `outbound connection to`
+        /// （失败的连接也有这一行，真机 2026-09-28 样本 388/388），vless 成功后还会再写一行
+        /// （577 条成功连接各两行）。旧实现按行累加，一次失败被算成「一次成功 + 一次失败」：
+        /// 节点失败率只剩真实值的一半，直连失败率封顶 50%——「本机网络不通」只有在直连
+        /// **全部**失败时才触发，部分断网被归咎于节点。真机 2026-09-26 11:53 直连真实失败约 93%，
+        /// 却报「本机网络正常，可换一个节点」。
+        var countedAttempts: Set<String> = []
+        var countedFailures: Set<String> = []
     }
 
     private let windowDuration: TimeInterval
@@ -482,8 +512,10 @@ public struct OutboundFailureDetector: Sendable {
         line.message.contains("outbound/direct[")
     }
 
-    /// 成功建连。内核对每条成功的出站连接都写一行 `outbound connection to <host>`。
-    public static func isSuccessfulAttempt(_ line: CoreLogLine) -> Bool {
+    /// 建连尝试。内核在**拨号开始时**写 `outbound connection to <host>`——失败的连接也有这一行，
+    /// vless 成功后还会再写一行。所以它只能当「尝试」计，且要按连接 ID 去重（见 `Window.countedAttempts`）；
+    /// 把它当成「成功」会让失败率只剩一半。
+    public static func isAttemptLine(_ line: CoreLogLine) -> Bool {
         line.message.contains("outbound connection to")
     }
 
@@ -565,9 +597,9 @@ public struct OutboundFailureDetector: Sendable {
     }
 
     public mutating func ingest(_ line: CoreLogLine, at date: Date) -> OutboundFailureReport? {
-        let success = Self.isSuccessfulAttempt(line)
+        let attempt = Self.isAttemptLine(line)
         let failure = Self.isFailedAttempt(line)
-        guard success || failure else { return flush(at: date) }
+        guard attempt || failure else { return flush(at: date) }
         let isDirect = Self.isDirectOutbound(line)
         let tag = Self.outboundTag(in: line.message)
         // 既不是直连、也翻不出节点 tag（reject/block 等）：与两个口径都无关，跳过。
@@ -575,12 +607,16 @@ public struct OutboundFailureDetector: Sendable {
 
         let expired = flush(at: date)
         var current = window ?? Window(startedAt: date, lastAt: date)
+        // 没有连接 ID 的行（内核的连接行都带 ID，理论上不会出现）退回按行计数。
+        let newAttempt = line.connectionID.map { current.countedAttempts.insert($0).inserted } ?? true
+        let newFailure = failure
+            && (line.connectionID.map { current.countedFailures.insert($0).inserted } ?? true)
         if isDirect {
-            current.directAttempts += 1
-            if failure { current.directFailures += 1 }
+            if newAttempt { current.directAttempts += 1 }
+            if newFailure { current.directFailures += 1 }
         } else if let tag {
-            current.attempts[tag, default: 0] += 1
-            if failure {
+            if newAttempt { current.attempts[tag, default: 0] += 1 }
+            if newFailure {
                 current.failures[tag, default: 0] += 1
                 let reason = Self.normalizedReason(from: line.message)
                 current.reasons[tag, default: [:]][reason, default: 0] += 1

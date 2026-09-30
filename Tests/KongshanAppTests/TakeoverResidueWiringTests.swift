@@ -155,6 +155,51 @@ final class TakeoverResidueWiringTests: XCTestCase {
     }
 }
 
+/// 系统代理设置变化（SCDynamicStore 通知）后的兜底清扫。
+/// 真机 2026-09-29 重启后代理又指回 36815，启动、换网、停止、自检之外没人管，留到次日才被手动清掉。
+extension TakeoverResidueWiringTests {
+    private func prepareInstalledState() async throws -> (AppState, AppNetworkSetupSimulator, URL) {
+        let root = try temporaryDirectory()
+        try Data("1".utf8).write(to: root.appending(path: "proxy-takeover.marker"))
+        try Data("1".utf8).write(to: root.appending(path: "dns-takeover.marker"))
+        try writeSettings(relayPort: 36815, to: root)
+        let simulator = AppNetworkSetupSimulator(proxyPort: 36815, dns: [TunSettings.defaults.dnsServerAddress])
+        let state = makeState(root: root, simulator: simulator)
+        await state.initialize()
+        return (state, simulator, root)
+    }
+
+    func testProxyChangeWhileIdleSweepsTheResidue() async throws {
+        let (state, simulator, root) = try await prepareInstalledState()
+        defer { try? FileManager.default.removeItem(at: root) }
+        await simulator.setProxyEnabled(true)   // 残留又冒出来了
+        let before = await simulator.calls.count
+
+        await state.sweepAfterProxyChange()
+
+        let calls = await simulator.calls.dropFirst(before)
+        XCTAssertTrue(calls.contains(["-setwebproxystate", "Wi-Fi", "off"]), "\(Array(calls))")
+        XCTAssertFalse(calls.contains { $0.first == "-setdnsservers" || $0.first == "-getdnsservers" },
+                       "代理变化只清代理，不去碰 DNS：\(Array(calls))")
+        let detail = state.runtimeEvents.last { $0.title == "已清理残留的系统代理设置" }?.detail ?? ""
+        XCTAssertTrue(detail.contains("系统代理设置被改动"), detail)
+    }
+
+    /// 接管中收到通知（多半是我们自己写的）绝不能动——那等于把自己关掉。
+    func testProxyChangeWhileTakingOverLeavesSettingsAlone() async throws {
+        let (state, simulator, root) = try await prepareInstalledState()
+        defer { try? FileManager.default.removeItem(at: root) }
+        state.setRunningForTesting(modes: [.systemProxy])
+        await simulator.setProxyEnabled(true)
+        let before = await simulator.calls.count
+
+        await state.sweepAfterProxyChange()
+
+        let calls = await simulator.calls.dropFirst(before)
+        XCTAssertTrue(calls.isEmpty, "接管中不得执行任何 networksetup：\(Array(calls))")
+    }
+}
+
 /// 一个 Wi-Fi 服务：三项代理指向 127.0.0.1:<proxyPort>，DNS 为给定列表；按真实 networksetup 语义响应。
 private actor AppNetworkSetupSimulator {
     private var proxyEnabled = true
