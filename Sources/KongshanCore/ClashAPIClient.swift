@@ -64,7 +64,14 @@ public struct ConnectionSnapshot: Equatable, Sendable {
 public struct ConnectionDetail: Identifiable, Equatable, Sendable {
     public let id: String
     public let host: String          // 目标主机（域名优先，回退 IP:端口）
-    public let process: String?      // 发起进程名（内核 sniff 到才有）
+    /// 发起进程的可执行文件名（与分应用规则用的名字一致）。
+    ///
+    /// sing-box 1.13 的连接元数据里**只有 `processPath`**（形如 `/usr/bin/curl (user)`），没有 `process`——
+    /// 2026-10-02 用临时内核实测确认。此前只读 `process`，真实使用中这一项一直为空：连接页的进程列、
+    /// 按进程搜索、「按该 App 分流」入口全部失效，只有自己构造的快照数据里看得到。
+    public let process: String?
+    /// 入站类型（`type` 字段 `mixed/mixed-in` 斜杠前的部分）：`mixed` 即经本地代理入口，`tun` 即经 TUN。
+    public let inboundType: String?
     public let rule: String          // 命中的规则（含 payload）
     public let chains: [String]      // 出站链路，从入站到最终节点
     public let network: String       // tcp / udp
@@ -85,8 +92,11 @@ public struct ConnectionDetail: Identifiable, Equatable, Sendable {
         let destPort = meta["destinationPort"] as? String ?? (meta["destinationPort"] as? NSNumber).map { "\($0)" } ?? ""
         host = hostName.map { destPort.isEmpty ? $0 : "\($0):\(destPort)" }
             ?? (destPort.isEmpty ? destIP : "\(destIP):\(destPort)")
-        let proc = (meta["process"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-        process = proc
+        process = (meta["process"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            ?? Self.processName(fromPath: meta["processPath"] as? String)
+        inboundType = (meta["type"] as? String)
+            .flatMap { $0.split(separator: "/").first.map(String.init) }
+            .flatMap { $0.isEmpty ? nil : $0 }
         network = (meta["network"] as? String) ?? "tcp"
         let ruleName = payload["rule"] as? String ?? ""
         let rulePayload = (payload["rulePayload"] as? String).flatMap { $0.isEmpty ? nil : $0 }
@@ -96,6 +106,24 @@ public struct ConnectionDetail: Identifiable, Equatable, Sendable {
         upload = (payload["upload"] as? NSNumber)?.int64Value ?? 0
         download = (payload["download"] as? NSNumber)?.int64Value ?? 0
         start = (payload["start"] as? String).flatMap(Self.isoFormatter.date(from:))
+    }
+
+    /// 经本地代理入口（系统代理 / 局域网共享）进来的连接：内核看到的来源进程是空山自己（或查不到），
+    /// 真正发起的 App 无从得知。连接页据此显示「经系统代理」，也不提供「按该 App 分流」——
+    /// 那会给空山自己建一条规则。
+    public var viaLocalProxyEntry: Bool {
+        inboundType == "mixed" && (process == nil || process == "kongshan")
+    }
+
+    /// `/Applications/Foo.app/Contents/MacOS/Foo (user)` → `Foo`；`/usr/bin/curl (user)` → `curl`。
+    static func processName(fromPath raw: String?) -> String? {
+        guard var path = raw?.trimmingCharacters(in: .whitespaces), !path.isEmpty else { return nil }
+        // 末尾的「 (用户名)」或「 (uid)」是 sing-box 附加的，不属于路径。
+        if path.hasSuffix(")"), let open = path.range(of: " (", options: .backwards) {
+            path = String(path[..<open.lowerBound])
+        }
+        let name = (path as NSString).lastPathComponent
+        return name.isEmpty ? nil : name
     }
 
     /// 内核给的是带小数秒的 ISO8601（`2026-07-30T12:00:00.123456789+08:00`）。

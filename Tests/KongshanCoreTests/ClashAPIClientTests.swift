@@ -172,3 +172,36 @@ private final class StubState: @unchecked Sendable {
         lock.withLock { activeRequests -= 1 }
     }
 }
+
+/// 连接元数据的真实形状（sing-box 1.13.21 实测）：只有 `processPath` 与 `type`，没有 `process`。
+extension ClashAPIClientTests {
+    private func detail(_ meta: [String: Any]) -> ConnectionDetail {
+        ConnectionDetail(payload: ["id": "c", "metadata": meta, "rule": "final", "chains": ["direct"]])
+    }
+
+    func testProcessNameComesFromProcessPath() {
+        let app = detail(["type": "tun/tun-in", "processPath": "/Applications/Foo Bar.app/Contents/MacOS/Foo Bar (user)"])
+        XCTAssertEqual(app.process, "Foo Bar")
+        XCTAssertEqual(app.inboundType, "tun")
+        XCTAssertFalse(app.viaLocalProxyEntry)
+
+        let tool = detail(["type": "mixed/mixed-in", "processPath": "/usr/bin/curl (user)"])
+        XCTAssertEqual(tool.process, "curl")
+        XCTAssertFalse(tool.viaLocalProxyEntry, "直连内核入口、认得出来源的不算经系统代理")
+    }
+
+    /// 经空山本地入口进来的：来源是空山自己或查不到，标为经系统代理，不能据此建分应用规则。
+    func testConnectionsThroughTheLocalEntryAreMarked() {
+        let relayed = detail(["type": "mixed/mixed-in", "processPath": "/Applications/kongshan.app/Contents/MacOS/kongshan (user)"])
+        XCTAssertEqual(relayed.process, "kongshan")
+        XCTAssertTrue(relayed.viaLocalProxyEntry)
+        XCTAssertTrue(detail(["type": "mixed/mixed-in", "processPath": ""]).viaLocalProxyEntry)
+    }
+
+    func testLegacyProcessKeyStillWorks() {
+        XCTAssertEqual(detail(["process": "Safari"]).process, "Safari")
+        XCTAssertNil(detail([:]).process)
+        XCTAssertNil(detail([:]).inboundType)
+    }
+}
+

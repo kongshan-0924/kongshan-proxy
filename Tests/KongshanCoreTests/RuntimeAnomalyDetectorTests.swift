@@ -650,6 +650,54 @@ final class RuntimeAnomalyDetectorTests: XCTestCase {
         XCTAssertFalse(r.localNetworkLooksDown)
     }
 
+    /// `no route to internet` 是整机级的（sing-box 找不到默认网卡），直连样本再多也是本机问题。
+    /// 真机 2026-10-01 23:18：直连 214 次、失败 91 次，仍被写成「本机网络正常」。
+    func testNoRouteToInternetIsMachineWideEvenWithEnoughDirectSamples() {
+        let r = report(reason: "no route to internet", directAttempts: 214, directFailures: 91)
+        XCTAssertTrue(r.localNetworkLooksDown)
+    }
+
+    func testDirectFailureRateTiers() {
+        XCTAssertFalse(report(reason: "i/o timeout", directAttempts: 100, directFailures: 10).directSaysLocalNetworkUnstable)
+        XCTAssertTrue(report(reason: "i/o timeout", directAttempts: 100, directFailures: 30).directSaysLocalNetworkUnstable)
+        let down = report(reason: "i/o timeout", directAttempts: 100, directFailures: 60)
+        XCTAssertFalse(down.directSaysLocalNetworkUnstable)
+        XCTAssertTrue(down.localNetworkLooksDown)
+        XCTAssertFalse(report(reason: "i/o timeout", directAttempts: 3, directFailures: 3).directSaysLocalNetworkUnstable,
+                       "样本不足不下结论")
+    }
+
+    /// 慢性窗口跨几个小时，中途网卡重连会把计数清零；累加要跨过重置，不能报「不可用」。
+    func testChronicWindowAccumulatesTrafficAcrossCounterReset() throws {
+        var detector = DNSStallDetector(windowDuration: 600, minimumStalls: 3)
+        let stall = { (i: Int) in
+            CoreLogLine.parse(
+                "[\(4_000 + i) 10.0s] connection: open connection to s\(i).example.invalid:443 using "
+                + "outbound/direct[direct]: lookup s\(i).example.invalid: context deadline exceeded"
+            )
+        }
+        _ = detector.ingest(stall(0), at: origin, physicalBytes: 1_000_000)
+        _ = detector.flush(at: origin.addingTimeInterval(60), physicalBytes: 3_000_000)
+        _ = detector.ingest(stall(1), at: origin.addingTimeInterval(120), physicalBytes: 500_000)   // 重置
+        _ = detector.ingest(stall(2), at: origin.addingTimeInterval(180), physicalBytes: 2_500_000)
+        let report = try XCTUnwrap(detector.flush(at: origin.addingTimeInterval(601), physicalBytes: 2_500_000))
+        XCTAssertEqual(report.physicalBytesDelta, 4_000_000, "重置前 2 MB + 重置后 2 MB")
+    }
+
+    func testCPUDetectorExposesWhenTheAnomalyOpened() {
+        var detector = CPUAnomalyDetector()
+        XCTAssertNil(detector.openAnomalyStartedAt)
+        var total = 0.0
+        for i in 0...5 {
+            total += 5   // 每 10 秒烧 5 秒 = 50%
+            _ = detector.ingest(ProcessResourceSample(
+                capturedAt: origin.addingTimeInterval(Double(i) * 10), userSeconds: total, systemSeconds: 0,
+                residentBytes: 50_000_000, threadCount: 8
+            ))
+        }
+        XCTAssertNotNil(detector.openAnomalyStartedAt)
+    }
+
     func testOrdinaryReasonWithoutDirectSamplesStaysOnTheNode() {
         let r = report(reason: "i/o timeout", directAttempts: 0, directFailures: 0)
         XCTAssertFalse(r.localNetworkLooksDown)

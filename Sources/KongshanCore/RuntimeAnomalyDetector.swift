@@ -152,6 +152,9 @@ public struct CPUAnomalyDetector: Sendable {
         return closeWindow(at: sample.capturedAt)
     }
 
+    /// 当前异常段的开始时间；没有异常时为 nil。调用方据此在爆发早期就抓调用栈。
+    public var openAnomalyStartedAt: Date? { window?.startedAt }
+
     /// 应用要退出或停止采样时调用：把仍开着的异常段落盘，否则这段观测直接丢失。
     public mutating func finish(at date: Date) -> CPUAnomalyReport? {
         guard window != nil else { return nil }
@@ -264,7 +267,11 @@ public struct DNSStallDetector: Sendable {
     private struct Window {
         var startedAt: Date
         var lastAt: Date
-        var startBytes: UInt64?
+        /// 窗口内物理网卡收发的累计字节。**逐次读数累加**，不是首尾相减：
+        /// 慢性窗口一跨就是几个小时，中途网卡重连会把计数清零，首尾一倒挂就只能报「不可用」
+        /// （真机 2026-10-01 22:51、10-02 06:18 两条都是这样）。读数变小视为重置，从新读数接着累加。
+        var accumulatedBytes: UInt64?
+        var lastBytes: UInt64?
         var outboundServerDomain = 0
         var general = 0
         var targets: Set<String> = []
@@ -339,7 +346,10 @@ public struct DNSStallDetector: Sendable {
         // 报告的时间范围与计数都失真——旧窗口凭空多出一次几百秒后才发生的失败。
         let expired = flush(at: date, physicalBytes: physicalBytes)
 
-        var current = window ?? Window(startedAt: date, lastAt: date, startBytes: physicalBytes)
+        var current = window ?? Window(
+            startedAt: date, lastAt: date,
+            accumulatedBytes: physicalBytes == nil ? nil : 0, lastBytes: physicalBytes
+        )
         if Self.stallsOutboundServerDomain(line) {
             current.outboundServerDomain += 1
         } else {
@@ -361,25 +371,37 @@ public struct DNSStallDetector: Sendable {
 
     /// 内核停止/重启时**先结算再清空**。达不到阈值仍返回 nil，不会因为"停止"就凭空多报。
     public mutating func finish(at date: Date, physicalBytes: UInt64?) -> DNSStallReport? {
+        observe(physicalBytes)
         guard let current = window else { return nil }
-        return settle(current, physicalBytes: physicalBytes)
+        return settle(current)
     }
 
     /// 窗口到期就出报告。没有新日志行时也要由调用方周期性调用，否则最后一段永远不落盘。
     public mutating func flush(at date: Date, physicalBytes: UInt64?) -> DNSStallReport? {
+        observe(physicalBytes)
         guard let current = window,
               date.timeIntervalSince(current.startedAt) >= windowDuration else { return nil }
-        return settle(current, physicalBytes: physicalBytes)
+        return settle(current)
     }
 
-    private mutating func settle(_ current: Window, physicalBytes: UInt64?) -> DNSStallReport? {
+    /// 把一次网卡读数并入当前窗口。调用方每个诊断周期都会调 `flush`，所以重置前后的流量都数得到。
+    private mutating func observe(_ bytes: UInt64?) {
+        guard var current = window, let bytes else { return }
+        if let last = current.lastBytes {
+            let step = bytes >= last ? bytes - last : 0
+            current.accumulatedBytes = (current.accumulatedBytes ?? 0) + step
+        } else if current.accumulatedBytes == nil {
+            current.accumulatedBytes = 0
+        }
+        current.lastBytes = bytes
+        window = current
+    }
+
+    private mutating func settle(_ current: Window) -> DNSStallReport? {
         window = nil
         guard current.outboundServerDomain + current.general >= minimumStalls else { return nil }
 
-        var delta: UInt64?
-        if let start = current.startBytes, let end = physicalBytes, end >= start {
-            delta = end - start
-        }
+        let delta = current.accumulatedBytes
         return DNSStallReport(
             kind: kind,
             windowStart: current.startedAt,
@@ -438,10 +460,27 @@ public struct OutboundFailureReport: Equatable, Sendable {
     /// 直连样本够用时不走这条：直连正常而某节点报本机不可达，多半是该节点地址（如 IPv6）
     /// 在当前网络下走不通，那仍是节点这一侧的问题。
     public var failureReasonSaysLocalNetworkDown: Bool {
-        !hasEnoughDirectSamples && Self.localNetworkReasons.contains(dominantReason)
+        if Self.machineWideReasons.contains(dominantReason) { return true }
+        return !hasEnoughDirectSamples && Self.localNetworkReasons.contains(dominantReason)
     }
 
+    /// 直连有一定比例失败（20%–50%）：没到「本机不通」，但也谈不上正常——多半是网络正在切换或不稳。
+    ///
+    /// 真机 2026-10-01 23:18：23:10 刚重连过网络，这一窗前半段断、后半段通，节点 50% 失败、
+    /// 直连 42% 失败，告警却写「本机网络正常，可换一个节点」。
+    public var directSaysLocalNetworkUnstable: Bool {
+        guard hasEnoughDirectSamples else { return false }
+        let rate = Double(directFailures) / Double(directAttempts)
+        return rate >= 0.2 && rate < 0.5
+    }
+
+    /// 只在本机协议栈出现的失败原因。`network is unreachable` 也可能只是某个地址族（如 IPv6）在当前网络走不通，
+    /// 所以只在直连样本不足时据此下结论。
     static let localNetworkReasons: Set<String> = ["network is unreachable", "no route to internet"]
+
+    /// 整机级的失败原因：`no route to internet` 是 sing-box 找不到默认网卡时报的，与目标地址无关，
+    /// 直连样本再多也改变不了这个结论（真机 2026-10-01 23:18 直连 214 次时仍以它为主因）。
+    static let machineWideReasons: Set<String> = ["no route to internet"]
 }
 
 /// 按出站 tag 聚合会话建立失败。纯逻辑，日志行由调用方喂入。

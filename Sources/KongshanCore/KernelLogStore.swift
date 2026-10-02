@@ -248,6 +248,13 @@ public actor KernelLogStore {
             let content = String(decoding: data, as: UTF8.self)
             sections.append("===== \(source.title) =====\n\(content)")
         }
+        // 更早的压缩归档不进导出（体积），只列出来，需要时到 logs/ 里用 gunzip 查看。
+        let archives = [KernelLogSource.system, .tun, .tunStream]
+            .flatMap { LogArchiver.list(baseName: $0.fileName, in: directory) }
+            .map(\.lastPathComponent)
+        if !archives.isEmpty {
+            sections.append("===== 压缩归档（未展开，共 \(archives.count) 份）=====\n" + archives.joined(separator: "\n"))
+        }
         if sections.isEmpty { return "kongshan 日志导出\n（没有可用的内核日志）\n" }
         return sections.joined(separator: "\n")
     }
@@ -286,6 +293,7 @@ public actor KernelLogStore {
         }
         let archiveURL = fileURL.appendingPathExtension("1")
         if FileManager.default.fileExists(atPath: archiveURL.path) {
+            archivePrevious(archiveURL, source: source)
             try FileManager.default.removeItem(at: archiveURL)
         }
         let existing = try Data(contentsOf: fileURL)
@@ -297,6 +305,17 @@ public actor KernelLogStore {
         try FileManager.default.removeItem(at: fileURL)
     }
 
+    /// `.1` 即将被新一轮覆盖：先压缩留档（见 `LogArchiver`）。归档失败只上报，不挡滚动——
+    /// 挡住滚动等于让当前日志无限增长。
+    private func archivePrevious(_ previous: URL, source: KernelLogSource) {
+        do {
+            try LogArchiver.archive(previous, baseName: source.fileName, in: directory, at: now())
+        } catch {
+            errorHandler("日志归档失败：\(error.localizedDescription)")
+        }
+        LogArchiver.prune(baseName: source.fileName, in: directory, now: now())
+    }
+
     private func rotateExternalFileIfNeeded(source: KernelLogSource) {
         guard source == externalMonitorSource else { return }
         let fileURL = directory.appending(path: source.fileName)
@@ -304,6 +323,7 @@ public actor KernelLogStore {
         do {
             let archiveURL = fileURL.appendingPathExtension("1")
             if FileManager.default.fileExists(atPath: archiveURL.path) {
+                archivePrevious(archiveURL, source: source)
                 try FileManager.default.removeItem(at: archiveURL)
             }
             let reader = try FileHandle(forReadingFrom: fileURL)

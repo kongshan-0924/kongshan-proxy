@@ -210,3 +210,33 @@ extension SelfDiagnosticsWiringTests {
         XCTAssertEqual(state.runtimeEvents.filter { $0.title == "节点建连失败偏多" }.count, 3)
     }
 }
+
+extension SelfDiagnosticsWiringTests {
+    /// 直连两成以上失败时不能说「本机网络正常」。
+    func testUnstableDirectIsNotCalledHealthy() throws {
+        let clock = TestClock(Date(timeIntervalSince1970: 1_790_000_000))
+        let state = makeState(clock: clock)
+        state.record(OutboundFailureReport(
+            windowStart: clock.current, windowEnd: clock.current.addingTimeInterval(600), outboundTag: "node-unstable",
+            failures: 307, attempts: 609, distinctReasonCount: 1, dominantReason: "i/o timeout",
+            directAttempts: 214, directFailures: 91
+        ))
+        let detail = try XCTUnwrap(state.runtimeEvents.last { $0.title == "节点建连失败偏多" }?.detail)
+        XCTAssertTrue(detail.contains("本机网络不稳定"), detail)
+        XCTAssertFalse(detail.contains("本机网络正常"), detail)
+    }
+
+    func testNoRouteToInternetIsReportedAsLocalNetworkEvenWithDirectSamples() throws {
+        let clock = TestClock(Date(timeIntervalSince1970: 1_790_000_000))
+        let state = makeState(clock: clock)
+        state.record(OutboundFailureReport(
+            windowStart: clock.current, windowEnd: clock.current.addingTimeInterval(600), outboundTag: "node-x",
+            failures: 307, attempts: 609, distinctReasonCount: 1, dominantReason: "no route to internet",
+            directAttempts: 214, directFailures: 91
+        ))
+        XCTAssertEqual(state.runtimeEvents.last?.title, "本机网络不通，期间建连大量失败")
+        let detail = state.runtimeEvents.last?.detail ?? ""
+        XCTAssertTrue(detail.contains("同期直连 214 次中也失败 91 次"), detail)
+        XCTAssertFalse(detail.contains("样本不足"), "直连样本够用时不能写样本不足：\(detail)")
+    }
+}

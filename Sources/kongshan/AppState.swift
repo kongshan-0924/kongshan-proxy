@@ -456,8 +456,9 @@ final class AppState {
         ]
         connections = rows.enumerated().map { index, row in
             let (host, process, rule, chains, network, upload, download, upRate, downRate) = row
-            var meta: [String: Any] = ["host": host, "network": network]
-            if let process { meta["process"] = process }
+            // 与 sing-box 1.13 真实下发的一致：只有 `processPath`（带「 (用户)」后缀）与 `type`，没有 `process`。
+            var meta: [String: Any] = ["host": host, "network": network, "type": "tun/tun-in"]
+            if let process { meta["processPath"] = "/Applications/\(process).app/Contents/MacOS/\(process) (user)" }
             return ConnectionLiveDetail(
                 connection: ConnectionDetail(payload: [
                     "id": "snapshot-\(index)",
@@ -707,6 +708,8 @@ final class AppState {
     @ObservationIgnored private var dashboardConnectionTask: Task<Void, Never>?
     /// CPU 异常持续时给自己采调用栈，见 `CPUSampleCapture`。目录在 init 里按 storage 定。
     @ObservationIgnored private var cpuSampleCapture: CPUSampleCapture
+    /// 本段 CPU 异常已抓到的调用栈采样（见 `captureEarlyCPUSampleIfNeeded`），异常结束时清空。
+    @ObservationIgnored private var cpuSampleForCurrentAnomaly: URL?
     /// 真正执行 `/usr/bin/sample` 的闭包；测试替换成假的，不真起进程。
     @ObservationIgnored var cpuSampleRunner: @Sendable ([String]) throws -> Void = CPUSampleCapture.run
     @ObservationIgnored private(set) var cpuSampleTask: Task<Void, Never>?
@@ -5631,9 +5634,7 @@ final class AppState {
         let physicalBytes = Self.physicalByteTotal()
         if let sample = ProcessResourceSampler.current(now: now()) {
             accumulateMetrics(sample, physicalBytes: physicalBytes)
-            if let report = cpuAnomalyDetector.ingest(sample) {
-                record(report, logLinesInWindow: logLines)
-            }
+            ingestCPUSample(sample, logLinesInWindow: logLines)
         }
         if let report = dnsStallDetector.flush(at: now(), physicalBytes: physicalBytes) {
             record(report)
@@ -5762,9 +5763,14 @@ final class AppState {
 
         // 直连也在大面积失败时，这就不是节点的锅——建议换节点会把用户引向错误方向。
         if report.localNetworkLooksDown {
-            let evidence = report.directSaysLocalNetworkDown
-                ? "但同期直连也有 \(report.directFailures)/\(report.directAttempts) 次失败"
-                : "失败原因是本机网络不可达（同期直连 \(report.directAttempts) 次，样本不足）"
+            let evidence: String
+            if report.directSaysLocalNetworkDown {
+                evidence = "但同期直连也有 \(report.directFailures)/\(report.directAttempts) 次失败"
+            } else if report.hasEnoughDirectSamples {
+                evidence = "失败原因是本机网络不可达（同期直连 \(report.directAttempts) 次中也失败 \(report.directFailures) 次）"
+            } else {
+                evidence = "失败原因是本机网络不可达（同期直连 \(report.directAttempts) 次，样本不足）"
+            }
             let detail = [
                 counts,
                 reason,
@@ -5775,16 +5781,22 @@ final class AppState {
             return
         }
 
-        // 直连样本不够时不能说「本机网络正常」——0 次直连什么也证明不了。
-        let directNote = report.hasEnoughDirectSamples
-            ? "同期直连 \(report.directAttempts) 次中失败 \(report.directFailures) 次，本机网络正常"
-            : "同期直连仅 \(report.directAttempts) 次，样本不足，无法据此判断本机网络"
-        let detail = [
-            counts,
-            reason,
-            directNote,
-            "多为节点或线路问题，可到代理页测速后换一个节点"
-        ].joined(separator: "；")
+        // 直连样本不够时不能说「本机网络正常」——0 次直连什么也证明不了；
+        // 直连也有两成以上失败时同样不能说正常，换节点未必有用。
+        let directNote: String
+        let advice: String
+        if !report.hasEnoughDirectSamples {
+            directNote = "同期直连仅 \(report.directAttempts) 次，样本不足，无法据此判断本机网络"
+            advice = "多为节点或线路问题，可到代理页测速后换一个节点"
+        } else if report.directSaysLocalNetworkUnstable {
+            let rate = Int((Double(report.directFailures) / Double(report.directAttempts) * 100).rounded())
+            directNote = "同期直连 \(report.directAttempts) 次中也失败 \(report.directFailures) 次（\(rate)%），本机网络不稳定"
+            advice = "可能正在切换网络或信号不好，先确认本机网络，换节点未必有用"
+        } else {
+            directNote = "同期直连 \(report.directAttempts) 次中失败 \(report.directFailures) 次，本机网络正常"
+            advice = "多为节点或线路问题，可到代理页测速后换一个节点"
+        }
+        let detail = [counts, reason, directNote, advice].joined(separator: "；")
         recordCoalescedAlert(key: "节点|\(report.outboundTag)|\(report.dominantReason)",
                              cooldown: Self.nodeAlertCooldown,
                              title: "节点建连失败偏多", detail: detail)
@@ -5876,11 +5888,38 @@ final class AppState {
         ]
         // 上面这些说得出"主线程在渲染仪表盘"，说不出主线程具体在跑什么；只有调用栈说得出。
         // 异常**持续**时采（回落时已经不在烧了），10 分钟最多一份，见 `CPUSampleCapture`。
-        if report.phase == .ongoing, let output = cpuSampleCapture.claim(now: now()) {
+        if let early = cpuSampleForCurrentAnomaly {
+            parts.append("本段的调用栈采样：\(early.path)")
+        } else if report.phase == .ongoing, let output = cpuSampleCapture.claim(now: now()) {
             parts.append("正在保存调用栈采样（\(CPUSampleCapture.durationSeconds) 秒）：\(output.path)")
             captureCPUSample(to: output)
+            cpuSampleForCurrentAnomaly = output
         }
+        if report.phase != .ongoing { cpuSampleForCurrentAnomaly = nil }
         recordRuntimeEvent(level: .warning, title: title, detail: parts.joined(separator: "；"))
+    }
+
+    /// 异常开始约 30 秒仍在烧就抓一份调用栈（仍受 `CPUSampleCapture` 的 10 分钟限频）。
+    ///
+    /// 原先只在「持续偏高」的中途报告时采，而那份报告要等开段 10 分钟后才出：真机 2026-09-30 20:19
+    /// （31.7%）、10-01 14:56（13%）几次爆发都只烧了 2~3 分钟，一份调用栈都没留下，事后只能猜。
+    private static let earlySampleDelay: TimeInterval = 30
+
+    /// internal 而非 private：「短时爆发也要留下调用栈」靠这里的接线，断了不会报错。
+    func ingestCPUSample(_ sample: ProcessResourceSample, logLinesInWindow: Int) {
+        if let report = cpuAnomalyDetector.ingest(sample) {
+            record(report, logLinesInWindow: logLinesInWindow)
+        }
+        captureEarlyCPUSampleIfNeeded()
+    }
+
+    private func captureEarlyCPUSampleIfNeeded() {
+        guard cpuSampleForCurrentAnomaly == nil,
+              let started = cpuAnomalyDetector.openAnomalyStartedAt,
+              now().timeIntervalSince(started) >= Self.earlySampleDelay,
+              let output = cpuSampleCapture.claim(now: now()) else { return }
+        cpuSampleForCurrentAnomaly = output
+        captureCPUSample(to: output)
     }
 
     private func captureCPUSample(to output: URL) {

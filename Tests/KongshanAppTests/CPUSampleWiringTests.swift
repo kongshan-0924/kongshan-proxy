@@ -56,8 +56,52 @@ final class CPUSampleWiringTests: XCTestCase {
         state.record(report(.ended), logLinesInWindow: 0)
         XCTAssertNil(state.cpuSampleTask)
         XCTAssertEqual(recorder.recorded.count, 1)
+        // 回落的总结仍指向本段那份采样：短时爆发只有这一条记录，路径不能丢。
         let ended = try XCTUnwrap(state.runtimeEvents.last { $0.title == "CPU 占用已回落" })
-        XCTAssertFalse(ended.detail?.contains("调用栈采样") == true)
+        XCTAssertTrue(ended.detail?.contains("本段的调用栈采样：\(output)") == true, ended.detail ?? "")
+
+        // 下一段（仍在 10 分钟限频内）不得沿用上一段的采样。
+        state.record(report(.ongoing), logLinesInWindow: 0)
+        let next = try XCTUnwrap(state.runtimeEvents.last { $0.title == "CPU 占用持续偏高" })
+        XCTAssertFalse(next.detail?.contains(output) == true, next.detail ?? "")
+        XCTAssertEqual(recorder.recorded.count, 1)
+    }
+
+    /// 真机 2026-09-30、10-01 几次爆发只烧 2~3 分钟，等不到 10 分钟后的「持续偏高」报告，
+    /// 一份调用栈都没留下。现在开段约 30 秒就采，回落时的总结写明文件在哪。
+    func testShortBurstIsSampledEarlyAndTheEndedReportPointsToIt() async throws {
+        let (state, root) = makeState()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recorder = SampleRunRecorder()
+        state.cpuSampleRunner = recorder.run
+
+        // 15 秒一采：4 次 40% 开段，再 3 次空闲回落，全程约 2 分钟，没有中途报告。
+        let origin = Date().addingTimeInterval(-300)
+        var cpu = 0.0
+        func sample(_ index: Int) -> ProcessResourceSample {
+            ProcessResourceSample(
+                capturedAt: origin.addingTimeInterval(Double(index) * 15),
+                userSeconds: cpu, systemSeconds: 0,
+                residentBytes: 80 * 1_048_576, threadCount: 9, mainThreadSeconds: cpu * 0.9
+            )
+        }
+        state.ingestCPUSample(sample(0), logLinesInWindow: 0)
+        for index in 1...4 {
+            cpu += 0.4 * 15
+            state.ingestCPUSample(sample(index), logLinesInWindow: 0)
+        }
+        let task = try XCTUnwrap(state.cpuSampleTask, "开段 30 秒后必须已在采样")
+        await task.value
+        XCTAssertEqual(recorder.recorded.count, 1)
+        XCTAssertFalse(state.runtimeEvents.contains { $0.title == "CPU 占用持续偏高" }, "短爆发不该有中途报告")
+
+        for index in 5...7 {
+            state.ingestCPUSample(sample(index), logLinesInWindow: 0)
+        }
+        let output = try XCTUnwrap(recorder.recorded.first?.last)
+        let ended = try XCTUnwrap(state.runtimeEvents.last { $0.title == "CPU 占用已回落" })
+        XCTAssertTrue(ended.detail?.contains("本段的调用栈采样：\(output)") == true, ended.detail ?? "")
+        XCTAssertEqual(recorder.recorded.count, 1)
     }
 
     func testSampleFailureIsRecordedNotSwallowed() async throws {

@@ -132,7 +132,12 @@ struct ConnectionsView: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                     }
-                    if let process = conn.process {
+                    if conn.connection.viaLocalProxyEntry {
+                        Text("经系统代理")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .help("经空山的本地代理入口（系统代理或局域网共享）进来，内核识别不到发起的 App")
+                    } else if let process = conn.process {
                         Text(process)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -243,7 +248,7 @@ struct ConnectionsView: View {
             } label: {
                 Label("始终直连", systemImage: "arrow.right.circle")
             }
-            if let process = conn.process, !process.isEmpty {
+            if let process = conn.process, !process.isEmpty, !conn.connection.viaLocalProxyEntry {
                 Button {
                     Task {
                         await state.upsertProcessRule(
@@ -322,7 +327,11 @@ private struct ConnectionRouteDetail: View {
             Form {
                 Section {
                     LabeledContent("目标", value: connection.host)
-                    if let process = connection.process { LabeledContent("进程", value: process) }
+                    if connection.connection.viaLocalProxyEntry {
+                        LabeledContent("来源", value: "经系统代理（发起的 App 无法识别）")
+                    } else if let process = connection.process {
+                        LabeledContent("进程", value: process)
+                    }
                     LabeledContent("命中规则", value: connection.rule.isEmpty ? "未报告" : connection.rule)
                 }
                 Section("出站链路") {

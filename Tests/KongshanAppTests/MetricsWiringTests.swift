@@ -112,7 +112,11 @@ final class MetricsWiringTests: XCTestCase {
         XCTAssertEqual(first?.cpu ?? 0, 1.0, accuracy: 0.05, "按真实跨度算，不是按名义 60 秒")
     }
 
-    private func outboundReport(directAttempts: Int, directFailures: Int) -> OutboundFailureReport {
+    private func outboundReport(
+        directAttempts: Int,
+        directFailures: Int,
+        reason: String = "no route to internet"
+    ) -> OutboundFailureReport {
         OutboundFailureReport(
             windowStart: Date(timeIntervalSince1970: 1_700_000_000),
             windowEnd: Date(timeIntervalSince1970: 1_700_000_540),
@@ -120,7 +124,7 @@ final class MetricsWiringTests: XCTestCase {
             failures: 145,
             attempts: 383,
             distinctReasonCount: 1,
-            dominantReason: "no route to internet",
+            dominantReason: reason,
             directAttempts: directAttempts,
             directFailures: directFailures
         )
@@ -141,12 +145,13 @@ final class MetricsWiringTests: XCTestCase {
     }
 
     /// 直连正常时仍按节点问题处理，建议照给——不能被上一条带跑。
+    /// 原因取节点侧的超时：`no route to internet` 是整机没路由，无论直连如何都判本机（见 v0.2.8）。
     func testHealthyDirectStillBlamesTheNode() {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let state = makeState(root: root, journal: MetricsJournal(directory: root))
 
-        state.record(outboundReport(directAttempts: 40, directFailures: 0))
+        state.record(outboundReport(directAttempts: 40, directFailures: 0, reason: "i/o timeout"))
 
         let event = state.runtimeEvents.last
         XCTAssertEqual(event?.title, "节点建连失败偏多")
