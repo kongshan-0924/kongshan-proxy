@@ -17,11 +17,16 @@ final class SubscriptionRuleSetParsingTests: XCTestCase {
         XCTAssertNil(rule.type, "规则集引用没有单条规则类型")
     }
 
-    func testParsesGeoIPIgnoringNoResolveOption() throws {
+    func testParsesGeoIPAndItsNoResolveOption() throws {
         let rule = try XCTUnwrap(SubscriptionRule.parse("GEOIP,cn,DIRECT,no-resolve"))
         XCTAssertEqual(rule.kind, .geoIP)
         XCTAssertEqual(rule.value, "CN", "国家码统一大写")
         XCTAssertEqual(rule.target, "DIRECT")
+        XCTAssertFalse(rule.resolvesDomain, "写了 no-resolve 就只看连接本身的 IP")
+
+        // 与 Clash 一致：默认要解析。此前一律当 no-resolve 处理，未进名单的国内站全走了代理。
+        XCTAssertTrue(try XCTUnwrap(SubscriptionRule.parse("GEOIP,CN,DIRECT")).resolvesDomain)
+        XCTAssertFalse(try XCTUnwrap(SubscriptionRule.parse("GEOIP,CN,DIRECT, NO-RESOLVE ")).resolvesDomain)
     }
 
     /// MATCH 不是一条规则，而是兜底出口：`parse` 不认它，`parseMatch` 取目标。

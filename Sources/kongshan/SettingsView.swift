@@ -51,6 +51,7 @@ struct SettingsView: View {
     @State private var diagnosticDocument: TextExportDocument?
     @State private var showsDiagnosticExporter = false
     @State private var isPreparingDiagnostics = false
+    @State private var exportsShareableDiagnostics = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -292,11 +293,13 @@ struct SettingsView: View {
 
                 Section("数据与日志") {
                     LabeledContent("故障诊断") {
-                        Button {
-                            prepareDiagnosticExport()
+                        Menu {
+                            Button("完整版（自用排查，含内核日志）") { prepareDiagnosticExport(forSharing: false) }
+                            Button("可公开分享版（去掉日志、地址与名字）") { prepareDiagnosticExport(forSharing: true) }
                         } label: {
-                            Label("导出脱敏诊断", systemImage: "stethoscope")
+                            Label("导出诊断", systemImage: "stethoscope")
                         }
+                        .fixedSize()
                         .disabled(isPreparingDiagnostics)
                     }
                     LabeledContent("数据目录") {
@@ -317,7 +320,8 @@ struct SettingsView: View {
                         .textSelection(.enabled)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    Text("脱敏诊断不包含订阅原文、节点凭据或运行时密钥；日志仍可能包含访问域名和服务器地址，请仅发给可信维护者。")
+                    Text("两版都不含订阅原文、节点凭据或运行时密钥。完整版保留内核日志（访问过的网站与地址）和节点服务器地址，"
+                         + "只发给信任的人；要贴到公开场合请用可公开分享版。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -378,7 +382,7 @@ struct SettingsView: View {
             isPresented: $showsDiagnosticExporter,
             document: diagnosticDocument,
             contentType: .plainText,
-            defaultFilename: "kongshan-diagnostics"
+            defaultFilename: exportsShareableDiagnostics ? "kongshan-diagnostics-shareable" : "kongshan-diagnostics"
         ) { result in
             if case let .failure(error) = result {
                 state.errorMessage = "导出诊断失败：\(error.localizedDescription)"
@@ -423,12 +427,13 @@ struct SettingsView: View {
         }
     }
 
-    private func prepareDiagnosticExport() {
+    private func prepareDiagnosticExport(forSharing: Bool) {
         isPreparingDiagnostics = true
+        exportsShareableDiagnostics = forSharing
         Task {
             defer { isPreparingDiagnostics = false }
             do {
-                diagnosticDocument = TextExportDocument(text: try await state.exportDiagnostics())
+                diagnosticDocument = TextExportDocument(text: try await state.exportDiagnostics(forSharing: forSharing))
                 showsDiagnosticExporter = true
             } catch {
                 state.errorMessage = "准备诊断失败：\(error.localizedDescription)"

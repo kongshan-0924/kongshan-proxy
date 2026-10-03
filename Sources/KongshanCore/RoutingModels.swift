@@ -537,6 +537,12 @@ public struct SubscriptionRule: Codable, Equatable, Hashable, Sendable, Identifi
     public var value: String
     /// DIRECT / REJECT / 策略组名。
     public var target: String
+    /// 只对 `GEOIP` 有意义：域名连接要不要先解析成 IP 再比对。订阅写了 `no-resolve` 时为 false。
+    ///
+    /// 不解析的话这条规则对域名连接永远落空：TUN 下系统拿到的是假 IP，系统代理入口只送域名。
+    /// 真机 2026-10-03：没进任何名单的国内站（游戏交易站之类）全掉进「漏网之鱼」，绕美国节点访问，
+    /// 比直连慢 10～20 倍。
+    public var resolvesDomain: Bool = true
 
     /// 单条规则的类型；规则集引用与 GEOIP 为 nil。
     public var type: CustomRuleType? {
@@ -560,10 +566,11 @@ public struct SubscriptionRule: Codable, Equatable, Hashable, Sendable, Identifi
         }
     }
 
-    public init(kind: Kind, value: String, target: String) {
+    public init(kind: Kind, value: String, target: String, resolvesDomain: Bool = true) {
         self.kind = kind
         self.value = value
         self.target = target
+        self.resolvesDomain = resolvesDomain
     }
 
     /// 单条规则的便捷构造，与改动前的调用方式保持一致。
@@ -587,9 +594,9 @@ public struct SubscriptionRule: Codable, Equatable, Hashable, Sendable, Identifi
         case "RULE-SET":
             return SubscriptionRule(kind: .ruleSet, value: value, target: target)
         case "GEOIP":
-            // 末尾的 `no-resolve` 选项不影响取值；sing-box 的路由规则本来就不会为了匹配 IP 规则
-            // 主动解析域名，行为与 no-resolve 一致。
-            return SubscriptionRule(kind: .geoIP, value: value.uppercased(), target: target)
+            // 与 Clash 一致：默认先把域名解析成 IP 再比对，末尾写了 `no-resolve` 才只看连接本身的 IP。
+            let noResolve = parts.dropFirst(3).contains { $0.lowercased() == "no-resolve" }
+            return SubscriptionRule(kind: .geoIP, value: value.uppercased(), target: target, resolvesDomain: !noResolve)
         default:
             break
         }
@@ -787,7 +794,7 @@ public struct RoutingSettings: Codable, Equatable, Sendable {
         var seenSSHTargets = Set<SSHProxyTarget>()
         settings.sshProxyTargets = settings.sshProxyTargets.filter { seenSSHTargets.insert($0).inserted }
         settings.bypassDomains = try bypassDomains.map { domain in
-            let value = domain.trimmingCharacters(in: .whitespacesAndNewlines)
+            let value = Self.normalizedBypassDomain(domain)
             guard !value.isEmpty else { throw RoutingValidationError.emptyBypassDomain }
             return value
         }
@@ -806,6 +813,32 @@ public struct RoutingSettings: Codable, Equatable, Sendable {
             return value
         }
         return settings
+    }
+}
+
+extension RoutingSettings {
+    /// 绕过列表的一项归一成内核认得的域名：去掉协议、路径、端口，统一小写，保留 `*.` / `.` 前缀。
+    ///
+    /// 内核按域名精确比对，`http://oa.example.com/` 这种从浏览器地址栏粘进来的写法是一条永远命不中的
+    /// 死规则（真机 2026-10-03 的绕过列表里就有一条），界面上却看不出任何异常。
+    static func normalizedBypassDomain(_ raw: String) -> String {
+        var value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let range = value.range(of: "://") {
+            value = String(value[range.upperBound...])
+        }
+        if let slash = value.firstIndex(where: { $0 == "/" || $0 == "?" || $0 == "#" }) {
+            value = String(value[..<slash])
+        }
+        if let at = value.lastIndex(of: "@") {
+            value = String(value[value.index(after: at)...])
+        }
+        // 只去「主机:端口」这一种冒号；多个冒号是 IPv6 字面量，原样保留。
+        if value.filter({ $0 == ":" }).count == 1, let colon = value.firstIndex(of: ":"),
+           !value[value.index(after: colon)...].isEmpty,
+           value[value.index(after: colon)...].allSatisfy(\.isNumber) {
+            value = String(value[..<colon])
+        }
+        return value.lowercased()
     }
 }
 

@@ -254,6 +254,7 @@ struct DeepDiagnosticsView: View {
     @State private var diagnosticDocument: TextExportDocument?
     @State private var showsExporter = false
     @State private var isPreparing = false
+    @State private var exportsShareable = false
     @State private var notice: String?
 
     var body: some View {
@@ -285,13 +286,13 @@ struct DeepDiagnosticsView: View {
             } footer: {
                 // 「内核输出级别」而不是「内核日志」：日志页有一个同名但语义不同的「显示等级」，
                 // 那个只过滤已经收到的行。不区分就会出现「开了 Debug 却看不到 debug 行」的误解。
-                Text("与日志页的「显示等级」不同：这里决定内核**产出**多详细的行，那里只过滤已收到的行。"
+                Text("与日志页的「显示等级」不同：这里决定内核产出多详细的行，那里只过滤已收到的行。"
                      + "切换会重载内核并断开当前连接；到期自动恢复，截止时间随设置持久化。")
             }
 
             Section {
                 HStack {
-                    Text("打包配置、运行事件与最近日志，发给维护者时用。")
+                    Text("打包配置、运行事件与最近日志，排查问题时用。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -299,7 +300,10 @@ struct DeepDiagnosticsView: View {
                     if isPreparing {
                         ProgressView().controlSize(.small)
                     } else {
-                        Button("导出脱敏诊断…") { prepareExport() }
+                        Button("完整版…") { prepareExport(forSharing: false) }
+                            .help("含内核日志、节点地址与规则，只发给信任的人")
+                        Button("可公开分享版…") { prepareExport(forSharing: true) }
+                            .help("不含内核日志，隐去节点地址、规则内容、DNS 服务器、IP 与节点名")
                     }
                 }
                 if let notice {
@@ -308,7 +312,8 @@ struct DeepDiagnosticsView: View {
             } header: {
                 Text("导出诊断包")
             } footer: {
-                Text("导出前会脱敏：订阅地址、节点凭据与本机用户名都不会出现在文件里。")
+                Text("两版都不含订阅地址、节点凭据与本机用户名。完整版保留内核日志（访问过的网站与地址）、"
+                     + "节点服务器地址和规则，只发给信任的人；可公开分享版再去掉这些，可以贴到公开场合。")
             }
         }
         .formStyle(.grouped)
@@ -317,7 +322,7 @@ struct DeepDiagnosticsView: View {
             isPresented: $showsExporter,
             document: diagnosticDocument,
             contentType: .plainText,
-            defaultFilename: "kongshan-diagnostics"
+            defaultFilename: exportsShareable ? "kongshan-diagnostics-shareable" : "kongshan-diagnostics"
         ) { result in
             if case let .failure(error) = result {
                 notice = "导出失败：\(error.localizedDescription)"
@@ -328,13 +333,14 @@ struct DeepDiagnosticsView: View {
         }
     }
 
-    private func prepareExport() {
+    private func prepareExport(forSharing: Bool) {
         isPreparing = true
+        exportsShareable = forSharing
         notice = nil
         Task {
             defer { isPreparing = false }
             do {
-                diagnosticDocument = TextExportDocument(text: try await state.exportDiagnostics())
+                diagnosticDocument = TextExportDocument(text: try await state.exportDiagnostics(forSharing: forSharing))
                 showsExporter = true
             } catch {
                 notice = "准备诊断包失败：\(error.localizedDescription)"

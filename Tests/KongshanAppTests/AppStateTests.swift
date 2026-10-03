@@ -3152,6 +3152,39 @@ extension AppStateTests {
         XCTAssertFalse(text.contains("runtime-secret"))
     }
 
+    /// 可公开分享版：不带内核日志（逐条访问目标），节点地址与名字都换掉。
+    func testShareableDiagnosticExportDropsLogsAddressesAndNames() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "kongshan-diagnostics-share-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        try await storage.prepare()
+        let node = ProxyNode(name: "家宽 (someone)", protocolType: .shadowsocks, server: "198.51.100.23", port: 443,
+                             password: "node-secret", method: "aes-128-gcm")
+        try await storage.writeAtomically(try ConfigGenerator.generate(ConfigInput(
+            nodes: [node], selectedNodeID: node.id,
+            runtime: RuntimeParameters(mixedPort: 51_080, clashPort: 51_909, secret: "runtime-secret")
+        )), to: root.appending(path: "config.json"))
+        let logs = root.appending(path: "logs", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+        try Data("INFO [1 2ms] outbound/direct[direct]: outbound connection to visited-site.example:443\n".utf8)
+            .write(to: logs.appending(path: "sing-box.log"))
+
+        let state = AppState(storage: storage, kernelLogStore: KernelLogStore(directory: logs), automaticallyInitialize: false)
+        state.nodes = [node]
+        state.recordRuntimeEvent(level: .warning, title: "节点建连失败偏多", detail: "家宽 (someone) 连 198.51.100.23:443 失败")
+
+        let full = try await state.exportDiagnostics()
+        XCTAssertTrue(full.contains("visited-site.example"), "前提：完整版带内核日志")
+
+        let text = try await state.exportDiagnostics(forSharing: true)
+        XCTAssertTrue(text.contains("可公开分享版"))
+        for leaked in ["visited-site.example", "198.51.100.23", "someone", "node-secret", "runtime-secret"] {
+            XCTAssertFalse(text.contains(leaked), "不该出现：\(leaked)")
+        }
+        XCTAssertTrue(text.contains("节点#1"), "名字换成编号，事件仍看得懂是哪个节点")
+    }
+
 }
 
 /// 记录 `@Observable` 通知发生时的观测值。onChange 在任意线程回调，故加锁。

@@ -678,4 +678,18 @@ extension RoutingConfigTests {
         XCTAssertEqual(merged[3]["domain_suffix"] as? [String], ["d.com"])
         XCTAssertTrue(merged.allSatisfy { $0["action"] as? String == "route" })
     }
+
+    /// 从地址栏粘进来的 `http://oa.example.com/` 是一条永远命不中的死规则（真机 2026-10-03 的绕过列表里就有）。
+    func testBypassDomainsAreNormalizedToHosts() throws {
+        let settings = try RoutingSettings(
+            customRules: [],
+            bypassDomains: ["http://OA.Example.com/", "https://intra.example.com:8443/login?x=1", "*.Corp.Example",
+                            ".internal", "user@mail.example.com", "  plain.example.com  ", "fe80::1"],
+            bypassCIDRs: [],
+            blockAds: false
+        ).validated()
+        XCTAssertEqual(settings.bypassDomains, ["oa.example.com", "intra.example.com", "*.corp.example",
+                                                ".internal", "mail.example.com", "plain.example.com", "fe80::1"])
+        XCTAssertThrowsError(try RoutingSettings(customRules: [], bypassDomains: ["https://"], bypassCIDRs: [], blockAds: false).validated())
+    }
 }

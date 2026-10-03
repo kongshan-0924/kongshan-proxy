@@ -708,6 +708,10 @@ final class AppState {
     @ObservationIgnored private var dashboardConnectionTask: Task<Void, Never>?
     /// CPU 异常持续时给自己采调用栈，见 `CPUSampleCapture`。目录在 init 里按 storage 定。
     @ObservationIgnored private var cpuSampleCapture: CPUSampleCapture
+    /// 睡眠 / 暗唤醒感知：醒来后的安静期里失败不进检测器，见 `SleepWakeTracker`。
+    @ObservationIgnored private var sleepWakeTracker = SleepWakeTracker()
+    /// 读两只单调时钟；测试替换成可控的，模拟一次睡眠。
+    @ObservationIgnored var sleepClockReading: @Sendable () -> SleepWakeTracker.Reading = SleepWakeTracker.Reading.current
     /// 本段 CPU 异常已抓到的调用栈采样（见 `captureEarlyCPUSampleIfNeeded`），异常结束时清空。
     @ObservationIgnored private var cpuSampleForCurrentAnomaly: URL?
     /// 真正执行 `/usr/bin/sample` 的闭包；测试替换成假的，不真起进程。
@@ -3414,14 +3418,19 @@ final class AppState {
         try await kernelLogStore.exportText()
     }
 
-    /// 导出可直接发给维护者的脱敏诊断文本。只收集现有脱敏配置和日志，
-    /// 不读取订阅 YAML、备份、节点缓存或运行时 API secret。
-    func exportDiagnostics() async throws -> String {
+    /// 导出诊断文本。不读取订阅 YAML、备份、节点缓存或运行时 API secret。
+    ///
+    /// - 完整版（默认）：去掉凭据，但保留内核日志（逐条访问目标）、节点地址与规则——自用排查、只发给信任的人。
+    /// - 可公开分享版：再去掉内核日志，隐去节点地址 / SNI、规则内容、DNS 服务器，文本里的 IP、链接与
+    ///   节点名（见 `DiagnosticRedactor`）。
+    func exportDiagnostics(forSharing: Bool = false) async throws -> String {
         let root = storage.rootDirectory
         let configURL = root.appending(path: "config.json")
         let configText: String
         if let data = try await storage.readIfPresent(from: configURL) {
-            let sanitized = try ConfigGenerator.diagnosticSnapshot(from: data)
+            let sanitized = forSharing
+                ? try DiagnosticRedactor.shareableConfig(from: data)
+                : try ConfigGenerator.diagnosticSnapshot(from: data)
             configText = String(decoding: sanitized, as: UTF8.self)
         } else {
             configText = "（尚未生成配置）"
@@ -3433,8 +3442,11 @@ final class AppState {
         let modes = activeModes.map(\.displayName).sorted().joined(separator: " + ")
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "开发版"
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "—"
+        let kernelLogs = forSharing
+            ? "（可公开分享版不含内核日志：其中逐条记录了访问过的网站与地址。需要时导出完整版，只发给信任的人。）"
+            : try await kernelLogStore.exportText()
         let diagnostics = """
-        kongshan 脱敏诊断
+        \(forSharing ? "kongshan 诊断（可公开分享版）" : "kongshan 脱敏诊断")
         导出时间：\(now().formatted(.iso8601))
         应用版本：\(version) (\(build))
         内核版本：\(coreVersion)
@@ -3463,9 +3475,13 @@ final class AppState {
         \(metricsTableText)
 
         ===== 内核日志 =====
-        \(try await kernelLogStore.exportText())
+        \(kernelLogs)
         """
-        return diagnostics.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+        let text = diagnostics.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+        guard forSharing else { return text }
+        let names = nodes.enumerated().map { ($1.name, "节点#\($0 + 1)") }
+            + configItems.enumerated().map { ($1.name, "配置#\($0 + 1)") }
+        return DiagnosticRedactor.redactText(text, replacing: names)
     }
 
     /// 告警存档的可读渲染。只取最近 60 条——更久的在文件里，导出不必全带。
@@ -5627,6 +5643,8 @@ final class AppState {
     }
 
     private func tickSelfDiagnostics() {
+        // 没有日志行时也要按时观测，醒来 15 秒内就进入安静期。
+        sleepWakeTracker.observe(sleepClockReading(), at: now())
         let logLines = logLinesSinceDiagnosticsTick
         logLinesSinceDiagnosticsTick = 0
         metricsLogLines += logLines
@@ -5727,7 +5745,7 @@ final class AppState {
     /// internal 而非 private：接线本身需要回归覆盖（日志行 → 聚合 → 脱敏事件），
     /// 这条链路一旦断掉不会有任何报错，只会安静地不再留证。
     func inspectForDNSStall(_ line: CoreLogLine) {
-        guard DNSStallDetector.isResolutionStall(line) else { return }
+        guard DNSStallDetector.isResolutionStall(line), !isRecoveringFromSleep() else { return }
         let physicalBytes = Self.physicalByteTotal()
         if let report = dnsStallDetector.ingest(line, at: now(), physicalBytes: physicalBytes) {
             record(report)
@@ -5739,9 +5757,18 @@ final class AppState {
 
     /// internal 同 `inspectForDNSStall`：接线断掉不会报错，只会安静地不再留证，需回归覆盖。
     func inspectForOutboundFailure(_ line: CoreLogLine) {
+        guard !isRecoveringFromSleep() else { return }
         if let report = outboundFailureDetector.ingest(line, at: now()) {
             record(report)
         }
+    }
+
+    /// 刚从睡眠（含暗唤醒）醒来的安静期里，行一概不进检测器——尝试与失败都不收，比例才不失真。
+    /// 每行都先观测一次时钟：醒来后的第一行就能察觉，不必等下一次自诊断。
+    private func isRecoveringFromSleep() -> Bool {
+        let current = now()
+        sleepWakeTracker.observe(sleepClockReading(), at: current)
+        return sleepWakeTracker.isQuiet(at: current)
     }
 
     /// 出站 tag → 用户看得懂的节点名。翻不出来时退回 tag 尾号，不暴露完整 UUID。
@@ -5774,7 +5801,7 @@ final class AppState {
             let detail = [
                 counts,
                 reason,
-                evidence + "，说明本机网络当时不通（断网、休眠或切换网络），**换节点无用**"
+                evidence + "，说明本机网络当时不通（断网、休眠或切换网络），换节点无用"
             ].joined(separator: "；")
             recordCoalescedAlert(key: "本机网络不通", cooldown: Self.outageAlertCooldown,
                                  title: "本机网络不通，期间建连大量失败", detail: detail)
