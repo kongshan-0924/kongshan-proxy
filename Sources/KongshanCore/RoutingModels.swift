@@ -315,6 +315,7 @@ public struct RouteTestResult: Equatable, Sendable {
         case bypass = "绕过列表"
         case subscription = "订阅规则"
         case privateNetwork = "私有网络"
+        case chinaList = "内置国内名单"
         case final = "最终规则"
     }
 
@@ -341,12 +342,15 @@ public enum RouteRuleEvaluator {
     ///   - ruleSetContents: 订阅规则集的内容（按规则集名）。给出的才能在本地判定；
     ///     没给出的 RULE-SET 视为未命中——与内核里「没就绪就跳过」一致。
     ///   - matchTarget: 订阅 `MATCH` 的目标；规则模式下作兜底出口，没有则用主出口。
+    ///   - chinaListHit: 内置国内域名名单（geosite-cn / 扩展名单）是否命中、命中的是哪份。名单内容归内核，
+    ///     由调用方用内核自己判定后传进来；不传就按未命中处理（与以前一致）。
     public static func evaluate(
         _ input: RouteTestInput,
         settings: RoutingSettings,
         subscriptionRules: [SubscriptionRule],
         ruleSetContents: [String: RuleSetContent] = [:],
         matchTarget: String? = nil,
+        chinaListHit: String? = nil,
         primaryOutbound: String
     ) -> RouteTestResult {
         let custom = settings.customRules.filter(\.enabled).sorted { $0.order < $1.order }
@@ -408,11 +412,21 @@ public enum RouteRuleEvaluator {
                 value: "ip_is_private"
             )
         }
+        // 内置国内名单排在订阅规则与私有网段之后、兜底之前，与生成的配置同序。
+        if let chinaListHit {
+            return result(
+                source: .chinaList,
+                priority: bypassPriority + subscriptionRules.count + 2,
+                action: .direct,
+                target: "DIRECT",
+                value: chinaListHit
+            )
+        }
         // 兜底：订阅写了 MATCH 且启用了订阅规则时，走它指定的出口（与生成的配置一致）。
         let match = settings.useSubscriptionRules ? matchTarget : nil
         return result(
             source: .final,
-            priority: bypassPriority + subscriptionRules.count + 2,
+            priority: bypassPriority + subscriptionRules.count + 3,
             action: .proxy,
             target: match ?? primaryOutbound,
             value: match == nil ? "FINAL" : "MATCH"
@@ -537,12 +551,6 @@ public struct SubscriptionRule: Codable, Equatable, Hashable, Sendable, Identifi
     public var value: String
     /// DIRECT / REJECT / 策略组名。
     public var target: String
-    /// 只对 `GEOIP` 有意义：域名连接要不要先解析成 IP 再比对。订阅写了 `no-resolve` 时为 false。
-    ///
-    /// 不解析的话这条规则对域名连接永远落空：TUN 下系统拿到的是假 IP，系统代理入口只送域名。
-    /// 真机 2026-10-03：没进任何名单的国内站（游戏交易站之类）全掉进「漏网之鱼」，绕美国节点访问，
-    /// 比直连慢 10～20 倍。
-    public var resolvesDomain: Bool = true
 
     /// 单条规则的类型；规则集引用与 GEOIP 为 nil。
     public var type: CustomRuleType? {
@@ -566,11 +574,10 @@ public struct SubscriptionRule: Codable, Equatable, Hashable, Sendable, Identifi
         }
     }
 
-    public init(kind: Kind, value: String, target: String, resolvesDomain: Bool = true) {
+    public init(kind: Kind, value: String, target: String) {
         self.kind = kind
         self.value = value
         self.target = target
-        self.resolvesDomain = resolvesDomain
     }
 
     /// 单条规则的便捷构造，与改动前的调用方式保持一致。
@@ -594,9 +601,11 @@ public struct SubscriptionRule: Codable, Equatable, Hashable, Sendable, Identifi
         case "RULE-SET":
             return SubscriptionRule(kind: .ruleSet, value: value, target: target)
         case "GEOIP":
-            // 与 Clash 一致：默认先把域名解析成 IP 再比对，末尾写了 `no-resolve` 才只看连接本身的 IP。
-            let noResolve = parts.dropFirst(3).contains { $0.lowercased() == "no-resolve" }
-            return SubscriptionRule(kind: .geoIP, value: value.uppercased(), target: target, resolvesDomain: !noResolve)
+            // 只按连接本身的 IP 比对，不为它解析域名（相当于一律 no-resolve）。
+            // Clash 默认会先用国内解析器把域名解析成 IP 再比对；v0.2.9 照做过，真机 2026-10-04 实测：
+            // 被墙域名的污染地址会落进国内段而被判直连（超时），系统代理入口解析一失败连接就断。已撤回，
+            // 国内站直连改由域名名单兜底（见 `ConfigGenerator.route` 里的 geosite-cn-extra）。
+            return SubscriptionRule(kind: .geoIP, value: value.uppercased(), target: target)
         default:
             break
         }

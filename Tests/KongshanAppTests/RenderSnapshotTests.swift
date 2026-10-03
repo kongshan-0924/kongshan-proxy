@@ -35,6 +35,12 @@ final class RenderSnapshotTests: XCTestCase {
             name: "nodes-page",
             size: CGSize(width: 820, height: 640)
         )
+        // 规则集数据库是固定 520×420 的 sheet：v0.2.10 多了扩展名单的下载地址与说明，要看是否被截断。
+        render(
+            RuleSetDatabaseSheet().environment(state),
+            name: "rule-set-database",
+            size: CGSize(width: 520, height: 420)
+        )
 
         state.routingSettings.policyGroups = [
             PolicyGroup(name: "流媒体", kind: .selector),

@@ -3139,8 +3139,34 @@ final class AppState {
             subscriptionRules: rules,
             ruleSetContents: contents,
             matchTarget: activeMatchTarget,
+            chinaListHit: await chinaListHit(domain: domain),
             primaryOutbound: primaryGroupName ?? "手动选择"
         )
+    }
+
+    /// 内置国内域名名单是否命中：交给内核自己的 `rule-set match` 判定（名单是二进制规则集，本地不解析）。
+    ///
+    /// 不判的话，名单里的国内站在命中测试里会显示成「兜底 → 走代理」，与实际直连相反——
+    /// 扩展名单（v0.2.10）让这类站多了很多，看起来就像修复没生效。只认缓存里真实存在的文件，
+    /// 与生成配置时用的是同一份；判定失败按未命中处理，与以前一致。
+    private func chinaListHit(domain: String?) async -> String? {
+        guard let domain = domain?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !domain.isEmpty,
+              outboundMode == .rule else { return nil }
+        let directory = storage.rootDirectory.appending(path: "rule-sets", directoryHint: .isDirectory)
+        let binary = Self.singBoxBinaryURL()
+        for (tag, label) in [("geosite-cn", "geosite-cn"), (ConfigGenerator.geositeCNExtraTag, "国内域名扩展名单")] {
+            let file = directory.appending(path: "\(tag).srs")
+            guard FileManager.default.fileExists(atPath: file.path),
+                  let result = try? await ProcessRunner.run(
+                      executable: binary,
+                      arguments: ["rule-set", "match", "-f", "binary", file.path, domain],
+                      timeout: 5
+                  ),
+                  result.exitCode == 0,
+                  result.stderr.contains("match rules") || result.stdout.contains("match rules") else { continue }
+            return label
+        }
+        return nil
     }
 
     func applyTunSettings(_ requestedSettings: TunSettings, operation: String = "TUN 设置") async {

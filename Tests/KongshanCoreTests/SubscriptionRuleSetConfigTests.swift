@@ -39,7 +39,8 @@ final class SubscriptionRuleSetConfigTests: XCTestCase {
         builtin = PreparedRuleSets(
             geositeCN: try await compile(#"{"version":1,"rules":[{"domain_suffix":["cn"]}]}"#, "geosite-cn"),
             geoipCN: try await compile(#"{"version":1,"rules":[{"ip_cidr":["1.0.1.0/24"]}]}"#, "geoip-cn"),
-            ads: try await compile(#"{"version":1,"rules":[{"domain_suffix":["ads.example"]}]}"#, "ads")
+            ads: try await compile(#"{"version":1,"rules":[{"domain_suffix":["ads.example"]}]}"#, "ads"),
+            geositeCNExtra: try await compile(#"{"version":1,"rules":[{"domain_suffix":["extra-cn.example"]}]}"#, "cn-extra")
         )
         for (name, withDNS) in [("local-direct", true), ("reject", true), ("ai", true), ("apple", true),
                                 ("proxy", true), ("cn", true), ("ips", false)] {
@@ -123,66 +124,84 @@ final class SubscriptionRuleSetConfigTests: XCTestCase {
     func testRuleSetReferencesKeepSubscriptionOrder() throws {
         let subscription = routeRules(try config()).filter { ruleSetTags($0).contains { $0.hasPrefix("sub-") } }
         XCTAssertEqual(subscription.map(ruleSetTags), [
-            ["sub-local-direct"], ["sub-reject"], ["sub-ai"], ["sub-apple"], ["sub-proxy"], ["sub-cn"],
-        ], "顺序即语义")
+            ["sub-local-direct"], ["sub-reject"], ["sub-ai"], ["sub-apple"], ["sub-proxy"],
+            ["sub-cn", "geoip-cn"],
+        ], "顺序即语义；cn 与相邻同目标的 GEOIP,CN 合并成一条")
         XCTAssertEqual(subscription.map { $0["outbound"] as? String },
                        ["全球直连", "广告拦截", "AI", "苹果服务", "节点选择", "全球直连"])
     }
 
-    /// 写了 no-resolve 的 GEOIP 不插 resolve，与相邻同目标的规则集照旧合并成一条。
-    func testNoResolveGeoIPMergesWithNeighbourAndAddsNothing() throws {
-        var noResolve = rules
-        noResolve[noResolve.count - 1] = SubscriptionRule(kind: .geoIP, value: "CN", target: "全球直连", resolvesDomain: false)
-        let root = try config(rules: noResolve)
-        XCTAssertTrue(routeRules(root).contains { ruleSetTags($0) == ["sub-cn", "geoip-cn"] })
-        XCTAssertFalse(routeRules(root).contains { $0["action"] as? String == "resolve" })
-        XCTAssertFalse(dnsRules(root).contains { ruleSetTags($0) == ["geoip-cn"] }, "订阅没要求解析，就不拿域名去问国内解析器")
+    // MARK: - 国内域名扩展名单（v0.2.10）
+
+    /// 排在订阅规则（含 MATCH 之前的全部）与私有网段之后、内置 geosite-cn/geoip-cn 之前，直连。
+    /// 订阅明确送去代理的域名先命中订阅规则，不受影响。
+    func testChinaExtraListRoutesDirectAfterSubscriptionRules() throws {
+        let root = try config()
+        let rules = routeRules(root)
+        let extra = try XCTUnwrap(rules.firstIndex { ruleSetTags($0) == ["geosite-cn-extra"] })
+        XCTAssertEqual(rules[extra]["outbound"] as? String, "direct")
+        let lastSubscription = try XCTUnwrap(rules.lastIndex { ruleSetTags($0).contains { $0.hasPrefix("sub-") } })
+        let privateNetwork = try XCTUnwrap(rules.firstIndex { $0["ip_is_private"] as? Bool == true })
+        let builtin = try XCTUnwrap(rules.firstIndex { ruleSetTags($0) == ["geosite-cn", "geoip-cn"] })
+        XCTAssertLessThan(lastSubscription, extra)
+        XCTAssertLessThan(privateNetwork, extra)
+        XCTAssertEqual(extra + 1, builtin)
+        let declared = ((root["route"] as? [String: Any])?["rule_set"] as? [[String: Any]])?.compactMap { $0["tag"] as? String } ?? []
+        XCTAssertEqual(declared.filter { $0 == "geosite-cn-extra" }.count, 1)
+        XCTAssertEqual((root["route"] as? [String: Any])?["final"] as? String, "漏网之鱼", "MATCH 兜底不变")
     }
 
-    // MARK: - GEOIP,CN 需要先解析（真机 2026-10-03：未进名单的国内站全走了代理）
-
-    /// 系统代理入口送来的是域名：在 GEOIP 那条前对 mixed-in 做一次 resolve，只做一次。
-    func testSystemProxyConnectionsAreResolvedRightBeforeGeoIP() throws {
-        let rules = routeRules(try config())
-        let resolves = rules.indices.filter { rules[$0]["action"] as? String == "resolve" }
-        XCTAssertEqual(resolves.count, 1)
-        let resolve = rules[resolves[0]]
-        XCTAssertEqual(resolve["inbound"] as? [String], ["mixed-in"], "TUN 的连接本来就带 IP，不能 resolve——否则代理收到的就是 IP 而不是域名")
-        XCTAssertNil(resolve["server"], "不指定 server：查询要走 DNS 规则里的国内地址过滤")
-        XCTAssertEqual(ruleSetTags(rules[resolves[0] + 1]), ["geoip-cn"])
-        XCTAssertEqual(rules[resolves[0] + 1]["outbound"] as? String, "全球直连")
-        XCTAssertEqual(ruleSetTags(rules[resolves[0] - 1]), ["sub-cn"], "域名名单先比，命中就不用解析")
-    }
-
-    /// TUN：没进名单的域名先问国内解析器，答案是国内 IP 才采用，否则照旧给假 IP；排在 geosite-cn 之后、fakeip 之前。
-    func testTUNChecksDomesticAnswerBeforeFakeIP() throws {
-        let root = try config(modes: [.tun])
-        XCTAssertFalse(routeRules(root).contains { $0["action"] as? String == "resolve" }, "只开 TUN 时没有 mixed 入站，也不需要 resolve")
-        let rules = dnsRules(root)
-        let filter = try XCTUnwrap(rules.firstIndex { ruleSetTags($0) == ["geoip-cn"] })
-        XCTAssertEqual(rules[filter]["query_type"] as? [String], ["A", "AAAA"])
-        XCTAssertEqual(rules[filter]["server"] as? String, "dns-bootstrap", "地址过滤的上游超时会让查询直接失败，不能用会卡死的 DoH 长连接")
-        XCTAssertNil(rules[filter]["inbound"])
+    /// 名单里的站解析留在国内（真实地址），排在 geosite-cn 之后、fakeip 之前；订阅的 DNS 规则仍在它前面。
+    func testChinaExtraListResolvesDomestically() throws {
+        let rules = dnsRules(try config())
+        let extra = try XCTUnwrap(rules.firstIndex { ruleSetTags($0) == ["geosite-cn-extra"] })
+        XCTAssertEqual(rules[extra]["server"] as? String, "dns-cn")
         let geosite = try XCTUnwrap(rules.firstIndex { ruleSetTags($0) == ["geosite-cn"] })
         let fakeip = try XCTUnwrap(rules.firstIndex { ($0["server"] as? String) == "dns-fakeip" && ruleSetTags($0).isEmpty })
-        XCTAssertLessThan(geosite, filter)
-        XCTAssertLessThan(filter, fakeip)
+        let lastSubscription = try XCTUnwrap(rules.lastIndex { ruleSetTags($0).contains { $0.hasPrefix("sub-") } })
+        XCTAssertEqual(geosite + 1, extra)
+        XCTAssertLessThan(extra, fakeip)
+        XCTAssertLessThan(lastSubscription, extra)
     }
 
-    /// 只开系统代理：没有 fakeip，resolve 的查询不带 query_type，只能按入站匹配。
-    func testSystemProxyOnlyFiltersByInbound() throws {
-        let rules = dnsRules(try config(modes: [.systemProxy]))
-        let filters = rules.filter { ruleSetTags($0) == ["geoip-cn"] }
-        XCTAssertEqual(filters.count, 1)
-        XCTAssertEqual(filters[0]["inbound"] as? [String], ["mixed-in"])
-        XCTAssertNil(filters[0]["query_type"])
-        XCTAssertEqual(filters[0]["server"] as? String, "dns-bootstrap")
+    /// 名单下载不到时（nil）：配置里一点痕迹都没有，与 v0.2.8 完全一致。
+    func testWithoutExtraListNothingReferencesIt() throws {
+        var settings = RoutingSettings.defaults
+        settings.policyGroups = groups
+        settings.blockAds = false
+        let withoutExtra = PreparedRuleSets(geositeCN: builtin.geositeCN, geoipCN: builtin.geoipCN, ads: builtin.ads)
+        let input = ConfigInput(
+            nodes: [node], selectedNodeID: node.id,
+            runtime: RuntimeParameters(mixedPort: 31_080, clashPort: 31_909, secret: String(repeating: "s", count: 32)),
+            routing: RoutingConfiguration(settings: settings, ruleSets: withoutExtra, subscriptionRules: rules,
+                                          subscriptionRuleSets: prepared, matchTarget: "漏网之鱼"),
+            enabledModes: [.tun, .systemProxy], outboundMode: .rule
+        )
+        let text = String(decoding: try ConfigGenerator.generate(input), as: UTF8.self)
+        XCTAssertFalse(text.contains("geosite-cn-extra"))
     }
 
-    func testNoChinaIPCheckWithoutSubscriptionRulesOrOutsideRuleMode() throws {
-        for root in [try config(useSubscriptionRules: false), try config(outboundMode: .global)] {
-            XCTAssertFalse(routeRules(root).contains { $0["action"] as? String == "resolve" })
-            XCTAssertFalse(dnsRules(root).contains { ruleSetTags($0) == ["geoip-cn"] })
+    /// 只在规则模式：全局 / 直连不按名单分流。
+    func testChinaExtraListOnlyInRuleMode() throws {
+        for mode in [OutboundMode.global, .direct] {
+            let root = try config(outboundMode: mode)
+            XCTAssertFalse(routeRules(root).contains { ruleSetTags($0).contains("geosite-cn-extra") })
+            XCTAssertFalse(dnsRules(root).contains { ruleSetTags($0).contains("geosite-cn-extra") })
+        }
+    }
+
+    // MARK: - 撤回「GEOIP,CN 先解析」的护栏（真机 2026-10-04）
+
+    /// v0.2.9 曾在 GEOIP 前对系统代理入口 resolve、在 DNS 里按 geoip-cn 过滤答案。实测两处缺陷：
+    /// 被墙域名的污染地址落进国内段被判直连（超时）；resolve 一失败连接就断（远端 DoH 偶发卡死）。
+    /// 已撤回，这里守住：任何模式组合下都不得再出现这两种规则。
+    func testNoResolveActionOrGeoIPAnswerFilterInAnyMode() throws {
+        for modes in [Set<ProxyMode>([.tun, .systemProxy]), [.systemProxy], [.tun]] {
+            for outboundMode in [OutboundMode.rule, .global, .direct] {
+                let root = try config(modes: modes, outboundMode: outboundMode)
+                XCTAssertFalse(routeRules(root).contains { $0["action"] as? String == "resolve" }, "\(modes) \(outboundMode)")
+                XCTAssertFalse(dnsRules(root).contains { ruleSetTags($0).contains("geoip-cn") }, "\(modes) \(outboundMode)")
+            }
         }
     }
 

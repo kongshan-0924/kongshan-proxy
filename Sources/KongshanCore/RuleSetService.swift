@@ -26,8 +26,9 @@ public enum RuleSetServiceError: Error, Equatable, LocalizedError {
     }
 }
 
-/// 规则集下载源。上游都是 sing-box 官方开源仓库 SagerNet/sing-geoip 与 sing-geosite，
-/// 这里只切换分发通道：GitHub 原始地址在国内常被阻断，jsDelivr 走 Fastly CDN 更稳。
+/// 规则集下载源。上游是 sing-box 官方开源仓库 SagerNet/sing-geoip 与 sing-geosite，
+/// 国内域名扩展名单来自 MetaCubeX/meta-rules-dat。这里只切换分发通道：
+/// GitHub 原始地址在国内常被阻断，jsDelivr 走 Fastly CDN 更稳。
 public enum RuleSetMirror: String, Codable, CaseIterable, Sendable {
     case githubRaw
     case jsdelivr
@@ -45,6 +46,16 @@ public enum RuleSetMirror: String, Codable, CaseIterable, Sendable {
             URL(string: "https://raw.githubusercontent.com/SagerNet/\(repository)/rule-set/\(file)")!
         case .jsdelivr:
             URL(string: "https://fastly.jsdelivr.net/gh/SagerNet/\(repository)@rule-set/\(file)")!
+        }
+    }
+
+    /// MetaCubeX/meta-rules-dat 的 sing 分支（mihomo 社区维护的 sing-box 格式规则集）。
+    public func metaCubeXURL(path: String) -> URL {
+        switch self {
+        case .githubRaw:
+            URL(string: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/\(path)")!
+        case .jsdelivr:
+            URL(string: "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@sing/\(path)")!
         }
     }
 }
@@ -70,20 +81,29 @@ public actor RuleSetService {
 
     private struct Resource: Sendable {
         let tag: String
-        let repository: String
+        let remote: @Sendable (RuleSetMirror) -> URL
 
         func remoteURL(mirror: RuleSetMirror) -> URL {
-            mirror.url(repository: repository, file: "\(tag).srs")
+            remote(mirror)
+        }
+
+        static func sagerNet(tag: String, repository: String) -> Resource {
+            Resource(tag: tag) { $0.url(repository: repository, file: "\(tag).srs") }
         }
     }
 
-    private static let geositeCN = Resource(tag: "geosite-cn", repository: "sing-geosite")
-    private static let geoipCN = Resource(tag: "geoip-cn", repository: "sing-geoip")
-    private static let ads = Resource(tag: "geosite-category-ads-all", repository: "sing-geosite")
+    private static let geositeCN = Resource.sagerNet(tag: "geosite-cn", repository: "sing-geosite")
+    private static let geoipCN = Resource.sagerNet(tag: "geoip-cn", repository: "sing-geoip")
+    private static let ads = Resource.sagerNet(tag: "geosite-category-ads-all", repository: "sing-geosite")
+    /// 国内域名扩展名单：v2fly 的 cn 并上 dnsmasq-china-list（权威 DNS 在国内的域名），约 11 万条。
+    /// SagerNet 的 geosite-cn 只有前者，没进订阅名单的国内中小站（真机：两个游戏交易站）都不在里面。
+    private static let geositeCNExtra = Resource(tag: ConfigGenerator.geositeCNExtraTag) {
+        $0.metaCubeXURL(path: "geo/geosite/cn.srs")
+    }
 
     /// 供设置页展示的当前下载地址。
     public static func sourceURLs(mirror: RuleSetMirror, includeAds: Bool) -> [(tag: String, url: URL)] {
-        var resources = [geoipCN, geositeCN]
+        var resources = [geoipCN, geositeCN, geositeCNExtra]
         if includeAds { resources.append(ads) }
         return resources.map { ($0.tag, $0.remoteURL(mirror: mirror)) }
     }
@@ -139,6 +159,17 @@ public actor RuleSetService {
         var resources = [Self.geositeCN, Self.geoipCN]
         if includeAds { resources.append(Self.ads) }
 
+        // 扩展名单与核心规则集并发准备（首次下载不拖慢启动）；它自己失败不影响核心规则集，见 `prepareOptional`。
+        async let extra = Self.prepareOptional(
+            Self.geositeCNExtra,
+            mirror: mirror,
+            allowsNetwork: allowsNetwork,
+            forceRefresh: forceRefresh,
+            storage: storage,
+            loader: loader,
+            validator: validator
+        )
+
         var collected: [(tag: String, url: URL, warnings: [String])] = []
         try await withThrowingTaskGroup(of: (String, URL, [String]).self) { [storage, loader, validator] group in
             for resource in resources {
@@ -178,10 +209,38 @@ public actor RuleSetService {
         guard let geositeCN = geositeURL, let geoipCN = geoipURL else {
             throw RuleSetServiceError.unavailable(tag: "core", reason: "核心规则集缺失")
         }
+
+        let (extraURL, extraWarnings) = await extra
+        warnings.append(contentsOf: extraWarnings)
         return RuleSetPreparationResult(
-            ruleSets: PreparedRuleSets(geositeCN: geositeCN, geoipCN: geoipCN, ads: adsURL),
+            ruleSets: PreparedRuleSets(geositeCN: geositeCN, geoipCN: geoipCN, ads: adsURL, geositeCNExtra: extraURL),
             warnings: warnings
         )
+    }
+
+    /// 可有可无的规则集：拿不到就返回 nil，配置照常生成、退回原有名单——绝不能因为它让内核起不来。
+    /// 自动更新关着又没有缓存时不算失败（那是用户的选择），不出警告，免得每次启动都提示一遍。
+    private static func prepareOptional(
+        _ resource: Resource,
+        mirror: RuleSetMirror,
+        allowsNetwork: Bool,
+        forceRefresh: Bool,
+        storage: Storage,
+        loader: @escaping Loader,
+        validator: @escaping Validator
+    ) async -> (URL?, [String]) {
+        let cacheURL = storage.rootDirectory.appending(path: "rule-sets/\(resource.tag).srs")
+        if !allowsNetwork, !FileManager.default.fileExists(atPath: cacheURL.path) {
+            return (nil, [])
+        }
+        do {
+            return try await prepare(
+                resource, mirror: mirror, allowsNetwork: allowsNetwork, forceRefresh: forceRefresh,
+                storage: storage, loader: loader, validator: validator
+            )
+        } catch {
+            return (nil, ["国内域名扩展名单暂不可用，国内站分流先用内置名单：\(error.localizedDescription)"])
+        }
     }
 
     /// 单个规则集的下载 + 校验 + 缓存。nonisolated 以便外层并发调用。

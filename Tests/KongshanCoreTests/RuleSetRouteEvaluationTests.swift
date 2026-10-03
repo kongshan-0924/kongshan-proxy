@@ -100,4 +100,39 @@ final class RuleSetRouteEvaluationTests: XCTestCase {
         XCTAssertEqual(result.source, .final)
         XCTAssertEqual(result.target, "节点选择")
     }
+
+    // MARK: - 内置国内名单（v0.2.10）
+
+    /// 名单命中由调用方用内核判定后传入：命中显示「内置国内名单 → 直连」，不再误报成兜底走代理。
+    func testChinaListHitIsReportedAsDirectBeforeFinal() {
+        let settings = RoutingSettings(customRules: [], bypassDomains: [], bypassCIDRs: [], blockAds: false)
+        let hit = RouteRuleEvaluator.evaluate(
+            RouteTestInput(domain: "shop.example", ip: nil, processName: nil),
+            settings: settings, subscriptionRules: [], matchTarget: "漏网之鱼",
+            chinaListHit: "国内域名扩展名单", primaryOutbound: "节点选择"
+        )
+        XCTAssertEqual(hit.source, .chinaList)
+        XCTAssertEqual(hit.action, .direct)
+        XCTAssertEqual(hit.matchedValue, "国内域名扩展名单")
+
+        let miss = RouteRuleEvaluator.evaluate(
+            RouteTestInput(domain: "shop.example", ip: nil, processName: nil),
+            settings: settings, subscriptionRules: [], matchTarget: "漏网之鱼", primaryOutbound: "节点选择"
+        )
+        XCTAssertEqual(miss.source, .final)
+        XCTAssertEqual(miss.target, "漏网之鱼")
+    }
+
+    /// 订阅规则排在名单前：订阅明确送去代理的域名，即使也在名单里，仍按订阅走。
+    func testSubscriptionRuleStillWinsOverChinaList() {
+        let settings = RoutingSettings(customRules: [], bypassDomains: [], bypassCIDRs: [], blockAds: false)
+        let result = RouteRuleEvaluator.evaluate(
+            RouteTestInput(domain: "api.shop.example", ip: nil, processName: nil),
+            settings: settings,
+            subscriptionRules: [SubscriptionRule(type: .domainSuffix, value: "shop.example", target: "节点选择")],
+            chinaListHit: "国内域名扩展名单", primaryOutbound: "节点选择"
+        )
+        XCTAssertEqual(result.source, .subscription)
+        XCTAssertEqual(result.target, "节点选择")
+    }
 }

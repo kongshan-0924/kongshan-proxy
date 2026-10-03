@@ -4,11 +4,14 @@ public struct PreparedRuleSets: Equatable, Sendable {
     public let geositeCN: URL
     public let geoipCN: URL
     public let ads: URL?
+    /// 国内域名扩展名单（MetaCubeX geosite cn，约 11 万域名），可选：下载不到就不用，不影响启动。
+    public let geositeCNExtra: URL?
 
-    public init(geositeCN: URL, geoipCN: URL, ads: URL?) {
+    public init(geositeCN: URL, geoipCN: URL, ads: URL?, geositeCNExtra: URL? = nil) {
         self.geositeCN = geositeCN
         self.geoipCN = geoipCN
         self.ads = ads
+        self.geositeCNExtra = geositeCNExtra
     }
 }
 
@@ -292,14 +295,12 @@ public enum ConfigGenerator {
 
         let lanResolver = LANResolver.effective(settings: input.tunSettings, detected: input.lanResolver)
         let availableGroups = generatedNames.union(nodeTags)
-        let chinaIPCheck = Self.needsChinaIPCheck(input, available: availableGroups.union(["direct", "reject"]))
         var route = try route(
             for: input.routing,
             outboundMode: input.outboundMode,
             primaryOutbound: primaryOutbound,
             availableGroups: availableGroups,
-            lanDomainSuffixes: lanResolver.isUsable ? lanResolver.searchDomains : [],
-            resolveInbounds: chinaIPCheck && input.usesSystemProxy ? ["mixed-in"] : []
+            lanDomainSuffixes: lanResolver.isUsable ? lanResolver.searchDomains : []
         )
         // 订阅规则集的 DNS 规则（只在规则模式、且启用订阅规则时）。DNS 用的纯域名规则集
         // 也要声明在 route.rule_set 里——sing-box 的规则集统一在那里定义，DNS 规则按 tag 引用。
@@ -366,12 +367,7 @@ public enum ConfigGenerator {
 
         let root: [String: Any] = [
             "log": ["level": input.coreLogLevel, "timestamp": true],
-            "dns": try dns(
-                for: input,
-                primaryOutbound: primaryOutbound,
-                subscriptionRules: subscriptionDNS.rules,
-                chinaIPCheck: chinaIPCheck
-            ),
+            "dns": try dns(for: input, primaryOutbound: primaryOutbound, subscriptionRules: subscriptionDNS.rules),
             "inbounds": try inbounds(for: input),
             "outbounds": outbounds,
             "route": route,
@@ -401,8 +397,7 @@ public enum ConfigGenerator {
     private static func dns(
         for input: ConfigInput,
         primaryOutbound: String,
-        subscriptionRules: [[String: Any]] = [],
-        chinaIPCheck: Bool = false
+        subscriptionRules: [[String: Any]] = []
     ) throws -> [String: Any] {
         let endpoints = try input.dnsSettings.endpoints()
         var servers: [[String: Any]] = []
@@ -510,6 +505,14 @@ public enum ConfigGenerator {
             "action": "route",
             "server": localResolver
         ])
+        // 不带点的单段主机名（局域网设备名，如 NAS）同样不能拿假 IP：真机 2026-10-04，`MY-NAS` 拿到 240.x，
+        // 访达连 NAS 的 SMB（139/445）全被送去了节点。有内网 DNS 交给它；没有就回 NXDOMAIN，
+        // macOS 随即改用 mDNS / NetBIOS 在局域网里找（路由器 DNS 本来就不认识这类名字）。
+        if lan.isUsable {
+            rules.append(["domain_regex": [Self.singleLabelPattern], "action": "route", "server": "dns-lan"])
+        } else {
+            rules.append(["domain_regex": [Self.singleLabelPattern], "action": "predefined", "rcode": "NXDOMAIN"])
+        }
         // 直连域名的解析也必须留在国内解析器。它们在**路由**上走 direct，可**解析**上
         // 既不命中内网规则、也多半不在 geosite-cn 里，于是掉到 `final: dns-remote`——
         // 经代理去问 8.8.8.8，再把答案拿回本地直连。绕远一圈的代价是双份的：
@@ -548,37 +551,18 @@ public enum ConfigGenerator {
             "action": "route",
             "server": localResolver
         ])
-        if input.routing != nil, input.outboundMode == .rule {
+        if let routing = input.routing, input.outboundMode == .rule {
             rules.append([
                 "rule_set": "geosite-cn",
                 "action": "route",
                 "server": "dns-cn"
             ])
-        }
-        // 订阅的 `GEOIP,CN`（没写 no-resolve）：没进任何名单的域名先问一次国内解析器，
-        // 答案是国内 IP 才采用（地址过滤：答案不在 geoip-cn 里时本条跳过，落到下面的 fakeip / final）。
-        // - TUN：系统拿到真实国内 IP，连接按 IP 命中 geoip-cn 直连；不是国内的照旧拿假 IP，
-        //   代理收到的仍是域名——节点按域名分流、远端解析都不受影响。
-        // - 系统代理入口：路由在 GEOIP 那条前对 mixed-in 做 resolve，查询走这里；不是国内的落到
-        //   final（dns-remote，经代理解析，避开国内解析器对境外域名的污染）。
-        //   这类查询不带 query_type，所以单列一条按入站匹配的规则（2026-10-03 实测 1.13.21）。
-        // 用无连接的 dns-bootstrap 而不是 DoH 的 dns-cn：地址过滤的上游一旦超时，TUN 下这次查询
-        // 直接失败、不会往下落（同日实测），而 DoH 长连接会被 NAT 悄悄回收、卡满 10 秒（见上文）。
-        if chinaIPCheck {
-            if useFakeIP {
+            // 与路由同一份名单（见 `route(for:)`）：这些是国内托管的站，解析留在国内拿真实地址。
+            if routing.ruleSets.geositeCNExtra != nil {
                 rules.append([
-                    "query_type": ["A", "AAAA"],
-                    "rule_set": "geoip-cn",
+                    "rule_set": Self.geositeCNExtraTag,
                     "action": "route",
-                    "server": "dns-bootstrap"
-                ])
-            }
-            if input.usesSystemProxy {
-                rules.append([
-                    "inbound": ["mixed-in"],
-                    "rule_set": "geoip-cn",
-                    "action": "route",
-                    "server": "dns-bootstrap"
+                    "server": "dns-cn"
                 ])
             }
         }
@@ -607,6 +591,9 @@ public enum ConfigGenerator {
 
     /// 公网上必然不存在的保留后缀，见 `dns(for:)` 里的说明。
     static let nonexistentSuffixes = ["invalid", "test", "example", "localhost", "onion"]
+    /// 不带点的单段主机名。
+    static let singleLabelPattern = "^[^.]+$"
+    public static let geositeCNExtraTag = "geosite-cn-extra"
 
     private static func dohServer(
         endpoint: DoHEndpoint,
@@ -688,23 +675,15 @@ public enum ConfigGenerator {
     /// （`rule_set` 数组内也是「或」）。**没就绪的规则集直接跳过**——引用不存在的规则集，
     /// 内核会整份拒绝配置；跳过只是退回到没有这条规则的状态。
     /// `GEOIP,CN` 原位引用内置 `geoip-cn`；其他国家码没有本地库，跳过。
-    ///
-    /// `resolveInbounds` 非空时，第一条要求解析的 `GEOIP,CN` 前插一条只对这些入站生效的 `resolve`：
-    /// 系统代理入口送来的是域名，不解析就永远命中不了 IP 规则。不带 server，查询走 DNS 规则里
-    /// 按入站匹配的国内地址过滤（见 `dns(for:)`）。只解析一次——之后的 IP 规则都用这次的结果。
-    /// 不对 TUN 做：TUN 的连接本来就带 IP（国内的在 DNS 阶段已拿到真实 IP），再 resolve 会把
-    /// 假 IP 连接的域名换成 IP 交给代理。
     static func mergedSubscriptionRules(
         _ subscriptionRules: [SubscriptionRule],
         available: Set<String>,
-        ruleSets: [String: PreparedSubscriptionRuleSet] = [:],
-        resolveInbounds: [String] = []
+        ruleSets: [String: PreparedSubscriptionRuleSet] = [:]
     ) -> [[String: Any]] {
         var result: [[String: Any]] = []
         var field: String?
         var outbound: String?
         var values: [String] = []
-        var resolved = resolveInbounds.isEmpty
 
         func flush() {
             if let field, let outbound, !values.isEmpty {
@@ -716,12 +695,6 @@ public enum ConfigGenerator {
         for rule in subscriptionRules {
             guard let target = resolvedOutbound(for: rule.target, available: available),
                   let (ruleField, value) = routeMatcher(for: rule, ruleSets: ruleSets) else { continue }
-            if !resolved, rule.kind == .geoIP, rule.resolvesDomain {
-                flush()
-                field = nil
-                result.append(["inbound": resolveInbounds, "action": "resolve"])
-                resolved = true
-            }
             if ruleField == field, target == outbound {
                 values.append(value)
             } else {
@@ -767,17 +740,6 @@ public enum ConfigGenerator {
             // 组套组有环、或深度异常：按代理处理（最保守——不会把代理流量的解析错送到国内）。
             guard depth < 8, let next = selectorDefaults[tag] else { return .proxy }
             return targetKind(of: next, selectorDefaults: selectorDefaults, depth: depth + 1)
-        }
-    }
-
-    /// 订阅里有没有一条会生效、且要求解析的 `GEOIP,CN`（没写 `no-resolve`、目标能解析到出站）。
-    /// 有才加国内地址过滤与 resolve——订阅没要求，就不把未命中名单的域名拿去问国内解析器。
-    static func needsChinaIPCheck(_ input: ConfigInput, available: Set<String>) -> Bool {
-        guard input.outboundMode == .rule, let routing = input.routing,
-              (try? routing.settings.validated())?.useSubscriptionRules == true else { return false }
-        return routing.subscriptionRules.contains { rule in
-            rule.kind == .geoIP && rule.value == "CN" && rule.resolvesDomain
-                && resolvedOutbound(for: rule.target, available: available) != nil
         }
     }
 
@@ -847,8 +809,7 @@ public enum ConfigGenerator {
         outboundMode: OutboundMode = .rule,
         primaryOutbound: String = "手动选择",
         availableGroups: Set<String> = [],
-        lanDomainSuffixes: [String] = [],
-        resolveInbounds: [String] = []
+        lanDomainSuffixes: [String] = []
     ) throws -> [String: Any] {
         let settings = try routing?.settings.validated()
         let sshRules = settings.map { settings in
@@ -893,10 +854,7 @@ public enum ConfigGenerator {
         if settings.useSubscriptionRules {
             let available = availableGroups.union(["direct", "reject"])
             rules.append(contentsOf: mergedSubscriptionRules(
-                routing.subscriptionRules,
-                available: available,
-                ruleSets: routing.subscriptionRuleSets,
-                resolveInbounds: resolveInbounds
+                routing.subscriptionRules, available: available, ruleSets: routing.subscriptionRuleSets
             ))
             // 只声明真正被引用、且已就绪的规则集。按订阅顺序，重复引用只声明一次。
             var declared = Set<String>()
@@ -936,6 +894,17 @@ public enum ConfigGenerator {
             ruleSets.append(localRuleSet(tag: "geosite-category-ads-all", path: ads))
         }
 
+        // 国内域名扩展名单：订阅的 `GEOIP,CN` 对域名连接落空（不为它解析，见 `SubscriptionRule.parse`），
+        // 没进订阅名单的国内站原本全掉进 MATCH 走代理（真机 2026-10-03：两个交易站比直连慢 10～20 倍）。
+        // 按域名判定，不看 DNS 应答，污染地址影响不到；排在订阅规则之后，订阅明确送去代理的域名不受影响。
+        if let extra = routing.ruleSets.geositeCNExtra {
+            rules.append([
+                "rule_set": Self.geositeCNExtraTag,
+                "action": "route",
+                "outbound": "direct"
+            ])
+            ruleSets.append(localRuleSet(tag: Self.geositeCNExtraTag, path: extra))
+        }
         rules.append([
             "rule_set": ["geosite-cn", "geoip-cn"],
             "action": "route",

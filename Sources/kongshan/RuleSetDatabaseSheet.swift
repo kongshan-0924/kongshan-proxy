@@ -53,7 +53,7 @@ struct RuleSetDatabaseSheet: View {
                                 .textSelection(.enabled)
                         }
                     }
-                    Text("上游是 sing-box 官方开源仓库 SagerNet/sing-geoip 与 sing-geosite，由官方持续维护。下载后用打包内核校验通过才替换缓存；失败或关闭自动更新时沿用最后一次成功的缓存。")
+                    Text("国内 IP、国内域名与广告名单来自 sing-box 官方开源仓库 SagerNet/sing-geoip 与 sing-geosite；国内域名扩展名单来自 MetaCubeX/meta-rules-dat（v2fly cn 与 dnsmasq-china-list 合并）。下载后用打包内核校验通过才替换缓存；失败或关闭自动更新时沿用最后一次成功的缓存，扩展名单拿不到时不用。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                                 }

@@ -53,25 +53,27 @@ final class DNSConfigTests: XCTestCase {
         XCTAssertNil(dns["fakeip"])
         XCTAssertEqual(dns["final"] as? String, "dns-remote")
 
-        // 七条，顺序即优先级：保留名（NXDOMAIN / 本地）→ 自定义代理规则 → 旁路直连 →
+        // 八条，顺序即优先级：保留名（NXDOMAIN / 本地）→ 单段主机名 → 自定义代理规则 → 旁路直连 →
         // 反向解析 / Bonjour 留本地 → geosite-cn。
-        // 保留名见 `testReservedNamesNeverGetFakeIPs`，自定义与旁路见 `testDirectDomainsResolveLocally`，
-        // 反向解析与 Bonjour 见 `testReverseLookupAndBonjourQueriesStayOnLocalResolver`。
+        // 保留名与单段主机名见 `testReservedNamesNeverGetFakeIPs` / `testSingleLabelHostnamesNeverGetFakeIPs`，
+        // 自定义与旁路见 `testDirectDomainsResolveLocally`，反向解析与 Bonjour 见
+        // `testReverseLookupAndBonjourQueriesStayOnLocalResolver`。
         let dnsRules = try XCTUnwrap(dns["rules"] as? [[String: Any]])
-        XCTAssertEqual(dnsRules.count, 7)
+        XCTAssertEqual(dnsRules.count, 8)
         XCTAssertEqual(dnsRules[0]["rcode"] as? String, "NXDOMAIN")
         XCTAssertEqual(dnsRules[1]["domain_suffix"] as? [String], ["local", "home.arpa"])
-        XCTAssertEqual(dnsRules[2]["domain_suffix"] as? [String], ["custom.example"])
-        XCTAssertEqual(dnsRules[2]["server"] as? String, "dns-remote")
-        XCTAssertEqual(dnsRules[3]["domain"] as? [String], ["localhost"])
-        XCTAssertEqual(dnsRules[3]["server"] as? String, "dns-cn")
-        XCTAssertEqual(dnsRules[4]["domain_suffix"] as? [String], ["in-addr.arpa", "ip6.arpa"])
+        XCTAssertEqual(dnsRules[2]["domain_regex"] as? [String], ["^[^.]+$"])
+        XCTAssertEqual(dnsRules[3]["domain_suffix"] as? [String], ["custom.example"])
+        XCTAssertEqual(dnsRules[3]["server"] as? String, "dns-remote")
+        XCTAssertEqual(dnsRules[4]["domain"] as? [String], ["localhost"])
         XCTAssertEqual(dnsRules[4]["server"] as? String, "dns-cn")
-        XCTAssertEqual(dnsRules[5]["domain_keyword"] as? [String], ["_dns-sd._udp"])
+        XCTAssertEqual(dnsRules[5]["domain_suffix"] as? [String], ["in-addr.arpa", "ip6.arpa"])
         XCTAssertEqual(dnsRules[5]["server"] as? String, "dns-cn")
-        XCTAssertEqual(dnsRules[6]["rule_set"] as? String, "geosite-cn")
-        XCTAssertEqual(dnsRules[6]["action"] as? String, "route")
+        XCTAssertEqual(dnsRules[6]["domain_keyword"] as? [String], ["_dns-sd._udp"])
         XCTAssertEqual(dnsRules[6]["server"] as? String, "dns-cn")
+        XCTAssertEqual(dnsRules[7]["rule_set"] as? String, "geosite-cn")
+        XCTAssertEqual(dnsRules[7]["action"] as? String, "route")
+        XCTAssertEqual(dnsRules[7]["server"] as? String, "dns-cn")
 
         // **必须是无连接的 dns-bootstrap，不能是 DoH。**
         // default_domain_resolver 负责解析出站节点自己的域名。DoH 是长连接，被路由器 NAT
@@ -421,6 +423,35 @@ final class DNSConfigTests: XCTestCase {
             let customOrSubscription = rules.firstIndex { ($0["server"] as? String) == "dns-remote" } ?? rules.count
             XCTAssertLessThan(nxdomain, customOrSubscription, "排在自定义与订阅规则之前：保留名谁也不该接走")
         }
+    }
+
+    /// 单段主机名（NAS、打印机这类局域网设备名）不能拿假 IP：真机 2026-10-04 `MY-NAS` 拿到 240.x，
+    /// 访达连 NAS 的 SMB 全被送去节点。有内网 DNS 交它；没有就回 NXDOMAIN，macOS 改用 mDNS / NetBIOS。
+    func testSingleLabelHostnamesNeverGetFakeIPs() throws {
+        for (snapshot, expectsLAN) in [(LANResolverSnapshot.empty, false), (lanSnapshot, true)] {
+            let root = try json(try ConfigGenerator.generate(input(proxyMode: .tun, lanResolver: snapshot)))
+            let rules = try XCTUnwrap((root["dns"] as? [String: Any])?["rules"] as? [[String: Any]])
+            let index = try XCTUnwrap(rules.firstIndex { ($0["domain_regex"] as? [String]) == ["^[^.]+$"] })
+            if expectsLAN {
+                XCTAssertEqual(rules[index]["server"] as? String, "dns-lan")
+            } else {
+                XCTAssertEqual(rules[index]["action"] as? String, "predefined")
+                XCTAssertEqual(rules[index]["rcode"] as? String, "NXDOMAIN")
+            }
+            let fakeip = try XCTUnwrap(rules.firstIndex { $0["server"] as? String == "dns-fakeip" })
+            XCTAssertLessThan(index, fakeip)
+            let custom = try XCTUnwrap(rules.firstIndex { ($0["domain_suffix"] as? [String]) == ["custom.example"] })
+            XCTAssertLessThan(index, custom)
+        }
+        // 正则本身：只认不带点的名字。
+        let pattern = try NSRegularExpression(pattern: ConfigGenerator.singleLabelPattern)
+        func matches(_ name: String) -> Bool {
+            pattern.firstMatch(in: name, range: NSRange(name.startIndex..., in: name)) != nil
+        }
+        XCTAssertTrue(matches("MY-NAS"))
+        XCTAssertTrue(matches("printer"))
+        XCTAssertFalse(matches("my-nas.local"))
+        XCTAssertFalse(matches("example.com"))
     }
 
     func testLANSplitCanBeTurnedOff() throws {
