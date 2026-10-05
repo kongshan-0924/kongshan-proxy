@@ -708,6 +708,8 @@ final class AppState {
     @ObservationIgnored private var dashboardConnectionTask: Task<Void, Never>?
     /// CPU 异常持续时给自己采调用栈，见 `CPUSampleCapture`。目录在 init 里按 storage 定。
     @ObservationIgnored private var cpuSampleCapture: CPUSampleCapture
+    /// 最近 15 分钟直连 / 经节点建连的成败（10 秒一格），DNS 突发告警据此区分「解析器坏了」与「整机断网」。
+    @ObservationIgnored private var connectivityPulse = ConnectivityPulse()
     /// 睡眠 / 暗唤醒感知：醒来后的安静期里失败不进检测器，见 `SleepWakeTracker`。
     @ObservationIgnored private var sleepWakeTracker = SleepWakeTracker()
     /// 读两只单调时钟；测试替换成可控的，模拟一次睡眠。
@@ -1269,16 +1271,24 @@ final class AppState {
         do {
             services = try await systemProxyManager.inspectServices()
             let tunAddresses = Set(tunResolverExclusions(tunSettings) + [tunSettings.dnsServerAddress])
-            let stillOurs = services.filter { svc in
-                svc.dnsServers.contains(where: { tunAddresses.contains($0) })
-                    || (svc.proxyPort != nil && svc.proxyPort == preferredRelayPort.map(Int.init))
-            }
+            let tunActive = status == .on && activeModes.contains(.tun)
+            let systemProxyActive = status == .on && activeModes.contains(.systemProxy)
+            let relayPort = preferredRelayPort.map(Int.init)
+            let stillOurs = NetworkTakeoverClassifier.leftovers(
+                in: services, tunAddresses: tunAddresses, relayPort: relayPort,
+                tunActive: tunActive, systemProxyActive: systemProxyActive
+            )
             if stillOurs.isEmpty {
                 let top = services.min(by: { $0.order < $1.order })
                 let topText = top.map { "优先级最高的是「\($0.name)」" } ?? ""
+                let expected = NetworkTakeoverClassifier.expected(
+                    in: services, tunAddresses: tunAddresses, relayPort: relayPort,
+                    tunActive: tunActive, systemProxyActive: systemProxyActive
+                )
+                let takeoverText = expected.isEmpty ? "" : "正在接管，\(expected.count) 个服务按预期指向 kongshan。"
                 items.append(NetworkCheckItem(
                     title: "网络服务设置",
-                    detail: "\(services.count) 个服务都没有指向 kongshan 的残留。\(topText)"
+                    detail: "\(services.count) 个服务都没有指向 kongshan 的残留。\(takeoverText)\(topText)"
                         + "——macOS 按服务优先级选用 DNS，排在前面的服务出问题会影响整机解析。",
                     severity: .ok
                 ))
@@ -5784,6 +5794,7 @@ final class AppState {
     /// internal 同 `inspectForDNSStall`：接线断掉不会报错，只会安静地不再留证，需回归覆盖。
     func inspectForOutboundFailure(_ line: CoreLogLine) {
         guard !isRecoveringFromSleep() else { return }
+        connectivityPulse.ingest(line, at: now())
         if let report = outboundFailureDetector.ingest(line, at: now()) {
             record(report)
         }
@@ -6152,6 +6163,13 @@ final class AppState {
         outboundFailureDetector.finish(at: now())
     }
 
+    /// internal 测试入口：内核停止时的 DNS 窗口结算（突发在前、慢性在后，扣除才生效）。
+    func finishDNSStallWindowsForTesting() {
+        let at = now()
+        if let report = dnsStallDetector.finish(at: at, physicalBytes: nil) { record(report) }
+        if let report = chronicDNSStallDetector.finish(at: at, physicalBytes: nil) { record(report) }
+    }
+
     /// 内核停止前结算三个检测窗口。达不到阈值仍然不出报告，不会凭空多报。
     private func finishAnomalyWindows() {
         let at = now()
@@ -6173,15 +6191,15 @@ final class AppState {
     }
 
     private func record(_ report: DNSStallReport) {
-        // 网卡增量是区分「解析器出问题」与「整机断网」的判据。
         let throughput: String
-        if let delta = report.physicalBytesDelta {
-            throughput = delta > 0
-                ? String(format: "期间网卡仍收发 %.1f MB，链路正常，问题在被查询的解析器",
-                         Double(delta) / 1_048_576)
-                : "期间网卡收发为 0，更像整机链路中断而非解析器故障"
-        } else {
-            throughput = "网卡计数不可用"
+        switch report.kind {
+        case .burst:
+            // 突发报过的超时从慢性窗口里扣掉，6 小时后不再拿同一件事补报一次。
+            chronicDNSStallDetector.discount(report)
+            throughput = dnsStallCauseText(for: report)
+        case .chronic:
+            // 慢性窗口跨几个小时，建连记账只留 15 分钟，仍按网卡收发量判断（几小时里网络大体是通的）。
+            throughput = Self.throughputText(report.physicalBytesDelta, conclusive: true)
         }
         // 跨度必须写进去：两种形状的窗口差 30 倍，「超时 10 次」在 2 分钟里和在 1 小时里
         // 是完全不同的两件事，不带跨度的计数没法判断严重程度。
@@ -6192,11 +6210,52 @@ final class AppState {
             "涉及 \(report.distinctTargetCount) 个不同目标（目标本身不记录）",
             throughput
         ].joined(separator: "；")
-        let title = switch report.kind {
-        case .burst: "DNS 解析持续超时"
-        case .chronic: "DNS 解析长期零星超时"
+        switch report.kind {
+        case .burst:
+            // 突发窗口只有 2 分钟，一段持续十几分钟的解析故障会拆成一串告警：真机 2026-10-05 22:24–22:39
+            // 同一个节点域名解析不了，15 分钟里连报 7 条。节点域名（整条代理停摆）与普通域名分开合并。
+            let key = report.outboundServerDomainStalls > 0 ? "DNS突发|节点域名" : "DNS突发|普通域名"
+            recordCoalescedAlert(key: key, cooldown: Self.dnsBurstAlertCooldown, title: "DNS 解析持续超时", detail: detail)
+        case .chronic:
+            recordRuntimeEvent(level: .warning, title: "DNS 解析长期零星超时", detail: detail)
         }
-        recordRuntimeEvent(level: .warning, title: title, detail: detail)
+    }
+
+    static let dnsBurstAlertCooldown: TimeInterval = 30 * 60
+
+    /// 突发超时的成因：看同一时段（前后各放宽 10 秒）直连与经节点的建连成败。
+    ///
+    /// 只看网卡收发量会误判：Wi-Fi 连着、外网断了时局域网照样有流量。真机 2026-10-05 04:00 断网约 1.5 分钟，
+    /// 告警却写「链路正常，问题在被查询的解析器」，同期直连与节点建连其实全在超时。
+    func dnsStallCauseText(for report: DNSStallReport) -> String {
+        let (direct, proxied) = connectivityPulse.tallies(
+            from: report.windowStart.addingTimeInterval(-10),
+            to: report.windowEnd.addingTimeInterval(10)
+        )
+        func counts() -> String {
+            var parts = ["直连 \(direct.failures)/\(direct.attempts) 次失败"]
+            if proxied.attempts > 0 { parts.append("经节点 \(proxied.failures)/\(proxied.attempts) 次失败") }
+            return parts.joined(separator: "、")
+        }
+        switch DNSStallCause.classify(direct: direct, proxied: proxied) {
+        case .networkDown:
+            return "同期\(counts())，是本机网络整体不通（断网、路由器重启或宽带重新拨号），不是解析器的问题，换解析器无用"
+        case .resolver:
+            return "同期建连基本正常（\(counts())），问题在被查询的解析器"
+        case .undetermined:
+            return Self.throughputText(report.physicalBytesDelta, conclusive: false)
+        }
+    }
+
+    /// 只凭网卡收发量下的结论。`conclusive` 为 false 时不下「链路正常」的断语：
+    /// 局域网流量也算在网卡里，外网断了它照样不为 0。
+    static func throughputText(_ delta: UInt64?, conclusive: Bool) -> String {
+        guard let delta else { return "网卡计数不可用" }
+        guard delta > 0 else { return "期间网卡收发为 0，更像整机链路中断而非解析器故障" }
+        let megabytes = String(format: "%.1f MB", Double(delta) / 1_048_576)
+        return conclusive
+            ? "期间网卡仍收发 \(megabytes)，链路正常，问题在被查询的解析器"
+            : "期间网卡收发 \(megabytes)，但同期建连样本不足，分不清是解析器还是整机网络的问题"
     }
 
     // MARK: - 特权助手（零弹窗 TUN）

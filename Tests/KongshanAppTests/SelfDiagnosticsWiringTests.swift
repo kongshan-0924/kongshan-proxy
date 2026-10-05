@@ -239,4 +239,78 @@ extension SelfDiagnosticsWiringTests {
         XCTAssertTrue(detail.contains("同期直连 214 次中也失败 91 次"), detail)
         XCTAssertFalse(detail.contains("样本不足"), "直连样本够用时不能写样本不足：\(detail)")
     }
+
+    // MARK: - DNS 突发告警的成因与慢性窗口去重（真机 2026-10-05 04:00）
+
+    private func dnsStall(_ id: Int) -> CoreLogLine {
+        CoreLogLine.parse("[\(id) 10.0s] dns: exchange failed for www.example.invalid. IN A: context deadline exceeded")
+    }
+
+    private func dial(_ id: Int, direct: Bool, fails: Bool) -> [CoreLogLine] {
+        let outbound = direct ? "direct[direct]" : "vless[node-placeholder]"
+        var lines = [CoreLogLine.parse("[\(id) 1ms] outbound/\(outbound): outbound connection to x\(id).example.invalid:443")]
+        if fails {
+            lines.append(CoreLogLine.parse("[\(id) 5.0s] connection: open connection to x\(id).example.invalid:443 using "
+                + "outbound/\(outbound): dial tcp 203.0.113.9:443: i/o timeout"))
+        }
+        return lines
+    }
+
+    private func burstWithDials(fail: Bool) throws -> (AppState, RuntimeEvent) {
+        let clock = TestClock(Date(timeIntervalSince1970: 1_790_000_000))
+        let state = makeState(clock: clock)
+        for i in 0..<6 {
+            for line in dial(100 + i, direct: true, fails: fail) + dial(200 + i, direct: false, fails: fail) {
+                state.inspectForOutboundFailure(line)
+            }
+            state.inspectForDNSStall(dnsStall(300 + i))
+            clock.advance(2)
+        }
+        clock.advance(200)
+        state.finishDNSStallWindowsForTesting()
+        let event = try XCTUnwrap(state.runtimeEvents.last { $0.title == "DNS 解析持续超时" })
+        return (state, event)
+    }
+
+    func testBurstDuringAnOutageBlamesTheNetworkNotTheResolver() throws {
+        let (_, event) = try burstWithDials(fail: true)
+        let detail = event.detail ?? ""
+        XCTAssertTrue(detail.contains("本机网络整体不通"), detail)
+        XCTAssertTrue(detail.contains("直连 6/6 次失败"), detail)
+        XCTAssertFalse(detail.contains("问题在被查询的解析器"), detail)
+    }
+
+    func testBurstWithHealthyDialsBlamesTheResolver() throws {
+        let (_, event) = try burstWithDials(fail: false)
+        XCTAssertTrue(event.detail?.contains("问题在被查询的解析器") == true, event.detail ?? "")
+    }
+
+    func testChronicWindowDoesNotReReportABurst() throws {
+        let (state, _) = try burstWithDials(fail: true)
+        XCTAssertFalse(state.runtimeEvents.contains { $0.title == "DNS 解析长期零星超时" },
+                       "突发已经报过的超时，慢性窗口不能再报一次")
+    }
+
+    /// 一段持续十几分钟的解析故障不能拆成一串告警（真机 2026-10-05 22:24–22:39 连报 7 条）。
+    func testRepeatedDNSBurstsAreCoalesced() throws {
+        let clock = TestClock(Date(timeIntervalSince1970: 1_790_000_000))
+        let state = makeState(clock: clock)
+        func burst(_ base: Int) {
+            for i in 0..<4 {
+                state.inspectForDNSStall(stallLine(destination: "api.example.invalid:443", lookup: "server.node-placeholder.invalid"))
+                clock.advance(5)
+                _ = i
+            }
+            clock.advance(130)
+            state.finishDNSStallWindowsForTesting()
+        }
+        for _ in 0..<4 { burst(0) }   // 约 11 分钟里 4 段
+        XCTAssertEqual(state.runtimeEvents.filter { $0.title == "DNS 解析持续超时" }.count, 1)
+
+        clock.advance(AppState.dnsBurstAlertCooldown)
+        burst(0)
+        let events = state.runtimeEvents.filter { $0.title == "DNS 解析持续超时" }
+        XCTAssertEqual(events.count, 2)
+        XCTAssertTrue(events.last?.detail?.contains("另有 3 条，已合并") == true, events.last?.detail ?? "")
+    }
 }

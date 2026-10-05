@@ -454,6 +454,22 @@ final class DNSConfigTests: XCTestCase {
         XCTAssertFalse(matches("example.com"))
     }
 
+    /// 国内 DoH 长连接保活：空闲后被 NAT 回收的连接，下一批查询要先在死连接上等到报错——
+    /// 真机 2026-10-05 空闲 30 分钟后慢 1.2–1.9 秒、空闲 1 小时后约 5.3 秒。只给直连的 dns-cn 设，走节点的 dns-remote 不设。
+    func testDomesticDoHKeepsItsConnectionAlive() throws {
+        for mode in [ProxyMode.systemProxy, .tun] {
+            let root = try json(try ConfigGenerator.generate(input(proxyMode: mode)))
+            let servers = try XCTUnwrap((root["dns"] as? [String: Any])?["servers"] as? [[String: Any]])
+            let domestic = try XCTUnwrap(servers.first { $0["tag"] as? String == "dns-cn" })
+            XCTAssertEqual(domestic["tcp_keep_alive"] as? String, "30s")
+            XCTAssertEqual(domestic["tcp_keep_alive_interval"] as? String, "15s")
+            let remote = try XCTUnwrap(servers.first { $0["tag"] as? String == "dns-remote" })
+            XCTAssertNil(remote["tcp_keep_alive"], "经节点的远端 DoH 不设")
+            let bootstrap = try XCTUnwrap(servers.first { $0["tag"] as? String == "dns-bootstrap" })
+            XCTAssertNil(bootstrap["tcp_keep_alive"], "UDP 引导解析器没有 TCP 连接")
+        }
+    }
+
     func testLANSplitCanBeTurnedOff() throws {
         var tun = TunSettings.defaults
         tun.lanDNSEnabled = false

@@ -853,4 +853,43 @@ final class RuntimeAnomalyDetectorTests: XCTestCase {
         detector.reset()
         XCTAssertNil(detector.flush(at: origin.addingTimeInterval(61)))
     }
+
+    // MARK: - 慢性窗口扣除突发已报的超时（真机 2026-10-05：04:02 报过的断网 08:22 又补报一次）
+
+    private func stall(_ id: Int) -> CoreLogLine {
+        CoreLogLine.parse("[\(id) 10.0s] dns: exchange failed for www.example.invalid. IN A: context deadline exceeded")
+    }
+
+    func testChronicWindowDiscountsStallsAlreadyReportedAsABurst() throws {
+        let origin = Date(timeIntervalSince1970: 1_790_000_000)
+        var burst = DNSStallDetector()
+        var chronic = DNSStallDetector.chronic()
+        // 一次早先的零星超时，随后断网：几秒内 6 次。
+        _ = chronic.ingest(stall(1), at: origin, physicalBytes: nil)
+        for i in 0..<6 {
+            let at = origin.addingTimeInterval(5_000 + Double(i))
+            _ = burst.ingest(stall(10 + i), at: at, physicalBytes: nil)
+            _ = chronic.ingest(stall(10 + i), at: at, physicalBytes: nil)
+        }
+        let burstReport = try XCTUnwrap(burst.flush(at: origin.addingTimeInterval(5_200), physicalBytes: nil))
+        XCTAssertEqual(burstReport.generalStalls, 6)
+        chronic.discount(burstReport)
+        XCTAssertNil(chronic.flush(at: origin.addingTimeInterval(6 * 3600 + 1), physicalBytes: nil),
+                     "扣掉已报的 6 次只剩 1 次，不够 5 次门槛，不能再报")
+    }
+
+    func testChronicStillReportsGenuineDripsAndOnlyDiscountsWhatItHolds() throws {
+        let origin = Date(timeIntervalSince1970: 1_790_000_000)
+        // 真正的零星滴漏（没有突发）照报。
+        var chronic = DNSStallDetector.chronic()
+        for i in 0..<5 { _ = chronic.ingest(stall(i), at: origin.addingTimeInterval(Double(i) * 1800), physicalBytes: nil) }
+        XCTAssertEqual(try XCTUnwrap(chronic.flush(at: origin.addingTimeInterval(6 * 3600 + 1), physicalBytes: nil)).generalStalls, 5)
+
+        // 突发起点早于慢性窗口起点：那批超时不一定在这个窗口里，一律不扣。
+        var later = DNSStallDetector.chronic()
+        for i in 0..<5 { _ = later.ingest(stall(i), at: origin.addingTimeInterval(Double(i)), physicalBytes: nil) }
+        later.discount(DNSStallReport(kind: .burst, windowStart: origin.addingTimeInterval(-60), windowEnd: origin,
+                                      outboundServerDomainStalls: 0, generalStalls: 5, distinctTargetCount: 1, physicalBytesDelta: nil))
+        XCTAssertEqual(try XCTUnwrap(later.flush(at: origin.addingTimeInterval(6 * 3600 + 1), physicalBytes: nil)).generalStalls, 5)
+    }
 }

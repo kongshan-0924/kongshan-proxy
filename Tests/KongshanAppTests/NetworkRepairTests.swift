@@ -110,6 +110,14 @@ final class NetworkRepairTests: XCTestCase {
         XCTAssertTrue(sweep.lowerBound < probe.lowerBound, "必须先清残留再验连通性")
     }
 
+    /// 自检判残留必须看「对应接管方式是否开着」，与清残留同一判据（见 `NetworkTakeoverClassifier`）。
+    func testRepairJudgesLeftoversAgainstActiveTakeover() throws {
+        let source = try String(contentsOf: Self.appStateURL, encoding: .utf8)
+        let body = try Self.body(of: "func runNetworkRepair()", in: source)
+        XCTAssertTrue(body.contains("NetworkTakeoverClassifier.leftovers("))
+        XCTAssertTrue(body.contains("activeModes.contains(.tun)") && body.contains("activeModes.contains(.systemProxy)"))
+    }
+
     // MARK: - 工具
 
     private static var appStateURL: URL {

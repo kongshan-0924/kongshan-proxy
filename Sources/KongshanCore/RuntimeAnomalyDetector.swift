@@ -363,6 +363,18 @@ public struct DNSStallDetector: Sendable {
         return expired
     }
 
+    /// 突发窗口已经单独报过的超时，从这个（慢性）窗口里扣掉。
+    ///
+    /// 两个检测器吃的是同一批日志行，突发报过的超时原样留在慢性窗口里，6 小时窗口到期时会再报一遍：
+    /// 真机 2026-10-05 04:00 断网，04:02 报了「持续超时」，08:22 又以「99 分钟内零星超时 8 次」补报同一件事。
+    /// 只扣起点不晚于突发窗口的慢性窗口（那样才一定装着这批超时）；扣完不够门槛，到期就不报。
+    public mutating func discount(_ report: DNSStallReport) {
+        guard var current = window, current.startedAt <= report.windowStart else { return }
+        current.outboundServerDomain = max(0, current.outboundServerDomain - report.outboundServerDomainStalls)
+        current.general = max(0, current.general - report.generalStalls)
+        window = current
+    }
+
     /// 不结算地清空。仅用于确实不该出报告的场景；内核停止请用 `finish`——
     /// 直接丢弃未到期的窗口，等于在故障最严重时销毁唯一的证据。
     public mutating func reset() {

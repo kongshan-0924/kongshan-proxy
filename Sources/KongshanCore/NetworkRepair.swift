@@ -105,3 +105,39 @@ public enum NetworkStateParser {
             .filter { !$0.isEmpty }
     }
 }
+
+/// 网络自检里「哪些服务算接管残留」。
+///
+/// 指向 kongshan 本身不等于残留：正在接管系统代理时，各服务的代理指向中转端口是预期；正在接管 TUN 时，
+/// DNS 指向 TUN 地址也是预期。真机 2026-10-05 21:52 开着 TUN + 系统代理跑自检，4 个服务按预期都指向 kongshan，
+/// 却被报成「仍指向 kongshan 且未能自动清理，请手工清空 DNS 与代理」——照做就把正在用的接管拆了。
+/// 与清残留（`sweepTakeoverResidue`）同一判据：只认对应接管方式**没开着**时的指向。
+public enum NetworkTakeoverClassifier {
+    public static func leftovers(
+        in services: [NetworkServiceState],
+        tunAddresses: Set<String>,
+        relayPort: Int?,
+        tunActive: Bool,
+        systemProxyActive: Bool
+    ) -> [NetworkServiceState] {
+        services.filter { service in
+            let dnsLeft = !tunActive && service.dnsServers.contains(where: tunAddresses.contains)
+            let proxyLeft = !systemProxyActive && relayPort != nil && service.proxyPort == relayPort
+            return dnsLeft || proxyLeft
+        }
+    }
+
+    /// 按预期指向 kongshan 的服务（正在接管）。只用来在报告里说明一句，不算问题。
+    public static func expected(
+        in services: [NetworkServiceState],
+        tunAddresses: Set<String>,
+        relayPort: Int?,
+        tunActive: Bool,
+        systemProxyActive: Bool
+    ) -> [NetworkServiceState] {
+        services.filter { service in
+            (tunActive && service.dnsServers.contains(where: tunAddresses.contains))
+                || (systemProxyActive && relayPort != nil && service.proxyPort == relayPort)
+        }
+    }
+}

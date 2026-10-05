@@ -439,6 +439,14 @@ public enum ConfigGenerator {
         if !endpoints.domestic.hostIsIPAddress {
             domestic["domain_resolver"] = "dns-bootstrap"
         }
+        // 国内 DoH 长连接的保活：空闲 30 秒后开始探测、每 15 秒一次（内核默认 5 分钟后才开始、75 秒一次）。
+        // sing-box 的 DoH 客户端没有 HTTP/2 健康检查，连接在空闲期间被 NAT 悄悄回收后，下一批查询要先在
+        // 死连接上等到报错才重建：真机 2026-10-05 空闲 30 分钟后的一批查询各慢 1.2–1.9 秒，空闲 1 小时后
+        // 28 个查询各等约 5.3 秒；空闲 10 分钟以内只多一百多毫秒。保活让映射一直新鲜；仍断了也会在空闲中被发现、
+        // 丢弃，下次直接新建（约 0.2 秒）。代价是空闲时每 15 秒一个保活包。走代理的 dns-remote 不设：连接经节点，
+        // 未观察到这个问题。
+        domestic["tcp_keep_alive"] = Self.domesticDoHKeepAlive
+        domestic["tcp_keep_alive_interval"] = Self.domesticDoHKeepAliveInterval
         servers.append(domestic)
 
         // 内网 DNS：把内网域名交给内网自己的 DNS，而不是让它落到 fakeip。
@@ -588,6 +596,9 @@ public enum ConfigGenerator {
         }
         return result
     }
+
+    static let domesticDoHKeepAlive = "30s"
+    static let domesticDoHKeepAliveInterval = "15s"
 
     /// 公网上必然不存在的保留后缀，见 `dns(for:)` 里的说明。
     static let nonexistentSuffixes = ["invalid", "test", "example", "localhost", "onion"]
