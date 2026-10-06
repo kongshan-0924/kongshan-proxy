@@ -13,11 +13,27 @@ public struct DNSServiceSnapshot: Codable, Equatable, Sendable {
     public let name: String
     /// 空数组表示该服务此前没有手动 DNS（跟随 DHCP），还原时写回 "Empty"。
     public let servers: [String]
+    /// 采集时所在的网络位置，语义同 `NetworkServiceProxySnapshot.locationID`。
+    /// 特权助手在 App 异常退出后还原 DNS 时也按它过滤（`HelperDNSRestore`）。
+    public let locationID: String?
+    public let locationName: String?
 
-    public init(name: String, servers: [String]) {
+    public init(name: String, servers: [String], locationID: String? = nil, locationName: String? = nil) {
         self.name = name
         self.servers = servers
+        self.locationID = locationID
+        self.locationName = locationName
     }
+
+    func tagged(with location: NetworkLocation?) -> DNSServiceSnapshot {
+        DNSServiceSnapshot(name: name, servers: servers, locationID: location?.id, locationName: location?.name)
+    }
+
+    func withServers(_ servers: [String]) -> DNSServiceSnapshot {
+        DNSServiceSnapshot(name: name, servers: servers, locationID: locationID, locationName: locationName)
+    }
+
+    var slot: (name: String, locationID: String?) { (name, locationID) }
 }
 
 public struct DNSRecoverySnapshot: Codable, Equatable, Sendable {
@@ -37,10 +53,13 @@ public struct DNSRecoverySnapshot: Codable, Equatable, Sendable {
 public struct DNSRestoreOutcome: Equatable, Sendable {
     public let restored: [String]
     public let pending: [String]
+    /// 属于其他网络位置的项，语义同 `ProxyRestoreOutcome.elsewhere`。
+    public let elsewhere: [PendingLocationRestore]
 
-    public init(restored: [String], pending: [String]) {
+    public init(restored: [String], pending: [String], elsewhere: [PendingLocationRestore] = []) {
         self.restored = restored
         self.pending = pending
+        self.elsewhere = elsewhere
     }
 }
 
@@ -92,6 +111,7 @@ public actor SystemDNSManager {
 
     private let storage: Storage
     private let runner: NetworkSetupRunner
+    private let locations: NetworkLocationsProvider
     private let timeout: TimeInterval
     private var transactionInProgress = false
 
@@ -110,11 +130,13 @@ public actor SystemDNSManager {
     public init(
         storage: Storage = Storage(),
         timeout: TimeInterval = 5,
-        runner: @escaping NetworkSetupRunner = defaultRunner
+        runner: @escaping NetworkSetupRunner = defaultRunner,
+        locations: @escaping NetworkLocationsProvider = NetworkLocationReader.live
     ) {
         self.storage = storage
         self.timeout = timeout
         self.runner = runner
+        self.locations = locations
         recoveryURL = storage.rootDirectory.appending(path: "dns-recovery.json")
     }
 
@@ -123,12 +145,15 @@ public actor SystemDNSManager {
         try beginTransaction()
         defer { transactionInProgress = false }
 
-        // 同 SystemProxyManager.enable：旧快照先还原，只剩待还原（服务不在列表）项时并入本次快照，
-        // 真有还原失败才拒绝接管。
+        // 同 SystemProxyManager.enable：旧快照先还原，只剩待还原（服务不在列表 / 属于其他网络位置）项时
+        // 并入本次快照，真有还原失败才拒绝接管。
+        let locationSnapshot = locations()
+        let location = locationSnapshot?.current
         var carried: [DNSServiceSnapshot] = []
         if try await storage.readIfPresent(from: recoveryURL) != nil {
-            let outcome = try await restoreFromDisk()
-            if !outcome.pending.isEmpty, let data = try await storage.readIfPresent(from: recoveryURL) {
+            let outcome = try await restoreFromDisk(locationSnapshot)
+            if !outcome.pending.isEmpty || !outcome.elsewhere.isEmpty,
+               let data = try await storage.readIfPresent(from: recoveryURL) {
                 carried = try decode(data).services
             }
         }
@@ -141,9 +166,11 @@ public actor SystemDNSManager {
 
         var snapshots: [DNSServiceSnapshot] = []
         for service in services {
-            snapshots.append(try await capture(service: service))
+            // 采到的列表里若已有我们的劫持地址，那是上次没还原掉的残留，不是用户的原值。
+            let captured = try await capture(service: service)
+            snapshots.append(captured.withServers(captured.servers.filter { $0 != server }).tagged(with: location))
         }
-        for entry in carried where !snapshots.contains(where: { $0.name == entry.name }) {
+        for entry in carried where !snapshots.contains(where: { NetworkLocationScope.sameSlot($0.slot, entry.slot) }) {
             snapshots.append(entry)
         }
         try await persist(DNSRecoverySnapshot(services: snapshots))
@@ -155,7 +182,7 @@ public actor SystemDNSManager {
             }
         } catch {
             do {
-                try await restoreFromDisk()
+                try await restoreFromDisk(locations())
             } catch let restoreError {
                 throw SystemDNSError.rollbackFailed(
                     enableError: error.localizedDescription,
@@ -170,14 +197,14 @@ public actor SystemDNSManager {
     public func restore() async throws -> DNSRestoreOutcome {
         try beginTransaction()
         defer { transactionInProgress = false }
-        return try await restoreFromDisk()
+        return try await restoreFromDisk(locations())
     }
 
     @discardableResult
     public func recoverIfNeeded() async throws -> DNSRestoreOutcome {
         try beginTransaction()
         defer { transactionInProgress = false }
-        return try await restoreFromDisk()
+        return try await restoreFromDisk(locations())
     }
 
     /// 不依赖快照的兜底清扫：任何 DNS 列表里还含 `server`（TUN 劫持地址）的服务，把它摘掉，
@@ -219,6 +246,8 @@ public actor SystemDNSManager {
 
         guard let data = try await storage.readIfPresent(from: recoveryURL) else { return }
         let snapshot = try decode(data)
+        // 切换网络位置后，新位置的同名服务是另一份设置：只认当前位置的快照项（见 `NetworkLocation`）。
+        let location = locations()?.current
 
         let services = SystemProxyCommands.enabledServices(
             from: try await execute(["-listallnetworkservices"]).stdout
@@ -228,7 +257,9 @@ public actor SystemDNSManager {
         var refreshedExisting: [DNSServiceSnapshot] = []
         for service in services {
             let current = try await capture(service: service)
-            let inSnapshot = snapshot.services.first { $0.name == service }
+            let inSnapshot = snapshot.services.first {
+                $0.name == service && NetworkLocationScope.belongs($0.locationID, to: location)
+            }
 
             if current.servers.contains(server) {
                 // 情况 1 / 2：hijack 仍在。
@@ -237,7 +268,7 @@ public actor SystemDNSManager {
                     // 即便该服务不在原快照里，refreshedExisting 的项也只会被 merged 用同名覆盖，
                     // 不在 snapshot.services 里的服务本来就走 discovered 路径或不入快照——这里无副作用。
                     let userAdded = current.servers.filter { $0 != server }
-                    refreshedExisting.append(DNSServiceSnapshot(name: service, servers: userAdded))
+                    refreshedExisting.append(DNSServiceSnapshot(name: service, servers: userAdded).tagged(with: location))
                 }
                 // 情况 1：保留快照原值，无需补挂。
                 continue
@@ -246,17 +277,19 @@ public actor SystemDNSManager {
             // 情况 3：hijack 服务器被移除。
             stale.append(service)
             if inSnapshot == nil {
-                // 新服务：把当前状态（不含 server）并入快照，restore 时还原到这次的状态。
-                discovered.append(DNSServiceSnapshot(name: service, servers: current.servers))
+                // 新服务（或新位置里的同名服务）：把当前状态（不含 server）并入快照，restore 时还原到这次的状态。
+                discovered.append(DNSServiceSnapshot(name: service, servers: current.servers).tagged(with: location))
             }
             // 已在快照的服务被重置：保留快照原值（不更新），restore 时仍写回原始值。
         }
 
-        // 合并：snapshot 为基底，refreshedExisting 覆盖同名项（保留用户修改），discovered 追加（新服务）。
+        // 合并：snapshot 为基底，refreshedExisting 覆盖当前位置的同名项（保留用户修改），discovered 追加（新服务）。
+        // 其他位置的同名项原样保留——它们记的是那个位置的原值。
         var merged = snapshot.services.map { existing in
-            refreshedExisting.first { $0.name == existing.name } ?? existing
+            guard NetworkLocationScope.belongs(existing.locationID, to: location) else { return existing }
+            return refreshedExisting.first { $0.name == existing.name } ?? existing
         }
-        for entry in discovered where !merged.contains(where: { $0.name == entry.name }) {
+        for entry in discovered where !merged.contains(where: { NetworkLocationScope.sameSlot($0.slot, entry.slot) }) {
             merged.append(entry)
         }
 
@@ -308,10 +341,10 @@ public actor SystemDNSManager {
         return snapshot
     }
 
-    /// 逐个服务写回快照并**读回核对**；此刻不在列表中的服务保留为待还原，失败/不一致的也保留并抛错；
-    /// 只有全部复位成功才删除快照。
+    /// 逐个服务写回快照并**读回核对**；此刻不在列表中的服务保留为待还原，属于其他网络位置的项原样保留，
+    /// 失败/不一致的也保留并抛错；只有全部复位成功才删除快照。
     @discardableResult
-    private func restoreFromDisk() async throws -> DNSRestoreOutcome {
+    private func restoreFromDisk(_ locationSnapshot: NetworkLocationsSnapshot?) async throws -> DNSRestoreOutcome {
         guard let data = try await storage.readIfPresent(from: recoveryURL) else {
             return DNSRestoreOutcome(restored: [], pending: [])
         }
@@ -322,11 +355,22 @@ public actor SystemDNSManager {
                 from: try await execute(["-listallnetworkservices"]).stdout
             )
         )
+        let location = locationSnapshot?.current
         var failures: [String] = []
         var retained: [DNSServiceSnapshot] = []
         var restored: [String] = []
         var pending: [String] = []
+        var elsewhere: [(locationID: String, locationName: String?, service: String)] = []
         for service in snapshot.services {
+            if NetworkLocationScope.isOrphaned(service.locationID, in: locationSnapshot) { continue }
+            // 其他位置的项写进当前位置的同名服务是错的（真机 2026-10-06 就这样把另一个位置手动填的 DNS 清空了）。
+            guard NetworkLocationScope.belongs(service.locationID, to: location) else {
+                if let id = service.locationID {
+                    elsewhere.append((id, locationSnapshot?.location(withID: id)?.name ?? service.locationName, service.name))
+                }
+                retained.append(service)
+                continue
+            }
             guard currentServices.contains(service.name) else {
                 pending.append(service.name)
                 retained.append(service)
@@ -366,7 +410,7 @@ public actor SystemDNSManager {
                 message: "部分网络服务 DNS 恢复失败，已保留快照重试：\(failures.joined(separator: "；"))"
             )
         }
-        return DNSRestoreOutcome(restored: restored, pending: pending)
+        return DNSRestoreOutcome(restored: restored, pending: pending, elsewhere: PendingLocationRestore.group(elsewhere))
     }
 
     private static func describe(_ servers: [String]) -> String {

@@ -94,6 +94,20 @@ public enum ClashSubscriptionConverter {
         return rules
     }
 
+    /// 解析不了的规则行，按类型计数（出现顺序）。MATCH 与能解析的行（含重复行）不算。
+    static func unsupportedRuleTypes(in lines: [String]) -> [(type: String, count: Int)] {
+        var order: [String] = []
+        var counts: [String: Int] = [:]
+        for line in lines where SubscriptionRule.parseMatch(line) == nil && SubscriptionRule.parse(line) == nil {
+            let head = line.split(separator: ",", maxSplits: 1, omittingEmptySubsequences: false).first
+                .map { $0.trimmingCharacters(in: .whitespaces).uppercased() } ?? ""
+            let type = head.isEmpty ? "格式无效" : head
+            if counts[type] == nil { order.append(type) }
+            counts[type, default: 0] += 1
+        }
+        return order.map { ($0, counts[$0] ?? 0) }
+    }
+
     /// `MATCH,<目标>` 的目标。Clash 里 MATCH 是最后一条、兜住一切，取第一个出现的。
     static func matchTarget(from root: [String: Any]) -> String? {
         (root["rules"] as? [String])?.lazy.compactMap(SubscriptionRule.parseMatch).first
@@ -188,14 +202,20 @@ public enum ClashSubscriptionConverter {
 
         let skippedNodes = proxies.count - nodes.count
         let skippedGroups = (root["proxy-groups"] as? [[String: Any]]).map { $0.count - groups.count } ?? 0
-        // MATCH 不是"被跳过"：它被取作兜底出口。
-        let skippedRules = (root["rules"] as? [String]).map { $0.count - rules.count - (match == nil ? 0 : 1) } ?? 0
-        if skippedNodes > 0 || skippedGroups > 0 || skippedRules > 0 {
-            warnings.append(
-                "订阅兼容性：节点 \(nodes.count) 个已导入/\(skippedNodes) 个跳过，"
-                    + "策略组 \(groups.count) 个已导入/\(skippedGroups) 个跳过，"
-                    + "规则 \(rules.count) 条已导入/\(skippedRules) 条由内置规则接管或不支持"
-            )
+        let unsupportedRules = Self.unsupportedRuleTypes(in: root["rules"] as? [String] ?? [])
+        // 只在真有东西用不上时提示。重复的规则（同类型、同值、同目标）去掉不影响分流，MATCH 被取作兜底出口——
+        // 都不算。旧版把它们一并算成「由内置规则接管或不支持」，每次刷新订阅都提示一遍：真机 2026-10-06
+        // 三条「订阅兼容性」里两条全是重复规则（20 条、333 条），只有一条是真不支持的 `AND`。
+        if skippedNodes > 0 || skippedGroups > 0 || !unsupportedRules.isEmpty {
+            var parts: [String] = []
+            if skippedNodes > 0 { parts.append("节点 \(skippedNodes) 个不支持已跳过（导入 \(nodes.count) 个）") }
+            if skippedGroups > 0 { parts.append("策略组 \(skippedGroups) 个不支持已跳过（导入 \(groups.count) 个）") }
+            if !unsupportedRules.isEmpty {
+                let total = unsupportedRules.reduce(0) { $0 + $1.count }
+                let kinds = unsupportedRules.map { "\($0.type) ×\($0.count)" }.joined(separator: "、")
+                parts.append("规则 \(total) 条不支持已跳过（\(kinds)）")
+            }
+            warnings.append("订阅兼容性：" + parts.joined(separator: "；"))
         }
         return SubscriptionConversionResult(
             nodes: nodes,

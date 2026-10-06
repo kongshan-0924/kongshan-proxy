@@ -25,7 +25,7 @@ let package = Package(
         .executableTarget(
             name: "KongshanHelper",
             dependencies: ["HelperProtocol"],
-            linkerSettings: [.linkedFramework("Security")]
+            linkerSettings: [.linkedFramework("Security"), .linkedFramework("SystemConfiguration")]
         ),
         .testTarget(name: "KongshanCoreTests", dependencies: ["KongshanCore", "HelperProtocol"]),
         .testTarget(name: "KongshanAppTests", dependencies: ["kongshan", "KongshanCore"]),

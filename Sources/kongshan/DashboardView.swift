@@ -499,9 +499,22 @@ private struct ExitIPMetricBox: View {
     private var value: some View {
         if let report = state.exitDiagnostics {
             VStack(alignment: .leading, spacing: 2) {
-                Text(report.exit.ip)
-                    .font(.title3.weight(.semibold).monospacedDigit())
-                    .textSelection(.enabled)
+                HStack(spacing: 6) {
+                    Text(report.exit.ip)
+                        .font(.title3.weight(.semibold).monospacedDigit())
+                        .foregroundStyle(state.exitDiagnosticsIsStale ? Color.secondary : Color.primary)
+                        .textSelection(.enabled)
+                    if state.exitDiagnosticsIsStale {
+                        // 切换节点后还没测到新出口：这个 IP 是切换前的，别让人当成新节点的。
+                        Text("切换前")
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(.orange)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(Color.orange.opacity(0.15)))
+                            .help("已切换节点，正在探测新出口")
+                    }
+                }
                 let locationOrg = [report.exit.location, report.exit.organization]
                     .filter { !$0.isEmpty }
                     .joined(separator: " · ")

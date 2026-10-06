@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import HelperProtocol
 import Security
+import SystemConfiguration
 
 // kongshan 特权助手（以 root 由 launchd 运行）。职责单一：起/停内置 sing-box TUN 内核。
 //
@@ -725,7 +726,14 @@ func restoreSystemDNSAfterClientLoss(uid: UInt32) {
         return
     }
     let known = HelperNetworkServices.allNames(from: listing.output)
-    let commands = HelperDNSRestore.restoreArguments(snapshot: snapshot, knownServiceNames: known)
+    // 只还原当前网络位置拍下的项：别的位置的原值写进当前位置的同名服务是错的。
+    let currentLocation = SCPreferencesCreate(nil, "kongshan-helper" as CFString, nil)
+        .flatMap { SCPreferencesGetValue($0, kSCPrefCurrentSet) as? String }
+    let commands = HelperDNSRestore.restoreArguments(
+        snapshot: snapshot,
+        knownServiceNames: known,
+        currentLocationID: HelperNetworkLocation.currentSetID(fromCurrentSetValue: currentLocation)
+    )
     guard !commands.isEmpty else { return }
 
     var restored = 0

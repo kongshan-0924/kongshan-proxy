@@ -132,7 +132,10 @@ struct ExitAnalysisView: View {
                 header("出口 IP", symbol: "globe.asia.australia", tint: .orange)
                 if let report = state.exitDiagnostics {
                     // IP 要能选中复制：用户去查询、去反馈时都需要它。
-                    row("IP 地址", value: report.exit.ip, monospaced: true, selectable: true)
+                    row(
+                        state.exitDiagnosticsIsStale ? "IP 地址（切换前）" : "IP 地址",
+                        value: report.exit.ip, monospaced: true, selectable: true
+                    )
                     row("位置", value: report.exit.location)
                     row("归属", value: report.exit.organization.isEmpty ? "未知" : report.exit.organization)
                     if let asn = report.reputation?.asnText {

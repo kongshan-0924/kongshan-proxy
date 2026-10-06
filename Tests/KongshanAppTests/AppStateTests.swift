@@ -119,7 +119,7 @@ final class AppStateTests: XCTestCase {
         let state = AppState(
             storage: Storage(rootDirectory: root),
             singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
-            tcpPingProvider: { host, _ in .success(host == "fast.example" ? 18 : 90) },
+            tcpPingProvider: { host, _, _ in .success(host == "fast.example" ? 18 : 90) },
             automaticallyInitialize: false
         )
         await state.addManual(manualNode(name: "慢节点", server: "slow.example"))
@@ -131,13 +131,44 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(state.delays[state.selectedNode!.id]!, 18)
     }
 
+    /// 网关会替目标完成握手（软路由透明代理）时不测：测出来全是网关的几毫秒，会误导用户挑节点。
+    /// 真机 2026-10-07「手动网关」位置：10 个节点地址的握手全是 2～4 毫秒。
+    func testTCPSpeedTestRefusesWhenGatewayInterceptsConnections() async {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let pings = CallCounter()
+        let state = AppState(
+            storage: Storage(rootDirectory: root),
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            tcpPingProvider: { _, _, _ in
+                _ = await pings.increment()
+                return .success(3)
+            },
+            gatewayInterceptionProbe: { _, _, _ in "向公网不存在的地址握手也成功了" },
+            automaticallyInitialize: false
+        )
+        await state.addManual(manualNode(name: "原节点", server: "first.example"))
+        await state.addManual(manualNode(name: "其他节点", server: "second.example"))
+        let originalID = state.selectedNodeID
+
+        await state.testAndSelectFastest(in: "手动选择")
+        await state.testDelay(state.nodes[0])
+
+        let count = await pings.increment() - 1
+        XCTAssertEqual(count, 0, "网关接管时一个节点都不该测")
+        XCTAssertEqual(state.selectedNodeID, originalID, "不能按网关的假延迟去换节点")
+        XCTAssertTrue(state.delays.values.allSatisfy { $0 == nil })
+        XCTAssertTrue(state.errorMessage?.contains("网关会接管连接") == true, state.errorMessage ?? "")
+        XCTAssertTrue(state.errorMessage?.contains("URL 测速") == true)
+    }
+
     func testTestAndSelectFastestKeepsSelectionWhenEveryTestFails() async {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let state = AppState(
             storage: Storage(rootDirectory: root),
             singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
-            tcpPingProvider: { _, _ in .failure("timeout") },
+            tcpPingProvider: { _, _, _ in .failure("timeout") },
             automaticallyInitialize: false
         )
         await state.addManual(manualNode(name: "原节点", server: "first.example"))
@@ -179,7 +210,7 @@ final class AppStateTests: XCTestCase {
         let state = AppState(
             storage: Storage(rootDirectory: root),
             singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
-            tcpPingProvider: { host, _ in
+            tcpPingProvider: { host, _, _ in
                 await calls.append(host)
                 return .success(host == "included.example" ? 20 : 200)
             },
@@ -208,7 +239,7 @@ final class AppStateTests: XCTestCase {
         let state = AppState(
             storage: Storage(rootDirectory: root),
             singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
-            tcpPingProvider: { _, _ in .success(25) },
+            tcpPingProvider: { _, _, _ in .success(25) },
             automaticallyInitialize: false
         )
         state.nodes = (0..<20).map { index in
@@ -243,7 +274,7 @@ final class AppStateTests: XCTestCase {
         let state = AppState(
             storage: Storage(rootDirectory: root),
             singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
-            tcpPingProvider: { _, _ in
+            tcpPingProvider: { _, _, _ in
                 try? await Task.sleep(for: .milliseconds(200))
                 return Task.isCancelled ? .failure("cancelled") : .success(25)
             },
@@ -2013,15 +2044,17 @@ final class AppStateTests: XCTestCase {
     }
 
     /// 下载失败：没有缓存的保持空占位并告警，内核照常运行；之后恢复了，手动更新即可补上。
+    /// 导入时的预下载属于还没生效的配置，失败不报（用不上）；切过去后补下仍失败才报。
     func testFailedRuleSetDownloadWarnsAndRecoversOnManualUpdate() async throws {
         let server = RuleSetFakeServer(bodies: Self.ruleSetBodies)
         server.fail("/ai.yaml")
         let (fixture, sourceID) = try await ruleSetFixture(initialMode: .systemProxy, server: server)
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         try await waitLonger { fixture.state.subscriptionRuleSetCache[sourceID]?.count == 1 }
-        XCTAssertTrue(fixture.state.warnings.contains { $0.contains("规则集「ai」") }, "\(fixture.state.warnings)")
+        XCTAssertFalse(fixture.state.warnings.contains { $0.contains("规则集「ai」") }, "没生效的配置不报：\(fixture.state.warnings)")
         await fixture.state.setActiveConfig(sourceID)
         XCTAssertEqual(fixture.state.status, .on, "缺一份规则集不该拖垮启动")
+        try await waitLonger { fixture.state.warnings.contains { $0.contains("规则集「ai」") } }
 
         server.recover("/ai.yaml")
         await fixture.state.updateSubscriptionRuleSetsNow()
@@ -2042,15 +2075,30 @@ final class AppStateTests: XCTestCase {
         )
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         try await waitLonger { server.requestCount == 2 && !fixture.state.ruleSetDownloadingSources.contains(sourceID) }
+        // 规则集只为生效中的配置下载、报错；切过去后补下仍失败才报。
+        await fixture.state.setActiveConfig(sourceID)
+        try await waitLonger { fixture.state.warnings.contains { $0.hasPrefix("订阅「rs」：") } }
+        // 等切换带起的补下全部结束、请求数稳定下来。
+        var settled = server.requestCount
+        for _ in 0..<50 {
+            try await Task.sleep(for: .milliseconds(100))
+            if !fixture.state.ruleSetDownloadingSources.contains(sourceID), server.requestCount == settled { break }
+            settled = server.requestCount
+        }
         XCTAssertEqual(
             fixture.state.warnings.filter { $0.hasPrefix("订阅「rs」：") }.count, 1,
             "同一原因的规则集失败合成一条：\(fixture.state.warnings)"
         )
 
         online.isOn = false
+        let reloadsBefore = fixture.state.runtimeEvents.filter { $0.title == "当前配置已应用" }.count
         await fixture.state.refreshSubscription(id: sourceID)
         try await Task.sleep(for: .milliseconds(300))
-        XCTAssertEqual(server.requestCount, 2, "订阅退回缓存时不该连带去下规则集")
+        XCTAssertEqual(server.requestCount, settled, "订阅退回缓存时不该连带去下规则集")
+        XCTAssertEqual(
+            fixture.state.runtimeEvents.filter { $0.title == "当前配置已应用" }.count, reloadsBefore,
+            "内容没变（只是策略组又发了新 ID）不该重载内核、断开全部连接"
+        )
         XCTAssertTrue(fixture.state.warnings.contains { $0.hasPrefix("订阅「rs」更新失败，继续使用缓存") })
 
         online.isOn = true
@@ -2063,6 +2111,24 @@ final class AppStateTests: XCTestCase {
             "恢复后两类旧失败告警都要清掉：\(fixture.state.warnings)"
         )
         await fixture.state.stop()
+    }
+
+    /// 没在用的订阅刷新时不下载它的规则集，也不报规则集失败。真机 2026-10-06：没在用的「空山」订阅
+    /// 每次刷新都去下 4 份规则集、经节点下载失败、报 4 条警告——那些规则集根本用不上。
+    func testRefreshingInactiveSubscriptionSkipsItsRuleSets() async throws {
+        let server = RuleSetFakeServer(bodies: Self.ruleSetBodies)
+        server.fail("/ai.yaml")
+        server.fail("/direct.yaml")
+        let (fixture, sourceID) = try await ruleSetFixture(initialMode: .systemProxy, server: server)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        try await waitLonger { server.requestCount == 2 && !fixture.state.ruleSetDownloadingSources.contains(sourceID) }
+        XCTAssertNotEqual(fixture.state.activeConfigID, sourceID, "夹具里它不是生效配置")
+
+        await fixture.state.refreshSubscription(id: sourceID)
+        await fixture.state.refreshSubscriptions()
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(server.requestCount, 2, "没在用的订阅刷新时不下规则集")
+        XCTAssertFalse(fixture.state.warnings.contains { $0.hasPrefix("订阅「rs」：") }, "\(fixture.state.warnings)")
     }
 
     /// 定时更新触发时没网（睡眠中的暗唤醒、刚醒 Wi-Fi 未连上）：不去撞离线失败、不告警、

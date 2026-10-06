@@ -97,7 +97,10 @@ final class AppState {
     typealias NowProvider = @Sendable () -> Date
     typealias ExitDiagnosticsProvider = @Sendable (String) async throws -> ExitDiagnosticsReport
     typealias SiteProbeProvider = @Sendable () async -> [SiteProbeResult]
-    typealias TCPPingProvider = @Sendable (String, Int) async -> DelayResult
+    /// (节点地址, 端口, 直连解析节点域名用的 DNS) → 握手延迟。
+    typealias TCPPingProvider = @Sendable (String, Int, [String]) async -> DelayResult
+    /// (样本节点地址, 端口, 直连 DNS) → 网关会替目标完成握手时的原因（见 `TCPPinger.gatewayInterception`）。
+    typealias GatewayInterceptionProbe = @Sendable (String, Int, [String]) async -> String?
     private static let delayPublishBatchSize = 24
     private static let bulkURLTestConcurrency = 16
     private static let bulkURLTestTimeoutMilliseconds = 3_000
@@ -208,6 +211,14 @@ final class AppState {
     private(set) var exitDiagnostics: ExitDiagnosticsReport?
     private(set) var exitDiagnosticsError: String?
     private(set) var isRefreshingExitDiagnostics = false
+    /// 切换节点后、拿到新出口之前为 true：面板上的 IP 还是切换前的，界面据此标「切换前」。
+    private(set) var exitDiagnosticsIsStale = false
+    /// 每次切换主节点加一。探测途中又切换了，旧结果不能当新出口用。
+    @ObservationIgnored private var exitSelectionGeneration = 0
+    /// 探测进行中又有人要求刷新：记下来，这次结束后再测一次，不吞掉。
+    @ObservationIgnored private var exitRefreshRequestedWhileBusy = false
+    /// 切换节点后的退避重试，见 `scheduleExitRefreshAfterSwitch`。
+    @ObservationIgnored private var exitRetryTask: Task<Void, Never>?
 
     /// 站点可达性自测的结果。与出口 IP 分开存：出口信息回答"这是个什么 IP"，
     /// 这里回答"这个 IP 现在到底能不能用"——后者才是用户真正要的答案。
@@ -288,17 +299,26 @@ final class AppState {
     private struct ActiveRuntimeContent: Equatable {
         let id: UUID?
         let nodes: [ProxyNode]
-        let policyGroups: [PolicyGroup]
+        /// 策略组只比名字、类型与成员。订阅每次解析都给策略组发新的随机 ID（`PolicyGroup(name:)`），
+        /// 连 ID 一起比，内容没变也判成「变了」：每次刷新当前订阅（含定时更新、离线退回缓存）都重载一次内核、
+        /// 断开全部连接。生成配置用的是组名，不用 ID。
+        let policyGroups: [GroupShape]
         let rules: [SubscriptionRule]
         let ruleProviders: [SubscriptionRuleProvider]
         let matchTarget: String?
+
+        struct GroupShape: Equatable {
+            let name: String
+            let kind: PolicyGroup.Kind
+            let members: [String]
+        }
     }
 
     private var activeRuntimeContent: ActiveRuntimeContent {
         ActiveRuntimeContent(
             id: activeConfigID,
             nodes: activeConfigNodes,
-            policyGroups: activeConfigPolicyGroups,
+            policyGroups: activeConfigPolicyGroups.map { .init(name: $0.name, kind: $0.kind, members: $0.members) },
             rules: subscriptionRules,
             ruleProviders: activeRuleProviders,
             matchTarget: activeMatchTarget
@@ -417,6 +437,8 @@ final class AppState {
         } catch {
             appendWarning("当前配置已切换，但保存失败：\(error.localizedDescription)")
         }
+        // 换走的配置的规则集失败告警不再相关（它的规则集已不在用）。
+        if let previousConfigID { clearWarnings(withPrefix: ruleSetWarningPrefix(for: previousConfigID)) }
         downloadMissingRuleSets(for: id)
         rescheduleRuleSetExpiryTimer()
     }
@@ -598,6 +620,7 @@ final class AppState {
     @ObservationIgnored private let exitDiagnosticsProvider: ExitDiagnosticsProvider
     @ObservationIgnored private let siteProbeProvider: SiteProbeProvider
     @ObservationIgnored private let tcpPingProvider: TCPPingProvider
+    @ObservationIgnored private let gatewayInterceptionProbe: GatewayInterceptionProbe
     @ObservationIgnored private let kernelLogStore: KernelLogStore
     @ObservationIgnored private let subscriptionUpdateScheduler: SubscriptionUpdateScheduler
     @ObservationIgnored private let notificationSender: any NotificationSending
@@ -695,6 +718,17 @@ final class AppState {
     /// 系统代理设置变化的监听与去抖，见 `systemProxySettingsChanged`。
     @ObservationIgnored private var proxyChangeObserver: SystemProxyChangeObserver?
     @ObservationIgnored private var proxyResidueSweepTask: Task<Void, Never>?
+    /// 读系统网络位置（只读）。测试夹具默认读不到（nil），不碰宿主机的真实设置。
+    @ObservationIgnored private let networkLocations: NetworkLocationsProvider
+    /// 网络位置切换的监听与去抖，见 `networkLocationMayHaveChanged`。
+    @ObservationIgnored private var locationObserver: NetworkLocationObserver?
+    @ObservationIgnored private var locationCheckTask: Task<Void, Never>?
+    @ObservationIgnored private var lastKnownNetworkLocation: NetworkLocation?
+    /// 合并进同一次补挂的诉求：路径事件与位置切换前后脚到，后到的不能把先到的「强制按换网处理」冲掉。
+    @ObservationIgnored private var pendingReassertTrigger: String?
+    @ObservationIgnored private var pendingReassertForcesIdentityChange = false
+    /// 残留清扫撞上「另一项操作正在执行」时，稍后静默补一次，见 `sweepTakeoverResidue`。
+    @ObservationIgnored private var deferredResidueSweepTask: Task<Void, Never>?
     /// 同类告警的合并状态，见 `recordCoalescedAlert`。
     @ObservationIgnored private var lastCoalescedAlertAt: [String: Date] = [:]
     @ObservationIgnored private var suppressedAlertCounts: [String: Int] = [:]
@@ -757,12 +791,23 @@ final class AppState {
         exitDiagnosticsProvider: ExitDiagnosticsProvider? = nil,
         siteProbeProvider: SiteProbeProvider? = nil,
         tcpPingProvider: TCPPingProvider? = nil,
+        gatewayInterceptionProbe: GatewayInterceptionProbe? = nil,
         lanResolverProbe: LANResolverProbing? = nil,
         networkAvailability: (@Sendable () async -> Bool)? = nil,
+        networkLocations: NetworkLocationsProvider? = nil,
         now: @escaping NowProvider = Date.init,
         automaticallyInitialize: Bool = true
     ) {
         let binaryURL = Self.singBoxBinaryURL()
+        let resolvedLocations: NetworkLocationsProvider
+        if let networkLocations {
+            resolvedLocations = networkLocations
+        } else if automaticallyInitialize {
+            resolvedLocations = NetworkLocationReader.live
+        } else {
+            resolvedLocations = { @Sendable in nil }
+        }
+        self.networkLocations = resolvedLocations
         let logWarningRelay = AppWarningRelay()
         let resolvedLogStore = kernelLogStore ?? KernelLogStore(
             directory: storage.rootDirectory.appending(path: "logs", directoryHint: .isDirectory),
@@ -776,11 +821,11 @@ final class AppState {
         self.ruleSetService = ruleSetService ?? RuleSetService(storage: storage, binaryURL: binaryURL)
         self.subscriptionRuleSetService = subscriptionRuleSetService
             ?? SubscriptionRuleSetService(storage: storage, binaryURL: binaryURL)
-        self.systemProxyManager = systemProxyManager ?? SystemProxyManager(storage: storage)
+        self.systemProxyManager = systemProxyManager ?? SystemProxyManager(storage: storage, locations: resolvedLocations)
         self.proxyRelay = proxyRelay ?? LocalTCPRelay()
         self.sshProxyConfigManager = sshProxyConfigManager
             ?? (automaticallyInitialize ? SSHProxyConfigManager() : InertSSHProxyConfigManager())
-        self.systemDNSManager = systemDNSManager ?? SystemDNSManager(storage: storage)
+        self.systemDNSManager = systemDNSManager ?? SystemDNSManager(storage: storage, locations: resolvedLocations)
         self.singBoxProcess = singBoxProcess ?? SingBoxProcess(
             binaryURL: binaryURL,
             logStore: resolvedLogStore,
@@ -818,8 +863,18 @@ final class AppState {
         self.siteProbeProvider = siteProbeProvider ?? {
             await SiteReachabilityProbe.run()
         }
-        self.tcpPingProvider = tcpPingProvider ?? { host, port in
-            await TCPPinger.ping(host: host, port: port)
+        self.tcpPingProvider = tcpPingProvider ?? { host, port, resolvers in
+            await TCPPinger.ping(host: host, port: port, resolvers: resolvers)
+        }
+        // 探测要连真实网络：测试夹具（不自动初始化）默认不探测。
+        if let gatewayInterceptionProbe {
+            self.gatewayInterceptionProbe = gatewayInterceptionProbe
+        } else if automaticallyInitialize {
+            self.gatewayInterceptionProbe = { host, port, resolvers in
+                await TCPPinger.gatewayInterception(sampleHost: host, samplePort: port, resolvers: resolvers)
+            }
+        } else {
+            self.gatewayInterceptionProbe = { _, _, _ in nil }
         }
         self.now = now
         self.kernelLogStore = resolvedLogStore
@@ -840,6 +895,12 @@ final class AppState {
                 Task { @MainActor [weak self] in self?.systemProxySettingsChanged() }
             }
             if observer.start() { proxyChangeObserver = observer }
+            // 网络位置切换：接管中要把接管挪到新位置，没在接管时要还原这个位置上次留下的设置。
+            let locationObserver = NetworkLocationObserver { [weak self] in
+                Task { @MainActor [weak self] in self?.networkLocationMayHaveChanged() }
+            }
+            if locationObserver.start() { self.locationObserver = locationObserver }
+            lastKnownNetworkLocation = resolvedLocations()?.current
             // 睡眠唤醒后核心可能进入拒绝连接的假死态（sing-box#1709），网络也可能已切换。
             observerBag.add(to: NSWorkspace.shared.notificationCenter, NSWorkspace.shared.notificationCenter.addObserver(
                 forName: NSWorkspace.didWakeNotification,
@@ -872,15 +933,60 @@ final class AppState {
         status == .starting || status == .stopping || isApplyingRouting
     }
 
+    /// 探测出口。进行中又被要求刷新时**不吞掉**：记下来，这次结束后再测一次——
+    /// 真机 2026-10-06 22:36 切换节点时上一次探测还没跑完，这次请求被直接丢掉，面板一直停在切换前的 IP。
     func refreshExitDiagnostics() async {
-        guard !isRefreshingExitDiagnostics else { return }
+        guard !isRefreshingExitDiagnostics else {
+            exitRefreshRequestedWhileBusy = true
+            return
+        }
         isRefreshingExitDiagnostics = true
         defer { isRefreshingExitDiagnostics = false }
-        do {
-            exitDiagnostics = try await exitDiagnosticsProvider(dnsSettings.remoteDoH)
-            exitDiagnosticsError = nil
-        } catch {
-            exitDiagnosticsError = "出口诊断失败：\(error.localizedDescription)"
+        repeat {
+            exitRefreshRequestedWhileBusy = false
+            let generation = exitSelectionGeneration
+            do {
+                let report = try await exitDiagnosticsProvider(dnsSettings.remoteDoH)
+                // 探测途中又切换了节点：这份结果可能还是旧节点的，再测一次。
+                guard generation == exitSelectionGeneration else {
+                    exitRefreshRequestedWhileBusy = true
+                    continue
+                }
+                exitDiagnostics = report
+                exitDiagnosticsError = nil
+                exitDiagnosticsIsStale = false
+                // 出口探测到了：「探测不到出口」的提示已不成立，留着会让人以为节点还是坏的。
+                clearWarnings(withPrefix: Self.exitUnreachableWarningPrefix)
+            } catch {
+                exitDiagnosticsError = "出口诊断失败：\(error.localizedDescription)"
+            }
+        } while exitRefreshRequestedWhileBusy
+    }
+
+    static let exitUnreachableWarningPrefix = "已接管但探测不到出口"
+    static let exitUnreachableAfterSwitchPrefix = "切换节点后仍探测不到出口"
+    /// 切换节点后探测出口的退避：先等旧连接断干净，再逐渐拉长（合计约 1 分钟）。
+    /// 新节点线路慢、第一次探测失败很常见，只测一次就放弃会让面板一直停在切换前的 IP。
+    static let exitRefreshRetryDelays: [Duration] = [
+        .milliseconds(500), .seconds(2), .seconds(4), .seconds(8), .seconds(16), .seconds(30)
+    ]
+
+    /// 切换了主节点：旧 IP 标「切换前」，按退避重试直到拿到新出口；全部失败才提示一次。
+    /// internal：测试直接调用。
+    func scheduleExitRefreshAfterSwitch(to nodeName: String) {
+        exitSelectionGeneration += 1
+        if exitDiagnostics != nil { exitDiagnosticsIsStale = true }
+        clearWarnings(withPrefix: Self.exitUnreachableAfterSwitchPrefix)
+        exitRetryTask?.cancel()
+        exitRetryTask = Task { [weak self] in
+            for delay in Self.exitRefreshRetryDelays {
+                try? await Task.sleep(for: delay)
+                guard let self, !Task.isCancelled, self.status == .on else { return }
+                await self.refreshExitDiagnostics()
+                if !self.exitDiagnosticsIsStale, self.exitDiagnosticsError == nil { return }
+            }
+            guard let self, !Task.isCancelled, self.status == .on else { return }
+            self.appendWarning("\(Self.exitUnreachableAfterSwitchPrefix)：切到「\(nodeName)」约 1 分钟仍探测不到出口，这个节点可能连不上——请到节点页测速或换一个节点")
         }
     }
 
@@ -928,7 +1034,7 @@ final class AppState {
     private func verifyExitAfterStart() async {
         await refreshExitDiagnostics()
         guard status == .on, !activeModes.isEmpty, exitDiagnosticsError != nil else { return }
-        appendWarning("已接管但探测不到出口，当前节点可能连不上——请到节点页测速或换一个节点")
+        appendWarning("\(Self.exitUnreachableWarningPrefix)，当前节点可能连不上——请到节点页测速或换一个节点")
     }
 
     var selectedNode: ProxyNode? {
@@ -1158,13 +1264,13 @@ final class AppState {
             var restoreFailures: [String] = []
             do {
                 let proxyOutcome = try await systemProxyManager.restore()
-                await notePendingTakeover(kind: "系统代理", proxyOutcome.pending, trigger: "启动失败回滚")
+                await notePendingTakeover(kind: "系统代理", proxyOutcome.pending, elsewhere: proxyOutcome.elsewhere, trigger: "启动失败回滚")
             } catch {
                 restoreFailures.append("系统代理（系统设置 → 网络 → 详细信息 → 代理）")
             }
             do {
                 let dnsOutcome = try await systemDNSManager.restore()
-                await notePendingTakeover(kind: "系统 DNS", dnsOutcome.pending, trigger: "启动失败回滚")
+                await notePendingTakeover(kind: "系统 DNS", dnsOutcome.pending, elsewhere: dnsOutcome.elsewhere, trigger: "启动失败回滚")
             } catch {
                 restoreFailures.append("系统 DNS（系统设置 → 网络 → 详细信息 → DNS）")
             }
@@ -1214,7 +1320,7 @@ final class AppState {
         if !(status == .on && activeModes.contains(.systemProxy)) {
             do {
                 let outcome = try await systemProxyManager.recoverIfNeeded()
-                await notePendingTakeover(kind: "系统代理", outcome.pending, trigger: trigger)
+                await notePendingTakeover(kind: "系统代理", outcome.pending, elsewhere: outcome.elsewhere, trigger: trigger)
             } catch {
                 appendWarning("\(trigger)时恢复系统代理失败：\(error.localizedDescription)")
             }
@@ -1222,7 +1328,7 @@ final class AppState {
         if !(status == .on && activeModes.contains(.tun)) {
             do {
                 let outcome = try await systemDNSManager.recoverIfNeeded()
-                await notePendingTakeover(kind: "系统 DNS", outcome.pending, trigger: trigger)
+                await notePendingTakeover(kind: "系统 DNS", outcome.pending, elsewhere: outcome.elsewhere, trigger: trigger)
             } catch {
                 appendWarning("\(trigger)时恢复系统 DNS 失败：\(error.localizedDescription)")
             }
@@ -1307,6 +1413,9 @@ final class AppState {
                 severity: .problem
             ))
         }
+        if let item = otherLocationsCheckItem() {
+            items.append(item)
+        }
 
         // 3. 残留内核：没在接管却还有内核在跑，说明上次没收干净。
         if status == .off, await singBoxProcess.isRunning {
@@ -1376,14 +1485,57 @@ final class AppState {
         return report
     }
 
+    /// 其他网络位置里仍指向 kongshan 的设置。上面两项只看得到当前位置（`networksetup` 只管当前位置），
+    /// 真机 2026-10-06 残留全在「自动」、用户人在另一个位置，自检连报三次「接管残留：ok」。
+    /// 只有一个位置时不出这一项。
+    /// internal：测试直接调用。
+    func otherLocationsCheckItem() -> NetworkCheckItem? {
+        guard let snapshot = networkLocations(), snapshot.locations.count > 1 else { return nil }
+        let findings = NetworkLocationResidue.findings(
+            in: snapshot,
+            relayPort: preferredRelayPort.map(Int.init),
+            tunDNSAddresses: Set(tunResolverExclusions(tunSettings) + [tunSettings.dnsServerAddress])
+        )
+        let others = snapshot.locations.count - 1
+        guard !findings.isEmpty else {
+            return NetworkCheckItem(
+                title: "其他网络位置",
+                detail: "其他 \(others) 个网络位置里没有指向 kongshan 的设置。",
+                severity: .ok
+            )
+        }
+        let described = NetworkLocationResidue.describe(findings)
+        if status == .on {
+            // 接管期间去过的位置仍由我们接管着，停止后切回该位置时按快照还原——这是预期状态。
+            return NetworkCheckItem(
+                title: "其他网络位置",
+                detail: "\(described)。接管期间切换过网络位置，这些设置仍指向 kongshan；停止接管后切回该位置时会自动还原。",
+                severity: .ok
+            )
+        }
+        return NetworkCheckItem(
+            title: "其他网络位置",
+            detail: "\(described)仍指向 kongshan。macOS 只允许修改当前网络位置的设置，"
+                + "切到该位置时 kongshan 会自动还原（需 kongshan 在运行）；也可以切过去后再点一次自检。",
+            severity: .problem
+        )
+    }
+
     /// 返回本次清掉的服务名（代理、DNS 各一组），供「网络自检与修复」汇报。
+    ///
+    /// 撞上「另一项系统代理 / DNS 操作仍在执行」时不报警：那是我们自己的接管、还原或另一次清扫正在改同一批设置
+    /// （真机 2026-10-06：切系统代理时实时清理被自己的改动触发，报了一条「检查系统代理残留失败」）。
+    /// 短暂重试几次；仍忙就几秒后静默补一次，残留不会因此漏掉。
     @discardableResult
     func sweepTakeoverResidue(trigger: String, includeDNS: Bool = true) async -> (proxy: [String], dns: [String]) {
         var clearedProxy: [String] = []
         var clearedDNS: [String] = []
+        var deferred = false
         if !(status == .on && activeModes.contains(.systemProxy)), let port = preferredRelayPort {
             do {
-                let cleared = try await systemProxyManager.sweepResidue(port: Int(port))
+                let cleared = try await retryingWhileBusy { [systemProxyManager] in
+                    try await systemProxyManager.sweepResidue(port: Int(port))
+                }
                 clearedProxy = cleared
                 if !cleared.isEmpty {
                     recordRuntimeEvent(
@@ -1392,13 +1544,18 @@ final class AppState {
                         detail: "\(trigger)时发现这些网络服务的代理仍指向本机 \(port) 端口（kongshan 并未在接管），已关闭：\(cleared.joined(separator: "、"))"
                     )
                 }
+            } catch SystemProxyError.transactionInProgress {
+                deferred = true
             } catch {
                 appendWarning("\(trigger)时检查系统代理残留失败：\(error.localizedDescription)")
             }
         }
         if includeDNS, !(status == .on && activeModes.contains(.tun)) {
             do {
-                let cleared = try await systemDNSManager.sweepResidue(server: tunSettings.dnsServerAddress)
+                let server = tunSettings.dnsServerAddress
+                let cleared = try await retryingWhileBusy { [systemDNSManager] in
+                    try await systemDNSManager.sweepResidue(server: server)
+                }
                 clearedDNS = cleared
                 if !cleared.isEmpty {
                     recordRuntimeEvent(
@@ -1407,11 +1564,48 @@ final class AppState {
                         detail: "\(trigger)时发现这些网络服务的 DNS 仍指向 TUN 地址 \(tunSettings.dnsServerAddress)（TUN 并未运行），已摘除：\(cleared.joined(separator: "、"))"
                     )
                 }
+            } catch SystemDNSError.transactionInProgress {
+                deferred = true
             } catch {
                 appendWarning("\(trigger)时检查系统 DNS 残留失败：\(error.localizedDescription)")
             }
         }
+        if deferred { scheduleDeferredResidueSweep(trigger: trigger, includeDNS: includeDNS) }
         return (clearedProxy, clearedDNS)
+    }
+
+    /// 撞上忙时的短暂重试间隔。接管 / 还原通常一两秒就完。
+    static let residueSweepBusyRetryDelays: [Duration] = [.milliseconds(300), .milliseconds(700), .milliseconds(1_500)]
+    static let deferredResidueSweepDelay = Duration.seconds(5)
+
+    private func retryingWhileBusy<T>(_ operation: () async throws -> T) async throws -> T {
+        var attempt = 0
+        while true {
+            do {
+                return try await operation()
+            } catch let error where Self.isBusyError(error) && attempt < Self.residueSweepBusyRetryDelays.count {
+                try? await Task.sleep(for: Self.residueSweepBusyRetryDelays[attempt])
+                attempt += 1
+            }
+        }
+    }
+
+    private static func isBusyError(_ error: Error) -> Bool {
+        if case SystemProxyError.transactionInProgress = error { return true }
+        if case SystemDNSError.transactionInProgress = error { return true }
+        return false
+    }
+
+    /// 仍忙：几秒后静默补一次。只排一次，不叠加。
+    private func scheduleDeferredResidueSweep(trigger: String, includeDNS: Bool) {
+        guard deferredResidueSweepTask == nil else { return }
+        deferredResidueSweepTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.deferredResidueSweepDelay)
+            guard let self, !Task.isCancelled else { return }
+            self.deferredResidueSweepTask = nil
+            guard self.isReady, !self.isBusy else { return }
+            _ = await self.sweepTakeoverResidue(trigger: trigger, includeDNS: includeDNS)
+        }
     }
 
     /// 快照里有服务此刻不在网络服务列表中（VPN 类虚拟服务随其 App 启停出现/消失）：还原不了，
@@ -1423,8 +1617,14 @@ final class AppState {
     /// 真机 2026-09-04 的 `LAN` 服务从系统里消失后，20:01 / 20:06 / 20:08 三次启动各刷了一对，
     /// 而那个服务可能再也不会回来——消息页会被永久占位。
     /// internal 而非 private：跨启动不再重复这条性质断了不会有任何报错，只会慢慢把消息页刷满，需回归覆盖。
-    func notePendingTakeover(kind: String, _ pending: [String], trigger: String) async {
+    func notePendingTakeover(
+        kind: String,
+        _ pending: [String],
+        elsewhere: [PendingLocationRestore] = [],
+        trigger: String
+    ) async {
         await loadNotedPendingTakeoversIfNeeded()
+        await notePendingElsewhere(kind: kind, elsewhere, trigger: trigger)
         guard !pending.isEmpty else {
             // 服务回来并复位后要清掉记录，否则它下次再缺席时就不报了。
             guard notedPendingTakeovers[kind] != nil else { return }
@@ -1439,6 +1639,30 @@ final class AppState {
             level: .info,
             title: "\(kind)有待还原的网络服务",
             detail: "\(trigger)时这些网络服务不在系统的网络服务列表中，其\(kind)设置暂未还原（快照已保留，服务重新出现时自动复位）：\(pending.joined(separator: "、"))"
+        )
+    }
+
+    /// 快照里属于**其他网络位置**的项：接管期间切换过位置，macOS 只能改当前位置的设置，
+    /// 原位置里指向 kongshan 的代理 / DNS 这会儿还原不了。与「服务不在列表」不同，这是要用户知道的：
+    /// 在 kongshan 没运行时切回那个位置，那里的网络是坏的。判重同样落盘，避免每次启动重报。
+    private func notePendingElsewhere(kind: String, _ elsewhere: [PendingLocationRestore], trigger: String) async {
+        let key = "\(kind)|其他位置"
+        let summaries = elsewhere.map(\.summary)
+        guard !summaries.isEmpty else {
+            guard notedPendingTakeovers[key] != nil else { return }
+            notedPendingTakeovers[key] = nil
+            await persistNotedPendingTakeovers()
+            return
+        }
+        guard notedPendingTakeovers[key] != summaries else { return }
+        notedPendingTakeovers[key] = summaries
+        await persistNotedPendingTakeovers()
+        recordRuntimeEvent(
+            level: .warning,
+            title: "其他网络位置有待还原的\(kind)",
+            detail: "\(trigger)时这些设置属于别的网络位置（接管期间切换过位置，macOS 只能改当前位置），暂未还原："
+                + summaries.joined(separator: "；")
+                + "。切回该位置时 kongshan 会自动还原；若那时 kongshan 没在运行，打开它即可"
         )
     }
 
@@ -1471,13 +1695,13 @@ final class AppState {
         var failures: [String] = []
         do {
             let outcome = try await systemProxyManager.restore()
-            await notePendingTakeover(kind: "系统代理", outcome.pending, trigger: "回滚")
+            await notePendingTakeover(kind: "系统代理", outcome.pending, elsewhere: outcome.elsewhere, trigger: "回滚")
         } catch {
             failures.append("系统代理（系统设置 → 网络 → 详细信息 → 代理）：\(error.localizedDescription)")
         }
         do {
             let outcome = try await systemDNSManager.restore()
-            await notePendingTakeover(kind: "系统 DNS", outcome.pending, trigger: "回滚")
+            await notePendingTakeover(kind: "系统 DNS", outcome.pending, elsewhere: outcome.elsewhere, trigger: "回滚")
         } catch {
             failures.append("系统 DNS（系统设置 → 网络 → 详细信息 → DNS）：\(error.localizedDescription)")
         }
@@ -1510,6 +1734,8 @@ final class AppState {
         // 已消失的 TUN 地址 172.19.0.1，而它的服务优先级高于 Wi-Fi → 全机解析瘫痪五分钟。
         pathChangeTask?.cancel()
         pathChangeTask = nil
+        pendingReassertTrigger = nil
+        pendingReassertForcesIdentityChange = false
         let stoppingModes = activeModes
         // 内核可能在「未接管」状态下运行（测速用），此时没有模式但仍要停进程。
         guard !stoppingModes.isEmpty || runtime != nil else {
@@ -1540,7 +1766,7 @@ final class AppState {
         if stoppingModes.contains(.systemProxy) {
             do {
                 let proxyOutcome = try await systemProxyManager.restore()
-                await notePendingTakeover(kind: "系统代理", proxyOutcome.pending, trigger: "停止")
+                await notePendingTakeover(kind: "系统代理", proxyOutcome.pending, elsewhere: proxyOutcome.elsewhere, trigger: "停止")
             } catch {
                 restoreFailures.append("系统代理（系统设置 → 网络 → 详细信息 → 代理）：\(error.localizedDescription)")
             }
@@ -1552,7 +1778,7 @@ final class AppState {
             // 先把系统 DNS 还原（此刻 TUN 还在，解析不断档），再停内核。
             do {
                 let dnsOutcome = try await systemDNSManager.restore()
-                await notePendingTakeover(kind: "系统 DNS", dnsOutcome.pending, trigger: "停止")
+                await notePendingTakeover(kind: "系统 DNS", dnsOutcome.pending, elsewhere: dnsOutcome.elsewhere, trigger: "停止")
             } catch {
                 restoreFailures.append("系统 DNS（系统设置 → 网络 → 详细信息 → DNS）：\(error.localizedDescription)")
             }
@@ -1706,8 +1932,9 @@ final class AppState {
             discoveredRules[source.id] = result.subscriptionRules
             discoveredRuleProviders[source.id] = result.ruleProviders
             discoveredMatchTargets[source.id] = result.matchTarget
-            appendWarnings(result.warnings)
+            appendWarnings(Self.attributed(result.warnings, to: savedSource.name))
             // 规则集随订阅一起下载（后台，不拖慢导入）；切到这个配置时就不必再等。
+            // 它若不是当前配置，下载失败不报（见 `finishRuleSetDownload`）。
             scheduleRuleSetDownload(for: source.id)
             // 第一个配置自动生效；已有生效配置则保持不变（不打断用户）。
             ensureActiveConfig()
@@ -1833,12 +2060,13 @@ final class AppState {
             if !result.usedCache {
                 clearWarnings(withPrefix: Self.subscriptionFailurePrefix(source.name))
             }
-            appendWarnings(result.warnings)
+            appendWarnings(Self.attributed(result.warnings, to: source.name))
+            ensureActiveConfig()
             // 订阅本身都没刷下来（多半是没网）时不连带下规则集：那只会再多出一串同样原因的失败。
-            if !result.usedCache {
+            // 只下当前生效配置的：别的订阅的规则集用不上，切过去时会补下（`setActiveConfig`）。
+            if !result.usedCache, id == activeConfigID {
                 scheduleRuleSetDownload(for: id)
             }
-            ensureActiveConfig()
             try await persistSubscriptions()
             try await persistSettings()
             errorMessage = nil
@@ -1863,7 +2091,7 @@ final class AppState {
             if automaticOnly, !source.autoUpdate { continue }
             do {
                 let result = try await subscriptionService.refresh(source)
-                collectedWarnings.append(contentsOf: result.warnings)
+                collectedWarnings.append(contentsOf: Self.attributed(result.warnings, to: source.name))
                 if result.usedCache {
                     failedSubscriptions.append(source.name)
                 } else {
@@ -1875,7 +2103,11 @@ final class AppState {
                     discoveredRuleProviders[source.id] = result.ruleProviders
                     discoveredMatchTargets[source.id] = result.matchTarget
                     clearWarnings(withPrefix: Self.subscriptionFailurePrefix(source.name))
-                    scheduleRuleSetDownload(for: source.id)
+                    // 只下当前生效配置的规则集。真机 2026-10-06：没在用的「空山」订阅每次刷新都去下 4 份规则集、
+                    // 经节点下载失败、报 4 条警告——那些规则集根本用不上。切到它时会补下。
+                    if source.id == activeConfigID {
+                        scheduleRuleSetDownload(for: source.id)
+                    }
                 }
             } catch {
                 collectedWarnings.append("\(Self.subscriptionFailurePrefix(source.name))：\(error.localizedDescription)")
@@ -2286,7 +2518,7 @@ final class AppState {
         // 立即生效靠 Clash API 的 select 已经发出；落盘只关乎重启后恢复，延迟 500ms 无感知。
         schedulePersistSettingsDebounced()
         if isPrimaryPick, status == .on {
-            Task { await refreshExitDiagnostics() }
+            scheduleExitRefreshAfterSwitch(to: name)
         }
     }
 
@@ -2464,7 +2696,12 @@ final class AppState {
     func testDelay(_ node: ProxyNode) async {
         // TCP 握手直连节点服务器，不需要内核在跑，快且稳。
         if speedTestMethod == .tcpPing {
-            let result = await tcpPingProvider(node.server, node.port)
+            if let reason = await gatewayInterceptionProbe(node.server, node.port, directPingResolvers) {
+                delays.updateValue(nil, forKey: node.id)
+                errorMessage = Self.gatewayInterceptionMessage(reason)
+                return
+            }
+            let result = await tcpPingProvider(node.server, node.port, directPingResolvers)
             applyDelay(result, to: node.id)
             return
         }
@@ -2500,6 +2737,8 @@ final class AppState {
     /// TCP 握手用的是 Network 框架，域名解析不出来时报的是 `DNSError`/`-65554` 这类，
     /// 直接甩给用户没有意义——尤其"代理没开时全部超时"多半就是节点域名在本地解析不了。
     static func readableDelayFailure(_ reason: String) -> String {
+        // 直连解析的报错已是整理好的中文（问过哪几台 DNS、各自为何失败），原样给出。
+        if reason.hasPrefix("直连 DNS") || reason.hasPrefix("节点域名") { return reason }
         let lower = reason.lowercased()
         if lower.contains("dns") || lower.contains("hostname") || lower.contains("-65554")
             || lower.contains("nodename nor servname") {
@@ -2509,6 +2748,23 @@ final class AppState {
         if lower.contains("no route") || lower.contains("unreachable") { return "本机到该节点没有路由" }
         if reason == "超时" { return "握手超时（3 秒内没连上）" }
         return reason
+    }
+
+    /// TCP 握手测速时直连解析节点域名用的 DNS：与内核解析节点域名的 `dns-bootstrap` 同一上游
+    /// （用户指定的引导解析器，或国内 DoH 的 IP），再加两台公共 DNS 与探测到的内网 DNS 兜底
+    /// （公司网络可能不放行外部 DNS）。都是 IP，不会再去问系统解析器。
+    var directPingResolvers: [String] {
+        var servers: [String] = []
+        if let nodeResolver = dnsSettings.nodeResolverAddress { servers.append(nodeResolver) }
+        servers.append(contentsOf: TCPPinger.defaultResolvers)
+        servers.append(contentsOf: lanResolverSnapshot.servers)
+        var seen = Set<String>()
+        return servers.filter { seen.insert($0).inserted }
+    }
+
+    static func gatewayInterceptionMessage(_ reason: String) -> String {
+        "当前网络的网关会接管连接（\(reason)，常见于软路由的透明代理）：直连握手测到的是网关，不是节点，"
+            + "所以没有测。请在设置里把测速方式改成「URL 测速（经代理）」，或换到不经软路由的网络位置再测"
     }
 
     func testAllDelays() async {
@@ -2576,6 +2832,13 @@ final class AppState {
         // 拖成几十秒；结果按大批次合并发布，避免每个节点都让整张代理页重新布局。
         if speedTestMethod == .tcpPing {
             let nodes = testable
+            let resolvers = directPingResolvers
+            // 网关会替目标完成握手时（软路由透明代理），测出来的全是网关的几毫秒，不能当节点延迟给出去。
+            if let first = nodes.first,
+               let reason = await gatewayInterceptionProbe(first.server, first.port, resolvers) {
+                errorMessage = Self.gatewayInterceptionMessage(reason)
+                return false
+            }
             await withTaskGroup(of: (UUID, DelayResult).self) { group in
                 var next = 0
                 var pending: [(UUID, DelayResult)] = []
@@ -2583,8 +2846,8 @@ final class AppState {
                 while next < seed {
                     guard !Task.isCancelled else { break }
                     let node = nodes[next]; next += 1
-                    group.addTask { [tcpPingProvider] in
-                        (node.id, await tcpPingProvider(node.server, node.port))
+                    group.addTask { [tcpPingProvider, resolvers] in
+                        (node.id, await tcpPingProvider(node.server, node.port, resolvers))
                     }
                 }
                 while let (id, result) = await group.next() {
@@ -2600,8 +2863,8 @@ final class AppState {
                         break
                     } else if next < nodes.count {
                         let node = nodes[next]; next += 1
-                        group.addTask { [tcpPingProvider] in
-                            (node.id, await tcpPingProvider(node.server, node.port))
+                        group.addTask { [tcpPingProvider, resolvers] in
+                            (node.id, await tcpPingProvider(node.server, node.port, resolvers))
                         }
                     }
                 }
@@ -3710,6 +3973,14 @@ final class AppState {
     /// 某类失败后来恢复了：按前缀清掉对应告警，免得列表里一直挂着早已不成立的失败。
     private func clearWarnings(withPrefix prefix: String) {
         warnings.removeAll { $0.hasPrefix(prefix) }
+    }
+
+    /// 订阅转换的兼容性提示不带订阅名，几个订阅一起刷新时分不清是谁的；补上名字。
+    static func attributed(_ warnings: [String], to subscriptionName: String) -> [String] {
+        warnings.map { warning in
+            guard warning.hasPrefix("订阅兼容性：") else { return warning }
+            return "订阅「\(subscriptionName)」兼容性：" + warning.dropFirst("订阅兼容性：".count)
+        }
     }
 
     /// 订阅更新失败告警的统一前缀（与 `SubscriptionService` 的缓存兜底文案一致），成功后据此清除。
@@ -4863,11 +5134,14 @@ final class AppState {
         }
         subscriptionRuleSetCache[sourceID] = result.prepared
         let prefix = ruleSetWarningPrefix(for: sourceID)
-        if result.warnings.isEmpty {
+        if result.warnings.isEmpty || sourceID != activeConfigID {
             // 这次全部成功：之前「更新失败」的告警已经不成立，留着只会让人以为还没好。
+            // 不是当前配置的（导入时预下载、或下载途中切走了）：失败了也不报，用不上；切过去时会重试。
             clearWarnings(withPrefix: prefix)
         }
-        appendWarnings(result.warnings.map { prefix + $0 })
+        if sourceID == activeConfigID {
+            appendWarnings(result.warnings.map { prefix + $0 })
+        }
         if !result.updated.isEmpty {
             recordRuntimeEvent(
                 title: "订阅规则集已更新",
@@ -5176,7 +5450,7 @@ final class AppState {
         if modes.contains(.systemProxy) {
             do {
                 let proxyOutcome = try await systemProxyManager.restore()
-                await notePendingTakeover(kind: "系统代理", proxyOutcome.pending, trigger: "内核崩溃清理")
+                await notePendingTakeover(kind: "系统代理", proxyOutcome.pending, elsewhere: proxyOutcome.elsewhere, trigger: "内核崩溃清理")
             } catch {
                 cleanupMessages.append("系统代理恢复失败：\(error.localizedDescription)")
             }
@@ -5189,7 +5463,7 @@ final class AppState {
             }
             do {
                 let dnsOutcome = try await systemDNSManager.restore()
-                await notePendingTakeover(kind: "系统 DNS", dnsOutcome.pending, trigger: "内核崩溃清理")
+                await notePendingTakeover(kind: "系统 DNS", dnsOutcome.pending, elsewhere: dnsOutcome.elsewhere, trigger: "内核崩溃清理")
             } catch {
                 cleanupMessages.append("系统 DNS 恢复失败：\(error.localizedDescription)")
             }
@@ -5247,30 +5521,49 @@ final class AppState {
         pathMonitor = nil
         pathChangeTask?.cancel()
         pathChangeTask = nil
+        pendingReassertTrigger = nil
+        pendingReassertForcesIdentityChange = false
     }
 
     /// 路径事件在切网时会连发多条，压到一次、等网络稳定 2 秒再补挂。
-    private func scheduleTakeoverReassert() {
+    ///
+    /// - Parameters:
+    ///   - trigger: 写进事件的触发点。
+    ///   - forceIdentityChange: 按「换了网」处理（刷新内网 DNS、重载内核、断开旧连接）。切换网络位置时 IP
+    ///     可能不变，但网关、DNS 已经换了一套。几次调度合并时只要有一次要求就保留。
+    private func scheduleTakeoverReassert(trigger: String = "网络变化", forceIdentityChange: Bool = false) {
         // 未接管时也要跑：VPN 类虚拟网络服务随其 App 启停出现/消失，快照里待还原的服务可能这会儿
         // 刚回到列表里；残留清扫也只有在换网点上才有机会发现。真正的分流在 reassertTakeoversAfterNetworkChange。
+        if trigger != "网络变化" || pendingReassertTrigger == nil { pendingReassertTrigger = trigger }
+        pendingReassertForcesIdentityChange = pendingReassertForcesIdentityChange || forceIdentityChange
         pathChangeTask?.cancel()
         pathChangeTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(2))
             guard let self, !Task.isCancelled else { return }
             self.pathChangeTask = nil
-            await self.reassertTakeoversAfterNetworkChange()
+            let trigger = self.pendingReassertTrigger ?? "网络变化"
+            let force = self.pendingReassertForcesIdentityChange
+            self.pendingReassertTrigger = nil
+            self.pendingReassertForcesIdentityChange = false
+            await self.reassertTakeoversAfterNetworkChange(trigger: trigger, forceIdentityChange: force)
         }
     }
 
     /// 补挂系统代理/DNS。`resetConnections` 为 true 时无条件重置全部连接
     /// （睡眠唤醒场景：连接必然已死，但客户端不知道）。
-    func reassertTakeoversAfterNetworkChange(resetConnections: Bool = false, identityChangedForTesting: Bool? = nil) async {
+    func reassertTakeoversAfterNetworkChange(
+        resetConnections: Bool = false,
+        identityChangedForTesting: Bool? = nil,
+        trigger: String = "网络变化",
+        forceIdentityChange: Bool = false
+    ) async {
         guard !isBusy else { return }
         guard status == .on else {
-            await reconcileInactiveTakeovers(trigger: "网络变化")
+            await reconcileInactiveTakeovers(trigger: trigger)
             return
         }
-        let identityChanged = identityChangedForTesting ?? networkIdentityChanged()
+        // 指纹必须先算（它顺带刷新记录），再看是否被要求强制按换网处理。
+        let identityChanged = identityChangedForTesting ?? (networkIdentityChanged() || forceIdentityChange)
         if identityChanged {
             recordRuntimeEvent(title: "物理网络已变更", detail: "正在刷新 LAN DNS 与 DoH 连接")
             if activeModes.contains(.tun) {
@@ -5300,7 +5593,7 @@ final class AppState {
             }
         }
         // 只接管了一类时另一类可能有遗留（TUN 单开时残留的系统代理）；按类自检，不碰接管中的那类。
-        await reconcileInactiveTakeovers(trigger: "网络变化")
+        await reconcileInactiveTakeovers(trigger: trigger)
         // 换网/唤醒后内核里的旧连接已经作废，但**本地客户端并不知道**：它们的 socket 仍是
         // ESTABLISHED，写进去石沉大海，要等 TCP 重传耗尽（可长达十几分钟）才报错；很多客户端
         // 还用长连接池反复复用这些死连接 → "网络明明恢复了，某个 App 却一直转圈，只能重启它"。
@@ -5314,6 +5607,41 @@ final class AppState {
         if resetConnections || identityChanged, let clashAPIClient {
             try? await clashAPIClient.closeAllConnections()
         }
+    }
+
+    private static let locationChangeDebounce = Duration.seconds(1)
+
+    /// 网络配置变了（可能是切换了网络位置）：去抖后读一次当前位置，真换了才处理。
+    func networkLocationMayHaveChanged() {
+        locationCheckTask?.cancel()
+        locationCheckTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.locationChangeDebounce)
+            guard !Task.isCancelled else { return }
+            await self?.checkNetworkLocation()
+        }
+    }
+
+    /// 切换了网络位置（Apple 菜单 → 位置）。macOS 每个位置各有一套网络服务设置，只能改当前位置：
+    /// - 接管中：新位置的服务还没指向我们（系统代理模式会直连漏网、TUN 的 DNS 劫持不在），
+    ///   按「换了网」补挂，并先把新位置的原值记进快照；原位置的设置留在快照里，切回去时还原。
+    /// - 没在接管：还原这个位置上次留下的设置，再按「指向谁」兜底清扫。
+    ///
+    /// 真机 2026-10-06 23:29:56 接管中从「自动」切到另一个位置，5 秒后停止：旧实现把「自动」的快照
+    /// 写进了新位置，「自动」里的残留却没人管，重启都没用。internal：测试直接调用，跳过去抖。
+    func checkNetworkLocation() async {
+        locationCheckTask = nil
+        guard let current = networkLocations()?.current else { return }
+        let previous = lastKnownNetworkLocation
+        lastKnownNetworkLocation = current
+        guard let previous, previous.id != current.id else { return }
+        recordRuntimeEvent(
+            title: "网络位置已切换",
+            detail: "「\(previous.displayName)」→「\(current.displayName)」；"
+                + (status == .on
+                    ? "正在把接管挪到新位置，原位置的设置留待切回时还原"
+                    : "正在还原 kongshan 在这个位置留下的设置")
+        )
+        scheduleTakeoverReassert(trigger: "切换网络位置", forceIdentityChange: true)
     }
 
     /// 物理网络身份是否变化：取 `en*` 接口的 IPv4 集合做指纹。

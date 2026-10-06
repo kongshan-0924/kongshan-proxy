@@ -703,6 +703,15 @@ public enum HelperNetworkServices {
     }
 }
 
+/// 系统网络偏好里的 `CurrentSet`（形如 `/Sets/<ID>`）→ 位置 ID。
+public enum HelperNetworkLocation {
+    public static func currentSetID(fromCurrentSetValue value: String?) -> String? {
+        guard let value, value.hasPrefix("/Sets/") else { return nil }
+        let id = String(value.dropFirst("/Sets/".count))
+        return id.isEmpty || id.contains("/") ? nil : id
+    }
+}
+
 /// DNS 还原：快照 → `networksetup` 参数表。
 ///
 /// **这是一段以 root 执行、输入来自用户可写文件的逻辑**，所以整条链路拒绝优先：
@@ -716,10 +725,13 @@ public enum HelperDNSRestore {
         public struct Service: Decodable, Sendable, Equatable {
             public let name: String
             public let servers: [String]
+            /// 采集时所在的网络位置（`Sets/<ID>`）；旧快照没有。
+            public let locationID: String?
 
-            public init(name: String, servers: [String]) {
+            public init(name: String, servers: [String], locationID: String? = nil) {
                 self.name = name
                 self.servers = servers
+                self.locationID = locationID
             }
         }
 
@@ -748,14 +760,19 @@ public enum HelperDNSRestore {
     /// `["-setdnsservers", "<服务名>", "<ip>"…]`，无地址时用 `Empty`（与 App 侧写法一致）。
     ///
     /// - Parameter knownServiceNames: 实时 `-listallnetworkservices` 解析出的服务名全集。
+    /// - Parameter currentLocationID: 当前网络位置（`Sets/<ID>`）。`networksetup` 只写当前位置，
+    ///   别的位置拍下的原值写进当前位置的同名服务是错的（真机 2026-10-06：「自动」位置的空 DNS
+    ///   被写进另一个位置的 Wi-Fi，整机断网）。读不到当前位置时传 nil，退回只按服务名的旧行为。
     public static func restoreArguments(
         snapshot: Snapshot,
-        knownServiceNames: Set<String>
+        knownServiceNames: Set<String>,
+        currentLocationID: String? = nil
     ) -> [[String]] {
         guard (snapshot.version ?? supportedVersion) == supportedVersion else { return [] }
         var commands: [[String]] = []
         var seen: Set<String> = []
         for service in snapshot.services {
+            if let location = service.locationID, let currentLocationID, location != currentLocationID { continue }
             // 服务名必须逐字命中实时列表：这一条同时挡住了选项注入与不存在的服务。
             guard knownServiceNames.contains(service.name), seen.insert(service.name).inserted else {
                 continue

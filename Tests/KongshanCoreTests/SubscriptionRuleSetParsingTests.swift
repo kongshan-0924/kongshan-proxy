@@ -178,6 +178,33 @@ final class SubscriptionRuleSetParsingTests: XCTestCase {
             sourceID: UUID()
         )
         let compat = result.warnings.first { $0.contains("订阅兼容性") } ?? ""
-        XCTAssertTrue(compat.contains("1 条由内置规则接管或不支持"), compat)
+        XCTAssertTrue(compat.contains("规则 1 条不支持已跳过（UNKNOWN-TYPE ×1）"), compat)
+    }
+
+    /// 重复规则去掉不影响分流，不该每次刷新都报「兼容性」。真机 2026-10-06 三条提示里两条全是重复规则。
+    func testDuplicateRulesAloneDoNotRaiseCompatibilityWarning() throws {
+        let result = try ClashSubscriptionConverter.convert(
+            yaml: yaml(
+                rules: ["RULE-SET,ai,Proxy", "DOMAIN-SUFFIX,example.com,DIRECT", "DOMAIN-SUFFIX,Example.com,DIRECT", "MATCH,Final"],
+                providers: aiProvider
+            ),
+            sourceID: UUID()
+        )
+        XCTAssertFalse(result.warnings.contains { $0.contains("订阅兼容性") }, "\(result.warnings)")
+        XCTAssertEqual(result.subscriptionRules.count, 2)
+    }
+
+    /// 真不支持的规则照报，并说清是哪类、几条。
+    func testUnsupportedRuleTypesAreNamedInCompatibilityWarning() throws {
+        let result = try ClashSubscriptionConverter.convert(
+            yaml: yaml(
+                rules: ["AND,((DOMAIN,a.example),(NETWORK,UDP)),REJECT", "RULE-SET,ai,Proxy", "SCRIPT,quic,REJECT", "SCRIPT,x,REJECT", "MATCH,Final"],
+                providers: aiProvider
+            ),
+            sourceID: UUID()
+        )
+        let compat = result.warnings.first { $0.contains("订阅兼容性") } ?? ""
+        XCTAssertTrue(compat.contains("规则 3 条不支持已跳过（AND ×1、SCRIPT ×2）"), compat)
+        XCTAssertFalse(compat.contains("节点"), "节点与策略组都没被跳过时不提：\(compat)")
     }
 }

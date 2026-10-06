@@ -45,6 +45,15 @@ public struct DNSSettings: Codable, Equatable, Sendable {
         )
     }
 
+    /// 内核解析节点域名用的那台 UDP 上游（与 `ConfigGenerator` 里 `dns-bootstrap` 的选址一致）：
+    /// 用户指定的引导解析器；没指定时跟随国内 DoH 的 IP；国内 DoH 写的是域名时为 nil（内核退到 223.5.5.5）。
+    public var nodeResolverAddress: String? {
+        let bootstrap = bootstrapResolver.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !bootstrap.isEmpty { return Self.isIPAddress(bootstrap) ? bootstrap : nil }
+        guard let domestic = try? endpoints().domestic, domestic.hostIsIPAddress else { return nil }
+        return domestic.host
+    }
+
     func endpoints() throws -> (domestic: DoHEndpoint, remote: DoHEndpoint) {
         let settings = try validated()
         return (

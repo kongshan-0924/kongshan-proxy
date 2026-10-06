@@ -142,16 +142,20 @@ final class TakeoverResidueWiringTests: XCTestCase {
         let initialize = try body(of: "func initialize() async {", in: source)
         XCTAssertTrue(initialize.contains("reconcileInactiveTakeovers(trigger: \"启动\")"), "启动必须清理遗留接管")
 
-        let schedule = try body(of: "private func scheduleTakeoverReassert() {", in: source)
+        let schedule = try body(of: "private func scheduleTakeoverReassert(", in: source)
         XCTAssertFalse(schedule.contains("guard status == .on"), "未接管时换网也要调度清理，不能在调度层就拦掉")
 
+        // 触发点（换网 / 切换网络位置）作为参数传进来，默认「网络变化」。
         let reassert = try body(of: "func reassertTakeoversAfterNetworkChange(", in: source)
+        XCTAssertTrue(source.contains("trigger: String = \"网络变化\""), "默认触发点仍是「网络变化」")
         XCTAssertTrue(
-            reassert.contains("guard status == .on else {\n            await reconcileInactiveTakeovers(trigger: \"网络变化\")"),
+            reassert.contains("guard status == .on else {\n            await reconcileInactiveTakeovers(trigger: trigger)"),
             "未接管时换网必须走 reconcileInactiveTakeovers"
         )
-        XCTAssertTrue(reassert.contains("await reconcileInactiveTakeovers(trigger: \"网络变化\")\n    }") || reassert.hasSuffix("await reconcileInactiveTakeovers(trigger: \"网络变化\")") || reassert.components(separatedBy: "reconcileInactiveTakeovers(trigger: \"网络变化\")").count >= 3,
-            "接管中换网也要按类清扫另一类的遗留")
+        XCTAssertGreaterThanOrEqual(
+            reassert.components(separatedBy: "reconcileInactiveTakeovers(trigger: trigger)").count, 3,
+            "接管中换网也要按类清扫另一类的遗留"
+        )
     }
 }
 

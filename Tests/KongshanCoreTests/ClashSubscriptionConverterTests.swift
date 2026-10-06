@@ -96,7 +96,7 @@ final class ClashSubscriptionConverterTests: XCTestCase {
         XCTAssertEqual(result.warnings.count, 3)
         XCTAssertTrue(result.warnings.contains { $0.contains("skip") && $0.contains("tuic") })
         XCTAssertTrue(result.warnings.contains { $0.contains("broken") && $0.contains("password") })
-        XCTAssertTrue(result.warnings.contains { $0.contains("订阅兼容性") && $0.contains("2 个跳过") })
+        XCTAssertTrue(result.warnings.contains { $0.contains("订阅兼容性") && $0.contains("节点 2 个不支持已跳过") })
     }
 
     func testRejectsDocumentWithoutUsableNodes() {
