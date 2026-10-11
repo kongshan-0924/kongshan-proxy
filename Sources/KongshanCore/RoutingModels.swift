@@ -807,21 +807,19 @@ public struct RoutingSettings: Codable, Equatable, Sendable {
             guard !value.isEmpty else { throw RoutingValidationError.emptyBypassDomain }
             return value
         }
-        settings.bypassCIDRs = try bypassCIDRs.map { cidr in
-            let value = cidr.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard CustomRouteRule.isValidCIDR(value) else {
-                throw RoutingValidationError.invalidCIDR(value)
-            }
-            return value
-        }
-        settings.tunExcludeCIDRs = try tunExcludeCIDRs.map { cidr in
-            let value = cidr.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard CustomRouteRule.isValidCIDR(value) else {
-                throw RoutingValidationError.invalidCIDR(value)
-            }
-            return value
-        }
+        // 单个 IP 补成主机 CIDR，与强制代理一致。真机 2026-10-10：用户在绕过列表填了一个裸 IP，
+        // 校验只认带前缀的写法，「应用并重载内核」连点四次都失败，错误只进了通知。
+        settings.bypassCIDRs = try bypassCIDRs.map(Self.normalizedListCIDR)
+        settings.tunExcludeCIDRs = try tunExcludeCIDRs.map(Self.normalizedListCIDR)
         return settings
+    }
+
+    private static func normalizedListCIDR(_ raw: String) throws -> String {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let normalized = CustomRouteRule.normalizedCIDR(value) else {
+            throw RoutingValidationError.invalidCIDR(value)
+        }
+        return normalized
     }
 }
 
@@ -830,7 +828,7 @@ extension RoutingSettings {
     ///
     /// 内核按域名精确比对，`http://oa.example.com/` 这种从浏览器地址栏粘进来的写法是一条永远命不中的
     /// 死规则（真机 2026-10-03 的绕过列表里就有一条），界面上却看不出任何异常。
-    static func normalizedBypassDomain(_ raw: String) -> String {
+    public static func normalizedBypassDomain(_ raw: String) -> String {
         var value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if let range = value.range(of: "://") {
             value = String(value[range.upperBound...])

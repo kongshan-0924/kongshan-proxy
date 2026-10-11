@@ -85,7 +85,7 @@ struct ManualNodeSheet: View {
         Form {
             Section {
                 TextEditor(text: $linkText)
-                    .font(.system(size: 11, design: .monospaced))
+                    .font(.caption.monospaced())
                     .frame(minHeight: 140)
                     .onChange(of: linkText) { _, _ in reparse() }
                 HStack {
@@ -114,7 +114,7 @@ struct ManualNodeSheet: View {
                             ProtocolTag(value: node.protocolType)
                             VStack(alignment: .leading, spacing: 1) {
                                 Text(node.name)
-                                    .font(.system(size: 12, weight: .medium))
+                                    .font(.callout.weight(.medium))
                                     .lineLimit(1)
                                 Text("\(node.server):\(String(node.port))")
                                     .font(.caption2.monospacedDigit())

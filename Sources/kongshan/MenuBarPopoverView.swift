@@ -48,7 +48,10 @@ struct MenuBarPopoverView: View {
                 }
             }
             Spacer(minLength: 8)
-            if let node = state.selectedNode, let delay = state.delays[node.id] {
+            if state.isBusy {
+                ProgressView()
+                    .controlSize(.small)
+            } else if let node = state.selectedNode, let delay = state.delays[node.id] {
                 DelayLabel(milliseconds: delay)
             }
         }

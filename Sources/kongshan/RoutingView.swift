@@ -81,6 +81,9 @@ struct CustomRoutingRulesView: View {
     @State private var sshProxyAddress = ""
     @State private var sshProxyPort = 22
     @State private var sshProxyError: String?
+    @State private var bypassError: String?
+    /// 草稿初值是默认设置，`onAppear` 才换成当前设置；换之前不判「有未应用的修改」，免得底部操作条闪一下。
+    @State private var draftLoaded = false
     // 分区折叠状态跨会话记忆。分段化之后表单能吃满整个窗口高度，
     // 四个分区默认全展开也不会互相挤掉——SSH 低频，仍默认收起。
     @AppStorage("routing.perApp.expanded") private var perAppExpanded = true
@@ -96,11 +99,18 @@ struct CustomRoutingRulesView: View {
             bypassSection
             sshProxySection
         }
-        .formStyle(.grouped)
+        .pageFormStyle()
+        // 有未应用的修改（或上次应用失败）时，操作条固定在页面底部：不用再滚到列表最下面找按钮。
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if draftLoaded, routingDraft != state.routingSettings || bypassError != nil {
+                pendingChangesBar
+            }
+        }
         .navigationSubtitle(subtitle)
         .onAppear {
             refreshRunningApps()
             routingDraft = state.routingSettings
+            draftLoaded = true
         }
         // 只在草稿未脏时跟随外部变化：脏着就同步会把用户没应用完的编辑冲掉。
         .onChange(of: state.routingSettings) { old, new in
@@ -327,50 +337,89 @@ struct CustomRoutingRulesView: View {
         Section(isExpanded: $bypassExpanded) {
             BypassListSection(
                 title: "绕过域名（直连）",
-                placeholder: "例如 *.local 或 example.com",
-                addTitle: "添加域名",
-                deleteHelp: "删除域名",
-                identity: "bypass-domain",
+                placeholder: "例如 *.local 或 example.com，可一次填多个",
+                kind: .domain,
                 values: $routingDraft.bypassDomains
             )
             BypassListSection(
                 title: "绕过 IP / CIDR（直连）",
-                placeholder: "例如 192.168.0.0/16",
-                addTitle: "添加 IP / CIDR",
-                deleteHelp: "删除 CIDR",
-                identity: "bypass-cidr",
+                placeholder: "例如 203.0.113.6 或 192.168.0.0/16",
+                kind: .cidr,
                 values: $routingDraft.bypassCIDRs
             )
             BypassListSection(
                 title: "跳过 TUN 的网段",
                 placeholder: "例如 10.0.0.0/8",
-                addTitle: "添加网段",
-                deleteHelp: "删除网段",
-                identity: "tun-exclude",
+                kind: .cidr,
                 values: $routingDraft.tunExcludeCIDRs
             )
-            Button("恢复默认绕过列表") {
-                routingDraft.bypassDomains = RoutingSettings.defaults.bypassDomains
-                routingDraft.bypassCIDRs = RoutingSettings.defaults.bypassCIDRs
-                routingDraft.tunExcludeCIDRs = RoutingSettings.defaultTunExcludeCIDRs
-            }
             HStack {
-                if routingDraft != state.routingSettings {
-                    StatusBadge(text: "有未应用的修改", tint: .orange)
+                Text("改动先存成草稿，点底部的「应用并重载内核」才生效——重载会断开现有连接。")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                Spacer(minLength: 8)
+                Button("恢复默认") {
+                    routingDraft.bypassDomains = RoutingSettings.defaults.bypassDomains
+                    routingDraft.bypassCIDRs = RoutingSettings.defaults.bypassCIDRs
+                    routingDraft.tunExcludeCIDRs = RoutingSettings.defaultTunExcludeCIDRs
                 }
-                Spacer()
-                // 必须显式应用：改一个字符就重载内核会掐断所有连接。
-                Button("应用并重载内核") {
-                    Task { await state.applyRoutingSettings(routingDraft) }
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(state.isBusy || routingDraft == state.routingSettings)
+                .controlSize(.small)
+                .help("三张列表恢复成默认的局域网 / 本机地址")
             }
         } header: {
             sectionHeader("强制直连与排除", symbol: "arrow.uturn.down",
                           hint: "同时生效于分流规则、系统代理 bypass 与 TUN 排除",
                           count: routingDraft.bypassDomains.count + routingDraft.bypassCIDRs.count,
                           expanded: bypassExpanded)
+        }
+        .onChange(of: routingDraft) { _, _ in bypassError = nil }
+    }
+
+    private var pendingChangesBar: some View {
+        VStack(spacing: 0) {
+            Divider()
+            HStack(spacing: 10) {
+                if let bypassError {
+                    Label(bypassError, systemImage: "exclamationmark.circle.fill")
+                        .foregroundStyle(.red)
+                        .lineLimit(2)
+                } else {
+                    Label("强制直连与排除有未应用的修改", systemImage: "pencil.circle.fill")
+                        .foregroundStyle(.orange)
+                }
+                Spacer(minLength: 12)
+                if state.isApplyingRouting {
+                    ProgressView().controlSize(.small)
+                }
+                Button("撤销") {
+                    routingDraft = state.routingSettings
+                    bypassError = nil
+                }
+                .disabled(state.isApplyingRouting)
+                Button("应用并重载内核") { applyBypassDraft() }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut("s", modifiers: .command)
+                    .disabled(state.isBusy || routingDraft == state.routingSettings)
+                    .help("保存并重载内核（⌘S）；现有连接会断开重连")
+            }
+            .font(.callout)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 10)
+        }
+        .background(.bar)
+    }
+
+    /// 应用成功后草稿换成归一化后的值（`http://a.com/` → `a.com`、裸 IP → `/32`），
+    /// 否则草稿与已生效的设置永远不等，「有未应用的修改」一直挂着。
+    private func applyBypassDraft() {
+        let draft = routingDraft
+        bypassError = nil
+        Task {
+            if await state.applyRoutingSettings(draft) {
+                if routingDraft == draft { routingDraft = state.routingSettings }
+            } else {
+                bypassError = state.errorMessage ?? "未能应用，请检查输入后重试"
+            }
         }
     }
 
@@ -416,7 +465,8 @@ struct CustomRoutingRulesView: View {
                         Image(systemName: "network")
                             .foregroundStyle(.secondary)
                             .frame(width: 16)
-                        Text("\(target.address):\(target.port)")
+                        // verbatim：插值进 LocalizedStringKey 的整数会按区域加千分位，端口 10022 显示成「10,022」。
+                        Text(verbatim: "\(target.address):\(target.port)")
                             .font(.body.monospaced())
                         Spacer(minLength: 8)
                         Button(role: .destructive) {
@@ -443,7 +493,13 @@ struct CustomRoutingRulesView: View {
     /// 分区标题：符号 + 名称 + 一句说明；折叠时把条目数留在标题行，不用展开也能看到有多少条。
     private func sectionHeader(_ title: String, symbol: String, hint: String, count: Int, expanded: Bool) -> some View {
         HStack(spacing: 8) {
-            Label(title, systemImage: symbol)
+            // 分区图标用强调色：长表单里一眼找到分区开头，层次靠它而不是靠加粗一整行。
+            Label {
+                Text(title)
+            } icon: {
+                Image(systemName: symbol)
+                    .foregroundStyle(.tint)
+            }
             Text(hint)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -781,47 +837,94 @@ private enum ForcedProxyInputKind: String, CaseIterable, Identifiable {
 }
 
 
-/// 可增删的字符串列表（绕过域名 / IP / 跳过 TUN 网段）。设置页的隧道分区复用。
-/// 两个列表结构一致时，用带前缀的显式 id 把行身份分开，避免 SwiftUI 串内容。
+/// 一张绕过列表：上面一行输入框（回车或点「添加」，可一次填多个），下面是可删除的标签。
+/// 规则页三张绕过列表与设置页的内网域名后缀共用。
+///
+/// 原先一条一行、每行都是可编辑文本框，填错要等点「应用」才知道（真机 2026-10-10：
+/// 裸 IP 被拒，连点四次没反应）。改成添加时当场校验、当场规范化，错了就在输入框下面说。
 struct BypassListSection: View {
+    enum Kind {
+        case domain
+        case cidr
+    }
+
     let title: String
     let placeholder: String
-    let addTitle: String
-    let deleteHelp: String
-    let identity: String
+    let kind: Kind
     @Binding var values: [String]
+    @State private var input = ""
+    @State private var inputError: String?
 
     var body: some View {
-        Section(title) {
+        Section {
+            HStack(spacing: 8) {
+                TextField(placeholder, text: $input, prompt: Text(placeholder))
+                    .labelsHidden()
+                    .textFieldStyle(.roundedBorder)
+                    .font(.body.monospaced())
+                    .onSubmit(add)
+                Button("添加", action: add)
+                    .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            if let inputError {
+                Label(inputError, systemImage: "exclamationmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
             if values.isEmpty {
-                Text("暂无，点下方添加")
+                Text("暂无，在上面填写后添加")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
-            }
-            ForEach(values.indices, id: \.self) { index in
-                HStack(spacing: 8) {
-                    // 用 prompt 而非 label 作占位：只在空行显示提示，填了值就正常左对齐，
-                    // 不再有「例如…」那一列常驻标签。
-                    TextField(placeholder, text: $values[index], prompt: Text(placeholder))
-                        .labelsHidden()
-                        .textFieldStyle(.plain)
-                        .font(.body.monospaced())
-                    Button(role: .destructive) {
-                        values.remove(at: index)
-                    } label: {
-                        Image(systemName: "minus.circle.fill")
-                            .foregroundStyle(.secondary)
+            } else {
+                FlowLayout {
+                    ForEach(Array(values.enumerated()), id: \.offset) { index, value in
+                        TagChip(text: value) { values.remove(at: index) }
                     }
-                    .buttonStyle(.borderless)
-                    .help(deleteHelp)
                 }
-                .id("\(identity)-\(index)")
+                .padding(.vertical, 2)
             }
-            Button {
-                values.append("")
-            } label: {
-                Label(addTitle, systemImage: "plus")
+        } header: {
+            HStack {
+                Text(title)
+                Spacer()
+                Text("\(values.count) 条")
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
             }
+        }
+        .onChange(of: input) { _, _ in inputError = nil }
+    }
+
+    /// 空格、逗号、换行都可分隔；整批都合法才添加，重复的跳过。
+    private func add() {
+        let entries = input
+            .split { $0 == "," || $0 == "，" || $0.isWhitespace }
+            .map(String.init)
+        guard !entries.isEmpty else { return }
+        var accepted: [String] = []
+        for entry in entries {
+            guard let value = Self.normalized(entry, kind: kind) else {
+                inputError = kind == .cidr
+                    ? "「\(entry)」不是有效的 IP 或网段，例如 203.0.113.6 或 192.168.0.0/16"
+                    : "「\(entry)」不是有效的域名，例如 example.com 或 *.local"
+                return
+            }
+            if !values.contains(value), !accepted.contains(value) { accepted.append(value) }
+        }
+        values.append(contentsOf: accepted)
+        input = ""
+    }
+
+    /// 与 `RoutingSettings.validated()` 同一套规则，保证添加进来的条目应用时不会再被拒。
+    static func normalized(_ raw: String, kind: Kind) -> String? {
+        switch kind {
+        case .cidr:
+            return CustomRouteRule.normalizedCIDR(raw)
+        case .domain:
+            let value = RoutingSettings.normalizedBypassDomain(raw)
+            let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-_*:"))
+            guard !value.isEmpty, value.unicodeScalars.allSatisfy(allowed.contains) else { return nil }
+            return value
         }
     }
 }
@@ -980,5 +1083,89 @@ private struct RuleRow: View {
         case .geoIP:
             return rule.value == "CN" ? "内置国内 IP 库" : "暂不支持，已跳过"
         }
+    }
+}
+
+/// 按行自动换行的横向排布：放得下就排在同一行，放不下另起一行。
+///
+/// **只在本文件可见**：模块内多出一个公开的 `Layout` 类型后，设置页那个大 `body` 的类型推断直接超时
+///（编译器要把它也纳入候选）。
+///
+/// 规则页的绕过列表原先一条一行，默认的网段就有八九条，三张表叠起来要滚好几屏，
+/// 「应用」按钮被压在最底下（用户 2026-10-10 反馈「保存还得滑到最下面」）。改成标签流后同样内容只占几行。
+private struct FlowLayout: Layout {
+    var spacing: CGFloat = 6
+    var lineSpacing: CGFloat = 6
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let rows = arrange(width: proposal.width ?? .infinity, subviews: subviews)
+        let width = rows.map(\.width).max() ?? 0
+        let height = rows.map(\.height).reduce(0, +) + lineSpacing * CGFloat(max(rows.count - 1, 0))
+        return CGSize(width: proposal.width ?? width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        for row in arrange(width: bounds.width, subviews: subviews) {
+            var x = bounds.minX
+            for index in row.indices {
+                let size = subviews[index].sizeThatFits(.unspecified)
+                subviews[index].place(at: CGPoint(x: x, y: y + (row.height - size.height) / 2), proposal: .unspecified)
+                x += size.width + spacing
+            }
+            y += row.height + lineSpacing
+        }
+    }
+
+    private struct Row {
+        var indices: [Int] = []
+        var width: CGFloat = 0
+        var height: CGFloat = 0
+    }
+
+    private func arrange(width: CGFloat, subviews: Subviews) -> [Row] {
+        var rows: [Row] = []
+        var current = Row()
+        for index in subviews.indices {
+            let size = subviews[index].sizeThatFits(.unspecified)
+            let needed = current.indices.isEmpty ? size.width : current.width + spacing + size.width
+            if needed > width, !current.indices.isEmpty {
+                rows.append(current)
+                current = Row()
+            }
+            current.width = current.indices.isEmpty ? size.width : current.width + spacing + size.width
+            current.height = max(current.height, size.height)
+            current.indices.append(index)
+        }
+        if !current.indices.isEmpty { rows.append(current) }
+        return rows
+    }
+}
+
+/// 可删除的小标签：等宽文字 + 右侧删除叉。
+private struct TagChip: View {
+    let text: String
+    var help: String = "删除"
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(verbatim: text)
+                .font(.callout.monospaced())
+                .lineLimit(1)
+            Button(action: onDelete) {
+                Image(systemName: "xmark")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .help("\(help) \(text)")
+            .accessibilityLabel("\(help) \(text)")
+        }
+        .padding(.leading, 9)
+        .padding(.trailing, 6)
+        .padding(.vertical, 4)
+        .background(Color.accentColor.opacity(0.08), in: Capsule())
+        .overlay(Capsule().strokeBorder(Color.accentColor.opacity(0.18), lineWidth: 0.5))
     }
 }

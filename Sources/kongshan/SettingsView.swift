@@ -60,286 +60,16 @@ struct SettingsView: View {
                 // 网络＝域名怎么解析；维护＝磁盘上的东西。
                 // 运行时开关（系统代理 / TUN / 出站模式 / 局域网共享）一个都不在这里——
                 // 它们的归属是仪表盘与连接页，设置页只放几个月才碰一次的东西。
-                if tab == .general {
-                Section("外观") {
-                    Picker("菜单栏图标", selection: menuBarIconStyleBinding) {
-                        ForEach(MenuBarIconStyle.allCases) { style in
-                            // 直接把三种图标画出来给用户挑，比只列名字直观得多。
-                            Label {
-                                Text(style.displayName)
-                            } icon: {
-                                Image(nsImage: MenuBarIcon.image(style: style, state: .systemProxy))
-                            }
-                            .tag(style)
-                        }
-                    }
-                    Text(state.menuBarIconStyle.summary + "。菜单栏会把图标染成单色，所以状态靠形状区分：关闭时是线稿、开启后填实、TUN 额外加一个点。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("开机自启") {
-                    Toggle("登录时启动 kongshan", isOn: launchAtLoginBinding)
-                        .disabled(
-                            !state.isReady
-                                || state.loginItemStatus == .requiresApproval
-                                || state.loginItemStatus == .unsupported
-                        )
-                    LabeledContent("登录项状态", value: loginItemStatusTitle)
-                    Toggle("登录后自动恢复上次的接管", isOn: autoRestoreBinding)
-                        .disabled(!state.isReady || state.loginItemStatus != .enabled)
-                    Text("仅在开机自启场景生效：登录后若上次是开着系统代理，会等网络就绪再自动开启；网络不可达或启动失败时不接管，并发系统通知告知。当前版本不自动恢复 TUN——它在助手需要重装时会弹管理员密码框，届时会跳过并在消息页留下记录。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    if state.loginItemStatus == .requiresApproval {
-                        Text("登录项已登记，但需要你在系统设置中批准。应用不会重复发起注册。")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Button("打开系统登录项设置") {
-                            Task { await state.openLoginItemSystemSettings() }
-                        }
-                    } else if state.loginItemStatus == .unsupported {
-                        Text("当前运行环境不是可注册的应用包；请从打包后的 kongshan.app 使用此功能。")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    HStack {
-                        Spacer()
-                        Button("刷新状态") {
-                            Task { await state.refreshLoginItemStatus() }
-                        }
-                        .disabled(!state.isReady)
-                    }
-                }
-
-                Section("关于") {
-                    LabeledContent("应用版本", value: Self.appVersion)
-                    LabeledContent("应用更新") {
-                        Button("查看最新版本") {
-                            if let url = URL(string: "https://github.com/kongshan-0924/kongshan-proxy/releases/latest") {
-                                NSWorkspace.shared.open(url)
-                            }
-                        }
-                        .controlSize(.small)
-                    }
-                    LabeledContent("内核") {
-                        HStack(spacing: 8) {
-                            // coreVersion 是内核 /version 的原样返回，已经带名字（`sing-box 1.13.14`）。
-                            // 再加前缀会显示成「sing-box sing-box 1.13.14」。
-                            Text(state.coreVersion)
-                                .foregroundStyle(.secondary)
-                            Button(state.isCheckingKernelUpdate ? "检查中…" : "检查内核更新") {
-                                Task { await state.updateKernel() }
-                            }
-                            .controlSize(.small)
-                            .disabled(state.isCheckingKernelUpdate)
-                        }
-                    }
-                }
-                }
-
-                if tab == .takeover {
-                Section {
-                    Toggle("严格路由（strict_route）", isOn: strictRouteBinding)
-                        .disabled(state.isBusy || !state.isReady)
-                } header: {
-                    Text("TUN")
-                } footer: {
-                    Text(tunFooterText)
-                }
-
-                Section("免密码助手") {
-                    LabeledContent("状态", value: helperStatusText)
-                    Text("免密码助手让 TUN 启停无需每次输入密码：安装需一次管理员授权，之后开机自动运行。未装时 TUN 仍可用（每次弹密码）。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    if state.helperInstallStatus == .needsReinstall {
-                        // 本项目是 ad-hoc 签名，助手只能靠钉死 App 的 cdhash 来认人，
-                        // 因此 App 一更新（cdhash 变）助手就必须重装一次。说清楚，别让用户以为坏了。
-                        Text("助手在，但不认识当前这个 App —— 通常是 App 更新过（签名变了），或 App 被移动过位置。点「重新安装」授权一次即可，之后继续零弹窗。")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                    }
-                    // 安装/卸载都要 bootout helper：TUN 正在跑时做这件事会把 root 内核变成
-                    // 孤儿（继续持有 utun/路由/DNS，App 停不掉）。TUN 运行期间一律禁用。
-                    if tunActive {
-                        Text("TUN 正在运行，安装/卸载助手已暂时禁用——请先关闭 TUN，避免残留无法清理的 root 内核。")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                    }
-                    HStack {
-                        if state.isHelperOperationInProgress {
-                            ProgressView().controlSize(.small)
-                        }
-                        Spacer()
-                        switch state.helperInstallStatus {
-                        case .notInstalled:
-                            Button("安装免密码助手") {
-                                Task { await state.installHelper() }
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(state.isHelperOperationInProgress || tunActive)
-                        case .installed:
-                            Button("卸载") {
-                                Task { await state.uninstallHelper() }
-                            }
-                            .disabled(state.isHelperOperationInProgress || tunActive)
-                        case .needsReinstall:
-                            Button("重新安装") {
-                                Task { await state.installHelper() }
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(state.isHelperOperationInProgress || tunActive)
-                        }
-                    }
-                }
-                }
-
-                if tab == .network {
-                Section("DNS 高级设置") {
-                    TextField("国内 DoH", text: $dnsDraft.domesticDoH)
-                    TextField("远程 DoH", text: $dnsDraft.remoteDoH)
-                    TextField("引导解析器（可选）", text: $dnsDraft.bootstrapResolver)
-                    Text("geosite-cn 使用国内 DoH 直连解析，其余域名走当前代理的远程 DoH。兼容性优先，默认不启用 fake-ip。系统代理模式只管理进入本地 mixed 代理的解析，不等同于接管 macOS 全局 DNS。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text("引导解析器负责解析出站节点自身的域名，必须是无连接的 UDP。留空时跟随国内 DoH 的地址；填入独立 IP（如 114.114.114.114）可与国内 DoH 解耦，避免一台上游抖动同时影响节点域名与国内域名解析。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    HStack {
-                        Button("恢复默认") { dnsDraft = .defaults }
-                        Button("放弃修改") { dnsDraft = state.dnsSettings }
-                            .disabled(dnsDraft == state.dnsSettings)
-                        Spacer()
-                        Button("应用 DNS") {
-                            Task {
-                                await state.applyDNSSettings(dnsDraft)
-                                dnsDraft = state.dnsSettings
-                            }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(state.isBusy || !state.isReady || dnsDraft == state.dnsSettings)
-                    }
-                }
-
-                Section("内网 DNS 分流") {
-                    Toggle("把内网域名交给内网 DNS 解析", isOn: lanDNSEnabledBinding)
-                        .disabled(state.isBusy || !state.isReady)
-
-                    LabeledContent("自动探测到的 DNS", value: detectedLANServersText)
-                    LabeledContent("自动探测到的域名", value: detectedLANDomainsText)
-
-                    TextField("内网 DNS 服务器（留空＝用自动探测）", text: $tunDraft.lanDNSServer)
-                        .disabled(!state.tunSettings.lanDNSEnabled || state.isBusy || !state.isReady)
-
-                    Text("关掉它，内网域名会落到 Fake-IP 拿到一个 240.x 假地址，然后整段被路由进代理出口——表现就是内网设备一直加载。探测在接管系统 DNS 之前进行；网络不下发搜索域时，用下面的列表手填内网域名后缀。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                BypassListSection(
-                    title: "内网域名后缀",
-                    placeholder: "例如 corp.example.com 或 *.corp.example.com",
-                    addTitle: "添加内网域名",
-                    deleteHelp: "删除内网域名",
-                    identity: "lan-domain",
-                    values: $tunDraft.lanDomainSuffixes
-                )
-
-                Section {
-                    HStack {
-                        if tunDraft != state.tunSettings {
-                            StatusBadge(text: "未应用", tint: .orange)
-                        }
-                        Spacer()
-                        Button("应用内网 DNS 设置") {
-                            Task { await state.applyTunSettings(tunDraft) }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(state.isBusy || tunDraft == state.tunSettings)
-                    }
-                } footer: {
-                    Text("改动会重载内核并断开当前连接。")
-                }
-                }
-
-                if tab == .maintenance {
-                Section("备份与恢复") {
-                    HStack {
-                        Button {
-                            prepareBackupExport()
-                        } label: {
-                            Label("导出配置与设置", systemImage: "square.and.arrow.up")
-                        }
-                        .disabled(isPreparingBackup)
-
-                        Button {
-                            showsBackupImporter = true
-                        } label: {
-                            Label("导入备份", systemImage: "square.and.arrow.down")
-                        }
-                        .disabled(state.isOn || state.isBusy)
-
-                        if isPreparingBackup { ProgressView().controlSize(.small) }
-                        Spacer()
-                        if let backupNotice {
-                            StatusBadge(text: backupNotice, tint: .green)
-                        }
-                    }
-                    Text("备份包含订阅链接、订阅配置快照、节点凭据和全部设置，可能含敏感信息；不包含日志、运行时密钥或恢复文件。导入前需先停止代理。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("数据与日志") {
-                    LabeledContent("故障诊断") {
-                        Menu {
-                            Button("完整版（自用排查，含内核日志）") { prepareDiagnosticExport(forSharing: false) }
-                            Button("可公开分享版（去掉日志、地址与名字）") { prepareDiagnosticExport(forSharing: true) }
-                        } label: {
-                            Label("导出诊断", systemImage: "stethoscope")
-                        }
-                        .fixedSize()
-                        .disabled(isPreparingDiagnostics)
-                    }
-                    LabeledContent("数据目录") {
-                        Button("在 Finder 中显示") {
-                            NSWorkspace.shared.activateFileViewerSelecting([state.supportDirectory])
-                        }
-                    }
-                    LabeledContent("日志目录") {
-                        Button("在 Finder 中显示") {
-                            NSWorkspace.shared.activateFileViewerSelecting([
-                                state.supportDirectory.appending(path: "logs", directoryHint: .isDirectory)
-                            ])
-                        }
-                    }
-                    Text(state.supportDirectory.path)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Text("两版都不含订阅原文、节点凭据或运行时密钥。完整版保留内核日志（访问过的网站与地址）和节点服务器地址，"
-                         + "只发给信任的人；要贴到公开场合请用可公开分享版。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("清理") {
-                    LabeledContent("清理缓存", value: state.cacheSizeBytes > 0 ? AppState.formatBytes(state.cacheSizeBytes) : "—")
-                    Button("执行清理") {
-                        Task { await state.clearRegenerableCaches() }
-                    }
-                    .disabled(state.isOn || state.isBusy || state.cacheSizeBytes == 0)
-                    Text("删除内核日志与规则集缓存，两者都会自动重新生成。设置、订阅缓存和节点不受影响。需先停止内核。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .task { await state.refreshCacheSize() }
+                // 每个分区单独成一个 @ViewBuilder 属性：四个分区写在同一个表达式里时，编译器要整体推断类型，
+                // 其中任何一处写错只会报「无法在合理时间内完成类型检查」，看不到真正的错误在哪。
+                switch tab {
+                case .general: generalSections
+                case .takeover: takeoverSections
+                case .network: networkSections
+                case .maintenance: maintenanceSections
                 }
             }
-            .formStyle(.grouped)
+            .pageFormStyle()
         }
         .navigationTitle("设置")
         .navigationSubtitle(tab.title)
@@ -413,6 +143,287 @@ struct SettingsView: View {
         }
     }
 
+
+    @ViewBuilder
+    private var generalSections: some View {
+        Section("外观") {
+            Picker("菜单栏图标", selection: menuBarIconStyleBinding) {
+                ForEach(MenuBarIconStyle.allCases) { style in
+                    // 直接把三种图标画出来给用户挑，比只列名字直观得多。
+                    Label {
+                        Text(style.displayName)
+                    } icon: {
+                        Image(nsImage: MenuBarIcon.image(style: style, state: .systemProxy))
+                    }
+                    .tag(style)
+                }
+            }
+            Text(verbatim: "\(state.menuBarIconStyle.summary)。菜单栏会把图标染成单色，所以状态靠形状区分：关闭时是线稿、开启后填实、TUN 额外加一个点。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+
+        Section("开机自启") {
+            Toggle("登录时启动 kongshan", isOn: launchAtLoginBinding)
+                .disabled(
+                    !state.isReady
+                        || state.loginItemStatus == .requiresApproval
+                        || state.loginItemStatus == .unsupported
+                )
+            LabeledContent("登录项状态", value: loginItemStatusTitle)
+            Toggle("登录后自动恢复上次的接管", isOn: autoRestoreBinding)
+                .disabled(!state.isReady || state.loginItemStatus != .enabled)
+            Text("仅在开机自启场景生效：登录后若上次是开着系统代理，会等网络就绪再自动开启；网络不可达或启动失败时不接管，并发系统通知告知。当前版本不自动恢复 TUN——它在助手需要重装时会弹管理员密码框，届时会跳过并在消息页留下记录。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if state.loginItemStatus == .requiresApproval {
+                Text("登录项已登记，但需要你在系统设置中批准。应用不会重复发起注册。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("打开系统登录项设置") {
+                    Task { await state.openLoginItemSystemSettings() }
+                }
+            } else if state.loginItemStatus == .unsupported {
+                Text("当前运行环境不是可注册的应用包；请从打包后的 kongshan.app 使用此功能。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            HStack {
+                Spacer()
+                Button("刷新状态") {
+                    Task { await state.refreshLoginItemStatus() }
+                }
+                .disabled(!state.isReady)
+            }
+        }
+
+        Section("关于") {
+            LabeledContent("应用版本", value: Self.appVersion)
+            LabeledContent("应用更新") {
+                Button("查看最新版本") {
+                    if let url = URL(string: "https://github.com/kongshan-0924/kongshan-proxy/releases/latest") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                .controlSize(.small)
+            }
+            LabeledContent("内核") {
+                HStack(spacing: 8) {
+                    // coreVersion 是内核 /version 的原样返回，已经带名字（`sing-box 1.13.14`）。
+                    // 再加前缀会显示成「sing-box sing-box 1.13.14」。
+                    Text(state.coreVersion)
+                        .foregroundStyle(.secondary)
+                    Button(state.isCheckingKernelUpdate ? "检查中…" : "检查内核更新") {
+                        Task { await state.updateKernel() }
+                    }
+                    .controlSize(.small)
+                    .disabled(state.isCheckingKernelUpdate)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var takeoverSections: some View {
+        Section {
+            Toggle("严格路由（strict_route）", isOn: strictRouteBinding)
+                .disabled(state.isBusy || !state.isReady)
+        } header: {
+            Text("TUN")
+        } footer: {
+            Text(tunFooterText)
+        }
+
+        Section("免密码助手") {
+            LabeledContent("状态", value: helperStatusText)
+            Text("免密码助手让 TUN 启停无需每次输入密码：安装需一次管理员授权，之后开机自动运行。未装时 TUN 仍可用（每次弹密码）。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if state.helperInstallStatus == .needsReinstall {
+                // 本项目是 ad-hoc 签名，助手只能靠钉死 App 的 cdhash 来认人，
+                // 因此 App 一更新（cdhash 变）助手就必须重装一次。说清楚，别让用户以为坏了。
+                Text("助手在，但不认识当前这个 App —— 通常是 App 更新过（签名变了），或 App 被移动过位置。点「重新安装」授权一次即可，之后继续零弹窗。")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            // 安装/卸载都要 bootout helper：TUN 正在跑时做这件事会把 root 内核变成
+            // 孤儿（继续持有 utun/路由/DNS，App 停不掉）。TUN 运行期间一律禁用。
+            if tunActive {
+                Text("TUN 正在运行，安装/卸载助手已暂时禁用——请先关闭 TUN，避免残留无法清理的 root 内核。")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            HStack {
+                if state.isHelperOperationInProgress {
+                    ProgressView().controlSize(.small)
+                }
+                Spacer()
+                switch state.helperInstallStatus {
+                case .notInstalled:
+                    Button("安装免密码助手") {
+                        Task { await state.installHelper() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(state.isHelperOperationInProgress || tunActive)
+                case .installed:
+                    Button("卸载") {
+                        Task { await state.uninstallHelper() }
+                    }
+                    .disabled(state.isHelperOperationInProgress || tunActive)
+                case .needsReinstall:
+                    Button("重新安装") {
+                        Task { await state.installHelper() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(state.isHelperOperationInProgress || tunActive)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var networkSections: some View {
+        Section("DNS 高级设置") {
+            TextField("国内 DoH", text: $dnsDraft.domesticDoH)
+            TextField("远程 DoH", text: $dnsDraft.remoteDoH)
+            TextField("引导解析器（可选）", text: $dnsDraft.bootstrapResolver)
+            Text("geosite-cn 使用国内 DoH 直连解析，其余域名走当前代理的远程 DoH。兼容性优先，默认不启用 fake-ip。系统代理模式只管理进入本地 mixed 代理的解析，不等同于接管 macOS 全局 DNS。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("引导解析器负责解析出站节点自身的域名，必须是无连接的 UDP。留空时跟随国内 DoH 的地址；填入独立 IP（如 114.114.114.114）可与国内 DoH 解耦，避免一台上游抖动同时影响节点域名与国内域名解析。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack {
+                Button("恢复默认") { dnsDraft = .defaults }
+                Button("放弃修改") { dnsDraft = state.dnsSettings }
+                    .disabled(dnsDraft == state.dnsSettings)
+                Spacer()
+                Button("应用 DNS") {
+                    Task {
+                        await state.applyDNSSettings(dnsDraft)
+                        dnsDraft = state.dnsSettings
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(state.isBusy || !state.isReady || dnsDraft == state.dnsSettings)
+            }
+        }
+
+        Section("内网 DNS 分流") {
+            Toggle("把内网域名交给内网 DNS 解析", isOn: lanDNSEnabledBinding)
+                .disabled(state.isBusy || !state.isReady)
+
+            LabeledContent("自动探测到的 DNS", value: detectedLANServersText)
+            LabeledContent("自动探测到的域名", value: detectedLANDomainsText)
+
+            TextField("内网 DNS 服务器（留空＝用自动探测）", text: $tunDraft.lanDNSServer)
+                .disabled(!state.tunSettings.lanDNSEnabled || state.isBusy || !state.isReady)
+
+            Text("关掉它，内网域名会落到 Fake-IP 拿到一个 240.x 假地址，然后整段被路由进代理出口——表现就是内网设备一直加载。探测在接管系统 DNS 之前进行；网络不下发搜索域时，用下面的列表手填内网域名后缀。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+
+        BypassListSection(
+            title: "内网域名后缀",
+            placeholder: "例如 corp.example.com 或 *.corp.example.com",
+            kind: .domain,
+            values: $tunDraft.lanDomainSuffixes
+        )
+
+        Section {
+            HStack {
+                if tunDraft != state.tunSettings {
+                    StatusBadge(text: "未应用", tint: .orange)
+                }
+                Spacer()
+                Button("应用内网 DNS 设置") {
+                    Task { await state.applyTunSettings(tunDraft) }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(state.isBusy || tunDraft == state.tunSettings)
+            }
+        } footer: {
+            Text("改动会重载内核并断开当前连接。")
+        }
+    }
+
+    @ViewBuilder
+    private var maintenanceSections: some View {
+        Section("备份与恢复") {
+            HStack {
+                Button {
+                    prepareBackupExport()
+                } label: {
+                    Label("导出配置与设置", systemImage: "square.and.arrow.up")
+                }
+                .disabled(isPreparingBackup)
+
+                Button {
+                    showsBackupImporter = true
+                } label: {
+                    Label("导入备份", systemImage: "square.and.arrow.down")
+                }
+                .disabled(state.isOn || state.isBusy)
+
+                if isPreparingBackup { ProgressView().controlSize(.small) }
+                Spacer()
+                if let backupNotice {
+                    StatusBadge(text: backupNotice, tint: .green)
+                }
+            }
+            Text("备份包含订阅链接、订阅配置快照、节点凭据和全部设置，可能含敏感信息；不包含日志、运行时密钥或恢复文件。导入前需先停止代理。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+
+        Section("数据与日志") {
+            LabeledContent("故障诊断") {
+                Menu {
+                    Button("完整版（自用排查，含内核日志）") { prepareDiagnosticExport(forSharing: false) }
+                    Button("可公开分享版（去掉日志、地址与名字）") { prepareDiagnosticExport(forSharing: true) }
+                } label: {
+                    Label("导出诊断", systemImage: "stethoscope")
+                }
+                .fixedSize()
+                .disabled(isPreparingDiagnostics)
+            }
+            LabeledContent("数据目录") {
+                Button("在 Finder 中显示") {
+                    NSWorkspace.shared.activateFileViewerSelecting([state.supportDirectory])
+                }
+            }
+            LabeledContent("日志目录") {
+                Button("在 Finder 中显示") {
+                    NSWorkspace.shared.activateFileViewerSelecting([
+                        state.supportDirectory.appending(path: "logs", directoryHint: .isDirectory)
+                    ])
+                }
+            }
+            Text(state.supportDirectory.path)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Text("两版都不含订阅原文、节点凭据或运行时密钥。完整版保留内核日志（访问过的网站与地址）和节点服务器地址，"
+                 + "只发给信任的人；要贴到公开场合请用可公开分享版。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+
+        Section("清理") {
+            LabeledContent("清理缓存", value: state.cacheSizeBytes > 0 ? AppState.formatBytes(state.cacheSizeBytes) : "—")
+            Button("执行清理") {
+                Task { await state.clearRegenerableCaches() }
+            }
+            .disabled(state.isOn || state.isBusy || state.cacheSizeBytes == 0)
+            Text("删除内核日志与规则集缓存，两者都会自动重新生成。设置、订阅缓存和节点不受影响。需先停止内核。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .task { await state.refreshCacheSize() }
+    }
     private func prepareBackupExport() {
         isPreparingBackup = true
         backupNotice = nil

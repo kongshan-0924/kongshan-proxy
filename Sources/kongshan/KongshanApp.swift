@@ -42,6 +42,7 @@ final class KongshanAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     let appState = AppState()
 
     private var mainWindowController: NSWindowController?
+    private var mainWindowContent: MainWindowContentHost?
     private var menuBarController: MenuBarController?
     private var preparingToTerminate = false
 
@@ -120,6 +121,8 @@ final class KongshanAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     func showMainWindow() {
         let controller = mainWindowController ?? makeMainWindowController()
         mainWindowController = controller
+        // 关窗时卸下了内容（见 `MainWindowContentHost`），重开时按上次的页面重建。
+        mainWindowContent?.attachIfNeeded()
         // 在激活之前捕获主屏（菜单栏 / 程序坞所在屏，也就是用户启动时看的那块）。
         // 一旦某个窗口被置为 key，NSScreen.main 会跟着窗口跑，就取不准了。
         let homeScreen = NSScreen.main ?? NSScreen.screens.first
@@ -158,6 +161,7 @@ final class KongshanAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
 
     func windowWillClose(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        mainWindowContent?.detach()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -201,9 +205,9 @@ final class KongshanAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         // 表现为「打不开 / 没反应」。改为每次打开时居中到主屏（见 showMainWindow）。
         window.isRestorable = false
         window.delegate = self
-        window.contentView = NSHostingView(
-            rootView: MainWindowView().environment(appState)
-        )
+        let content = MainWindowContentHost(state: appState)
+        mainWindowContent = content
+        window.contentView = content.hostingView
         window.center()
         return NSWindowController(window: window)
     }

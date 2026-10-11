@@ -60,6 +60,15 @@ public struct ProxyNode: Identifiable, Codable, Hashable, Sendable {
     /// pluginName="obfs-local"、pluginOptions="obfs=http;obfs-host=…"。缺省＝无插件。
     public var pluginName: String?
     public var pluginOptions: String?
+    /// TLS 的 ALPN（订阅的 `alpn`）。只给不带传输层（ws / grpc）的 TLS 节点用：
+    /// ws 走 HTTP/1.1 升级，协商成 h2 反而连不上；grpc 由内核自己定。
+    public var alpn: [String]?
+
+    /// 内核（sing-box 1.13）认得的 uTLS 指纹。订阅写了别的值不能原样交给内核——
+    /// 认不出的指纹会让整份配置校验失败，所有节点一起不能用。
+    public static let supportedUTLSFingerprints: Set<String> = [
+        "chrome", "firefox", "edge", "safari", "360", "qq", "ios", "android", "random", "randomized"
+    ]
 
     public init(
         id: UUID = UUID(),
@@ -85,7 +94,8 @@ public struct ProxyNode: Identifiable, Codable, Hashable, Sendable {
         realityPublicKey: String? = nil,
         realityShortID: String? = nil,
         pluginName: String? = nil,
-        pluginOptions: String? = nil
+        pluginOptions: String? = nil,
+        alpn: [String]? = nil
     ) {
         self.id = id
         self.sourceID = sourceID
@@ -111,6 +121,7 @@ public struct ProxyNode: Identifiable, Codable, Hashable, Sendable {
         self.realityShortID = realityShortID
         self.pluginName = pluginName
         self.pluginOptions = pluginOptions
+        self.alpn = alpn
     }
 }
 
@@ -205,16 +216,19 @@ extension ProxyNode {
     /// 这些条目是合法 outbound，但没有实际代理用途，界面上应作为订阅信息展示而非可选节点。
     public var isSubscriptionInfo: Bool {
         let value = name.trimmingCharacters(in: .whitespaces)
-        let keywords = [
-            "流量", "剩余", "到期", "过期", "重置", "官网", "套餐", "续费", "购买", "邀请",
-            "expire", "traffic", "reset", "remaining", "official", "renew", "plan"
-        ]
         let lowercased = value.lowercased()
-        if keywords.contains(where: { lowercased.contains($0) }) { return true }
-        // 形如 “491.89 G | 500.00 G” 的用量展示
+        if Self.subscriptionInfoKeywords.contains(where: { lowercased.contains($0) }) { return true }
+        // 形如 “491.89 G | 500.00 G” 的用量展示。没有分隔符的名字不跑正则——
+        // 节点列表每次重绘都可能问到几百个节点（真机 2026-10-08 的卡顿就是它）。
+        guard value.contains("|") || value.contains("/") else { return false }
         return value.range(
             of: "^[0-9.]+\\s*[KMGTP]?B?\\s*[|/]\\s*[0-9.]+\\s*[KMGTP]?B?$",
             options: [.regularExpression, .caseInsensitive]
         ) != nil
     }
+
+    private static let subscriptionInfoKeywords = [
+        "流量", "剩余", "到期", "过期", "重置", "官网", "套餐", "续费", "购买", "邀请",
+        "expire", "traffic", "reset", "remaining", "official", "renew", "plan"
+    ]
 }

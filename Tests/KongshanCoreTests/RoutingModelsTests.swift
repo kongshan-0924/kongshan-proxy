@@ -296,4 +296,17 @@ final class RoutingModelsTests: XCTestCase {
             XCTAssertEqual(error as? RoutingValidationError, .invalidCIDR("not-a-cidr"))
         }
     }
+
+    /// 真机 2026-10-10：绕过列表里填了裸 IP，「应用并重载内核」一直报 CIDR 无效。与强制代理一样补成主机 CIDR。
+    func testSettingsValidationNormalizesBareIPInBypassAndTunLists() throws {
+        var settings = RoutingSettings.defaults
+        settings.bypassCIDRs += [" 203.0.113.6 ", "2001:db8::6"]
+        settings.tunExcludeCIDRs += ["198.51.100.7"]
+
+        let validated = try settings.validated()
+
+        XCTAssertEqual(validated.bypassCIDRs.suffix(2), ["203.0.113.6/32", "2001:db8::6/128"])
+        XCTAssertEqual(validated.tunExcludeCIDRs.last, "198.51.100.7/32")
+        XCTAssertEqual(try validated.validated(), validated, "归一化后再校验不再变化，界面草稿同步后不会一直挂「有未应用的修改」")
+    }
 }

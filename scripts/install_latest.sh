@@ -95,7 +95,14 @@ try:
     data = json.load(open(sys.argv[1]))
 except Exception:
     sys.exit(1)
-names = {s.get("name") for s in data.get("services", []) if isinstance(s, dict)}
+# 属于其他网络位置的项（v0.2.12 起快照按位置记）要等切回那个位置才能还原，不算没收干净。
+try:
+    import plistlib
+    current_set = str(plistlib.load(open("/Library/Preferences/SystemConfiguration/preferences.plist", "rb")).get("CurrentSet", "")).split("/")[-1] or None
+except Exception:
+    current_set = None
+names = {s.get("name") for s in data.get("services", [])
+         if isinstance(s, dict) and (current_set is None or s.get("locationID") in (None, current_set))}
 sys.exit(1 if (names & current) else 0)
 ' "$snapshot" || return 1
     done

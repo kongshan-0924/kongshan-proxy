@@ -20,6 +20,16 @@ enum Theme {
     /// `GroupBox` 才立得起来。这也是 Xcode 检查器、邮件正文区用的那一档。
     /// 侧栏不受影响——它自己画半透明材质，不读窗口底色。
     static let windowBackgroundColor = NSColor.controlBackgroundColor
+
+    /// 卡片（`GroupBox`）的底与描边。
+    ///
+    /// 用户 2026-10-10：「整体风格可以再亮一点，模块层次感分清楚」。原先卡片是系统 `GroupBox` 的半透明灰、
+    /// 没有边；表单页（规则 / 设置等）又各自铺了一层灰底，同一个窗口里有的页白底灰卡、有的页灰底灰卡。
+    /// 现在统一：所有页面白底，卡片与表单分区同为极浅的底色，卡片再加一圈发丝描边划清边界。
+    /// 用 `primary` 的透明度而不是写死颜色，深色模式自动成立。
+    static let cardFill = Color.primary.opacity(0.035)
+    static let cardStroke = Color.primary.opacity(0.09)
+    static let cardRadius: CGFloat = 10
     static func delayColor(_ milliseconds: Int) -> Color {
         if milliseconds < 150 { return .green }
         if milliseconds < 350 { return .orange }
@@ -124,7 +134,8 @@ extension AppState {
     /// 接管方式（系统代理 / TUN）开关绑定。同样是三处逐字相同的复制。
     func takeoverModeBinding(_ mode: ProxyMode) -> Binding<Bool> {
         Binding(
-            get: { self.activeModes.contains(mode) },
+            // 切换期间显示目标位置：开关点下去就停在那里，而不是弹回旧位置、等几秒再跳过去。
+            get: { (self.modeTransitionTarget ?? self.activeModes).contains(mode) },
             set: { enabled in Task { await self.setMode(mode, enabled: enabled) } }
         )
     }
@@ -248,3 +259,32 @@ enum NodeSortOption: String, CaseIterable, Identifiable {
         }
     }
 }
+
+/// 卡片样式：浅底 + 发丝描边 + 圆角。整个主窗口统一用它（`MainWindowView` 在根上设置），
+/// 各页的 `GroupBox` 不必各自调。不用投影：描边已足够分出层次，投影在浅色底上反而发脏。
+struct CardGroupBoxStyle: GroupBoxStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            configuration.label
+                .font(.headline)
+            configuration.content
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.cardFill, in: RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous)
+                .strokeBorder(Theme.cardStroke, lineWidth: 0.5)
+        )
+    }
+}
+
+extension View {
+    /// 页面里的表单：分组样式 + **不画自己的灰底**，透出窗口的白底，与仪表盘等页一致。
+    /// 默认的分组表单会铺一层窗口灰，上面的分区也是灰的，整页灰压灰（用户截图里的规则页）。
+    func pageFormStyle() -> some View {
+        formStyle(.grouped)
+            .scrollContentBackground(.hidden)
+    }
+}
+

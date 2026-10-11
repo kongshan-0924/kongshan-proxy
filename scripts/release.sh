@@ -158,7 +158,17 @@ try:
 except Exception:
     # 读不动就当没释放干净，按老规矩拦下。
     sys.exit(1)
-names = {s.get("name") for s in data.get("services", []) if isinstance(s, dict)}
+# 属于其他网络位置的项（v0.2.12 起快照按位置记）此刻本就还原不了，等切回那个位置时还原，不算没收干净。
+import plistlib
+try:
+    prefs = plistlib.load(open("/Library/Preferences/SystemConfiguration/preferences.plist", "rb"))
+    current_set = str(prefs.get("CurrentSet", "")).split("/")[-1] or None
+except Exception:
+    current_set = None
+names = {
+    s.get("name") for s in data.get("services", [])
+    if isinstance(s, dict) and (current_set is None or s.get("locationID") in (None, current_set))
+}
 # 快照里还留着「当前就在列表里」的服务 = 确实没还原干净，拦下。
 sys.exit(1 if (names & current) else 0)
 ' "$snapshot" || return 1

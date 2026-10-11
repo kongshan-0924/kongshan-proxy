@@ -283,7 +283,9 @@ public enum ClashSubscriptionConverter {
                 tlsEnabled: true,
                 sni: sni,
                 skipCertificateVerification: skipCertificateVerification,
-                transport: transport
+                transport: transport,
+                utlsFingerprint: clientFingerprint(raw),
+                alpn: alpn(raw, transport: transport)
             )
 
         case "vmess":
@@ -299,7 +301,9 @@ public enum ClashSubscriptionConverter {
                 tlsEnabled: bool(raw, "tls"),
                 sni: sni,
                 skipCertificateVerification: skipCertificateVerification,
-                transport: transport
+                transport: transport,
+                utlsFingerprint: bool(raw, "tls") ? clientFingerprint(raw) : nil,
+                alpn: bool(raw, "tls") ? alpn(raw, transport: transport) : nil
             )
 
         case "vless":
@@ -316,8 +320,9 @@ public enum ClashSubscriptionConverter {
                 skipCertificateVerification: skipCertificateVerification,
                 transport: transport,
                 flow: optionalString(raw, "flow"),
-                utlsFingerprint: optionalString(raw, "client-fingerprint")
-                    ?? optionalString(raw, "fingerprint"),
+                // Clash 里 `fingerprint` 是证书指纹（钉证书用的 SHA-256），`client-fingerprint` 才是 uTLS；
+                // 旧写法把前者也当 uTLS 兜底，现在只收内核认得的指纹名，证书指纹自然被挡掉。
+                utlsFingerprint: clientFingerprint(raw) ?? supportedFingerprint(optionalString(raw, "fingerprint")),
                 realityPublicKey: optionalString(reality ?? [:], "public-key"),
                 realityShortID: optionalString(reality ?? [:], "short-id")
             )
@@ -342,6 +347,8 @@ public enum ClashSubscriptionConverter {
             )
 
         case "anytls":
+            // 订阅给 anytls 节点写了 `client-fingerprint` 与 `alpn`（机场的 125 个 anytls 节点都是 chrome + h2），
+            // 2026-10-07 之前一律没用上，内核以 Go 默认的握手特征去连。
             return ProxyNode(
                 sourceID: sourceID,
                 name: name,
@@ -351,7 +358,9 @@ public enum ClashSubscriptionConverter {
                 password: try requiredString(raw, "password"),
                 tlsEnabled: true,
                 sni: sni,
-                skipCertificateVerification: skipCertificateVerification
+                skipCertificateVerification: skipCertificateVerification,
+                utlsFingerprint: clientFingerprint(raw),
+                alpn: alpn(raw, transport: nil)
             )
 
         default:
@@ -415,6 +424,31 @@ public enum ClashSubscriptionConverter {
     private static func requiredString(_ raw: [String: Any], _ key: String) throws -> String {
         guard let value = optionalString(raw, key) else { throw NodeMappingError.missingField(key) }
         return value
+    }
+
+    /// 订阅的 `client-fingerprint`（uTLS）。只收内核认得的值，其余当没写。
+    private static func clientFingerprint(_ raw: [String: Any]) -> String? {
+        supportedFingerprint(optionalString(raw, "client-fingerprint"))
+    }
+
+    private static func supportedFingerprint(_ value: String?) -> String? {
+        guard let value = value?.lowercased(), ProxyNode.supportedUTLSFingerprints.contains(value) else { return nil }
+        return value
+    }
+
+    /// 订阅的 `alpn`（数组，或逗号分隔的字符串）。带 ws / grpc 传输层时不用，见 `ProxyNode.alpn`。
+    private static func alpn(_ raw: [String: Any], transport: TransportOptions?) -> [String]? {
+        guard transport == nil else { return nil }
+        let values: [String]
+        if let list = raw["alpn"] as? [String] {
+            values = list
+        } else if let text = raw["alpn"] as? String {
+            values = text.split(separator: ",").map(String.init)
+        } else {
+            return nil
+        }
+        let cleaned = values.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        return cleaned.isEmpty ? nil : cleaned
     }
 
     private static func optionalString(_ raw: [String: Any], _ key: String) -> String? {

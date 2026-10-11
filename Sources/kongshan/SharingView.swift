@@ -19,7 +19,7 @@ struct SharingView: View {
             configurationSection
             clientsSection
         }
-        .formStyle(.grouped)
+        .pageFormStyle()
         .navigationTitle("共享")
         .navigationSubtitle(subtitle)
         .onAppear {

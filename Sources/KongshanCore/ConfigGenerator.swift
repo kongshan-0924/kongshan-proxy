@@ -1136,6 +1136,9 @@ public enum ConfigGenerator {
             "server_name": node.sni ?? node.server,
             "insecure": node.skipCertificateVerification
         ]
+        if let alpn = node.alpn, !alpn.isEmpty {
+            value["alpn"] = alpn
+        }
         if let fingerprint = node.utlsFingerprint {
             value["utls"] = ["enabled": true, "fingerprint": fingerprint]
         }

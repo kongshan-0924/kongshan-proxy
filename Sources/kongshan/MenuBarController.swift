@@ -51,6 +51,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     func start() {
         guard throughputTask == nil else { return }
         statusItem.isVisible = true
+        observeStatus()
         throughputTask = Task { @MainActor [weak self] in
             while let self, !Task.isCancelled {
                 self.sampleThroughput()
@@ -59,6 +60,20 @@ final class MenuBarController: NSObject, NSMenuDelegate {
                 } catch {
                     break
                 }
+            }
+        }
+    }
+
+    /// 状态一变就重画图标与提示，不等两秒一次的速率采样：启停、切换接管方式时图标要立刻跟上。
+    private func observeStatus() {
+        withObservationTracking {
+            _ = state.menuBarIconState
+            _ = state.statusText
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self, self.throughputTask != nil else { return }
+                self.updateStatusButton(uploadText: self.uploadText, downloadText: self.downloadText)
+                self.observeStatus()
             }
         }
     }

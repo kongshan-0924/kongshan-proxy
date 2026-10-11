@@ -38,6 +38,7 @@ struct DashboardView: View {
             }
             .padding(20)
         }
+        .groupBoxStyle(CardGroupBoxStyle())
         .navigationTitle("仪表盘")
         .navigationSubtitle(subtitle)
         .onAppear {
@@ -79,9 +80,8 @@ struct DashboardView: View {
             .font(.callout)
             .lineLimit(1)
         ProtocolTag(value: selected.protocolType)
-        if let delay = state.delays[selected.id] {
-            DelayLabel(milliseconds: delay)
-        }
+        // 延迟单独成视图：测速时 `delays` 每秒回填好几批，在这里读会带着整页重算。
+        SelectedNodeDelayLabel(nodeID: selected.id)
     } else {
         Text("未启用或未选择节点")
             .font(.callout)
@@ -159,6 +159,12 @@ struct DashboardView: View {
 
                     Spacer()
 
+                    // 启停要几秒（TUN 要换 root 内核）：转个圈说明在干活，而不是界面卡住。
+                    if state.isBusy {
+                        ProgressView()
+                            .controlSize(.small)
+                            .help(state.statusText)
+                    }
                     modeToggle(title: ProxyMode.systemProxy.displayName, mode: .systemProxy)
                     modeToggle(title: ProxyMode.tun.displayName, mode: .tun)
 
@@ -191,7 +197,6 @@ struct DashboardView: View {
             .controlSize(.small)
             .disabled(state.isBusy || !state.isReady)
     }
-
 
     // MARK: - 指标
 
@@ -262,168 +267,275 @@ struct DashboardView: View {
                     .disabled(state.isBusy)
             }
             .padding(12)
-            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background(Color.blue.opacity(0.07), in: RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous).strokeBorder(Color.blue.opacity(0.15), lineWidth: 0.5))
         }
     }
 
-    /// 三块各自跟踪 Observation：速率每秒变，只更新标题；累计量和图表互不牵连。
+    /// 网络流量：标题行（范围切换 + 图例）、统计行、图表。
+    ///
+    /// 用户 2026-10-10 反馈这块「看起来一点用都没有」：原来只在仪表盘开着时才攒点、最多四分钟，
+    /// 每次打开都从空白开始；上传、下载两块面积叠在一起，也没有任何可读的数字。
+    /// 现在：近 4 分钟 / 近 1 小时两档（后台一直在攒）；下载画在横轴上方、上传画在下方；
+    /// 统计行给出该范围的峰值与均值；鼠标悬停显示那一刻的速率。
     private struct DashboardTrafficGroup: View {
+        @State private var range: TrafficRange = .recent
+
         var body: some View {
             GroupBox {
-                VStack(alignment: .leading, spacing: 10) {
-                    TrafficHeader()
-                    SessionTrafficRow()
-                    TrafficPlot()
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .center, spacing: 12) {
+                        Text("网络流量")
+                            .font(.headline)
+                        Spacer()
+                        TrafficLegend()
+                        Picker("范围", selection: $range) {
+                            ForEach(TrafficRange.allCases) { Text($0.title).tag($0) }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .controlSize(.small)
+                        .fixedSize()
+                    }
+                    TrafficStatsRow(range: range)
+                    TrafficPlot(range: range)
                 }
                 .padding(4)
             }
         }
     }
+}
 
-    private struct TrafficHeader: View {
-        var body: some View {
-            HStack(alignment: .center) {
-                Text("网络流量")
-                    .font(.headline)
-                Spacer()
-                HStack(spacing: 12) {
-                    legendDot(color: .blue, title: "上传")
-                    legendDot(color: .green, title: "下载")
-                }
+enum TrafficRange: String, CaseIterable, Identifiable {
+    case recent
+    case hour
+
+    var id: Self { self }
+    var title: String { self == .recent ? "近 4 分钟" : "近 1 小时" }
+}
+
+/// 图表用的统一数据点：近 4 分钟是四秒一个的瞬时速率，近 1 小时是每分钟的均值（附峰值）。
+struct TrafficChartPoint: Identifiable, Equatable {
+    let time: Date
+    let upload: Int64
+    let download: Int64
+    let uploadPeak: Int64
+    let downloadPeak: Int64
+
+    var id: Date { time }
+
+    @MainActor static func series(_ range: TrafficRange, state: AppState) -> [TrafficChartPoint] {
+        switch range {
+        case .recent:
+            state.trafficHistory.map {
+                TrafficChartPoint(time: $0.timestamp, upload: $0.upload, download: $0.download,
+                                  uploadPeak: $0.upload, downloadPeak: $0.download)
             }
-        }
-
-        private func legendDot(color: Color, title: String) -> some View {
-            HStack(spacing: 5) {
-                Circle().fill(color).frame(width: 7, height: 7)
-                Text(title)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    /// 本次会话累计流量。数据来自内核权威累计计数器，跨内核重启连续。
-    private struct SessionTrafficRow: View {
-        @Environment(AppState.self) private var state
-
-        var body: some View {
-            HStack(spacing: 10) {
-                Text("本次会话")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(Theme.bytesOrDash(state.sessionTotal))
-                    .font(.callout.weight(.semibold).monospacedDigit())
-                    .accessibilityLabel("本次会话共 \(Theme.bytesOrDash(state.sessionTotal))")
-                Divider().frame(height: 11)
-                sessionLeg(symbol: "arrow.up", tint: .blue, value: state.sessionUpload)
-                sessionLeg(symbol: "arrow.down", tint: .green, value: state.sessionDownload)
-                Spacer(minLength: 0)
-            }
-        }
-
-        private func sessionLeg(symbol: String, tint: Color, value: Int64) -> some View {
-            HStack(spacing: 4) {
-                Image(systemName: symbol)
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(tint)
-                    .accessibilityHidden(true)
-                Text(Theme.bytesOrDash(value))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+        case .hour:
+            state.trafficMinutes.map {
+                TrafficChartPoint(time: $0.start, upload: $0.uploadAverage, download: $0.downloadAverage,
+                                  uploadPeak: $0.uploadPeak, downloadPeak: $0.downloadPeak)
             }
         }
     }
+}
 
-    private struct TrafficPlot: View {
-        @Environment(AppState.self) private var state
+private struct TrafficLegend: View {
+    var body: some View {
+        HStack(spacing: 10) {
+            legend(symbol: "arrow.down", color: .green, title: "下载")
+            legend(symbol: "arrow.up", color: .blue, title: "上传")
+        }
+    }
 
-        var body: some View {
-            Chart {
-                ForEach(state.trafficHistory) { point in
-                    AreaMark(
-                        x: .value("时间", point.timestamp),
-                        y: .value("速率", point.download),
-                        series: .value("方向", "下载")
-                    )
-                    .foregroundStyle(
-                        .linearGradient(
-                            colors: [.green.opacity(0.3), .green.opacity(0.03)],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-                    .interpolationMethod(.linear)
+    private func legend(symbol: String, color: Color, title: String) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: symbol)
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(color)
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
 
-                    AreaMark(
-                        x: .value("时间", point.timestamp),
-                        y: .value("速率", point.upload),
-                        series: .value("方向", "上传")
-                    )
-                    .foregroundStyle(
-                        .linearGradient(
-                            colors: [.blue.opacity(0.26), .blue.opacity(0.03)],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-                    .interpolationMethod(.linear)
+/// 统计行：本次会话累计 + 所选范围的峰值与均值。
+private struct TrafficStatsRow: View {
+    @Environment(AppState.self) private var state
+    let range: TrafficRange
 
-                    LineMark(
-                        x: .value("时间", point.timestamp),
-                        y: .value("速率", point.download),
-                        series: .value("方向", "下载线")
-                    )
-                    .foregroundStyle(.green)
-                    .lineStyle(StrokeStyle(lineWidth: 1.6))
-                    .interpolationMethod(.linear)
+    var body: some View {
+        let points = TrafficChartPoint.series(range, state: state)
+        let downPeak = points.map(\.downloadPeak).max() ?? 0
+        let upPeak = points.map(\.uploadPeak).max() ?? 0
+        let downAverage = points.isEmpty ? 0 : points.map(\.download).reduce(0, +) / Int64(points.count)
+        let upAverage = points.isEmpty ? 0 : points.map(\.upload).reduce(0, +) / Int64(points.count)
+        HStack(alignment: .top, spacing: 0) {
+            stat(title: "本次会话", value: Theme.bytesOrDash(state.sessionTotal),
+                 detail: "↓ \(Theme.bytesOrDash(state.sessionDownload))  ↑ \(Theme.bytesOrDash(state.sessionUpload))")
+            Divider().frame(height: 34).padding(.horizontal, 14)
+            stat(title: "峰值", value: "↓ \(Theme.rateOrDash(downPeak))", detail: "↑ \(Theme.rateOrDash(upPeak))")
+            Divider().frame(height: 34).padding(.horizontal, 14)
+            stat(title: "均值", value: "↓ \(Theme.rateOrDash(downAverage))", detail: "↑ \(Theme.rateOrDash(upAverage))")
+            Spacer(minLength: 0)
+        }
+    }
 
-                    LineMark(
-                        x: .value("时间", point.timestamp),
-                        y: .value("速率", point.upload),
-                        series: .value("方向", "上传线")
-                    )
-                    .foregroundStyle(.blue)
-                    .lineStyle(StrokeStyle(lineWidth: 1.6))
-                    .interpolationMethod(.linear)
-                }
+    private func stat(title: String, value: String, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.callout.weight(.semibold).monospacedDigit())
+                .lineLimit(1)
+            Text(detail)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+    }
+}
+
+/// 下载在横轴上方、上传在下方：两条曲线不再叠成一团，量级差很多时也都看得见形状。
+private struct TrafficPlot: View {
+    @Environment(AppState.self) private var state
+    let range: TrafficRange
+    @State private var hoverTime: Date?
+
+    var body: some View {
+        let points = TrafficChartPoint.series(range, state: state)
+        let hovered = hoverTime.flatMap { time in
+            points.min { abs($0.time.timeIntervalSince(time)) < abs($1.time.timeIntervalSince(time)) }
+        }
+        Chart {
+            ForEach(points) { point in
+                AreaMark(
+                    x: .value("时间", point.time),
+                    y: .value("速率", point.download),
+                    series: .value("方向", "下载")
+                )
+                .foregroundStyle(.green.opacity(0.22))
+                .interpolationMethod(.monotone)
+                LineMark(
+                    x: .value("时间", point.time),
+                    y: .value("速率", point.download),
+                    series: .value("方向", "下载线")
+                )
+                .foregroundStyle(.green)
+                .lineStyle(StrokeStyle(lineWidth: 1.5))
+                .interpolationMethod(.monotone)
+
+                AreaMark(
+                    x: .value("时间", point.time),
+                    y: .value("速率", -point.upload),
+                    series: .value("方向", "上传")
+                )
+                .foregroundStyle(.blue.opacity(0.2))
+                .interpolationMethod(.monotone)
+                LineMark(
+                    x: .value("时间", point.time),
+                    y: .value("速率", -point.upload),
+                    series: .value("方向", "上传线")
+                )
+                .foregroundStyle(.blue)
+                .lineStyle(StrokeStyle(lineWidth: 1.5))
+                .interpolationMethod(.monotone)
             }
-            .chartLegend(.hidden)
-            .chartYAxis {
-                AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { value in
-                    AxisGridLine().foregroundStyle(.quaternary)
-                    AxisValueLabel {
-                        if let bytes = value.as(Int64.self) {
-                            Text(bytes == 0 ? "0" : Theme.bytes(bytes))
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
+            if !points.isEmpty {
+                RuleMark(y: .value("零", 0))
+                    .foregroundStyle(.secondary.opacity(0.5))
+                    .lineStyle(StrokeStyle(lineWidth: 0.5))
+            }
+            if let hovered {
+                RuleMark(x: .value("时间", hovered.time))
+                    .foregroundStyle(.secondary.opacity(0.6))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                    .annotation(position: .top, alignment: .center, spacing: 4,
+                                overflowResolution: .init(x: .fit(to: .chart), y: .disabled)) {
+                        hoverCard(hovered)
                     }
-                }
             }
-            .chartXAxis {
-                AxisMarks(values: .automatic(desiredCount: 4)) {
-                    AxisGridLine().foregroundStyle(.quaternary)
-                    AxisValueLabel(format: .dateTime.hour().minute())
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .frame(height: 170)
-            .transaction { transaction in transaction.animation = nil }
-            .overlay {
-                if state.trafficHistory.isEmpty {
-                    VStack(spacing: 7) {
-                        Image(systemName: "chart.xyaxis.line")
-                            .font(.title3)
-                            .foregroundStyle(.tertiary)
-                        Text(state.isOn ? "等待内核推送流量数据" : "开启代理后显示实时速率")
-                            .font(.caption)
+        }
+        .chartLegend(.hidden)
+        .chartYAxis {
+            AxisMarks(position: .leading, values: .automatic(desiredCount: 5)) { value in
+                AxisGridLine().foregroundStyle(.quaternary)
+                AxisValueLabel {
+                    if let bytes = value.as(Int64.self) {
+                        Text(bytes == 0 ? "0" : Theme.rate(abs(bytes)))
+                            .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
                 }
             }
         }
+        .chartXAxis {
+            AxisMarks(values: .automatic(desiredCount: 5)) {
+                AxisGridLine().foregroundStyle(.quaternary)
+                AxisValueLabel(format: .dateTime.hour().minute())
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .chartOverlay { proxy in
+            GeometryReader { geometry in
+                Rectangle()
+                    .fill(.clear)
+                    .contentShape(Rectangle())
+                    .onContinuousHover { phase in
+                        switch phase {
+                        case let .active(location):
+                            guard let frame = proxy.plotFrame else { return }
+                            let x = location.x - geometry[frame].origin.x
+                            hoverTime = proxy.value(atX: x, as: Date.self)
+                        case .ended:
+                            hoverTime = nil
+                        }
+                    }
+            }
+        }
+        .frame(height: 190)
+        .transaction { transaction in transaction.animation = nil }
+        .overlay {
+            if points.isEmpty {
+                VStack(spacing: 7) {
+                    Image(systemName: "chart.xyaxis.line")
+                        .font(.title3)
+                        .foregroundStyle(.tertiary)
+                    Text(emptyText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private var emptyText: String {
+        guard state.isOn else { return "开启代理后显示实时速率" }
+        return range == .hour ? "每分钟记一个点，稍等一分钟" : "等待内核推送流量数据"
+    }
+
+    private func hoverCard(_ point: TrafficChartPoint) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(point.time, format: .dateTime.hour().minute().second())
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text("↓ \(Theme.rateOrDash(point.download))")
+                .foregroundStyle(.green)
+            Text("↑ \(Theme.rateOrDash(point.upload))")
+                .foregroundStyle(.blue)
+            if range == .hour {
+                Text("峰值 ↓ \(Theme.rateOrDash(point.downloadPeak))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .font(.caption.monospacedDigit().weight(.medium))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
     }
 }
 
@@ -728,5 +840,17 @@ extension DashboardLiveRatePair {
         #if DEBUG
         bodyEvaluations += 1
         #endif
+    }
+}
+
+/// 当前节点的延迟。只有它观察 `delays`。
+private struct SelectedNodeDelayLabel: View {
+    @Environment(AppState.self) private var state
+    let nodeID: UUID
+
+    var body: some View {
+        if let delay = state.delays[nodeID] {
+            DelayLabel(milliseconds: delay)
+        }
     }
 }

@@ -270,6 +270,30 @@ final class RenderSnapshotTests: XCTestCase {
             name: "dashboard-wide",
             size: CGSize(width: 1240, height: 700)
         )
+        // 流量图：下载在上、上传在下，统计行给峰值与均值。数据是合成的一段起伏。
+        let end = Date(timeIntervalSince1970: 1_790_000_000)
+        running.applyTrafficSnapshotFixture(
+            minutes: (0..<60).map { index in
+                let wave = Int64(abs(sin(Double(index) / 6)) * 3_000_000)
+                return TrafficMinute(
+                    start: end.addingTimeInterval(Double(index - 60) * 60),
+                    uploadAverage: wave / 12, downloadAverage: wave,
+                    uploadPeak: wave / 6, downloadPeak: wave * 2
+                )
+            },
+            recent: (0..<60).map { index in
+                let wave = Int64(abs(sin(Double(index) / 5)) * 4_000_000) + 120_000
+                return TrafficPoint(
+                    timestamp: end.addingTimeInterval(Double(index - 60) * 4),
+                    upload: wave / 10, download: wave
+                )
+            }
+        )
+        render(
+            DashboardView().environment(running),
+            name: "dashboard-traffic",
+            size: CGSize(width: 1000, height: 820)
+        )
         // 此前三页从未进过快照：连接、消息、设置。设置页尤其长，塌了没人看得见。
         render(
             ConnectionsView().environment(running),
@@ -332,17 +356,13 @@ final class RenderSnapshotTests: XCTestCase {
                 BypassListSection(
                     title: "绕过域名（直连）",
                     placeholder: "例如 *.local 或 example.com",
-                    addTitle: "添加域名",
-                    deleteHelp: "删除域名",
-                    identity: "bypass-domain",
+                    kind: .domain,
                     values: $settings.bypassDomains
                 )
                 BypassListSection(
                     title: "绕过 IP / CIDR（直连）",
                     placeholder: "例如 192.168.0.0/16",
-                    addTitle: "添加 IP / CIDR",
-                    deleteHelp: "删除 CIDR",
-                    identity: "bypass-cidr",
+                    kind: .cidr,
                     values: $settings.bypassCIDRs
                 )
             }

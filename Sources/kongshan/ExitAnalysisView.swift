@@ -29,6 +29,7 @@ struct ExitAnalysisView: View {
                 report
             }
         }
+        .groupBoxStyle(CardGroupBoxStyle())
         .navigationTitle("出口分析")
         .navigationSubtitle(subtitle)
         .toolbar {

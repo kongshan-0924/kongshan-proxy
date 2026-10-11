@@ -114,7 +114,7 @@ struct NetworkSelfCheckView: View {
                 }
             }
         }
-        .formStyle(.grouped)
+        .pageFormStyle()
         .navigationSubtitle(subtitle)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -197,7 +197,7 @@ struct RouteHitTestView: View {
                 }
             }
         }
-        .formStyle(.grouped)
+        .pageFormStyle()
         .navigationSubtitle(result == nil ? "输入一个目标看它会走哪里" : "命中 \(result!.target)")
         .onChange(of: kind) { _, _ in result = nil }
         .onChange(of: input) { _, _ in result = nil }
@@ -316,7 +316,7 @@ struct DeepDiagnosticsView: View {
                      + "节点服务器地址和规则，只发给信任的人；可公开分享版再去掉这些，可以贴到公开场合。")
             }
         }
-        .formStyle(.grouped)
+        .pageFormStyle()
         .navigationSubtitle(state.isDiagnosticModeActive ? "详细日志已开启" : "按需开启详细日志")
         .fileExporter(
             isPresented: $showsExporter,

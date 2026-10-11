@@ -133,7 +133,63 @@ final class AppState {
 
     var status: Status = .off
     var nodes: [ProxyNode] = [] {
-        didSet { rebuildOutboundTagIndexIfNeeded(old: oldValue) }
+        didSet {
+            nodesRevision &+= 1
+            rebuildOutboundTagIndexIfNeeded(old: oldValue)
+        }
+    }
+
+    /// 当前配置节点的派生数据：节点或生效配置变了才重建。
+    ///
+    /// 真机 2026-10-08 开 TUN 后 CPU 采样：主线程在代理页左列给每个策略组算副标题，
+    /// 每次都把全部节点重新筛一遍「套餐信息」（每个节点名跑一次正则）。几十个策略组 × 462 个节点，
+    /// 测速回填一批、状态变一次就整套重算，界面跟着卡。
+    struct NodeCatalog {
+        let activeNodes: [ProxyNode]
+        let testable: [ProxyNode]
+        let testableByName: [String: ProxyNode]
+        let infoNames: Set<String>
+    }
+
+    /// 代理页的浏览位置。页面每次切回来都会重建，`@State` 留不住：
+    /// 用户反馈选完节点切走再回来总是回到列表顶部。只是界面记忆，不持久化、不参与观察。
+    @ObservationIgnored var proxyPageGroupName: String?
+    /// 每个策略组里用户最后点过的成员名；没点过时回到正在使用的那个。
+    @ObservationIgnored var proxyPageClickedMember: [String: String] = [:]
+
+    @ObservationIgnored private var nodesRevision = 0
+    @ObservationIgnored private var nodeCatalogCache: (revision: Int, configID: UUID?, catalog: NodeCatalog)?
+    @ObservationIgnored private var discoveredGroupsRevision = 0
+    @ObservationIgnored private var primaryGroupNameCache: (revision: Int, configID: UUID?, name: String?)?
+
+    /// 读 `nodes` 与 `activeConfigID` 照常登记观察，只把筛选结果缓存起来。
+    var nodeCatalog: NodeCatalog {
+        let currentNodes = nodes
+        let configID = activeConfigID
+        if let cached = nodeCatalogCache, cached.revision == nodesRevision, cached.configID == configID {
+            return cached.catalog
+        }
+        let active: [ProxyNode]
+        if let configID {
+            active = configID == Self.localConfigID
+                ? currentNodes.filter { $0.sourceID == nil }
+                : currentNodes.filter { $0.sourceID == configID }
+        } else {
+            active = []
+        }
+        var testable: [ProxyNode] = []
+        var infoNames = Set<String>()
+        for node in active {
+            if node.isSubscriptionInfo { infoNames.insert(node.name) } else { testable.append(node) }
+        }
+        let catalog = NodeCatalog(
+            activeNodes: active,
+            testable: testable,
+            testableByName: Dictionary(testable.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first }),
+            infoNames: infoNames
+        )
+        nodeCatalogCache = (nodesRevision, configID, catalog)
+        return catalog
     }
 
     /// 出站 tag → 节点名。连接页每行都要把内核回报的 `node-<uuid>` 翻成人看得懂的名字。
@@ -196,6 +252,13 @@ final class AppState {
     @ObservationIgnored private var connectionRateTracker = ConnectionRateTracker()
     private(set) var runtimeStartedAt: Date?
     private(set) var trafficHistory: [TrafficPoint] = []
+    /// 最近一小时的分钟级流量，只在仪表盘可见时发布（见 `TrafficMinuteAccumulator`）。
+    private(set) var trafficMinutes: [TrafficMinute] = []
+    @ObservationIgnored private var trafficMinuteAccumulator = TrafficMinuteAccumulator()
+    /// 与 `trafficHistory` 同节奏、但不管仪表盘开没开都在攒的近四分钟点：打开仪表盘时直接拿来铺图，
+    /// 不必再从空白等几分钟。不进 Observation。
+    @ObservationIgnored private var recentTrafficPoints: [TrafficPoint] = []
+    @ObservationIgnored private var recentTrafficSampleCount = 0
     @ObservationIgnored private var dashboardMetrics = DashboardMetricsCoordinator()
     /// 本次接管会话的累计流量。跨内核重启连续，停止接管时归零。
     /// 见 `SessionTrafficAccumulator` —— 数据源必须是内核的权威累计量，不能靠速率积分。
@@ -229,7 +292,9 @@ final class AppState {
     private(set) var speedTestProgress = SpeedTestProgress()
     @ObservationIgnored private var speedTestTask: Task<Void, Never>?
     /// 各订阅自带的策略组（来自 Clash 的 proxy-groups），键为订阅 ID。
-    var discoveredPolicyGroups: [UUID: [PolicyGroup]] = [:]
+    var discoveredPolicyGroups: [UUID: [PolicyGroup]] = [:] {
+        didSet { discoveredGroupsRevision &+= 1 }
+    }
     /// 各订阅自带的分流规则（Clash 的 rules:），键为订阅 ID。
     var discoveredRules: [UUID: [SubscriptionRule]] = [:]
     /// 各订阅的 rule-providers（被 RULE-SET 引用、且形态受支持的），键为订阅 ID。
@@ -250,14 +315,12 @@ final class AppState {
 
     /// 当前生效配置里的节点。订阅配置→该订阅的节点；本地配置→自建节点。
     var activeConfigNodes: [ProxyNode] {
-        guard let activeConfigID else { return [] }
-        if activeConfigID == Self.localConfigID { return manualNodes }
-        return nodes.filter { $0.sourceID == activeConfigID }
+        nodeCatalog.activeNodes
     }
 
     /// 可测速/可选择的节点：当前配置里排除机场塞进来的套餐信息条目。
     var testableNodes: [ProxyNode] {
-        activeConfigNodes.filter { !$0.isSubscriptionInfo }
+        nodeCatalog.testable
     }
 
     /// 当前配置自带的策略组（带真实成员）。本地配置没有，返回空。
@@ -604,6 +667,10 @@ final class AppState {
         requestedPage = page
     }
 
+    /// 主窗口最后停留的页面。关窗时窗口内容会被卸下（见 `MainWindowContentHost`），
+    /// 重新打开时从这里接着显示，而不是每次回到仪表盘。只是界面记忆，不参与观察。
+    @ObservationIgnored var lastMainWindowPage: SidebarPage = .dashboard
+
     func noteVisiblePage(_ title: String?) {
         visiblePageTitle = title
     }
@@ -744,6 +811,9 @@ final class AppState {
     @ObservationIgnored private var cpuSampleCapture: CPUSampleCapture
     /// 最近 15 分钟直连 / 经节点建连的成败（10 秒一格），DNS 突发告警据此区分「解析器坏了」与「整机断网」。
     @ObservationIgnored private var connectivityPulse = ConnectivityPulse()
+    /// 「连接建好了却一直收不到回应」的节点识别，见 `StalledConnectionDetector`。
+    @ObservationIgnored private var stalledConnectionDetector = StalledConnectionDetector()
+    @ObservationIgnored private var stallCheckTask: Task<Void, Never>?
     /// 睡眠 / 暗唤醒感知：醒来后的安静期里失败不进检测器，见 `SleepWakeTracker`。
     @ObservationIgnored private var sleepWakeTracker = SleepWakeTracker()
     /// 读两只单调时钟；测试替换成可控的，模拟一次睡眠。
@@ -1052,6 +1122,11 @@ final class AppState {
     }
 
     var statusText: String {
+        if let target = modeTransitionTarget, status == .starting || status == .stopping {
+            let ordered: [ProxyMode] = [.systemProxy, .tun]
+            let names = ordered.filter(target.contains).map(\.displayName).joined(separator: " + ")
+            return names.isEmpty ? "正在关闭…" : "正在切换到\(names)…"
+        }
         switch status {
         case .off:
             return "已关闭"
@@ -1105,6 +1180,13 @@ final class AppState {
         await start(modes: [preferredMode])
     }
 
+    /// 正在切换到的接管方式集合；不在切换时为 nil。
+    ///
+    /// 切换要先停旧内核再起新的（TUN 要 root 内核），中间状态先是「正在关闭」再是「正在启动」。
+    /// 用户 2026-10-10 反馈开了代理再开 TUN「要卡好久」：开关在这几秒里停在旧位置且变灰，
+    /// 文字还写着「正在关闭…」，看上去像点错了或卡死了。界面据此让开关立刻停在目标位置、写明在切换什么。
+    private(set) var modeTransitionTarget: Set<ProxyMode>?
+
     /// 开启或关闭单个接管方式；两者互不排斥，可同时生效。
     /// 变更需要重建内核配置，因此先完整停机再按新集合启动。
     func setMode(_ mode: ProxyMode, enabled: Bool) async {
@@ -1112,6 +1194,8 @@ final class AppState {
         var target = activeModes
         if enabled { target.insert(mode) } else { target.remove(mode) }
         guard target != activeModes else { return }
+        modeTransitionTarget = target
+        defer { modeTransitionTarget = nil }
 
         if status == .on {
             await stop(reason: enabled ? "切换接管方式（开启\(mode.displayName)）" : "用户关闭\(mode.displayName)")
@@ -1750,6 +1834,8 @@ final class AppState {
         suspendLogMonitoring()
         status = .stopping
         errorMessage = nil
+        // 与启动一样把耗时写进事件：「开了代理再开 TUN 要卡好久」，得先知道停这一半花了多久。
+        let stopBegan = ContinuousClock.now
 
         // 先还原系统代理再停内核，避免中间态把流量指向已消失的端口。
         // 代理/DNS 还原失败不应阻塞停内核——否则用户「无法退出」被卡死。
@@ -1818,7 +1904,7 @@ final class AppState {
         // 旧实现直接丢弃，消息页一条记录都没有。
         finishAnomalyWindows()
         await finishTUNLogMirror()
-        recordRuntimeEvent(title: "内核已停止", detail: reason, previousPID: previousPID)
+        recordRuntimeEvent(title: "内核已停止", detail: reason + "；耗时 \(Self.elapsedText(stopBegan.duration(to: .now)))", previousPID: previousPID)
         if !restoreFailures.isEmpty {
             // 快照已保留，重开 App 会自动重试；但在那之前网络是坏的，必须明确告知怎么手工恢复。
             errorMessage = "以下系统设置未能还原，网络可能不通，请手工清空或重开 kongshan 自动重试——"
@@ -2404,7 +2490,15 @@ final class AppState {
     /// 当前配置的主组名（机场轮辐主组，如 TAGSS）——用户在这里挑主节点。
     /// 与 ConfigGenerator 用同一套识别逻辑，保证 App 与生成的 config 一致。
     var primaryGroupName: String? {
-        ConfigGenerator.primaryGroupName(among: activeConfigPolicyGroups)
+        // 每个策略组的副标题都会问一次；成员上百时逐个转大写比较，同样只在策略组变了才重算。
+        let groups = activeConfigPolicyGroups
+        if let cached = primaryGroupNameCache,
+           cached.revision == discoveredGroupsRevision, cached.configID == activeConfigID {
+            return cached.name
+        }
+        let name = ConfigGenerator.primaryGroupName(among: groups)
+        primaryGroupNameCache = (discoveredGroupsRevision, activeConfigID, name)
+        return name
     }
 
     /// 代理页/托盘展示的策略：有机场自带策略组时只显示它们（用户在主组里挑主节点，对应 Stash）；
@@ -2421,13 +2515,11 @@ final class AppState {
     /// 有成员时保留原顺序，节点解析成节点、其余（子策略组 / DIRECT / REJECT）保留为引用。
     /// 机场塞进 proxies 的套餐信息条目（剩余流量/到期）不是可用节点，从选项里剔除。
     func groupOptions(_ group: PolicyGroup) -> [GroupOption] {
-        let pool = testableNodes
-        guard !group.members.isEmpty else { return pool.map(GroupOption.node) }
-        let byName = Dictionary(pool.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
-        let infoNames = Set(activeConfigNodes.filter(\.isSubscriptionInfo).map(\.name))
+        let catalog = nodeCatalog
+        guard !group.members.isEmpty else { return catalog.testable.map(GroupOption.node) }
         return group.members.compactMap { member in
-            if let node = byName[member] { return .node(node) }
-            if infoNames.contains(member) { return nil }
+            if let node = catalog.testableByName[member] { return .node(node) }
+            if catalog.infoNames.contains(member) { return nil }
             return .reference(member)
         }
     }
@@ -3613,6 +3705,9 @@ final class AppState {
 
     func startDashboardMonitoring() {
         dashboardMonitorConsumers.insert(.dashboard)
+        // 后台一直在攒的近况一次交给图表：打开仪表盘就有曲线，不从空白开始。
+        if trafficHistory.isEmpty, !recentTrafficPoints.isEmpty { trafficHistory = recentTrafficPoints }
+        if trafficMinutes != trafficMinuteAccumulator.minutes { trafficMinutes = trafficMinuteAccumulator.minutes }
         resumeDashboardMonitoringIfNeeded()
     }
 
@@ -4895,6 +4990,14 @@ final class AppState {
         if sessionDownload != sessionTraffic.download { sessionDownload = sessionTraffic.download }
     }
 
+    /// 离屏快照用：直接摆好流量历史，不必真跑内核推流。
+    func applyTrafficSnapshotFixture(minutes: [TrafficMinute], recent: [TrafficPoint]) {
+        trafficMinuteAccumulator = TrafficMinuteAccumulator(minutes: minutes)
+        recentTrafficPoints = recent
+        trafficHistory = []
+        trafficMinutes = []
+    }
+
     /// 测试用：仪表盘 Observation 作用域的行为测试要能从外面喂速率样本。
     func receiveTrafficForTesting(_ sample: TrafficSample) {
         receiveTraffic(sample)
@@ -4910,8 +5013,18 @@ final class AppState {
         }
         // trafficHistory 只有仪表盘的折线图在读，且每个点的时间戳都不同、等值判断救不了。
         // 会话累计量订阅的是同一条流但不看历史 → 仪表盘不在屏幕上时继续 append，
-        // 等于每秒白白失效一次视图图。代价是重开仪表盘时折线从空开始画（有占位态）。
+        // 等于每秒白白失效一次视图图。所以看不见时只往不参与观察的近况点与分钟桶里记，
+        // 重开仪表盘时一次交给图表（见 `startDashboardMonitoring`）。
         let chartVisible = windowContentIsVisible && dashboardMonitorConsumers.contains(.dashboard)
+        let sampledAt = now()
+        if trafficMinuteAccumulator.record(upload: sample.up, download: sample.down, at: sampledAt), chartVisible {
+            trafficMinutes = trafficMinuteAccumulator.minutes
+        }
+        recentTrafficSampleCount += 1
+        if recentTrafficSampleCount == 1 || recentTrafficSampleCount.isMultiple(of: 4) {
+            recentTrafficPoints.append(TrafficPoint(timestamp: sampledAt, upload: sample.up, download: sample.down))
+            if recentTrafficPoints.count > 60 { recentTrafficPoints.removeFirst(recentTrafficPoints.count - 60) }
+        }
         // 四秒一个趋势点；状态栏和速率数字仍按两秒发布，不影响可读性。
         guard dashboardMetrics.shouldPublishTrafficPoint(isDashboardVisible: chartVisible) else { return }
         publishCountTraffic += 1
@@ -5011,6 +5124,8 @@ final class AppState {
         coreMemory = 0
         coreVersion = "—"
         trafficHistory.removeAll(keepingCapacity: true)
+        recentTrafficPoints.removeAll(keepingCapacity: true)
+        recentTrafficSampleCount = 0
     }
 
     private func clearDashboardRuntime() {
@@ -5023,6 +5138,8 @@ final class AppState {
         coreVersion = "—"
         runtimeStartedAt = nil
         trafficHistory.removeAll(keepingCapacity: false)
+        recentTrafficPoints.removeAll(keepingCapacity: false)
+        recentTrafficSampleCount = 0
         // 会话累计只在**停止接管**时归零。内核重启（改设置 / 崩溃自愈 / 切配置）
         // 走的是 markRuntimeStarted，那里不能清——跨内核重启保持连续正是这个累计量的意义。
         sessionTraffic.reset()
@@ -6024,6 +6141,45 @@ final class AppState {
         if let report = chronicDNSStallDetector.flush(at: now(), physicalBytes: physicalBytes) {
             record(report)
         }
+        scheduleStallCheck()
+    }
+
+    /// 接管中每拍（15 秒）取一次连接快照，找「发出请求后一直收不到回应」的节点。
+    /// 没在接管时不取：不碰内核，也不增加空闲开销。上一次还没回来就跳过这一拍。
+    private func scheduleStallCheck() {
+        guard status == .on, !activeModes.isEmpty, let client = clashAPIClient, stallCheckTask == nil else { return }
+        stallCheckTask = Task { [weak self] in
+            let details = try? await client.connectionsSnapshot()
+            // 被取消（停止接管 / 换内核）时状态已由 `finishAnomalyWindows` 清掉，别把新排的任务覆盖了。
+            guard let self, !Task.isCancelled else { return }
+            self.stallCheckTask = nil
+            guard let details, self.status == .on else { return }
+            self.checkStalledConnections(details.map(StalledConnectionDetector.Sample.init))
+        }
+    }
+
+    /// internal：测试直接喂快照。刚睡醒、或同期直连也在大面积失败（本机断网）时，卡住与节点无关，判定作废。
+    func checkStalledConnections(_ samples: [StalledConnectionDetector.Sample]) {
+        let at = now()
+        let reports = stalledConnectionDetector.ingest(samples, at: at)
+        let direct = connectivityPulse.tallies(from: at.addingTimeInterval(-120), to: at).direct
+        if isRecoveringFromSleep() || (direct.attempts >= 3 && direct.failureRate >= 0.5) {
+            stalledConnectionDetector.discardPending()
+            return
+        }
+        for report in reports {
+            let name = activeConfigNodes.first { ConfigGenerator.outboundTag(for: $0) == report.outboundTag }?.name
+                ?? "当前节点"
+            recordCoalescedAlert(
+                key: "节点卡住|\(report.outboundTag)",
+                cooldown: Self.nodeAlertCooldown,
+                title: "节点连接卡住",
+                detail: "「\(name)」\(Self.spanText(from: report.windowStart, to: report.windowEnd))内有 \(report.stalled) 条加密连接"
+                    + "发出请求后 \(Int(StalledConnectionDetector.stallAge)) 秒以上没收到任何回应"
+                    + "（同期采样到收到回应的 \(report.healthy) 条）。多半是节点远端那一跳断了——这种情况内核不报错，只表现为卡。"
+                    + "可以换个节点；自建节点请查服务器到出口这一段"
+            )
+        }
     }
 
     /// 攒进当前指标窗口；跨过 `metricsInterval` 就落一行并开新窗口。
@@ -6500,6 +6656,10 @@ final class AppState {
 
     /// 内核停止前结算三个检测窗口。达不到阈值仍然不出报告，不会凭空多报。
     private func finishAnomalyWindows() {
+        // 连接 ID 跟着内核走，换了内核就全部作废。
+        stalledConnectionDetector.reset()
+        stallCheckTask?.cancel()
+        stallCheckTask = nil
         let at = now()
         if let report = outboundFailureDetector.finish(at: at) { record(report) }
         let physicalBytes = Self.physicalByteTotal()

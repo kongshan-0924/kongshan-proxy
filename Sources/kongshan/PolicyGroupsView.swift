@@ -14,24 +14,27 @@ struct PolicyGroupsView: View {
     @State private var showsTestURLSheet = false
 
     var body: some View {
+        // 本视图**不读 `delays` 与测速进度**：测速时它们每秒变好几次，读了就整页（含左列几十个策略组）
+        // 跟着重算。延迟只在右列 `PolicyMemberList` 里读，进度只在 `SpeedTestToolbarButton` 里读。
         let groups = state.displayPolicyGroups
-        let currentGroup = groups.first { $0.name == selectedGroupName }
+        let rememberedGroup = selectedGroupName ?? state.proxyPageGroupName
+        let currentGroup = groups.first { $0.name == rememberedGroup }
             ?? groups.first
             ?? PolicyGroup(name: "手动选择")
         let options = state.groupOptions(currentGroup)
         let selectedName = state.selectedMemberName(in: currentGroup.name, options: options)
-        let delays = state.delays
         let isSelectable = currentGroup.kind == .selector
 
         HStack(spacing: 0) {
             groupColumn(groups: groups, currentGroupName: currentGroup.name)
             Divider()
-            memberColumn(
-                currentGroup: currentGroup,
+            PolicyMemberList(
+                group: currentGroup,
                 options: options,
                 selectedName: selectedName,
-                delays: delays,
-                isSelectable: isSelectable
+                isSelectable: isSelectable,
+                searchText: searchText,
+                sortOption: sortOption
             )
             .frame(maxWidth: .infinity)
         }
@@ -63,22 +66,7 @@ struct PolicyGroupsView: View {
                 }
                 .help("节点排序：\(sortOption.rawValue)")
 
-                Button {
-                    if state.isTestingAllDelays {
-                        state.cancelDelayTests()
-                    } else {
-                        state.startAllDelayTests()
-                    }
-                } label: {
-                    if state.isTestingAllDelays {
-                        Label("取消 \(state.speedTestProgress.label)", systemImage: "xmark.circle")
-                    } else {
-                        Label("测速全部", systemImage: "gauge.with.needle")
-                    }
-                }
-                .keyboardShortcut("r", modifiers: .command)
-                .disabled(state.testableNodes.isEmpty)
-                .help(state.isTestingAllDelays ? "取消正在进行的测速（⌘R）" : "对当前配置的全部节点测速（⌘R）")
+                SpeedTestToolbarButton()
 
                 // 测速的「怎么测」与「测完做什么」都收进这一个菜单：此前它们是并排的
                 // 三个无标签灰图标（测速 / 选最快 / 参数），彼此形状相近、一眼分不清是干什么的，
@@ -123,7 +111,10 @@ struct PolicyGroupsView: View {
     // MARK: - 左列：策略
 
     private func groupColumn(groups: [PolicyGroup], currentGroupName: String) -> some View {
-        List(selection: Binding(get: { currentGroupName }, set: { selectedGroupName = $0 })) {
+        List(selection: Binding(get: { currentGroupName }, set: { name in
+            selectedGroupName = name
+            state.proxyPageGroupName = name
+        })) {
             ForEach(groups, id: \.name) { group in
                 groupRow(group).tag(group.name)
             }
@@ -204,6 +195,20 @@ struct PolicyGroupsView: View {
         if name.contains("prox") || name.contains("节点") || name.contains("global") { return ("globe.asia.australia.fill", .purple) }
         return ("rectangle.3.group.fill", .purple)
     }
+}
+
+/// 代理页右列：所选策略的成员。
+///
+/// 单独成一个视图，是为了把 `delays` 的观察关在这里：测速时延迟每秒回填好几批，
+/// 只有这一列需要跟着重绘。
+private struct PolicyMemberList: View {
+    @Environment(AppState.self) private var state
+    let group: PolicyGroup
+    let options: [GroupOption]
+    let selectedName: String?
+    let isSelectable: Bool
+    let searchText: String
+    let sortOption: NodeSortOption
 
     private func processedOptions(
         _ options: [GroupOption],
@@ -246,19 +251,17 @@ struct PolicyGroupsView: View {
         return ms
     }
 
-    private func memberColumn(
-        currentGroup: PolicyGroup,
-        options: [GroupOption],
-        selectedName: String?,
-        delays: [UUID: Int?],
-        isSelectable: Bool
-    ) -> some View {
+    var body: some View {
+        let currentGroup = group
+        let delays = state.delays
         let visibleOptions = processedOptions(options, delays: delays)
         // 选中即切换。不可选（内核自动选路）时给一个只读的常量绑定，列表不响应点击。
         let selection = Binding<String?>(
             get: { selectedName },
             set: { name in
-                guard isSelectable, let name, name != selectedName else { return }
+                guard isSelectable, let name else { return }
+                state.proxyPageClickedMember[currentGroup.name] = name
+                guard name != selectedName else { return }
                 Task { await state.select(optionName: name, in: currentGroup.name) }
             }
         )
@@ -276,16 +279,22 @@ struct PolicyGroupsView: View {
                 .padding(.vertical, 8)
                 Divider()
             }
-            List(selection: selection) {
-                ForEach(visibleOptions) { option in
-                    optionRow(
-                        option,
-                        isSelected: option.name == selectedName,
-                        delay: optionDelay(option, delays: delays),
-                        isSelectable: isSelectable
-                    )
-                    .tag(option.name)
+            ScrollViewReader { proxy in
+                List(selection: selection) {
+                    ForEach(visibleOptions) { option in
+                        optionRow(
+                            option,
+                            isSelected: option.name == selectedName,
+                            delay: optionDelay(option, delays: delays),
+                            isSelectable: isSelectable
+                        )
+                        .tag(option.name)
+                    }
                 }
+                // 回到本页或换策略组时定位：先找用户在这个组里最后点过的，没点过就找正在用的。
+                // 只在这两个时机滚，用户自己点选、测速回填都不动列表位置。
+                .onAppear { revealRemembered(in: visibleOptions, using: proxy) }
+                .onChange(of: currentGroup.name) { _, _ in revealRemembered(in: visibleOptions, using: proxy) }
             }
             // 不用交替行底色：节点通常只有几条到几十条，交替条纹会一路铺到列表底部，
             // 空白处画出一排"幽灵行"，也正是用户反馈「代理这一列比较暗」的来源。
@@ -409,6 +418,40 @@ struct PolicyGroupsView: View {
         }
     }
 
+    private func revealRemembered(in visible: [GroupOption], using proxy: ScrollViewProxy) {
+        guard searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let wanted = [state.proxyPageClickedMember[group.name], selectedName].compactMap { $0 }
+        guard let target = wanted.lazy.compactMap({ name in visible.first { $0.name == name } }).first else { return }
+        // 等列表（AppKit 表格承载）完成第一次布局再滚，否则行还不存在，scrollTo 静默无效。
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(80))
+            proxy.scrollTo(target.id, anchor: .center)
+        }
+    }
+}
+
+/// 「测速全部 / 取消」。测速进度每回填一批就变一次，单独成视图才不会带着整页重绘。
+private struct SpeedTestToolbarButton: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        Button {
+            if state.isTestingAllDelays {
+                state.cancelDelayTests()
+            } else {
+                state.startAllDelayTests()
+            }
+        } label: {
+            if state.isTestingAllDelays {
+                Label("取消 \(state.speedTestProgress.label)", systemImage: "xmark.circle")
+            } else {
+                Label("测速全部", systemImage: "gauge.with.needle")
+            }
+        }
+        .keyboardShortcut("r", modifiers: .command)
+        .disabled(state.testableNodes.isEmpty)
+        .help(state.isTestingAllDelays ? "取消正在进行的测速（⌘R）" : "对当前配置的全部节点测速（⌘R）")
+    }
 }
 
 extension OutboundMode {

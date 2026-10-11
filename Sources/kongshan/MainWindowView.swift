@@ -3,10 +3,47 @@ import KongshanCore
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// 主窗口的 SwiftUI 内容。窗口关闭时卸下、打开时重建。
+///
+/// 主窗口关掉后窗口对象仍留着（下次秒开），而 SwiftUI 不管窗口是否可见：**关着的窗口里，
+/// 页面照样跟着每次状态变化重算**（实测关窗后改 10 次状态，仪表盘 body 求值 10 次）。
+/// 关窗前停在代理页时，从状态栏断开代理，主线程要在看不见的地方把几十个策略组重算好几轮——
+/// 用户看到的就是「状态栏点断开后卡住、一直显示正在关闭」，打开主窗口却一切正常。
+@MainActor
+final class MainWindowContentHost {
+    let hostingView: NSHostingView<AnyView>
+    private let state: AppState
+    private(set) var isAttached = false
+
+    init(state: AppState) {
+        self.state = state
+        hostingView = NSHostingView(rootView: AnyView(EmptyView()))
+        attachIfNeeded()
+    }
+
+    /// 打开窗口前调用：按上次停留的页面重建内容。已挂着（窗口开着或只是最小化）时不动，免得丢掉页内状态。
+    func attachIfNeeded() {
+        guard !isAttached else { return }
+        hostingView.rootView = AnyView(MainWindowView(initialPage: state.lastMainWindowPage).environment(state))
+        isAttached = true
+    }
+
+    /// 窗口关闭时调用：换成空内容，页面不再观察任何状态。
+    func detach() {
+        guard isAttached else { return }
+        hostingView.rootView = AnyView(EmptyView())
+        isAttached = false
+    }
+}
+
 struct MainWindowView: View {
     @Environment(AppState.self) private var state
-    @State private var selection: SidebarPage? = .dashboard
+    @State private var selection: SidebarPage?
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+
+    init(initialPage: SidebarPage = .dashboard) {
+        _selection = State(initialValue: initialPage)
+    }
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -63,6 +100,7 @@ struct MainWindowView: View {
             .onDisappear { state.noteVisiblePage(nil) }
             .onChange(of: selection) { _, page in
                 state.noteVisiblePage((page ?? .dashboard).title)
+                state.lastMainWindowPage = page ?? .dashboard
             }
             // 空态按钮（「前往配置页」等）与 ⌘, 发来的跳转请求：切页、清号。
             //
@@ -174,7 +212,7 @@ private struct NativeNoticeToolbarItem: View {
                         .symbolRenderingMode(.palette)
                         .foregroundStyle(noticeColor, .primary)
                     Text("\(totalCount)")
-                        .font(.system(size: 11, weight: .bold).monospacedDigit())
+                        .font(.caption.weight(.bold).monospacedDigit())
                         .foregroundStyle(noticeColor)
                 }
             }
@@ -185,7 +223,7 @@ private struct NativeNoticeToolbarItem: View {
                         Text("通知提醒")
                             .font(.headline)
                         Text("\(totalCount)")
-                            .font(.system(size: 10, weight: .bold).monospacedDigit())
+                            .font(.caption2.weight(.bold).monospacedDigit())
                             .foregroundStyle(.white)
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1)
@@ -197,7 +235,7 @@ private struct NativeNoticeToolbarItem: View {
                             showingPopover = false
                         }
                         .buttonStyle(.plain)
-                        .font(.system(size: 11))
+                        .font(.caption)
                         .foregroundStyle(.secondary)
                     }
 
@@ -218,10 +256,10 @@ private struct NativeNoticeToolbarItem: View {
                     } label: {
                         HStack {
                             Text("前往消息中心查看全部")
-                                .font(.system(size: 11, weight: .medium))
+                                .font(.caption.weight(.medium))
                             Spacer()
                             Image(systemName: "arrow.right")
-                                .font(.system(size: 9, weight: .semibold))
+                                .font(.caption2.weight(.semibold))
                         }
                         .foregroundStyle(Color.accentColor)
                         .padding(.vertical, 2)
@@ -238,11 +276,11 @@ private struct NativeNoticeToolbarItem: View {
     private func noticeRow(text: String, symbol: String, tint: Color) -> some View {
         HStack(alignment: .top, spacing: 6) {
             Image(systemName: symbol)
-                .font(.system(size: 11))
+                .font(.caption)
                 .foregroundStyle(tint)
                 .padding(.top, 1)
             Text(text)
-                .font(.system(size: 11))
+                .font(.caption)
                 .lineLimit(3)
                 .foregroundStyle(.primary)
                 .textSelection(.enabled)
