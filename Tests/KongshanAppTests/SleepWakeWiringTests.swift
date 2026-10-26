@@ -94,4 +94,15 @@ final class SleepWakeWiringTests: XCTestCase {
         }
         XCTAssertEqual(state.finishAnomalyWindowsForTesting()?.failures, 30)
     }
+
+    func testSleepDiscardsPendingPreSleepWindowBeforePeriodicSettlement() {
+        let box = Box()
+        let (state, root) = makeState(box)
+        defer { try? FileManager.default.removeItem(at: root) }
+        for id in 0..<30 { state.receiveLog(failureEntry(id: id)) }
+        box.sleep(900)
+        state.tickSelfDiagnostics()
+        XCTAssertFalse(state.runtimeEvents.contains { $0.title == "节点建连失败偏多" })
+        XCTAssertNil(state.finishAnomalyWindowsForTesting())
+    }
 }

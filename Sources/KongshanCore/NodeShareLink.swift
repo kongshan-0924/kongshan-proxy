@@ -82,14 +82,14 @@ public enum NodeShareLink {
         let password = String(credentials[credentials.index(after: colon)...])
 
         let (host, port, query) = try splitHostPort(hostPart)
-        let plugin = pluginFields(from: query)
+        let plugin = try pluginFields(from: query)
         return ProxyNode(
             name: name ?? host,
             protocolType: .shadowsocks,
             server: host,
             port: port,
             password: password,
-            method: method,
+            method: try kernelShadowsocksMethod(method),
             pluginName: plugin?.name,
             pluginOptions: plugin?.options
         )
@@ -110,7 +110,7 @@ public enum NodeShareLink {
             tlsEnabled: true,
             sni: query["sni"] ?? query["peer"] ?? query["host"],
             skipCertificateVerification: isTruthy(query["allowInsecure"]) || isTruthy(query["insecure"]),
-            transport: transport(from: query)
+            transport: try transport(from: query)
         )
     }
 
@@ -141,8 +141,11 @@ public enum NodeShareLink {
             )
         case "grpc":
             options = TransportOptions(kind: .grpc, serviceName: path)
-        default:
+        case "tcp", "":
             options = nil
+        default:
+            // h2 / kcp / quic / httpupgrade 等内核这里没接：当成裸 TCP 导入会握手后不通，还看不出原因。
+            throw NodeShareLinkError.malformed("vmess 传输方式 \(network) 暂不支持")
         }
 
         let tls = (string(json["tls"]) ?? "").lowercased()
@@ -152,7 +155,7 @@ public enum NodeShareLink {
             server: host,
             port: port,
             uuid: string(json["id"]),
-            security: string(json["scy"]) ?? "auto",
+            security: try kernelVMessSecurity(string(json["scy"]) ?? "auto"),
             // alterID 现在恒为 0（AEAD）。老链接里的非 0 值照收，但不去猜。
             alterID: int(json["aid"]) ?? 0,
             tlsEnabled: tls == "tls" || tls == "reality",
@@ -177,12 +180,16 @@ public enum NodeShareLink {
             tlsEnabled: security == "tls" || security == "reality" || security == "xtls",
             sni: query["sni"] ?? query["peer"] ?? query["host"],
             skipCertificateVerification: isTruthy(query["allowInsecure"]) || isTruthy(query["insecure"]),
-            transport: transport(from: query),
-            flow: query["flow"].flatMap { $0.isEmpty ? nil : $0 },
-            utlsFingerprint: query["fp"].flatMap { $0.isEmpty ? nil : $0 },
+            transport: try transport(from: query),
+            flow: try kernelVLESSFlow(query["flow"]),
+            // 内核认不得的指纹（大小写不对、自造名字）会让整份配置校验失败、所有节点一起不能用：
+            // 只收认得的，其余当没写（Reality 节点由配置生成补默认 chrome）。
+            utlsFingerprint: query["fp"].map { $0.lowercased() }.flatMap {
+                ProxyNode.supportedUTLSFingerprints.contains($0) ? $0 : nil
+            },
             // Reality 的公钥/短 ID 在链接里是 pbk/sid。
             realityPublicKey: security == "reality" ? query["pbk"] : nil,
-            realityShortID: security == "reality" ? query["sid"] : nil
+            realityShortID: security == "reality" ? try realityShortID(query["sid"]) : nil
         )
     }
 
@@ -194,6 +201,10 @@ public enum NodeShareLink {
         // obfs 目前只有 salamander 一种；密码字段名两种写法都见过。
         let obfs = (query["obfs"] ?? "").lowercased()
         let obfsPassword = obfs.isEmpty ? nil : (query["obfs-password"] ?? query["obfsParam"])
+        // 写了 obfs 却没给密码：空密码内核直接拒（整份配置失败），不带 obfs 又连不上。
+        if !obfs.isEmpty, obfsPassword?.isEmpty ?? true {
+            throw NodeShareLinkError.malformed("hysteria2 开了 obfs 却没有 obfs 密码")
+        }
 
         return ProxyNode(
             name: name ?? host,
@@ -297,8 +308,9 @@ public enum NodeShareLink {
         return result
     }
 
-    private static func transport(from query: [String: String]) -> TransportOptions? {
-        switch (query["type"] ?? "tcp").lowercased() {
+    private static func transport(from query: [String: String]) throws -> TransportOptions? {
+        let type = (query["type"] ?? "tcp").lowercased()
+        switch type {
         case "ws", "websocket":
             let host = query["host"]
             return TransportOptions(
@@ -308,18 +320,68 @@ public enum NodeShareLink {
             )
         case "grpc":
             return TransportOptions(kind: .grpc, serviceName: query["serviceName"] ?? query["path"])
-        default:
+        case "tcp", "":
+            // tcp + headerType=http 是 HTTP 伪装，不是裸 TCP。
+            if (query["headerType"] ?? "none").lowercased() != "none" {
+                throw NodeShareLinkError.malformed("TCP 伪装 headerType=\(query["headerType"] ?? "") 暂不支持")
+            }
             return nil
+        default:
+            // httpupgrade / xhttp / h2 / kcp 等这里没接：当成裸 TCP 导入会握手后不通，还看不出原因。
+            throw NodeShareLinkError.malformed("传输方式 \(type) 暂不支持")
         }
     }
 
+    /// 枚举字段换成内核写法，内核不认的导入即拒：写进配置会让整份配置校验失败（见 `ProxyNode.supportedShadowsocksMethods`）。
+    private static func kernelShadowsocksMethod(_ value: String) throws -> String {
+        guard let method = ProxyNode.kernelShadowsocksMethod(value) else {
+            throw NodeShareLinkError.malformed("内核不支持的 SS 加密方式 \(value)")
+        }
+        return method
+    }
+
+    private static func kernelVMessSecurity(_ value: String) throws -> String {
+        guard let security = ProxyNode.kernelVMessSecurity(value) else {
+            throw NodeShareLinkError.malformed("内核不支持的 vmess 加密方式 \(value)")
+        }
+        return security
+    }
+
+    private static func kernelVLESSFlow(_ value: String?) throws -> String? {
+        guard let flow = ProxyNode.kernelVLESSFlow(value) else {
+            throw NodeShareLinkError.malformed("内核不支持的 flow \(value ?? "")")
+        }
+        return flow
+    }
+
+    /// Reality 短 ID：最多 16 位十六进制、偶数长度。写坏了内核会 hex 解码失败、整份配置不能用。
+    private static func realityShortID(_ value: String?) throws -> String? {
+        guard let value, !value.isEmpty else { return nil }
+        let hex = Set("0123456789abcdefABCDEF")
+        guard value.count <= 16, value.count.isMultiple(of: 2), value.allSatisfy(hex.contains) else {
+            throw NodeShareLinkError.malformed("Reality 短 ID 无效：\(value)")
+        }
+        return value
+    }
+
     /// SS 的 SIP003 插件。链接里写成 `plugin=obfs-local;obfs=http;obfs-host=x`。
-    private static func pluginFields(from query: [String: String]) -> (name: String, options: String)? {
+    ///
+    /// 插件名要换成内核认得的：SIP002 示例里的 `simple-obfs` 内核不认，原样写进去整份配置都会被拒。
+    /// 与 Clash 订阅路径一致，只接 obfs（与 v2ray-plugin）；其余插件报错，不静默生成坏节点。
+    private static func pluginFields(from query: [String: String]) throws -> (name: String, options: String)? {
         guard let raw = query["plugin"], !raw.isEmpty else { return nil }
         var parts = raw.split(separator: ";").map(String.init)
         guard let name = parts.first, !name.isEmpty else { return nil }
         parts.removeFirst()
-        return (name, parts.joined(separator: ";"))
+        let options = parts.joined(separator: ";")
+        switch name.lowercased() {
+        case "obfs-local", "simple-obfs", "obfs":
+            return ("obfs-local", options)
+        case "v2ray-plugin":
+            return ("v2ray-plugin", options)
+        default:
+            throw NodeShareLinkError.malformed("SS 插件 \(name) 暂不支持")
+        }
     }
 
     private static func isTruthy(_ value: String?) -> Bool {

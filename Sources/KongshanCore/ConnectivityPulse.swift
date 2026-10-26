@@ -33,6 +33,7 @@ public struct ConnectivityPulse: Sendable {
     /// 按连接 ID 去重：内核拨号开始与成功各写一行「outbound connection to」，不能算两次尝试。
     private var countedAttempts: [String: Date] = [:]
     private var countedFailures: [String: Date] = [:]
+    private var lastPrunedAt: Date?
 
     public init() {}
 
@@ -41,7 +42,10 @@ public struct ConnectivityPulse: Sendable {
         guard isDirect || OutboundFailureDetector.outboundTag(in: line.message) != nil else { return }
         let failed = OutboundFailureDetector.isFailedAttempt(line)
         guard failed || OutboundFailureDetector.isAttemptLine(line) else { return }
-        prune(before: date.addingTimeInterval(-Self.retention))
+        if lastPrunedAt == nil || date.timeIntervalSince(lastPrunedAt!) >= Self.bucketSize {
+            prune(before: date.addingTimeInterval(-Self.retention))
+            lastPrunedAt = date
+        }
 
         var attempt = false
         var failure = false
@@ -91,10 +95,9 @@ public struct ConnectivityPulse: Sendable {
         if let first = buckets.first, first.start < cutoff {
             buckets.removeAll { $0.start.addingTimeInterval(Self.bucketSize) < cutoff }
         }
-        if countedAttempts.count > 4_096 {
-            countedAttempts = countedAttempts.filter { $0.value >= cutoff }
-            countedFailures = countedFailures.filter { $0.value >= cutoff }
-        }
+        // 至多每 10 秒清一次；低流量也清，避免旧 ID 永久被视为已统计。
+        countedAttempts = countedAttempts.filter { $0.value >= cutoff }
+        countedFailures = countedFailures.filter { $0.value >= cutoff }
     }
 }
 

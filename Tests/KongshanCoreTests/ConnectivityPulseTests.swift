@@ -61,4 +61,26 @@ final class ConnectivityPulseTests: XCTestCase {
         // 样本太少：不下结论。
         XCTAssertEqual(DNSStallCause.classify(direct: T(attempts: 1, failures: 1), proxied: T(attempts: 2, failures: 0)), .undetermined)
     }
+
+    func testSustainedLogBurstDoesNotScanAllConnectionIDsForEveryLine() {
+        var pulse = ConnectivityPulse()
+        let lines = (0..<12_000).map { attempt($0, direct: false) }
+        let started = ContinuousClock.now
+        for (index, line) in lines.enumerated() {
+            pulse.ingest(line, at: origin.addingTimeInterval(Double(index) / 100))
+        }
+        let elapsed = started.duration(to: .now)
+        print("ConnectivityPulse 12000 lines: \(elapsed)")
+        XCTAssertLessThan(elapsed, .seconds(1))
+        XCTAssertEqual(pulse.tallies(from: origin, to: origin.addingTimeInterval(120)).proxied.attempts, 12_000)
+    }
+
+    func testConnectionIDCanBeCountedAgainAfterRetentionWithLowTraffic() {
+        var pulse = ConnectivityPulse()
+        pulse.ingest(failure(1, direct: true), at: origin)
+        let later = origin.addingTimeInterval(16 * 60)
+        pulse.ingest(failure(1, direct: true), at: later)
+        XCTAssertEqual(pulse.tallies(from: later, to: later.addingTimeInterval(10)).direct,
+                       .init(attempts: 1, failures: 1))
+    }
 }

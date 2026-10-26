@@ -149,6 +149,11 @@ final class AppState {
         let testable: [ProxyNode]
         let testableByName: [String: ProxyNode]
         let infoNames: Set<String>
+        /// 「未列成员 = 全部节点」的组共用这一份选项，不必每次求值都对数百个节点重新 map。
+        let allTestableOptions: [GroupOption]
+        /// 节点名解析（国旗、倍率等）：每次解析都要做小写化、关键词匹配和三个正则，
+        /// 代理页每行渲染、测速每批回填都会重算，按节点缓存。
+        let metadataByNodeID: [UUID: NodeNameMetadata]
     }
 
     /// 代理页的浏览位置。页面每次切回来都会重建，`@State` 留不住：
@@ -186,7 +191,10 @@ final class AppState {
             activeNodes: active,
             testable: testable,
             testableByName: Dictionary(testable.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first }),
-            infoNames: infoNames
+            infoNames: infoNames,
+            allTestableOptions: testable.map(GroupOption.node),
+            metadataByNodeID: Dictionary(testable.map { ($0.id, NodeNameMetadata.parse($0.name)) },
+                                         uniquingKeysWith: { first, _ in first })
         )
         nodeCatalogCache = (nodesRevision, configID, catalog)
         return catalog
@@ -296,7 +304,11 @@ final class AppState {
         didSet { discoveredGroupsRevision &+= 1 }
     }
     /// 各订阅自带的分流规则（Clash 的 rules:），键为订阅 ID。
-    var discoveredRules: [UUID: [SubscriptionRule]] = [:]
+    var discoveredRules: [UUID: [SubscriptionRule]] = [:] {
+        didSet { discoveredRulesRevision &+= 1 }
+    }
+    @ObservationIgnored private var discoveredRulesRevision = 0
+    @ObservationIgnored private var subscriptionRulesCache: (revision: Int, configID: UUID, rules: [SubscriptionRule])?
     /// 各订阅的 rule-providers（被 RULE-SET 引用、且形态受支持的），键为订阅 ID。
     var discoveredRuleProviders: [UUID: [SubscriptionRuleProvider]] = [:]
     /// 各订阅 `MATCH` 的目标（策略组名 / DIRECT / REJECT），键为订阅 ID。
@@ -330,10 +342,19 @@ final class AppState {
     }
 
     /// 当前配置自带的分流规则（只读展示 + 写入运行配置）。
+    ///
+    /// 去重结果按 `discoveredRules` 的修改次数缓存：订阅规则常有三千多条，规则页每次求值
+    /// （含搜索框每敲一个字）都重新去重一遍是白工。读 `discoveredRules` 照常登记观察。
     var subscriptionRules: [SubscriptionRule] {
         guard let activeConfigID, activeConfigID != Self.localConfigID else { return [] }
+        let source = discoveredRules[activeConfigID] ?? []
+        if let cached = subscriptionRulesCache, cached.revision == discoveredRulesRevision, cached.configID == activeConfigID {
+            return cached.rules
+        }
         var seen = Set<String>()
-        return (discoveredRules[activeConfigID] ?? []).filter { seen.insert($0.id).inserted }
+        let rules = source.filter { seen.insert($0.id).inserted }
+        subscriptionRulesCache = (discoveredRulesRevision, activeConfigID, rules)
+        return rules
     }
 
     /// 当前配置的 rule-providers。
@@ -653,6 +674,8 @@ final class AppState {
     /// 只挡"没人看的视图状态"，不挡数据流本身：会话累计量与连接速率跟踪都要
     /// 连续采样才算得准，两者不受此标志影响。
     @ObservationIgnored private var windowContentIsVisible = true
+    @ObservationIgnored private var networkPathIsAvailable = true
+    @ObservationIgnored private var latestConnectionSnapshot: ConnectionSnapshot?
     /// 主窗口当前停在哪个页面。**只为归因存在**，不参与任何渲染，故 ObservationIgnored。
     /// 2026-09-01 那次 21 小时 CPU 异常里，记录只说得出「主线程 96%、窗口可见」，
     /// 说不出是哪个页面在渲染，于是无法进一步定位。
@@ -807,6 +830,10 @@ final class AppState {
     /// 仪表盘的 `/connections` 订阅单独存放，才能在连接页开合时精确接管 / 交还，
     /// 不用把流量流和版本查询一起重启。
     @ObservationIgnored private var dashboardConnectionTask: Task<Void, Never>?
+    /// 上面那条订阅当前的推送间隔（毫秒），仪表盘开合时据此决定要不要换档重订。
+    @ObservationIgnored private var dashboardConnectionInterval = 0
+    /// 连接页那条流最近一帧的明细。连接页开着时卡顿检测直接用它，不再单独拉一次 `/connections`。
+    @ObservationIgnored private var latestFeedDetails: [ConnectionDetail]?
     /// CPU 异常持续时给自己采调用栈，见 `CPUSampleCapture`。目录在 init 里按 storage 定。
     @ObservationIgnored private var cpuSampleCapture: CPUSampleCapture
     /// 最近 15 分钟直连 / 经节点建连的成败（10 秒一格），DNS 突发告警据此区分「解析器坏了」与「整机断网」。
@@ -836,6 +863,9 @@ final class AppState {
     private(set) var helperInstallStatus: HelperInstallStatus = .notInstalled
     /// 助手安装/卸载进行中（UI 禁用按钮）。
     private(set) var isHelperOperationInProgress = false
+    /// 最近一次安装 / 卸载助手失败的原因，设置页就地显示。只记进警告列表的话，用户在设置页点了按钮
+    /// 看不到任何变化（2026-10-26 iMac：内核没签名、安装在弹授权框前就失败，表现为「点了没反应」）。
+    private(set) var helperOperationError: String?
 
     init(
         storage: Storage = Storage(),
@@ -988,7 +1018,7 @@ final class AppState {
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor [weak self] in
-                    self?.windowContentIsVisible = NSApplication.shared.occlusionState.contains(.visible)
+                    self?.setWindowContentVisible(NSApplication.shared.occlusionState.contains(.visible))
                 }
             })
         }
@@ -1190,22 +1220,35 @@ final class AppState {
     /// 开启或关闭单个接管方式；两者互不排斥，可同时生效。
     /// 变更需要重建内核配置，因此先完整停机再按新集合启动。
     func setMode(_ mode: ProxyMode, enabled: Bool) async {
-        guard !isBusy, isReady else { return }
+        // 切换期间（停与启之间、落盘时）不是 busy 态，连点开关会再进来一次、两条 start 交错。
+        guard !isBusy, isReady, modeTransitionTarget == nil else { return }
         var target = activeModes
         if enabled { target.insert(mode) } else { target.remove(mode) }
         guard target != activeModes else { return }
         modeTransitionTarget = target
         defer { modeTransitionTarget = nil }
 
-        if status == .on {
-            await stop(reason: enabled ? "切换接管方式（开启\(mode.displayName)）" : "用户关闭\(mode.displayName)")
+        // 停了马上要启时，停止末尾那轮残留清扫挪到启动之后、放后台跑：清扫只扫「此刻没在用」的那一类
+        // （系统代理没开才扫代理残留、TUN 没开才扫 DNS 残留），启动后再扫语义不变且更准，
+        // 开关也不用再等一轮逐个网络服务的 networksetup。单纯关闭接管仍在停止时清扫。
+        let restartsAfterStop = !target.isEmpty
+        // `.failed` 但还留着接管（停 TUN 失败等）时也要先停：start 的守卫要求 activeModes 为空，
+        // 不先停的话开关点了没有任何反应。
+        if status == .on || !activeModes.isEmpty {
+            await stop(
+                reason: enabled ? "切换接管方式（开启\(mode.displayName)）" : "用户关闭\(mode.displayName)",
+                sweepsResidue: !restartsAfterStop
+            )
             guard status == .off, activeModes.isEmpty else { return }
         }
-        guard !target.isEmpty else { return }
+        guard restartsAfterStop else { return }
 
         preferredMode = target.contains(.tun) ? .tun : .systemProxy
         try? await persistSettings()
         await start(modes: target)
+        Task { [weak self] in
+            _ = await self?.sweepTakeoverResidue(trigger: "切换接管方式")
+        }
     }
 
     /// 启动内核。`modes` 为空表示只跑内核（本地 mixed inbound + Clash API），
@@ -1217,9 +1260,10 @@ final class AppState {
             return
         }
 
+        // 守卫一过就占住状态，再做任何 await：中间让出主线程的话，第二次调用也能通过上面的守卫。
+        status = .starting
         await cancelCoreExitMonitoring()
         crashRestartLimiter.reset()
-        status = .starting
         errorMessage = nil
         // 启动耗时写进事件：用户抱怨"切模式太慢"时，得先有数才知道该优化哪一段。
         // 用单调时钟，不受系统时间调整影响。
@@ -1803,7 +1847,7 @@ final class AppState {
             : "；另外这些系统设置未能还原，请手工清空或重开 kongshan 自动重试：" + failures.joined(separator: "；")
     }
 
-    func stop(reason: String = "用户停止接管") async {
+    func stop(reason: String = "用户停止接管", sweepsResidue: Bool = true) async {
         // 崩溃自愈期间 isBusy 包含 .starting，旧实现的 guard 会直接 return，用户点停止无响应。
         // 这里特殊放行：置位 stopRequestedDuringCrashHandling 让 handleUnexpectedCoreExit 中止，
         // 然后继续走正常 stop 流程（还原系统代理 / DNS、停内核）。
@@ -1829,10 +1873,11 @@ final class AppState {
             return
         }
         let previousPID = monitoredCorePID
+        // 与 start 一样：先占住状态再 await，第二次停止调用过不了守卫。
+        status = .stopping
         await cancelCoreExitMonitoring()
         suspendDashboardMonitoring()
         suspendLogMonitoring()
-        status = .stopping
         errorMessage = nil
         // 与启动一样把耗时写进事件：「开了代理再开 TUN 要卡好久」，得先知道停这一半花了多久。
         let stopBegan = ContinuousClock.now
@@ -1914,7 +1959,10 @@ final class AppState {
         // （竞态、快照缺项、还原写入未落地），在这里都能按"指向谁"兜住。
         // 此前残留清扫只在「启动」和「网络变化」跑，于是停止后的残留要等到下次启动才被发现——
         // 2026-09-16 那次正是因此从"瞬时竞态"放大成"五分钟全网不通"。
-        _ = await sweepTakeoverResidue(trigger: "停止")
+        // 只有「停了马上要启」的调用方（见 `setMode`）会关掉它，并在启动后补扫。
+        if sweepsResidue {
+            _ = await sweepTakeoverResidue(trigger: "停止")
+        }
     }
 
     func switchMode(to mode: ProxyMode) async {
@@ -1950,6 +1998,12 @@ final class AppState {
     }
 
     func prepareForTermination() async -> Bool {
+        // 启动 / 停止 / 热重载进行中点退出：先等它落定（最多 20 秒）。启动中的 activeModes 还是空的，
+        // 不等的话下面按「没在接管」收尾，那边随后写上的系统代理、起来的 root 内核就没人还原了。
+        let settleDeadline = ContinuousClock.now + .seconds(20)
+        while isBusy, ContinuousClock.now < settleDeadline {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
         // 退出前先冲掉未完成的防抖落盘（用户切节点后 500ms 内退出会丢最后一次选择）。
         await flushPersistSettingsIfNeeded()
         finishSelfDiagnostics()
@@ -1985,7 +2039,11 @@ final class AppState {
     }
 
     func importSubscription(url: URL, name: String? = nil, autoUpdate: Bool = true) async {
-        guard !isBusy else { return }
+        // 静默返回的话，导入弹层看 errorMessage 为空会当成成功，关掉并清空链接。
+        guard !isBusy else {
+            errorMessage = "正在启停或应用设置，请稍后再导入"
+            return
+        }
         // S4：订阅链接几乎都把鉴权令牌放在 URL 里。走明文 http 时，同网络上的任何人
         // 都能看到这个令牌——拿到它就等于拿到这份订阅的全部节点与凭据。
         // 不阻止（有些自建面板确实只有 http），但必须说清楚。
@@ -2404,18 +2462,24 @@ final class AppState {
     func addManualNodes(_ parsed: [ProxyNode]) async {
         guard !parsed.isEmpty else { return }
         let previousActiveContent = activeRuntimeContent
-        nodes.append(contentsOf: parsed.map { node in
+        let previousActiveConfigID = activeConfigID
+        let added = parsed.map { node in
             var copy = node
             copy.sourceID = nil
             copy.id = UUID()
             return copy
-        })
+        }
+        nodes.append(contentsOf: added)
         ensureActiveConfig()
         do {
             try await persistManualNodes()
             try await persistSettings()
             errorMessage = nil
         } catch {
+            // 没存下就撤回：留在内存里的话，用户照提示重试一次就多出一份重复节点。
+            let addedIDs = Set(added.map(\.id))
+            nodes.removeAll { addedIDs.contains($0.id) }
+            activeConfigID = previousActiveConfigID
             errorMessage = "保存自建节点失败：\(error.localizedDescription)"
             return
         }
@@ -2424,14 +2488,23 @@ final class AppState {
 
     func addManual(_ form: ManualHysteria2) async {
         let previousActiveContent = activeRuntimeContent
+        let previousActiveConfigID = activeConfigID
+        var addedID: UUID?
         do {
-            nodes.append(try form.makeNode())
+            let node = try form.makeNode()
+            nodes.append(node)
+            addedID = node.id
             // 没有其他配置时，本地节点配置自动生效。
             ensureActiveConfig()
             try await persistManualNodes()
             try await persistSettings()
             errorMessage = nil
         } catch {
+            // 没存下就撤回，见 addManualNodes。
+            if let addedID {
+                nodes.removeAll { $0.id == addedID }
+                activeConfigID = previousActiveConfigID
+            }
             errorMessage = error.localizedDescription
             return
         }
@@ -2516,7 +2589,7 @@ final class AppState {
     /// 机场塞进 proxies 的套餐信息条目（剩余流量/到期）不是可用节点，从选项里剔除。
     func groupOptions(_ group: PolicyGroup) -> [GroupOption] {
         let catalog = nodeCatalog
-        guard !group.members.isEmpty else { return catalog.testable.map(GroupOption.node) }
+        guard !group.members.isEmpty else { return catalog.allTestableOptions }
         return group.members.compactMap { member in
             if let node = catalog.testableByName[member] { return .node(node) }
             if catalog.infoNames.contains(member) { return nil }
@@ -2701,6 +2774,7 @@ final class AppState {
                         // （同一份 payload 不解析两遍，见 connectionFeedStream 的说明）。
                         // 会话累计量是权威数据，必须每一帧都喂。
                         self.receiveConnectionSnapshot(feed.snapshot)
+                        self.latestFeedDetails = feed.details
                         // 速率跟踪必须每一帧都喂，否则速率算不准；排序和赋值可以省。
                         let tracked = self.connectionRateTracker.update(feed.details, at: self.now())
                         guard self.windowContentIsVisible else { continue }
@@ -2750,6 +2824,7 @@ final class AppState {
         connectionsTask?.cancel()
         connectionsTask = nil
         connectionRateTracker.reset()
+        latestFeedDetails = nil
         connections = []   // 离开监控页即清空，下次进入重新拉取
         // 总量的供给交还给仪表盘那条订阅——否则页面一关，会话累计流量就没人喂了。
         connectionsFeedActive = false
@@ -2843,7 +2918,7 @@ final class AppState {
     }
 
     /// TCP 握手测速时直连解析节点域名用的 DNS：与内核解析节点域名的 `dns-bootstrap` 同一上游
-    /// （用户指定的引导解析器，或国内 DoH 的 IP），再加两台公共 DNS 与探测到的内网 DNS 兜底
+    /// （用户指定的引导解析器，或国内 DNS 的 IP），再加两台公共 DNS 与探测到的内网 DNS 兜底
     /// （公司网络可能不放行外部 DNS）。都是 IP，不会再去问系统解析器。
     var directPingResolvers: [String] {
         var servers: [String] = []
@@ -3110,8 +3185,11 @@ final class AppState {
             }
             return
         }
-        await applyRoutingSettings(routingSettings, operation: "出站模式")
-        if case .failed = status {
+        // 热重载失败多半已回滚到旧配置、状态仍是「运行中」，只看 `.failed` 会把界面留在新模式上。
+        let applied = await applyRoutingSettings(routingSettings, operation: "出站模式")
+        var failed = false
+        if case .failed = status { failed = true }
+        if !applied || failed {
             outboundMode = previous
             return
         }
@@ -3139,13 +3217,20 @@ final class AppState {
         }
         isApplyingRouting = true
         let result = await performRoutingApplication(requestedSettings, operation: operation)
+        await releaseApplyingLock()
+        return result
+    }
+
+    /// 放开热重载锁。TUN / DNS 设置与分流热重载共用这把锁：持锁期间排进来的分流请求
+    /// （改规则、切出站模式、订阅刷新后的热载）由当前持锁者接着跑完再放锁——
+    /// 否则它们的 continuation 永远没人 resume，调用方一直 await 下去。
+    private func releaseApplyingLock() async {
         while let pending = pendingRoutingApplication {
             pendingRoutingApplication = nil
             let pendingResult = await performRoutingApplication(pending.settings, operation: pending.operation)
             pending.continuations.forEach { $0.resume(returning: pendingResult) }
         }
         isApplyingRouting = false
-        return result
     }
 
     private func performRoutingApplication(_ requestedSettings: RoutingSettings, operation: String) async -> Bool {
@@ -3537,7 +3622,11 @@ final class AppState {
     func applyTunSettings(_ requestedSettings: TunSettings, operation: String = "TUN 设置") async {
         guard !isBusy else { return }
         isApplyingRouting = true
-        defer { isApplyingRouting = false }
+        await performTunSettingsApplication(requestedSettings, operation: operation)
+        await releaseApplyingLock()
+    }
+
+    private func performTunSettingsApplication(_ requestedSettings: TunSettings, operation: String) async {
 
         let oldTunSettings = tunSettings
         do {
@@ -3608,7 +3697,11 @@ final class AppState {
     func applyDNSSettings(_ requestedSettings: DNSSettings, operation: String = "DNS 设置") async {
         guard !isBusy else { return }
         isApplyingRouting = true
-        defer { isApplyingRouting = false }
+        await performDNSSettingsApplication(requestedSettings, operation: operation)
+        await releaseApplyingLock()
+    }
+
+    private func performDNSSettingsApplication(_ requestedSettings: DNSSettings, operation: String) async {
 
         let oldDNSSettings = dnsSettings
         do {
@@ -3708,12 +3801,41 @@ final class AppState {
         // 后台一直在攒的近况一次交给图表：打开仪表盘就有曲线，不从空白开始。
         if trafficHistory.isEmpty, !recentTrafficPoints.isEmpty { trafficHistory = recentTrafficPoints }
         if trafficMinutes != trafficMinuteAccumulator.minutes { trafficMinutes = trafficMinuteAccumulator.minutes }
+        dropDashboardConnectionStreamIfIntervalChanged()
         resumeDashboardMonitoringIfNeeded()
+    }
+
+    /// 仪表盘开合时 `/connections` 要换档（见 `dashboardConnectionStreamInterval`）：
+    /// 间隔在订阅时就定了，只能收掉旧订阅，由随后的 resume 按新间隔重订。
+    private func dropDashboardConnectionStreamIfIntervalChanged() {
+        guard dashboardConnectionTask != nil,
+              dashboardConnectionInterval != Self.dashboardConnectionStreamInterval(
+                  dashboardOnScreen: dashboardMonitorConsumers.contains(.dashboard)
+              ) else { return }
+        dashboardConnectionTask?.cancel()
+        dashboardConnectionTask = nil
+    }
+
+    func setWindowContentVisible(_ visible: Bool) {
+        windowContentIsVisible = visible
+        guard visible else {
+            discardPendingLogs()
+            return
+        }
+        if dashboardMonitorConsumers.contains(.dashboard) {
+            trafficHistory = recentTrafficPoints
+            trafficMinutes = trafficMinuteAccumulator.minutes
+        }
     }
 
     func stopDashboardMonitoring() {
         dashboardMonitorConsumers.remove(.dashboard)
-        if dashboardMonitorConsumers.isEmpty { suspendDashboardMonitoring() }
+        if dashboardMonitorConsumers.isEmpty {
+            suspendDashboardMonitoring()
+        } else {
+            dropDashboardConnectionStreamIfIntervalChanged()
+            resumeDashboardMonitoringIfNeeded()
+        }
     }
 
     func startMenuBarMonitoring() {
@@ -3871,7 +3993,12 @@ final class AppState {
         ===== 内核日志 =====
         \(kernelLogs)
         """
-        let text = diagnostics.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+        let home = NSHomeDirectory()
+        let text = diagnostics
+            .replacingOccurrences(of: home, with: "~")
+            // 配置段是 JSONSerialization 的输出，`/` 被转义成 `\/`：规则集路径里的用户名按原形换不掉，
+            // 两版导出（含「可公开分享」）都会把 `\/Users\/<用户名>` 带出去。
+            .replacingOccurrences(of: home.replacingOccurrences(of: "/", with: "\\/"), with: "~")
         guard forSharing else { return text }
         let names = nodes.enumerated().map { ($1.name, "节点#\($0 + 1)") }
             + configItems.enumerated().map { ($1.name, "配置#\($0 + 1)") }
@@ -4650,10 +4777,8 @@ final class AppState {
                 }
             }
 
-            var oldConfigurationRecord: PrivilegedProcessRecord?
             do {
                 let record = try await startTUN(config: oldConfig)
-                oldConfigurationRecord = record
                 activeModes = previousModes
                 try await verifyKernel(client, config: oldConfig)
                 currentConfig = oldConfig
@@ -4736,13 +4861,26 @@ final class AppState {
         dashboardTasks = [trafficTask, versionTask]
     }
 
+    /// 仪表盘不在屏幕上时（关窗、切到别的页，只剩菜单栏）`/connections` 的推送间隔。
+    /// 这时这条流只喂会话累计量与每分钟指标：累计量是内核计数器，隔 5 秒取一次不丢字节；
+    /// 连接数、内核内存只有仪表盘显示。每帧都是整张连接表的 JSON，1 秒一帧就是每秒全量解析一遍。
+    static let backgroundConnectionStreamInterval = 5_000
+
+    static func dashboardConnectionStreamInterval(dashboardOnScreen: Bool) -> Int {
+        dashboardOnScreen ? 1_000 : backgroundConnectionStreamInterval
+    }
+
     /// 仪表盘的 `/connections` 订阅。连接页开着时**不开**——那条流已经在供总量了，
     /// 同一份 payload 每秒解析两遍正是连接页 CPU 偏高的后台那一半。
     private func resumeDashboardConnectionStreamIfNeeded(client: ClashAPIClient) {
         guard !connectionsFeedActive, dashboardConnectionTask == nil else { return }
+        let interval = Self.dashboardConnectionStreamInterval(
+            dashboardOnScreen: dashboardMonitorConsumers.contains(.dashboard)
+        )
+        dashboardConnectionInterval = interval
         dashboardConnectionTask = Task { [weak self] in
             do {
-                let stream = await client.connectionStream()
+                let stream = await client.connectionStream(intervalMilliseconds: interval)
                 for try await snapshot in stream {
                     guard !Task.isCancelled else { return }
                     // 同样的等值判断：连接数和内存占用在空闲时经常一秒都不变。
@@ -4842,7 +4980,7 @@ final class AppState {
         // 日志页关着时走廉价路径：先用最便宜的判据挡掉绝大多数行，命中了才解析。
         // 这条流为了留证而常开，不该顺带把 CPU 也常开——`LiveLogEntry` 每行要分配一个 UUID
         // 并做完整解析（host/category），而内核忙时一秒几十行。
-        guard isLogsVisible else {
+        guard isLogsVisible && windowContentIsVisible else {
             guard Self.mayConcernDetectors(entry.message) else { return }
             let parsed = CoreLogLine.parse(entry.message)
             inspectForDNSStall(parsed)
@@ -4871,6 +5009,7 @@ final class AppState {
     }
 
     private func flushPendingLogs() {
+        guard windowContentIsVisible else { return }
         guard !pendingLogs.isEmpty else { return }
         publishCountLogs += 1
         liveLogs.append(contentsOf: pendingLogs)
@@ -4975,13 +5114,14 @@ final class AppState {
     }
 
     func receiveConnectionSnapshot(_ snapshot: ConnectionSnapshot) {
+        latestConnectionSnapshot = snapshot
         // 会话累计流量。这条流是唯一的权威来源，无论仪表盘是否可见都要喂——
         // 断一秒就永久少一秒的量，不像速率那样只是显示滞后。
         sessionTraffic.record(
             uploadTotal: snapshot.uploadTotal,
             downloadTotal: snapshot.downloadTotal
         )
-        guard dashboardMetrics.shouldPublishConnectionSnapshot(snapshot) else { return }
+        guard windowContentIsVisible, dashboardMetrics.shouldPublishConnectionSnapshot(snapshot) else { return }
         if activeConnectionCount != snapshot.connectionCount {
             activeConnectionCount = snapshot.connectionCount
         }
@@ -5007,7 +5147,7 @@ final class AppState {
         dashboardRetryDelay = 2
         // `@Observable` 赋同样的值也会通知观察者 → 失效整棵视图图。空闲时速率长时间是 0，
         // 无条件写就是每秒一次纯白工的全量重排。等值判断在这里几乎总是命中。
-        if dashboardMetrics.shouldPublishTrafficRates() {
+        if windowContentIsVisible, dashboardMetrics.shouldPublishTrafficRates() {
             if uploadRate != sample.up { uploadRate = sample.up }
             if downloadRate != sample.down { downloadRate = sample.down }
         }
@@ -5117,6 +5257,7 @@ final class AppState {
     }
 
     private func markRuntimeStarted() {
+        latestConnectionSnapshot = nil
         runtimeStartedAt = now()
         uploadRate = 0
         downloadRate = 0
@@ -5129,6 +5270,7 @@ final class AppState {
     }
 
     private func clearDashboardRuntime() {
+        latestConnectionSnapshot = nil
         suspendDashboardMonitoring()
         dashboardMetrics.reset()
         uploadRate = 0
@@ -5489,6 +5631,9 @@ final class AppState {
             stopRequestedDuringCrashHandling = false
         }
         await cancelCoreExitMonitoring()
+        // 上面让出过主线程：用户这时点停止，stop() 可能已经整个跑完（状态 .off、接管清空）。
+        // 不在这里收手的话，下面会把状态改成 .starting 而再没人改回来，开关全部卡死。
+        guard !stopRequestedDuringCrashHandling, status == .on else { return }
         suspendDashboardMonitoring()
         suspendLogMonitoring()
 
@@ -5624,8 +5769,10 @@ final class AppState {
     private func startNetworkPathMonitoringIfNeeded() {
         guard monitorsSystemEvents, pathMonitor == nil, !activeModes.isEmpty else { return }
         let monitor = NWPathMonitor()
-        monitor.pathUpdateHandler = { [weak self] _ in
+        monitor.pathUpdateHandler = { [weak self] path in
+            let isAvailable = path.status == .satisfied
             Task { @MainActor [weak self] in
+                self?.networkPathChanged(isAvailable: isAvailable)
                 self?.scheduleTakeoverReassert()
             }
         }
@@ -5634,12 +5781,19 @@ final class AppState {
     }
 
     private func stopNetworkPathMonitoring() {
+        networkPathIsAvailable = true
         pathMonitor?.cancel()
         pathMonitor = nil
         pathChangeTask?.cancel()
         pathChangeTask = nil
         pendingReassertTrigger = nil
         pendingReassertForcesIdentityChange = false
+    }
+
+    /// 不把掉线前的窗口留到重连后结算；原始日志仍照常留存。
+    func networkPathChanged(isAvailable: Bool) {
+        networkPathIsAvailable = isAvailable
+        if !isAvailable { outboundFailureDetector.reset() }
     }
 
     /// 路径事件在切网时会连发多条，压到一次、等网络稳定 2 秒再补挂。
@@ -5674,7 +5828,12 @@ final class AppState {
         trigger: String = "网络变化",
         forceIdentityChange: Bool = false
     ) async {
-        guard !isBusy else { return }
+        guard !isBusy else {
+            // 正在热重载或启停时不能叠着做，但也不能丢：新网络服务的补挂、死连接的重置都只有这一次机会。
+            // 稍后再来，直到不忙为止（2 秒一次，开销可忽略）。
+            scheduleTakeoverReassert(trigger: trigger, forceIdentityChange: forceIdentityChange)
+            return
+        }
         guard status == .on else {
             await reconcileInactiveTakeovers(trigger: trigger)
             return
@@ -5682,6 +5841,7 @@ final class AppState {
         // 指纹必须先算（它顺带刷新记录），再看是否被要求强制按换网处理。
         let identityChanged = identityChangedForTesting ?? (networkIdentityChanged() || forceIdentityChange)
         if identityChanged {
+            outboundFailureDetector.reset()
             recordRuntimeEvent(title: "物理网络已变更", detail: "正在刷新 LAN DNS 与 DoH 连接")
             if activeModes.contains(.tun) {
                 lanResolverSnapshot = await lanResolverProbe(tunResolverExclusions(tunSettings))
@@ -6123,9 +6283,11 @@ final class AppState {
         }
     }
 
-    private func tickSelfDiagnostics() {
+    func tickSelfDiagnostics() {
         // 没有日志行时也要按时观测，醒来 15 秒内就进入安静期。
-        sleepWakeTracker.observe(sleepClockReading(), at: now())
+        if sleepWakeTracker.observe(sleepClockReading(), at: now()) {
+            outboundFailureDetector.reset()
+        }
         let logLines = logLinesSinceDiagnosticsTick
         logLinesSinceDiagnosticsTick = 0
         metricsLogLines += logLines
@@ -6141,13 +6303,22 @@ final class AppState {
         if let report = chronicDNSStallDetector.flush(at: now(), physicalBytes: physicalBytes) {
             record(report)
         }
+        if let report = outboundFailureDetector.flush(at: now()) {
+            record(report)
+        }
         scheduleStallCheck()
     }
 
     /// 接管中每拍（15 秒）取一次连接快照，找「发出请求后一直收不到回应」的节点。
     /// 没在接管时不取：不碰内核，也不增加空闲开销。上一次还没回来就跳过这一拍。
+    /// 连接页开着时它那条流每秒都带着整张明细，直接拿最近一帧，省掉一次请求和一遍解析。
     private func scheduleStallCheck() {
-        guard status == .on, !activeModes.isEmpty, let client = clashAPIClient, stallCheckTask == nil else { return }
+        guard status == .on, !activeModes.isEmpty else { return }
+        if connectionsFeedActive, let details = latestFeedDetails {
+            checkStalledConnections(details.map(StalledConnectionDetector.Sample.init))
+            return
+        }
+        guard let client = clashAPIClient, stallCheckTask == nil else { return }
         stallCheckTask = Task { [weak self] in
             let details = try? await client.connectionsSnapshot()
             // 被取消（停止接管 / 换内核）时状态已由 `finishAnomalyWindows` 清掉，别把新排的任务覆盖了。
@@ -6231,7 +6402,7 @@ final class AppState {
             mode: status == .on
                 ? (activeModes.isEmpty ? "on" : activeModes.map(\.displayName).sorted().joined(separator: "+"))
                 : "off",
-            conns: activeConnectionCount,
+            conns: latestConnectionSnapshot?.connectionCount ?? activeConnectionCount,
             logs: metricsLogLines,
             net: (netMB * 100).rounded() / 100,
             pubConn: publishCountConnections,
@@ -6279,6 +6450,7 @@ final class AppState {
     func inspectForOutboundFailure(_ line: CoreLogLine) {
         guard !isRecoveringFromSleep() else { return }
         connectivityPulse.ingest(line, at: now())
+        guard networkPathIsAvailable else { return }
         if let report = outboundFailureDetector.ingest(line, at: now()) {
             record(report)
         }
@@ -6288,7 +6460,9 @@ final class AppState {
     /// 每行都先观测一次时钟：醒来后的第一行就能察觉，不必等下一次自诊断。
     private func isRecoveringFromSleep() -> Bool {
         let current = now()
-        sleepWakeTracker.observe(sleepClockReading(), at: current)
+        if sleepWakeTracker.observe(sleepClockReading(), at: current) {
+            outboundFailureDetector.reset()
+        }
         return sleepWakeTracker.isQuiet(at: current)
     }
 
@@ -6333,7 +6507,15 @@ final class AppState {
         // 直连也有两成以上失败时同样不能说正常，换节点未必有用。
         let directNote: String
         let advice: String
-        if !report.hasEnoughDirectSamples {
+        if report.directResolutionLooksSignificant {
+            directNote = "同期直连有 \(report.directResolutionFailures)/\(report.directAttempts) 次解析超时，无法确认本机网络是否可用"
+            advice = "先检查本机网络与 DNS；网络正常后若仍失败，再测速或换节点"
+        } else if report.directResolutionFailures > 0 {
+            // 一两次解析超时不足以把锅甩给本机网络，但也不能说直连「失败 N 次」——那是把
+            // 解析超时重复算了一遍。如实说明，仍给节点侧建议。
+            directNote = "同期直连 \(report.directAttempts) 次中有 \(report.directResolutionFailures) 次解析超时，不足以判定本机网络有问题"
+            advice = "多为节点或线路问题，可到代理页测速后换一个节点；若反复出现再检查本机 DNS"
+        } else if !report.hasEnoughDirectSamples {
             directNote = "同期直连仅 \(report.directAttempts) 次，样本不足，无法据此判断本机网络"
             advice = "多为节点或线路问题，可到代理页测速后换一个节点"
         } else if report.directSaysLocalNetworkUnstable {
@@ -6660,6 +6842,7 @@ final class AppState {
         stalledConnectionDetector.reset()
         stallCheckTask?.cancel()
         stallCheckTask = nil
+        latestFeedDetails = nil
         let at = now()
         if let report = outboundFailureDetector.finish(at: at) { record(report) }
         let physicalBytes = Self.physicalByteTotal()
@@ -6778,7 +6961,15 @@ final class AppState {
             // 顶回来，用户在界面上就是个死胡同——只能去终端 sudo 杀进程。
             // recoverIfNeeded 没有残留时是一次 status 往返的空操作，代价可以忽略。
             try? await helperClient.recoverIfNeeded()
-            record = try await helperClient.start(config: config)
+            do {
+                record = try await helperClient.start(config: config)
+            } catch PrivilegedHelperClientError.receiveFailed {
+                // 没收到回应 ≠ 没起来：助手可能在我们放弃等待之后才把内核拉起来。调用方把这当成「TUN 没起」，
+                // 不会去停它——于是一个 App 不知情的 root 内核接管着路由，系统 DNS 却没接管
+                // （2026-10-26 iMac 实测）。让助手把它可能起好的内核收掉，再如实报失败。
+                try? await helperClient.recoverIfNeeded()
+                throw PrivilegedHelperClientError.receiveFailed
+            }
         case .fallback:
             // 免密码助手不可用时才走这条——它每次都会弹系统密码框。
             // 必须说清楚原因：用户看到的是"装过助手了怎么又要密码"，而线索只在这里。
@@ -6861,6 +7052,7 @@ final class AppState {
         guard !isHelperOperationInProgress else { return }
         isHelperOperationInProgress = true
         defer { isHelperOperationInProgress = false }
+        helperOperationError = nil
         do {
             try await PrivilegedHelperInstaller.install(authorizer: { script, timeout in
                 try await OSAScriptAuthorizer.run(script: script, timeout: timeout)
@@ -6877,9 +7069,8 @@ final class AppState {
                         + "若刚更新过 App，请再点一次「重新安装」（App 签名变化后助手需要重新授权）"
                 )
             }
-        } catch let error as PrivilegedLauncherError {
-            appendWarning("安装助手失败：\(error.localizedDescription)")
         } catch {
+            helperOperationError = "安装助手失败：\(error.localizedDescription)"
             appendWarning("安装助手失败：\(error.localizedDescription)")
         }
     }
@@ -6893,15 +7084,15 @@ final class AppState {
         guard !isHelperOperationInProgress else { return }
         isHelperOperationInProgress = true
         defer { isHelperOperationInProgress = false }
+        helperOperationError = nil
         try? await helperClient.recoverIfNeeded()
         do {
             try await PrivilegedHelperInstaller.uninstall(authorizer: { script, timeout in
                 try await OSAScriptAuthorizer.run(script: script, timeout: timeout)
             })
             await refreshHelperInstallStatus()
-        } catch let error as PrivilegedLauncherError {
-            appendWarning("卸载助手失败：\(error.localizedDescription)")
         } catch {
+            helperOperationError = "卸载助手失败：\(error.localizedDescription)"
             appendWarning("卸载助手失败：\(error.localizedDescription)")
         }
     }

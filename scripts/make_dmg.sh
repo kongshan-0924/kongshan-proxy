@@ -13,8 +13,13 @@ if [[ ! -d "$app_path" ]]; then
 fi
 
 version=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$app_path/Contents/Info.plist")
+# 非 arm64 的本地构建加架构后缀，避免在 dist 里冒充可发布的正式包。
+source "$project_dir/scripts/arch_lib.sh"
+host_arch=$(kongshan_host_arch)
+dmg_name="kongshan-$version.dmg"
+[[ "$host_arch" == arm64 ]] || dmg_name="kongshan-$version-$host_arch.dmg"
 mkdir -p "$project_dir/dist"
-dmg_path="dist/kongshan-$version.dmg"
+dmg_path="dist/$dmg_name"
 
 staging=$(mktemp -d)
 cleanup() { rm -rf "$staging"; }
@@ -46,7 +51,12 @@ fi
 size=$(du -h "$dmg_path" | cut -f1)
 # 本地只留最新 DMG。**这不等于放弃版本历史**——GitHub Releases 保留全部历史版本，
 # 每个都能从对应标签重新构建；本地副本是纯粹的一次性产物（见 HANDOFF「发布保留策略」）。
-find "$project_dir/dist" -maxdepth 1 -type f -name 'kongshan-*.dmg' ! -name "kongshan-$version.dmg" -delete
+# 只清理**同一架构**的旧包：Intel 上跑本地构建不能把 arm64 的正式候选删掉。
+if [[ "$host_arch" == arm64 ]]; then
+    find "$project_dir/dist" -maxdepth 1 -type f -name 'kongshan-*.dmg' ! -name '*-x86_64.dmg' ! -name "$dmg_name" -delete
+else
+    find "$project_dir/dist" -maxdepth 1 -type f -name "kongshan-*-$host_arch.dmg" ! -name "$dmg_name" -delete
+fi
 # 可运行 App 副本必须清掉：Launch Services 会记住它，导致误启动第二个实例。
 rm -rf "$project_dir/dist/kongshan.app"
 rm -f "$project_dir/dist/.metadata_never_index" "$project_dir/dist/.DS_Store"

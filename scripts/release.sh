@@ -34,9 +34,19 @@ verify_artifacts() {
     hdiutil verify "$dmg" >/dev/null
 }
 
+# 工具链前置检查：缺 xctest 或 swift 时，verify_m4 会先编译几十分钟，再在测试阶段
+# 报一句看不懂的错误。这里提前拦住，把原因和修法直接说清楚。
+require_toolchain() {
+    xcrun --find xctest >/dev/null 2>&1 \
+        || fail "找不到 xctest：请安装完整的 Xcode（仅 Command Line Tools 不够），并在“Xcode → Settings → Locations”选中它"
+    command -v swift >/dev/null 2>&1 || fail "找不到 swift：请安装 Xcode 或 Swift 工具链"
+    xcode-select -p >/dev/null 2>&1 || fail "xcode-select 未指向可用的开发者目录"
+}
+
 prepare() {
     [[ -z $(git status --porcelain) ]] \
         || fail "prepare 前工作区必须完全干净；验证戳必须绑定一个确定提交"
+    require_toolchain
     KONGSHAN_KEEP_VERSION=1 zsh scripts/verify_m4.sh
     zsh scripts/make_dmg.sh
     verify_artifacts

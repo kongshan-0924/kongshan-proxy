@@ -64,11 +64,58 @@ public struct ProxyNode: Identifiable, Codable, Hashable, Sendable {
     /// ws 走 HTTP/1.1 升级，协商成 h2 反而连不上；grpc 由内核自己定。
     public var alpn: [String]?
 
-    /// 内核（sing-box 1.13）认得的 uTLS 指纹。订阅写了别的值不能原样交给内核——
+    /// 内核认得的 uTLS 指纹。订阅写了别的值不能原样交给内核——
     /// 认不出的指纹会让整份配置校验失败，所有节点一起不能用。
+    ///
+    /// 这一组枚举（指纹、SS 加密、VLESS flow、VMess security）都是 2026-10-25 拿 sing-box 1.14.4
+    /// 逐个 `check` 试出来的。**升级内核时用同样的方法重测一遍**：多认的值无害，少认的值会让合法节点被跳过。
     public static let supportedUTLSFingerprints: Set<String> = [
         "chrome", "firefox", "edge", "safari", "360", "qq", "ios", "android", "random", "randomized"
     ]
+
+    static let supportedShadowsocksMethods: Set<String> = [
+        "none",
+        "aes-128-gcm", "aes-192-gcm", "aes-256-gcm", "chacha20-ietf-poly1305", "xchacha20-ietf-poly1305",
+        "2022-blake3-aes-128-gcm", "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305",
+        "aes-128-ctr", "aes-192-ctr", "aes-256-ctr", "aes-128-cfb", "aes-192-cfb", "aes-256-cfb",
+        "rc4-md5", "chacha20-ietf", "xchacha20"
+    ]
+
+    /// Clash / mihomo 认、内核不认的别名 → 内核写法（同一种算法）。
+    static let shadowsocksMethodAliases: [String: String] = [
+        "chacha20-poly1305": "chacha20-ietf-poly1305",
+        "xchacha20-poly1305": "xchacha20-ietf-poly1305",
+        "plain": "none",
+        "dummy": "none"
+    ]
+
+    static let supportedVMessSecurities: Set<String> = [
+        "auto", "none", "zero", "aes-128-gcm", "chacha20-poly1305", "aes-128-cfb"
+    ]
+
+    /// 内核能用的 SS 加密写法；内核不认就是 nil（节点该跳过）。
+    public static func kernelShadowsocksMethod(_ raw: String) -> String? {
+        let method = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let mapped = shadowsocksMethodAliases[method] ?? method
+        return supportedShadowsocksMethods.contains(mapped) ? mapped : nil
+    }
+
+    /// 内核能用的 VLESS flow：空 = 不用 flow。`xtls-rprx-vision-udp443` 是 Xray 的变体（另放行 UDP 443），
+    /// 内核只有 vision，换成它握手照样成立。其余值内核不认 → nil。
+    public static func kernelVLESSFlow(_ raw: String?) -> String?? {
+        let flow = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch flow {
+        case "": return .some(nil)
+        case "xtls-rprx-vision", "xtls-rprx-vision-udp443": return .some("xtls-rprx-vision")
+        default: return nil
+        }
+    }
+
+    /// 内核能用的 VMess security；内核不认 → nil。
+    public static func kernelVMessSecurity(_ raw: String) -> String? {
+        let security = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return supportedVMessSecurities.contains(security) ? security : nil
+    }
 
     public init(
         id: UUID = UUID(),

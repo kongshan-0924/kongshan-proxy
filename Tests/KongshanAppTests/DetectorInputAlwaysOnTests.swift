@@ -66,6 +66,25 @@ final class DetectorInputAlwaysOnTests: XCTestCase {
         XCTAssertFalse(state.liveLogs.isEmpty, "日志页开着时行必须显示出来")
     }
 
+    func testOccludedLogPageDoesNotPublishButStillDetectsFailures() async {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let state = makeState(root: root)
+        state.startLogMonitoring()
+        state.receiveLog(failureEntry("first.example.invalid:443", id: 1))
+        state.setWindowContentVisible(false)
+        for id in 2...30 {
+            state.receiveLog(failureEntry("api.example.invalid:443", id: id))
+        }
+        try? await Task.sleep(for: .milliseconds(400))
+        XCTAssertTrue(state.liveLogs.isEmpty)
+        XCTAssertEqual(state.finishAnomalyWindowsForTesting()?.failures, 30)
+        state.setWindowContentVisible(true)
+        state.receiveLog(failureEntry("new.example.invalid:443", id: 31))
+        try? await Task.sleep(for: .milliseconds(400))
+        XCTAssertEqual(state.liveLogs.count, 1)
+    }
+
     /// 廉价预筛**不能漏掉任何一种检测器认的形态**。漏一种就是静默丢证——
     /// 不会报错，只会在下次排查时发现又没有记录。
     func testCheapPrefilterCoversEveryShapeTheDetectorsRecognize() {

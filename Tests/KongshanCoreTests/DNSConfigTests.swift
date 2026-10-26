@@ -5,19 +5,24 @@ import XCTest
 
 final class DNSConfigTests: XCTestCase {
     func testDefaultsAndValidationRejectUnsafeDoHURLs() throws {
-        XCTAssertEqual(DNSSettings.defaults.domesticDoH, "https://223.5.5.5/dns-query")
+        XCTAssertEqual(DNSSettings.defaults.domesticDNS, "223.5.5.5")
         XCTAssertEqual(DNSSettings.defaults.remoteDoH, "https://8.8.8.8/dns-query")
         XCTAssertEqual(try DNSSettings.defaults.validated(), .defaults)
+        for valid in ["119.29.29.29", " 2001:db8::1 ", "https://223.5.5.5/dns-query"] {
+            XCTAssertNoThrow(try DNSSettings(domesticDNS: valid, remoteDoH: DNSSettings.defaults.remoteDoH).validated(), valid)
+        }
 
         for invalid in [
             "http://223.5.5.5/dns-query",
             "https:///dns-query",
             "https://user:password@dns.example/dns-query",
             "https://dns.example",
-            "https://dns.example/dns-query#fragment"
+            "https://dns.example/dns-query#fragment",
+            "dns.alidns.com",
+            "223.5.5.5:53"
         ] {
             XCTAssertThrowsError(try DNSSettings(
-                domesticDoH: invalid,
+                domesticDNS: invalid,
                 remoteDoH: DNSSettings.defaults.remoteDoH
             ).validated(), "Expected invalid URL to fail: \(invalid)")
         }
@@ -36,13 +41,13 @@ final class DNSConfigTests: XCTestCase {
         XCTAssertEqual(servers[0]["server"] as? String, "223.5.5.5")
         XCTAssertEqual(servers[0]["server_port"] as? Int, 53)
         XCTAssertNil(servers[0]["detour"])
-        assertDoH(
-            servers[1],
-            tag: "dns-cn",
-            server: "223.5.5.5",
-            path: "/dns-query",
-            detour: nil
-        )
+        // 国内 DNS 默认走 UDP：DoH 长连接睡眠后已死，唤醒后首批国内查询要等约 10 秒超时才重建。
+        XCTAssertEqual(servers[1]["tag"] as? String, "dns-cn")
+        XCTAssertEqual(servers[1]["type"] as? String, "udp")
+        XCTAssertEqual(servers[1]["server"] as? String, "223.5.5.5")
+        XCTAssertEqual(servers[1]["server_port"] as? Int, 53)
+        XCTAssertNil(servers[1]["detour"])
+        XCTAssertNil(servers[1]["tcp_keep_alive"], "UDP 没有连接可保活")
         assertDoH(
             servers[2],
             tag: "dns-remote",
@@ -89,7 +94,7 @@ final class DNSConfigTests: XCTestCase {
     /// 不能硬钉 223.5.5.5——否则用户以为换掉了阿里，实际节点域名还在问阿里。
     func testBootstrapFollowsCustomDomesticResolverIP() throws {
         let settings = DNSSettings(
-            domesticDoH: "https://119.29.29.29/dns-query",
+            domesticDNS: "https://119.29.29.29/dns-query",
             remoteDoH: DNSSettings.defaults.remoteDoH
         )
         let root = try json(try ConfigGenerator.generate(input(dnsSettings: settings)))
@@ -104,7 +109,7 @@ final class DNSConfigTests: XCTestCase {
     /// 一台上游抖动不再同时打掉「节点域名解析」与「国内域名解析」。
     func testBootstrapResolverCanBeOverriddenIndependently() throws {
         let settings = DNSSettings(
-            domesticDoH: "https://119.29.29.29/dns-query",
+            domesticDNS: "https://119.29.29.29/dns-query",
             remoteDoH: DNSSettings.defaults.remoteDoH,
             bootstrapResolver: "114.114.114.114"
         )
@@ -125,7 +130,7 @@ final class DNSConfigTests: XCTestCase {
     func testBootstrapResolverValidation() throws {
         for valid in ["", "114.114.114.114", "2001:db8::1"] {
             let settings = DNSSettings(
-                domesticDoH: DNSSettings.defaults.domesticDoH,
+                domesticDNS: DNSSettings.defaults.domesticDNS,
                 remoteDoH: DNSSettings.defaults.remoteDoH,
                 bootstrapResolver: valid
             )
@@ -138,7 +143,7 @@ final class DNSConfigTests: XCTestCase {
             "not-an-ip"
         ] {
             let settings = DNSSettings(
-                domesticDoH: DNSSettings.defaults.domesticDoH,
+                domesticDNS: DNSSettings.defaults.domesticDNS,
                 remoteDoH: DNSSettings.defaults.remoteDoH,
                 bootstrapResolver: invalid
             )
@@ -155,12 +160,24 @@ final class DNSConfigTests: XCTestCase {
         let settings = try JSONDecoder().decode(DNSSettings.self, from: data)
         XCTAssertEqual(settings, .defaults)
         XCTAssertEqual(settings.bootstrapResolver, "")
+        // 旧默认 DoH 读进来就换成同一台阿里 DNS 的 UDP；键名不变，写回去仍是 domesticDoH。
+        XCTAssertEqual(settings.domesticDNS, "223.5.5.5")
+        let reencoded = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(settings)) as? [String: Any])
+        XCTAssertEqual(reencoded["domesticDoH"] as? String, "223.5.5.5")
+    }
+
+    /// 用户自己改过的国内 DoH 是有意的选择，不迁移。
+    func testCustomDomesticDoHIsNotMigrated() throws {
+        let data = Data(
+            #"{"domesticDoH":"https://119.29.29.29/dns-query","remoteDoH":"https://8.8.8.8/dns-query"}"#.utf8
+        )
+        XCTAssertEqual(try JSONDecoder().decode(DNSSettings.self, from: data).domesticDNS, "https://119.29.29.29/dns-query")
     }
 
     /// 编码必须带上 bootstrapResolver：应用持久化后重新加载，独立引导配置不能丢。
     func testBootstrapResolverSurvivesEncodeDecodeRoundTrip() throws {
         let original = DNSSettings(
-            domesticDoH: "https://119.29.29.29/dns-query",
+            domesticDNS: "https://119.29.29.29/dns-query",
             remoteDoH: DNSSettings.defaults.remoteDoH,
             bootstrapResolver: "114.114.114.114"
         )
@@ -172,7 +189,7 @@ final class DNSConfigTests: XCTestCase {
 
     func testCustomDomainDoHUsesFiniteDirectBootstrapChain() throws {
         let settings = DNSSettings(
-            domesticDoH: "https://dns.alidns.com:8443/custom-query?profile=mac",
+            domesticDNS: "https://dns.alidns.com:8443/custom-query?profile=mac",
             remoteDoH: "https://dns.google/dns-query"
         )
         let root = try json(try ConfigGenerator.generate(input(dnsSettings: settings)))
@@ -224,11 +241,11 @@ final class DNSConfigTests: XCTestCase {
         let ruleSets = try await compileRuleSets(in: directory)
         let routing = RoutingConfiguration(settings: routingSettings, ruleSets: ruleSets)
         let custom = DNSSettings(
-            domesticDoH: "https://dns.alidns.com/dns-query",
+            domesticDNS: "https://dns.alidns.com/dns-query",
             remoteDoH: "https://dns.google/dns-query"
         )
         let customBootstrap = DNSSettings(
-            domesticDoH: "https://119.29.29.29/dns-query",
+            domesticDNS: "https://119.29.29.29/dns-query",
             remoteDoH: "https://dns.google/dns-query",
             bootstrapResolver: "114.114.114.114"
         )
@@ -454,11 +471,12 @@ final class DNSConfigTests: XCTestCase {
         XCTAssertFalse(matches("example.com"))
     }
 
-    /// 国内 DoH 长连接保活：空闲后被 NAT 回收的连接，下一批查询要先在死连接上等到报错——
+    /// 用户把国内 DNS 改回 DoH 时仍要保活：空闲后被 NAT 回收的连接，下一批查询要先在死连接上等到报错——
     /// 真机 2026-10-05 空闲 30 分钟后慢 1.2–1.9 秒、空闲 1 小时后约 5.3 秒。只给直连的 dns-cn 设，走节点的 dns-remote 不设。
     func testDomesticDoHKeepsItsConnectionAlive() throws {
+        let doh = DNSSettings(domesticDNS: "https://223.5.5.5/dns-query", remoteDoH: DNSSettings.defaults.remoteDoH)
         for mode in [ProxyMode.systemProxy, .tun] {
-            let root = try json(try ConfigGenerator.generate(input(proxyMode: mode)))
+            let root = try json(try ConfigGenerator.generate(input(proxyMode: mode, dnsSettings: doh)))
             let servers = try XCTUnwrap((root["dns"] as? [String: Any])?["servers"] as? [[String: Any]])
             let domestic = try XCTUnwrap(servers.first { $0["tag"] as? String == "dns-cn" })
             XCTAssertEqual(domestic["tcp_keep_alive"] as? String, "30s")

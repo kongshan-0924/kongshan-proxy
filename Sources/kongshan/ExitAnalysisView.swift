@@ -32,8 +32,9 @@ struct ExitAnalysisView: View {
         .groupBoxStyle(CardGroupBoxStyle())
         .navigationTitle("出口分析")
         .navigationSubtitle(subtitle)
+        .buttonStyle(.pill)
         .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
+            ToolbarItemGroup(placement: .automatic) {
                 Button {
                     Task { await state.refreshSiteProbes() }
                 } label: {
@@ -93,7 +94,7 @@ struct ExitAnalysisView: View {
                  : "代理未开启，现在测到的是本机直连出口。开启代理后再测，结果才反映节点。")
         } actions: {
             Button("开始检测") { runFullCheck() }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.pillProminent)
                 .controlSize(.large)
         }
     }
@@ -130,7 +131,7 @@ struct ExitAnalysisView: View {
     private var exitGroup: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 10) {
-                header("出口 IP", symbol: "globe.asia.australia", tint: .orange)
+                header("出口 IP", symbol: "globe.asia.australia")
                 if let report = state.exitDiagnostics {
                     // IP 要能选中复制：用户去查询、去反馈时都需要它。
                     row(
@@ -169,7 +170,7 @@ struct ExitAnalysisView: View {
            reputation.fraudScore != nil || !reputation.labels.isEmpty {
             GroupBox {
                 VStack(alignment: .leading, spacing: 10) {
-                    header("IP 风险评估", symbol: "shield.lefthalf.filled", tint: .purple)
+                    header("IP 风险评估", symbol: "shield.lefthalf.filled")
 
                     if let score = reputation.fraudScore, let risk = reputation.risk {
                         HStack(spacing: 10) {
@@ -198,7 +199,7 @@ struct ExitAnalysisView: View {
                                     .font(.caption.weight(.medium))
                                     .padding(.horizontal, 7)
                                     .padding(.vertical, 3)
-                                    .background(.quaternary.opacity(0.6), in: Capsule())
+                                    .background(Theme.canvasBackground, in: Capsule(style: .circular))
                             }
                             Spacer(minLength: 0)
                         }
@@ -222,7 +223,7 @@ struct ExitAnalysisView: View {
     private var reachabilityGroup: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 10) {
-                header("站点可达性", symbol: "checkmark.shield", tint: .blue)
+                header("站点可达性", symbol: "checkmark.shield")
                 Text("直接请求这些站点看真实结果。比第三方「IP 风险分」准，也不必把你的出口 IP 交给额外的服务。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -234,7 +235,7 @@ struct ExitAnalysisView: View {
                         .fixedSize(horizontal: false, vertical: true)
                         .padding(10)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .background(Theme.canvasBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                 }
 
                 if state.siteProbes.isEmpty {
@@ -309,7 +310,7 @@ struct ExitAnalysisView: View {
     private var dnsGroup: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 10) {
-                header("DNS 泄漏", symbol: "list.bullet.rectangle", tint: .teal)
+                header("DNS 泄漏", symbol: "list.bullet.rectangle")
                 if let report = state.exitDiagnostics {
                     HStack(spacing: 6) {
                         Circle().fill(dnsTint(report.dns.status)).frame(width: 7, height: 7)
@@ -382,11 +383,12 @@ struct ExitAnalysisView: View {
 
     // MARK: - 通用
 
-    private func header(_ title: String, symbol: String, tint: Color) -> some View {
+    private func header(_ title: String, symbol: String) -> some View {
+        // 卡头图标统一中性灰：形状区分卡片、颜色不做彩色点缀（与全 App 口径一致）。
         Label {
             Text(title).font(.headline)
         } icon: {
-            Image(systemName: symbol).foregroundStyle(tint)
+            Image(systemName: symbol).foregroundStyle(.secondary)
         }
     }
 

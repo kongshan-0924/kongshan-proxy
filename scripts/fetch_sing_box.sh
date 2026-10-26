@@ -1,17 +1,24 @@
 #!/bin/zsh
 set -euo pipefail
 
-version=1.13.21
-archive="sing-box-${version}-darwin-arm64.tar.gz"
-expected=62bca85bf08b9145288729cf010c98ea9877b8086f7369cde9e127012d509424
-expected_binary=c71877673f3f444a11b3197b5f4c8e3954afb1341ddcf7ea8068f3bf6b187e12
+project_dir=${0:A:h:h}
+cd "$project_dir"
+source "$project_dir/scripts/arch_lib.sh"
+
+version=1.14.4
+platform=$(kongshan_singbox_platform)
+archive="sing-box-${version}-darwin-${platform}.tar.gz"
+expected=$(kongshan_singbox_archive_sha256)
+expected_binary=$(kongshan_singbox_binary_sha256)
 url="https://github.com/SagerNet/sing-box/releases/download/v${version}/${archive}"
 target=Vendor/sing-box/sing-box
 
+# 已存在且是**本机架构**的已验证副本就直接用。架构不符时必须重下：
+# Intel 上跑 arm64 内核只会得到 `bad CPU type in executable`。
 if [[ -x "$target" ]] \
-    && file "$target" | grep -q 'arm64' \
+    && file "$target" | grep -q "$(kongshan_host_arch)" \
     && [[ "$(shasum -a 256 "$target" | awk '{print $1}')" == "$expected_binary" ]]; then
-    print "Using verified sing-box $version at $target"
+    print "Using verified sing-box $version ($platform) at $target"
     exit 0
 fi
 
@@ -33,6 +40,8 @@ if [[ "$actual" != "$expected" ]]; then
     exit 1
 fi
 
-tar -xOf "$archive_path" "sing-box-${version}-darwin-arm64/sing-box" > "$binary_path"
+tar -xOf "$archive_path" "sing-box-${version}-darwin-${platform}/sing-box" > "$binary_path"
+# 新机器上 Vendor/ 可能还不存在（例如只同步了源码、没带二进制）。
+mkdir -p "${target:h}"
 install -m 755 "$binary_path" "$target"
-print "Installed sing-box $version to $target"
+print "Installed sing-box $version ($platform) to $target"

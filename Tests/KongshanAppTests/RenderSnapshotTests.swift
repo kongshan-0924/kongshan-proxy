@@ -248,14 +248,25 @@ final class RenderSnapshotTests: XCTestCase {
 
         // 菜单栏左键迷你面板：浅色空闲态与深色运行态各一张。
         render(
-            MenuBarPopoverView(openMainWindow: {}).environment(state),
+            MenuBarPopoverView(openMainWindow: {}, showGroupMenu: { _ in }).environment(state),
             name: "menubar-popover",
-            size: CGSize(width: 328, height: 460)
+            size: CGSize(width: 300, height: 560)
         )
+        // 真实订阅常见十几个选择组：组卡要限高滚动，面板不能顶出屏幕。
+        let savedGroups = state.discoveredPolicyGroups[state.snapshotSourceID!]
+        state.discoveredPolicyGroups[state.snapshotSourceID!] = (1...14).map {
+            PolicyGroup(name: "策略组 \($0)", kind: .selector)
+        }
         render(
-            MenuBarPopoverView(openMainWindow: {}).environment(running),
+            MenuBarPopoverView(openMainWindow: {}, showGroupMenu: { _ in }).environment(state),
+            name: "menubar-popover-many-groups",
+            size: CGSize(width: 300, height: 640)
+        )
+        state.discoveredPolicyGroups[state.snapshotSourceID!] = savedGroups
+        render(
+            MenuBarPopoverView(openMainWindow: {}, showGroupMenu: { _ in }).environment(running),
             name: "menubar-popover-dark",
-            size: CGSize(width: 328, height: 460),
+            size: CGSize(width: 300, height: 560),
             dark: true
         )
 
@@ -368,6 +379,38 @@ final class RenderSnapshotTests: XCTestCase {
             }
             .formStyle(.grouped)
         }
+    }
+
+    /// 按用户日常窗口（外框 867×697，扣掉统一工具栏约 52pt 后内容区 867×645）渲染主窗口全部页面。
+    /// 运行态 + 出口检测结果都摆上，核对比例、按钮、字体、输入框是否一致。
+    func testRenderUserWindowSnapshots() throws {
+        try XCTSkipIf(ProcessInfo.processInfo.environment["KONGSHAN_SNAPSHOT_DIR"] == nil)
+        try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+        let size = CGSize(width: 867, height: 645)
+        let running = makeState()
+        running.applyExitAnalysisSnapshotFixture()
+        running.status = .on
+        for page in SidebarPage.allCases {
+            render(MainWindowView(initialPage: page).environment(running), name: "user-\(page.rawValue)", size: size)
+        }
+        render(MainWindowView(initialPage: .dashboard).environment(running), name: "user-dashboard-dark", size: size, dark: true)
+        let idle = makeState()
+        render(MainWindowView(initialPage: .dashboard).environment(idle), name: "user-dashboard-off", size: size)
+        // 设置页其余三个分区与诊断各子页：内容区宽 = 867 - 侧栏 132。
+        let detail = CGSize(width: 735, height: 645)
+        for tab in SettingsTab.allCases where tab != .general {
+            render(SettingsView(initialTab: tab).environment(running), name: "user-settings-\(tab.rawValue)", size: detail)
+        }
+        render(NetworkSelfCheckView().environment(running), name: "user-diag-selfcheck", size: detail)
+        render(RouteHitTestView().environment(running), name: "user-diag-route", size: detail)
+        render(DeepDiagnosticsView().environment(running), name: "user-diag-deep", size: detail)
+        render(SharingView().environment(running), name: "user-sharing", size: detail)
+        render(SubscriptionRulesBrowserView().environment(running), name: "user-routing-subscription", size: detail)
+        // 弹层：与真实弹出时同样挂胶囊按钮。
+        render(ManualNodeSheet().environment(running).sheetChrome(), name: "user-sheet-manual", size: CGSize(width: 470, height: 580))
+        render(SpeedTestURLSheet().environment(running).sheetChrome(), name: "user-sheet-speedtest", size: CGSize(width: 460, height: 220))
+        render(SubscriptionScheduleSheet().environment(running).sheetChrome(), name: "user-sheet-schedule", size: CGSize(width: 460, height: 300))
+        render(RuleSetDatabaseSheet().environment(running).sheetChrome(), name: "user-sheet-ruleset", size: CGSize(width: 520, height: 420))
     }
 
     private func makeState() -> AppState {

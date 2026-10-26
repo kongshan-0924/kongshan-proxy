@@ -11,23 +11,33 @@ struct SharingView: View {
     @Environment(AppState.self) private var state
     @State private var draft = LANSharingSettings.defaults
     @State private var newCIDR = ""
+    /// 本机局域网地址。取一次要遍历网卡（`getifaddrs`）；设备列表每秒刷新会带着整页重算，
+    /// 不能每次求值都取，进页面和监听端口变化时取一次即可。
+    @State private var lanAddresses: [String] = []
 
     var body: some View {
-        Form {
+        CardForm {
             switchSection
             if state.lanSharing.enabled { addressSection }
             configurationSection
             clientsSection
         }
-        .pageFormStyle()
         .navigationTitle("共享")
         .navigationSubtitle(subtitle)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if state.lanSharing.enabled { PageStatusBar(subtitle) }
+        }
         .onAppear {
             draft = state.lanSharing
+            lanAddresses = state.lanProxyAddresses
             state.startLANClientsMonitoring()
         }
+        .onChange(of: state.lanSharingBoundPort) { lanAddresses = state.lanProxyAddresses }
         .onDisappear { state.stopLANClientsMonitoring() }
-        .onChange(of: state.lanSharing) { _, new in draft = new }
+        // 草稿脏着（改了端口或白名单还没应用）时只同步开关，不冲掉输入。
+        .onChange(of: state.lanSharing) { old, new in
+            if draft == old { draft = new } else { draft.enabled = new.enabled }
+        }
     }
 
     private var subtitle: String {
@@ -42,7 +52,7 @@ struct SharingView: View {
     // MARK: - 开关
 
     private var switchSection: some View {
-        Section {
+        CardSection {
             Toggle("共享给局域网", isOn: enabledBinding)
                 .disabled(!state.isReady)
             if state.lanSharing.enabled, state.lanSharingBoundPort == nil, state.lanSharingFailure == nil {
@@ -61,9 +71,9 @@ struct SharingView: View {
     /// 分成「服务器」「端口」两行：手机和电脑的代理设置里这两项本来就是分开填的，
     /// 合成「IP:端口」一行时用户不知道冒号后面该往哪填。
     private var addressSection: some View {
-        Section {
+        CardSection {
             if let port = state.lanSharingBoundPort {
-                let addresses = state.lanProxyAddresses
+                let addresses = lanAddresses
                 if addresses.isEmpty {
                     Label("当前没有可用的局域网地址（未连接网络？）", systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.orange)
@@ -109,12 +119,13 @@ struct SharingView: View {
     // MARK: - 配置
 
     private var configurationSection: some View {
-        Section {
+        CardSection {
             LabeledContent("监听端口") {
                 TextField("端口", value: $draft.port, format: .number.grouping(.never))
                     .labelsHidden()
-                    .frame(width: 90)
                     .font(.body.monospaced())
+                    .inputField()
+                    .frame(width: 92)
             }
 
             if draft.allowedCIDRs.isEmpty {
@@ -141,8 +152,10 @@ struct SharingView: View {
                 }
             }
             HStack(spacing: 8) {
-                TextField("192.168.1.0/24 或 192.168.1.7", text: $newCIDR)
+                TextField("允许的来源", text: $newCIDR, prompt: Text("192.168.1.0/24 或 192.168.1.7"))
+                    .labelsHidden()
                     .font(.body.monospaced())
+                    .inputField()
                     .onSubmit(addCIDR)
                 Button("添加网段") { addCIDR() }
                     .disabled(newCIDR.trimmingCharacters(in: .whitespaces).isEmpty)
@@ -158,7 +171,7 @@ struct SharingView: View {
                 Button("应用") {
                     Task { await state.applyLANSharing(draft) }
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.pillProminent)
                 .disabled(draft == state.lanSharing)
             }
         } header: {
@@ -172,7 +185,7 @@ struct SharingView: View {
 
     @ViewBuilder
     private var clientsSection: some View {
-        Section {
+        CardSection {
             if !state.lanSharing.enabled {
                 Text("开启共享后，这里会列出正在使用的设备。")
                     .font(.caption)
@@ -231,8 +244,8 @@ struct SharingView: View {
             set: { enabled in
                 var next = state.lanSharing
                 next.enabled = enabled
-                // 开关立即生效；端口与白名单要按「应用」。
-                draft.enabled = enabled
+                // 开关立即生效；端口与白名单要按「应用」。草稿的开关由上面的 onChange 在生效后同步，
+                // 失败时就不会留下一个假的「有未应用的修改」。
                 Task { await state.applyLANSharing(next) }
             }
         )

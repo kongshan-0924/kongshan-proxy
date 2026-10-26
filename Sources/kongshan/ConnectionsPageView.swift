@@ -27,11 +27,8 @@ struct ConnectionsPageView: View {
         .navigationTitle("连接")
         .toolbar {
             ToolbarItem(placement: .principal) {
-                Picker("连接来源", selection: $tab) {
-                    ForEach(Tab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
+                CapsuleSegmentedPicker(options: Tab.allCases, selection: $tab) { $0.rawValue }
+                    .fixedSize()
             }
         }
     }

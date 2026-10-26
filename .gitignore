@@ -6,3 +6,6 @@ dist/
 .worktrees/
 
 __pycache__/
+
+# 本机编辑器配置
+.vscode/

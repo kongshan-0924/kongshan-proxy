@@ -33,19 +33,29 @@ public actor PrivilegedHelperClient: PrivilegedLaunching {
     private let socketPath: String
     private let binaryURL: URL
     private let now: @Sendable () -> Date
-    /// socket 读写超时。helper 正常响应在毫秒级，超时即视作卡死/异常。
+    /// socket 读写超时（status 等轻请求）。helper 正常响应在毫秒级，超时即视作卡死/异常。
     private let ioTimeout: TimeInterval
+    /// 启动的等待上限。helper 要读完配置、白名单校验、**完整校验内核签名**再起进程：签名校验要逐页哈希
+    /// 整个内核，Intel iMac 上 90 MB 的内核单这一步就 2 秒多，整体超过 5 秒（2026-10-26 实测 5.1 秒），
+    /// 用通用的 5 秒就会「判失败、内核却在之后起来」。
+    private let startTimeout: TimeInterval
+    /// 停止的等待上限。helper 停内核时 INT → TERM → KILL 每级最多等 2 秒。
+    private let stopTimeout: TimeInterval
 
     public init(
         binaryURL: URL,
         socketPath: String = HelperConstants.socketPath,
         now: @escaping @Sendable () -> Date = Date.init,
-        ioTimeout: TimeInterval = 5
+        ioTimeout: TimeInterval = 5,
+        startTimeout: TimeInterval = 30,
+        stopTimeout: TimeInterval = 15
     ) {
         self.binaryURL = binaryURL.standardizedFileURL.resolvingSymlinksInPath()
         self.socketPath = socketPath
         self.now = now
         self.ioTimeout = ioTimeout
+        self.startTimeout = startTimeout
+        self.stopTimeout = stopTimeout
     }
 
     /// 发 status 请求。不可达或无响应返回 nil。
@@ -63,7 +73,7 @@ public actor PrivilegedHelperClient: PrivilegedLaunching {
     // MARK: - PrivilegedLaunching
 
     public func start(config: Data) async throws -> PrivilegedProcessRecord {
-        guard let fd = connectSocket() else { throw PrivilegedHelperClientError.helperNotReachable }
+        guard let fd = connectSocket(timeout: startTimeout) else { throw PrivilegedHelperClientError.helperNotReachable }
         defer { close(fd) }
 
         // §1.3 配置经 pipe 只读 FD 传：读端经 SCM_RIGHTS 传给 helper，sing-box 从 stdin 读。
@@ -136,13 +146,14 @@ public actor PrivilegedHelperClient: PrivilegedLaunching {
     }
 
     public func stop() async throws {
-        guard let fd = connectSocket() else { throw PrivilegedHelperClientError.helperNotReachable }
+        guard let fd = connectSocket(timeout: stopTimeout) else { throw PrivilegedHelperClientError.helperNotReachable }
         defer { close(fd) }
         try sendFrame(HelperRequest.stopTun, configFD: nil, on: fd)
         guard let response = receiveFrame(on: fd) else {
             throw PrivilegedHelperClientError.receiveFailed
         }
-        guard response.ok else {
+        // 内核已经不在（崩溃后被助手收尸）：要的就是它停下，不当失败报给用户。
+        guard response.ok || response.message == HelperDecision.noKernelRunningMessage else {
             throw PrivilegedHelperClientError.helperRejected(response.message)
         }
     }
@@ -162,12 +173,13 @@ public actor PrivilegedHelperClient: PrivilegedLaunching {
     /// 建立到 helper socket 的连接。Unix domain socket 本地 connect：
     /// helper 未跑/未装时立即返回 ENOENT/ECONNREFUSED；helper 在跑时本地 ms 级成功。
     /// 设置 SO_RCVTIMEO/SO_SNDTIMEO 防止 helper 卡死时 App 挂死。
-    private nonisolated func connectSocket() -> Int32? {
+    private nonisolated func connectSocket(timeout: TimeInterval? = nil) -> Int32? {
         guard FileManager.default.fileExists(atPath: socketPath) else { return nil }
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
 
-        var tv = timeval(tv_sec: Int(ioTimeout), tv_usec: Int32((ioTimeout.truncatingRemainder(dividingBy: 1)) * 1_000_000))
+        let timeout = timeout ?? ioTimeout
+        var tv = timeval(tv_sec: Int(timeout), tv_usec: Int32((timeout.truncatingRemainder(dividingBy: 1)) * 1_000_000))
         _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
         _ = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 

@@ -43,9 +43,14 @@ struct ConnectionsView: View {
         return content(list: list, nodeNames: nodeNames)
             .navigationTitle("连接")
             .navigationSubtitle(subtitle)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                // 没有连接时页面中间已有空状态说明，底栏不再重复。
+                if state.status == .on, !state.connections.isEmpty { PageStatusBar(subtitle) }
+            }
             .searchable(text: $searchText, placement: .toolbar, prompt: "搜索目标、进程或规则")
+            .buttonStyle(.pill)
             .toolbar {
-                ToolbarItem(placement: .primaryAction) {
+                ToolbarItem(placement: .automatic) {
                     Button(role: .destructive) {
                         confirmsCloseAll = true
                     } label: {
@@ -81,6 +86,7 @@ struct ConnectionsView: View {
             .onDisappear { state.stopConnectionsMonitoring() }
             .sheet(item: $inspectedConnection) { connection in
                 ConnectionRouteDetail(connection: connection, nodeNames: nodeNames)
+                    .sheetChrome()
             }
     }
 
@@ -208,7 +214,8 @@ struct ConnectionsView: View {
             .customizationID("close")
             .disabledCustomizationBehavior(.all)
         }
-        .tableStyle(.inset(alternatesRowBackgrounds: true))
+        .tableStyle(.inset(alternatesRowBackgrounds: false))
+        .scrollContentBackground(.hidden)
         .contextMenu(forSelectionType: ConnectionLiveDetail.ID.self) { ids in
             contextMenu(for: ids, in: list)
         } primaryAction: { ids in
@@ -324,8 +331,8 @@ private struct ConnectionRouteDetail: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Form {
-                Section {
+            CardForm {
+                CardSection {
                     LabeledContent("目标", value: connection.host)
                     if connection.connection.viaLocalProxyEntry {
                         LabeledContent("来源", value: "经系统代理（发起的 App 无法识别）")
@@ -334,7 +341,7 @@ private struct ConnectionRouteDetail: View {
                     }
                     LabeledContent("命中规则", value: connection.rule.isEmpty ? "未报告" : connection.rule)
                 }
-                Section("出站链路") {
+                CardSection("出站链路") {
                     ForEach(Array(connection.chains.enumerated()), id: \.offset) { index, tag in
                         LabeledContent("\(index + 1)") {
                             Text(nodeNames[tag] ?? tag)
@@ -343,7 +350,6 @@ private struct ConnectionRouteDetail: View {
                     }
                 }
             }
-            .formStyle(.grouped)
             Divider()
             HStack {
                 Spacer()

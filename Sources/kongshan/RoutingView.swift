@@ -35,13 +35,10 @@ struct RoutingView: View {
         .navigationTitle("规则")
         .toolbar {
             ToolbarItem(placement: .principal) {
-                Picker("规则来源", selection: $tab) {
-                    ForEach(Tab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
+                CapsuleSegmentedPicker(options: Tab.allCases, selection: $tab) { $0.rawValue }
+                    .fixedSize()
             }
-            ToolbarItem(placement: .primaryAction) {
+            ToolbarItem(placement: .automatic) {
                 // 命中测试搬去诊断页了，但产生「这条流量为什么走那里」疑问的现场仍是这一页。
                 // 给一键跳转而不是一句不可点的提示文字。
                 Button {
@@ -51,7 +48,7 @@ struct RoutingView: View {
                 }
                 .help("到诊断页测试某个域名 / IP / 进程会命中哪条规则")
             }
-            ToolbarItem(placement: .primaryAction) {
+            ToolbarItem(placement: .automatic) {
                 Button {
                     showsRuleSetSheet = true
                 } label: {
@@ -60,7 +57,7 @@ struct RoutingView: View {
                 .help("GeoIP 与规则集的下载源、自动更新与立即更新")
             }
         }
-        .sheet(isPresented: $showsRuleSetSheet) { RuleSetDatabaseSheet() }
+        .sheet(isPresented: $showsRuleSetSheet) { RuleSetDatabaseSheet().sheetChrome() }
     }
 }
 
@@ -92,14 +89,13 @@ struct CustomRoutingRulesView: View {
     @AppStorage("routing.sshProxy.expanded") private var sshProxyExpanded = false
 
     var body: some View {
-        Form {
+        CardForm {
             switchesSection
             perAppSection
             forcedProxySection
             bypassSection
             sshProxySection
         }
-        .pageFormStyle()
         // 有未应用的修改（或上次应用失败）时，操作条固定在页面底部：不用再滚到列表最下面找按钮。
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if draftLoaded, routingDraft != state.routingSettings || bypassError != nil {
@@ -114,7 +110,15 @@ struct CustomRoutingRulesView: View {
         }
         // 只在草稿未脏时跟随外部变化：脏着就同步会把用户没应用完的编辑冲掉。
         .onChange(of: state.routingSettings) { old, new in
-            if routingDraft == old { routingDraft = new }
+            if routingDraft == old {
+                routingDraft = new
+            } else {
+                // 草稿脏着时只吸收立即生效的开关，否则「应用」会把刚切的拦截广告 / 订阅规则回退。
+                if old.blockAds != new.blockAds { routingDraft.blockAds = new.blockAds }
+                if old.useSubscriptionRules != new.useSubscriptionRules {
+                    routingDraft.useSubscriptionRules = new.useSubscriptionRules
+                }
+            }
         }
     }
 
@@ -133,7 +137,7 @@ struct CustomRoutingRulesView: View {
     // MARK: - 规则开关
 
     private var switchesSection: some View {
-        Section {
+        CardSection {
             Toggle("拦截广告", isOn: blockAdsBinding)
         } header: {
             HStack {
@@ -151,7 +155,7 @@ struct CustomRoutingRulesView: View {
     // MARK: - 分应用代理
 
     private var perAppSection: some View {
-        Section(isExpanded: $perAppExpanded) {
+        CardSection(isExpanded: $perAppExpanded) {
             // 两行：主操作（选 App、选走向、添加）一行；两个辅助入口另起一行并说明用途。
             // 此前五个控件挤一行，App 名在普通窗宽下就被截成「"企业微信"网页内容…」。
             HStack(spacing: 10) {
@@ -255,21 +259,15 @@ struct CustomRoutingRulesView: View {
     // MARK: - 强制代理
 
     private var forcedProxySection: some View {
-        Section(isExpanded: $forcedProxyExpanded) {
+        CardSection(isExpanded: $forcedProxyExpanded) {
             HStack(alignment: .top, spacing: 10) {
-                Picker("类型", selection: $forcedProxyKind) {
-                    ForEach(ForcedProxyInputKind.allCases) { kind in
-                        Text(kind.title).tag(kind)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 150)
+                CapsuleSegmentedPicker(options: ForcedProxyInputKind.allCases, selection: $forcedProxyKind) { $0.title }
+                    .fixedSize()
 
                 TextField(forcedProxyKind.placeholder, text: $forcedProxyInput,
                           prompt: Text(forcedProxyKind.placeholder), axis: .vertical)
                     .labelsHidden()
-                    .textFieldStyle(.roundedBorder)
+                    .inputField()
                     .lineLimit(1...4)
                     .font(.body.monospaced())
 
@@ -334,7 +332,7 @@ struct CustomRoutingRulesView: View {
     /// **本页是 `RoutingSettings` 草稿的唯一持有者**：设置页原先也有一份 `routingDraft`
     /// 并且无条件 `onChange` 同步，两处同时编辑会互相覆盖。搬过来后那份已删除。
     private var bypassSection: some View {
-        Section(isExpanded: $bypassExpanded) {
+        CardSection(isExpanded: $bypassExpanded) {
             BypassListSection(
                 title: "绕过域名（直连）",
                 placeholder: "例如 *.local 或 example.com，可一次填多个",
@@ -397,16 +395,16 @@ struct CustomRoutingRulesView: View {
                 }
                 .disabled(state.isApplyingRouting)
                 Button("应用并重载内核") { applyBypassDraft() }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.pillProminent)
                     .keyboardShortcut("s", modifiers: .command)
                     .disabled(state.isBusy || routingDraft == state.routingSettings)
                     .help("保存并重载内核（⌘S）；现有连接会断开重连")
             }
             .font(.callout)
-            .padding(.horizontal, 20)
-            .padding(.vertical, 10)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
         }
-        .background(.bar)
+        .background(Theme.canvasBackground)
     }
 
     /// 应用成功后草稿换成归一化后的值（`http://a.com/` → `a.com`、裸 IP → `/32`），
@@ -426,17 +424,17 @@ struct CustomRoutingRulesView: View {
     // MARK: - SSH 走代理
 
     private var sshProxySection: some View {
-        Section(isExpanded: $sshProxyExpanded) {
+        CardSection(isExpanded: $sshProxyExpanded) {
             HStack(spacing: 10) {
                 TextField("IP 地址", text: $sshProxyAddress, prompt: Text("IP 地址"))
                     .labelsHidden()
-                    .textFieldStyle(.roundedBorder)
+                    .inputField()
                     .font(.body.monospaced())
                     .onSubmit { addSSHProxyTarget() }
                 TextField("端口", value: $sshProxyPort,
                           format: .number.grouping(.never), prompt: Text("端口"))
                     .labelsHidden()
-                    .textFieldStyle(.roundedBorder)
+                    .inputField()
                     .font(.body.monospaced())
                     .frame(width: 92)
                     .onSubmit { addSSHProxyTarget() }
@@ -498,7 +496,7 @@ struct CustomRoutingRulesView: View {
                 Text(title)
             } icon: {
                 Image(systemName: symbol)
-                    .foregroundStyle(.tint)
+                    .foregroundStyle(.secondary)
             }
             Text(hint)
                 .foregroundStyle(.secondary)
@@ -646,10 +644,19 @@ struct SubscriptionRulesBrowserView: View {
             }
             subscriptionRulesContent(subscriptionRules, matched: matched, targetGroups: targetGroups, keyword: keyword)
         }
+        .buttonStyle(.pill)
         .navigationSubtitle(subtitle(
             total: subscriptionRules.count, matched: matched.count, groups: targetGroups.count,
             ruleSets: ruleSetNames.count, keyword: keyword
         ))
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if !subscriptionRules.isEmpty {
+                PageStatusBar(subtitle(
+                    total: subscriptionRules.count, matched: matched.count, groups: targetGroups.count,
+                    ruleSets: ruleSetNames.count, keyword: keyword
+                ))
+            }
+        }
         .searchable(text: $ruleSearch, placement: .toolbar, prompt: "搜索规则或目标策略")
     }
 
@@ -723,7 +730,7 @@ struct SubscriptionRulesBrowserView: View {
             }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 6)
+        .padding(.vertical, 8)
     }
 
     // MARK: - 规则浏览
@@ -746,7 +753,7 @@ struct SubscriptionRulesBrowserView: View {
             // 不搜索时按目标策略折叠：三千多条规则平铺出来既没有全局认知、也找不到东西——
             // 用户真正想知道的是"哪些流量走哪个策略"，那正是按 target 分组的形状。
             List {
-                Section {
+                CardSection {
                     ForEach(targetGroups) { group in
                         RuleTargetGroupRow(
                             group: group, tint: targetTint(group.target), initiallyExpanded: expandsAllGroups
@@ -764,10 +771,11 @@ struct SubscriptionRulesBrowserView: View {
                 }
             }
             .listStyle(.inset)
+            .scrollContentBackground(.hidden)
         } else {
             // 搜索时给扁平结果（用户已经在找具体一条）。
             List {
-                Section("匹配的订阅规则 · 只读") {
+                CardSection("匹配的订阅规则 · 只读") {
                     ForEach(matched.prefix(300)) { rule in
                         RuleRow(rule: rule, tint: targetTint(rule.target))
                     }
@@ -779,6 +787,7 @@ struct SubscriptionRulesBrowserView: View {
                 }
             }
             .listStyle(.inset)
+            .scrollContentBackground(.hidden)
             .overlay {
                 if matched.isEmpty { ContentUnavailableView.search(text: ruleSearch) }
             }
@@ -856,11 +865,11 @@ struct BypassListSection: View {
     @State private var inputError: String?
 
     var body: some View {
-        Section {
+        CardSection {
             HStack(spacing: 8) {
                 TextField(placeholder, text: $input, prompt: Text(placeholder))
                     .labelsHidden()
-                    .textFieldStyle(.roundedBorder)
+                    .inputField()
                     .font(.body.monospaced())
                     .onSubmit(add)
                 Button("添加", action: add)
@@ -1165,7 +1174,7 @@ private struct TagChip: View {
         .padding(.leading, 9)
         .padding(.trailing, 6)
         .padding(.vertical, 4)
-        .background(Color.accentColor.opacity(0.08), in: Capsule())
-        .overlay(Capsule().strokeBorder(Color.accentColor.opacity(0.18), lineWidth: 0.5))
+        // 与 StatusBadge 同一语言：淡色填充、无描边。
+        .background(Color.accentColor.opacity(0.12), in: Capsule(style: .circular))
     }
 }

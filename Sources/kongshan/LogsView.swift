@@ -30,28 +30,31 @@ struct LogsView: View {
         }
     }
 
-    /// 按连接 ID 聚合。同一条连接的多行日志（入站 → 进程匹配 → 出站 → 失败原因）
-    /// 本来就是一个整体，散在几千行里靠肉眼找同号行是这一页最不好用的地方。
-    private var connectionGroups: [LogConnectionGroup] {
-        LogConnectionGrouping.groups(from: filteredLogs)
-    }
-
     var body: some View {
-        logList
+        // 过滤只算一遍：日志每 200 ms 批量到达一次，body 跟着重算；`filteredLogs` 是对至多 2000 行的
+        // 全量过滤（含不区分大小写的子串匹配），原先一次求值里被访问三四遍。
+        let logs = filteredLogs
+        let countText = "\(logs.count) / \(state.liveLogs.count) 行"
+        return logList(logs)
             .navigationTitle("内核日志")
-            .navigationSubtitle("\(filteredLogs.count) / \(state.liveLogs.count) 行")
+            .navigationSubtitle(countText)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                PageStatusBar(countText)
+            }
             .searchable(text: $filterText, placement: .toolbar, prompt: "搜索日志或主机名")
+            .buttonStyle(.pill)
             .toolbar {
-                ToolbarItemGroup(placement: .primaryAction) {
+                ToolbarItemGroup(placement: .automatic) {
                     // 这个选择器只是"过滤内核推来的日志"，不改内核自己的 log.level（那要重启内核）。
                     // 内核按 info 输出，因此没有「调试」这一档可选——放上去只会是个点了没反应的死控件。
-                    Picker("日志等级", selection: logLevelBinding) {
-                        Text("信息").tag(CoreLogLevel.info)
-                        Text("警告").tag(CoreLogLevel.warning)
-                        Text("错误").tag(CoreLogLevel.error)
+                    CapsuleSegmentedPicker(options: [CoreLogLevel.info, .warning, .error], selection: logLevelBinding) { level in
+                        switch level {
+                        case .info: "信息"
+                        case .warning: "警告"
+                        default: "错误"
+                        }
                     }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
+                    .fixedSize()
                     .disabled(!state.isOn)
                     .help("过滤显示的最低等级")
 
@@ -103,18 +106,27 @@ struct LogsView: View {
             }
     }
 
-    private var logList: some View {
+    /// 最后一行的标识。按连接聚合时行是分组（id 为连接 ID），用条目 id 去 scrollTo 对不上任何行。
+    private func lastRowID(_ logs: [LiveLogEntry]) -> AnyHashable? {
+        if groupsByConnection {
+            return LogConnectionGrouping.groups(from: logs).last.map { AnyHashable($0.id) }
+        }
+        return logs.last.map { AnyHashable($0.id) }
+    }
+
+    private func logList(_ logs: [LiveLogEntry]) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     if groupsByConnection {
-                        ForEach(connectionGroups) { group in
+                        // 按连接 ID 聚合：同一条连接的多行日志（入站 → 进程匹配 → 出站 → 失败原因）本来就是一个整体。
+                        ForEach(LogConnectionGrouping.groups(from: logs)) { group in
                             LogConnectionRow(group: group)
                                 .id(group.id)
                             Divider().opacity(0.4)
                         }
                     } else {
-                        ForEach(filteredLogs) { item in
+                        ForEach(logs) { item in
                             LogEntryRow(item: item)
                                 .id(item.id)
                                 .contextMenu {
@@ -131,7 +143,7 @@ struct LogsView: View {
             }
             .background(Color(nsColor: .textBackgroundColor))
             .overlay {
-                if filteredLogs.isEmpty {
+                if logs.isEmpty {
                     if !filterText.isEmpty {
                         ContentUnavailableView.search(text: filterText)
                     } else if state.isOn {
@@ -157,7 +169,7 @@ struct LogsView: View {
                             Spacer()
                             Button {
                                 pausesAutomaticScroll = false
-                                if let lastID = filteredLogs.last?.id {
+                                if let lastID = lastRowID(logs) {
                                     withAnimation { proxy.scrollTo(lastID, anchor: .bottom) }
                                 }
                             } label: {
@@ -170,8 +182,9 @@ struct LogsView: View {
                     }
                 }
             }
-            .onChange(of: state.liveLogs.count) {
-                guard !pausesAutomaticScroll, let lastID = filteredLogs.last?.id else { return }
+            // 看最后一行的 ID 而不是行数：满 2000 行后每批都是删旧加新，行数恒定，按行数触发会停止跟随。
+            .onChange(of: state.liveLogs.last?.id) {
+                guard !pausesAutomaticScroll, let lastID = lastRowID(logs) else { return }
                 proxy.scrollTo(lastID, anchor: .bottom)
             }
         }

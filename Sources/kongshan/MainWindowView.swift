@@ -4,11 +4,6 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// 主窗口的 SwiftUI 内容。窗口关闭时卸下、打开时重建。
-///
-/// 主窗口关掉后窗口对象仍留着（下次秒开），而 SwiftUI 不管窗口是否可见：**关着的窗口里，
-/// 页面照样跟着每次状态变化重算**（实测关窗后改 10 次状态，仪表盘 body 求值 10 次）。
-/// 关窗前停在代理页时，从状态栏断开代理，主线程要在看不见的地方把几十个策略组重算好几轮——
-/// 用户看到的就是「状态栏点断开后卡住、一直显示正在关闭」，打开主窗口却一切正常。
 @MainActor
 final class MainWindowContentHost {
     let hostingView: NSHostingView<AnyView>
@@ -21,14 +16,12 @@ final class MainWindowContentHost {
         attachIfNeeded()
     }
 
-    /// 打开窗口前调用：按上次停留的页面重建内容。已挂着（窗口开着或只是最小化）时不动，免得丢掉页内状态。
     func attachIfNeeded() {
         guard !isAttached else { return }
         hostingView.rootView = AnyView(MainWindowView(initialPage: state.lastMainWindowPage).environment(state))
         isAttached = true
     }
 
-    /// 窗口关闭时调用：换成空内容，页面不再观察任何状态。
     func detach() {
         guard isAttached else { return }
         hostingView.rootView = AnyView(EmptyView())
@@ -39,97 +32,63 @@ final class MainWindowContentHost {
 struct MainWindowView: View {
     @Environment(AppState.self) private var state
     @State private var selection: SidebarPage?
-    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var sidebarCollapsed = false
 
     init(initialPage: SidebarPage = .dashboard) {
         _selection = State(initialValue: initialPage)
     }
 
+    private var activePage: SidebarPage {
+        selection ?? .dashboard
+    }
+
     var body: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility) {
-            List(selection: $selection) {
-                sidebarRow(.dashboard)
-                // 两个组名各 3 项，扫一眼就知道该去哪。原先「其他」塞 6 项，
-                // 那不是分组、是兜底。
-                Section("流量") {
-                    sidebarRow(.nodes)
-                    sidebarRow(.policyGroups)
-                    sidebarRow(.routing)
-                }
-                Section("排查") {
-                    sidebarRow(.connections)
-                    sidebarRow(.records)
-                    sidebarRow(.diagnostics)
-                }
-                sidebarRow(.settings)
+        HStack(spacing: 0) {
+            if !sidebarCollapsed {
+                // 侧栏 132pt：窗口默认 1008 宽的约 1/8，与内容区 7:1，符合紧凑单窗范式。
+                customSidebar
+                    .frame(width: 132)
             }
-            .listStyle(.sidebar)
-            .navigationSplitViewColumnWidth(min: 200, ideal: 220, max: 280)
-            .toolbar(removing: .sidebarToggle)
-            .safeAreaInset(edge: .bottom, spacing: 0) { sidebarStatus }
-        } detail: {
-            Group {
-                switch selection ?? .dashboard {
-                case .dashboard:
-                    DashboardView()
-                case .nodes:
-                    NodesView()
-                case .policyGroups:
-                    PolicyGroupsView()
-                case .routing:
-                    RoutingView()
-                case .connections:
-                    ConnectionsPageView()
-                case .records:
-                    RecordsPageView()
-                case .diagnostics:
-                    DiagnosticsView()
-                case .settings:
-                    SettingsView()
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    NativeNoticeToolbarItem(selection: $selection)
-                }
-            }
-            // 只喂给自诊断做归因，不参与渲染。CPU 异常记录里此前缺的正是这一条：
-            // 只说得出"主线程在渲染"，说不出在渲染哪一页。
-            .onAppear { state.noteVisiblePage((selection ?? .dashboard).title) }
-            .onDisappear { state.noteVisiblePage(nil) }
-            .onChange(of: selection) { _, page in
-                state.noteVisiblePage((page ?? .dashboard).title)
-                state.lastMainWindowPage = page ?? .dashboard
-            }
-            // 空态按钮（「前往配置页」等）与 ⌘, 发来的跳转请求：切页、清号。
-            //
-            // `initial: true` 不能省：窗口**首次**打开时本视图刚被创建，而 ⌘, 是先建窗口、
-            // 再发跳转请求——请求值很可能在第一次求值 body 之前就已写入，
-            // 此时 `onChange` 看不到"变化"，窗口会停在仪表盘而不是设置页。
-            .onChange(of: state.requestedPage, initial: true) { _, page in
-                guard let page else { return }
-                selection = page
-                state.requestedPage = nil
-            }
+
+            detailCanvas
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .background(Theme.canvasBackground)
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Button {
-                    columnVisibility = columnVisibility == .detailOnly ? .all : .detailOnly
+                    sidebarCollapsed.toggle()
                 } label: {
                     Image(systemName: "sidebar.left")
                 }
-                .help(columnVisibility == .detailOnly ? "显示侧边栏" : "隐藏侧边栏")
-                .accessibilityLabel(columnVisibility == .detailOnly ? "显示侧边栏" : "隐藏侧边栏")
+                .help(sidebarCollapsed ? "显示侧边栏" : "隐藏侧边栏")
+                .accessibilityLabel(sidebarCollapsed ? "显示侧边栏" : "隐藏侧边栏")
+            }
+            if activePage == .dashboard {
+                ToolbarItem(placement: .automatic) {
+                    DashboardToolbarMenu()
+                }
+            }
+            ToolbarItem(placement: .automatic) {
+                NativeNoticeToolbarItem(selection: $selection)
             }
         }
-        // ⌘1~⌘8 直接切页，与侧栏顺序一致。零尺寸透明按钮藏在背景里，
-        // 只提供快捷键，不参与布局与渲染。
+        // 顶栏不画自己的底衬：与下方冷云灰画布融为一体，去掉横贯窗口的分割带。
+        .toolbarBackground(.hidden, for: .windowToolbar)
+        .onAppear { state.noteVisiblePage(activePage.title) }
+        .onDisappear { state.noteVisiblePage(nil) }
+        .onChange(of: selection) { _, page in
+            let current = page ?? .dashboard
+            state.noteVisiblePage(current.title)
+            state.lastMainWindowPage = current
+        }
+        .onChange(of: state.requestedPage, initial: true) { _, page in
+            guard let page else { return }
+            selection = page
+            state.requestedPage = nil
+        }
         .background {
             HStack(spacing: 0) {
-                // 只给前 9 页绑 ⌘1~⌘9。第 10 页起不能再绑：`Character("10")` 不是单字符，
-                // `Character(_:)` 会直接 trap——加一页就崩，且崩在启动路径上。
                 ForEach(Array(SidebarPage.allCases.enumerated()), id: \.element) { index, page in
                     if let key = SidebarPage.shortcutKey(at: index) {
                         Button(page.title) { selection = page }
@@ -145,44 +104,167 @@ struct MainWindowView: View {
         .navigationTitle("kongshan")
     }
 
-    private func sidebarRow(_ page: SidebarPage) -> some View {
-        // 未读数用系统 `.badge`：与访达 / 邮件的侧栏一致，不再自绘胶囊。
-        let noticeCount = page == .records
-            ? (state.errorMessage != nil ? 1 : 0) + state.warnings.count
-            : 0
-        return Label(page.title, systemImage: page.symbol)
-            .badge(noticeCount)
-            .tag(page)
+    // MARK: - 定制侧边栏（宽 132pt，冷银灰底 + 纯白圆角浮起选区 + 细线分段）
+
+    private var customSidebar: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 3) {
+                    sidebarButton(.dashboard)
+
+                    sidebarDivider
+
+                    sidebarButton(.nodes)
+                    sidebarButton(.policyGroups)
+                    sidebarButton(.routing)
+
+                    sidebarDivider
+
+                    sidebarButton(.connections)
+                    sidebarButton(.records)
+                    sidebarButton(.diagnostics)
+
+                    sidebarDivider
+
+                    sidebarButton(.settings)
+                }
+                .padding(.horizontal, 9)
+                .padding(.top, 10)
+                .padding(.bottom, 10)
+            }
+
+            Spacer(minLength: 0)
+
+            sidebarFooter
+        }
+        .background(Theme.sidebarFill.ignoresSafeArea(edges: .top))
+        // 自绘侧栏没有系统 List 的方向键切换：点过侧栏后 ↑↓ 按侧栏顺序切页。
+        .focusable()
+        .focusEffectDisabled()
+        .onMoveCommand { direction in
+            let pages = SidebarPage.allCases
+            guard let index = pages.firstIndex(of: activePage) else { return }
+            switch direction {
+            case .up where index > pages.startIndex:
+                selection = pages[pages.index(before: index)]
+            case .down where index < pages.index(before: pages.endIndex):
+                selection = pages[pages.index(after: index)]
+            default:
+                break
+            }
+        }
     }
 
-    /// 侧栏底部常驻状态条，任何页面下都能看到当前接管方式与节点。
-    private var sidebarStatus: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Divider()
+    private var sidebarDivider: some View {
+        Divider()
+            .opacity(0.5)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+    }
+
+    private func sidebarButton(_ page: SidebarPage) -> some View {
+        let isSelected = activePage == page
+        return Button {
+            selection = page
+        } label: {
             HStack(spacing: 8) {
-                Circle()
-                    .fill(state.statusTint)
-                    .frame(width: 7, height: 7)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(state.statusText)
-                        .font(.caption.weight(.medium))
-                        .lineLimit(1)
-                    Text(state.selectedNode?.name ?? "未选择节点")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                Image(systemName: page.symbol)
+                    .font(.callout.weight(isSelected ? .semibold : .regular))
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                    .frame(width: 18, alignment: .center)
+
+                Text(page.title)
+                    .font(.callout.weight(isSelected ? .semibold : .regular))
+                    .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+                    .lineLimit(1)
+
+                Spacer(minLength: 2)
+
+                if page == .records {
+                    SidebarNoticeBadge()
                 }
-                Spacer(minLength: 0)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 9)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 6.5)
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background {
+                if isSelected {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Theme.cardFill)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(Theme.cardStroke, lineWidth: 1)
+                        )
+                }
+            }
         }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    /// 侧栏底部状态条：拆成独立视图，状态变化只刷新它自己，不牵动整个主窗口重算。
+    private var sidebarFooter: some View {
+        SidebarStatusFooter { selection = .policyGroups }
+    }
+
+    // MARK: - 右侧主画布
+
+    private var detailCanvas: some View {
+        Group {
+            switch activePage {
+            case .dashboard:
+                DashboardView()
+            case .nodes:
+                NodesView()
+            case .policyGroups:
+                PolicyGroupsView()
+            case .routing:
+                RoutingView()
+            case .connections:
+                ConnectionsPageView()
+            case .records:
+                RecordsPageView()
+            case .diagnostics:
+                DiagnosticsView()
+            case .settings:
+                SettingsView()
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.canvasBackground)
+    }
+}
+
+/// 仪表盘顶栏的检测入口：探测出口与网络自检收进一个菜单，顶栏不再散落两枚孤立图标。
+private struct DashboardToolbarMenu: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        Menu {
+            Button {
+                Task { await state.refreshExitDiagnostics() }
+            } label: {
+                Label("立即探测出口", systemImage: "globe.asia.australia")
+            }
+            .keyboardShortcut("r", modifiers: .command)
+            .disabled(state.isRefreshingExitDiagnostics)
+
+            Divider()
+
+            Button {
+                state.requestPage(.diagnostics)
+            } label: {
+                Label("网络自检与诊断", systemImage: "stethoscope")
+            }
+        } label: {
+            Image(systemName: "waveform.path.ecg")
+        }
+        .menuIndicator(.hidden)
+        .help("网络检测：探测出口（⌘R）、网络自检")
     }
 }
 
 /// 原生 macOS 工具栏通知组件。
-/// 依托 Detail 视图的原生 Toolbar 渲染在窗口最右上角，拥有纯正系统质感与交互体验。
 private struct NativeNoticeToolbarItem: View {
     @Environment(AppState.self) private var state
     @Binding var selection: SidebarPage?
@@ -227,7 +309,7 @@ private struct NativeNoticeToolbarItem: View {
                             .foregroundStyle(.white)
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1)
-                            .background(noticeColor, in: Capsule())
+                            .background(noticeColor, in: Capsule(style: .circular))
                         Spacer()
                         Button("全部清除") {
                             state.dismissError()
@@ -291,3 +373,70 @@ private struct NativeNoticeToolbarItem: View {
     }
 }
 
+/// 侧栏「日志」项上的未读数。独立视图：错误与告警变化只刷新这枚徽标。
+private struct SidebarNoticeBadge: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        let count = (state.errorMessage != nil ? 1 : 0) + state.warnings.count
+        if count > 0 {
+            let tint: Color = state.errorMessage != nil ? .red : .orange
+            Text("\(count)")
+                .font(.caption2.weight(.semibold).monospacedDigit())
+                .foregroundStyle(tint)
+                .padding(.horizontal, 5.5)
+                .padding(.vertical, 1)
+                .background(tint.opacity(0.14), in: Capsule(style: .circular))
+        }
+    }
+}
+
+/// 侧栏底部紧凑状态条：接管状态 · 出站模式 · 当前节点，点击前往代理页。
+private struct SidebarStatusFooter: View {
+    @Environment(AppState.self) private var state
+    let onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            VStack(alignment: .leading, spacing: 6) {
+                Divider().opacity(0.55)
+
+                HStack(spacing: 7) {
+                    Circle()
+                        .fill(state.statusTint)
+                        .frame(width: 6.5, height: 6.5)
+
+                    VStack(alignment: .leading, spacing: 1) {
+                        HStack(spacing: 4) {
+                            Text(state.statusText)
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                            Text("·")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                            Text(state.outboundMode.displayName)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
+                        Text(state.selectedNode?.name ?? "未选择节点")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 3)
+            }
+            .padding(.horizontal, 10)
+            .padding(.bottom, 10)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("点击前往代理页切换节点")
+    }
+}

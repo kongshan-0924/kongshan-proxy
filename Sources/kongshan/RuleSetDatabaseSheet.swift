@@ -15,8 +15,8 @@ struct RuleSetDatabaseSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Form {
-                Section {
+            CardForm {
+                CardSection {
                     Picker("下载源", selection: mirrorBinding) {
                         ForEach(RuleSetMirror.allCases, id: \.self) { mirror in
                             Text(mirror.displayName).tag(mirror)
@@ -58,7 +58,6 @@ struct RuleSetDatabaseSheet: View {
                         .foregroundStyle(.secondary)
                                 }
             }
-            .formStyle(.grouped)
 
             Divider()
             HStack {

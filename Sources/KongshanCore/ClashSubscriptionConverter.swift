@@ -266,7 +266,7 @@ public enum ClashSubscriptionConverter {
                 server: server,
                 port: port,
                 password: try requiredString(raw, "password"),
-                method: try requiredString(raw, "cipher"),
+                method: try kernelValue(ProxyNode.kernelShadowsocksMethod, requiredString(raw, "cipher"), field: "cipher"),
                 transport: transport,
                 pluginName: plugin?.name,
                 pluginOptions: plugin?.options
@@ -296,7 +296,11 @@ public enum ClashSubscriptionConverter {
                 server: server,
                 port: port,
                 uuid: try requiredString(raw, "uuid"),
-                security: optionalString(raw, "cipher") ?? optionalString(raw, "security") ?? "auto",
+                security: try kernelValue(
+                    ProxyNode.kernelVMessSecurity,
+                    optionalString(raw, "cipher") ?? optionalString(raw, "security") ?? "auto",
+                    field: "cipher"
+                ),
                 alterID: int(raw, "alterId") ?? int(raw, "alter-id"),
                 tlsEnabled: bool(raw, "tls"),
                 sni: sni,
@@ -319,7 +323,7 @@ public enum ClashSubscriptionConverter {
                 sni: sni,
                 skipCertificateVerification: skipCertificateVerification,
                 transport: transport,
-                flow: optionalString(raw, "flow"),
+                flow: try kernelFlow(optionalString(raw, "flow")),
                 // Clash 里 `fingerprint` 是证书指纹（钉证书用的 SHA-256），`client-fingerprint` 才是 uTLS；
                 // 旧写法把前者也当 uTLS 兜底，现在只收内核认得的指纹名，证书指纹自然被挡掉。
                 utlsFingerprint: clientFingerprint(raw) ?? supportedFingerprint(optionalString(raw, "fingerprint")),
@@ -341,7 +345,8 @@ public enum ClashSubscriptionConverter {
                 tlsEnabled: true,
                 sni: sni,
                 skipCertificateVerification: skipCertificateVerification,
-                obfsPassword: optionalString(raw, "obfs-password"),
+                // 写了 obfs 就必须有密码：缺了的话静默不带 obfs 去连，节点永远不通。
+                obfsPassword: optionalString(raw, "obfs") == nil ? nil : try requiredString(raw, "obfs-password"),
                 uploadMbps: bandwidth(raw, "up"),
                 downloadMbps: bandwidth(raw, "down")
             )
@@ -451,8 +456,30 @@ public enum ClashSubscriptionConverter {
         return cleaned.isEmpty ? nil : cleaned
     }
 
+    /// 枚举字段换成内核写法；内核不认就跳过这个节点（计入 warnings），不让它拖垮整份配置。
+    private static func kernelValue(_ normalize: (String) -> String?, _ value: String, field: String) throws -> String {
+        guard let normalized = normalize(value) else { throw NodeMappingError.unsupportedValue(field, value) }
+        return normalized
+    }
+
+    private static func kernelFlow(_ value: String?) throws -> String? {
+        guard let flow = ProxyNode.kernelVLESSFlow(value) else {
+            throw NodeMappingError.unsupportedValue("flow", value ?? "")
+        }
+        return flow
+    }
+
     private static func optionalString(_ raw: [String: Any], _ key: String) -> String? {
-        guard let value = raw[key] as? String else { return nil }
+        // 不加引号的纯数字（`password: 123456`、Reality `short-id: 12345678`）被 YAML 解析成整数，
+        // 只认 String 会把节点判成缺字段丢掉，或把短 ID 静默丢成「永远连不上」。
+        let value: String
+        if let text = raw[key] as? String {
+            value = text
+        } else if let number = raw[key] as? Int {
+            value = String(number)
+        } else {
+            return nil
+        }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }
@@ -485,6 +512,7 @@ private enum NodeMappingError: Error, LocalizedError {
     case unsupportedTransport(String)
     case unsupportedObfs(String)
     case unsupportedPlugin(String)
+    case unsupportedValue(String, String)
 
     var errorDescription: String? {
         switch self {
@@ -494,6 +522,7 @@ private enum NodeMappingError: Error, LocalizedError {
         case let .unsupportedTransport(value): "不支持的传输方式 \(value)"
         case let .unsupportedObfs(value): "不支持的 Hysteria2 obfs \(value)"
         case let .unsupportedPlugin(value): "不支持的 SS 插件 \(value)"
+        case let .unsupportedValue(field, value): "内核不支持的 \(field)：\(value)"
         }
     }
 }

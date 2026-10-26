@@ -57,9 +57,9 @@ final class LocalTCPRelayTests: XCTestCase {
     /// 而回环死端口上 NWConnection 停在 `.waiting(ECONNREFUSED)` **永不转 `.failed`**
     /// （实测 8 秒仍是 waiting）。真正救场的是 `pump(from: backend, to: client)`
     /// 那个 `receive` —— 它会立刻带 ECONNREFUSED 回调，走 `cancel()`。
-    /// 也就是说这条路径**只有一层保险**：谁要是重排了 pump 的启动顺序、
-    /// 或让 backend 的 receive 晚于首个 send 才挂上，客户端就会一直挂着，
-    /// 表现为浏览器转圈、Claude/Codex 请求超时。这个测试就是那层保险的看门人。
+    /// 2026-10-25 起 backend 的状态回调也把 `.waiting` 当作断开（第二层保险）。
+    /// 谁要是重排了 pump 的启动顺序、又删了那个回调，客户端就会一直挂着，
+    /// 表现为浏览器转圈、Claude/Codex 请求超时。这个测试就是两层保险的看门人。
     /// 给 socket 留 6 秒读超时：断得快才过，挂着的话只能等满 6 秒。
     func testDeadBackendClosesClientImmediatelyInsteadOfHanging() async throws {
         let deadPort = try Self.reservedThenReleasedPort()

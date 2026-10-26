@@ -54,12 +54,15 @@ final class NativeChromeGuardTests: XCTestCase {
         )
     }
 
-    /// 内容区底色不得回到默认的 `windowBackgroundColor`：浅色模式下它与 `GroupBox` 同为浅灰，
-    /// 灰底摆灰卡、没有层次（用户 2026-09-18「整体页面太灰了」）。
+    /// 内容区底色不得回到默认的 `windowBackgroundColor`（灰）：浅色模式下它与 `GroupBox` 同为浅灰，
+    /// 灰底摆灰卡、没有层次。2026-10-23 起画布改用自定义极浅冷灰动态色（卡片纯白浮其上），
+    /// 这里钉死"画布是自定义动态色、不是系统默认灰"。
     func testMainWindowUsesContentBackgroundColor() throws {
         let app = try source("KongshanApp.swift")
         XCTAssertTrue(app.contains("window.backgroundColor = Theme.windowBackgroundColor"))
-        XCTAssertTrue(try source("Theme.swift").contains("NSColor.controlBackgroundColor"))
+        let theme = try source("Theme.swift")
+        XCTAssertTrue(theme.contains("static let windowBackgroundColor = NSColor(name: nil)"), "画布应为自定义动态色")
+        XCTAssertTrue(theme.contains("static let canvasBackground = Color(nsColor: windowBackgroundColor)"), "画布应跟随窗口底色")
     }
 
     /// 系统容器（GroupBox / Form / List / Table）自带层次，不需要也不该再叠投影。
@@ -81,8 +84,38 @@ final class NativeChromeGuardTests: XCTestCase {
             XCTAssertTrue(try source(file).contains(".navigationSubtitle("), "\(file) 应把统计放进副标题")
         }
         let app = try source("KongshanApp.swift")
-        XCTAssertTrue(app.contains("window.titleVisibility = .visible"), "标题栏必须可见")
+        // 方案 A 极简顶栏：标题隐藏、去掉标题栏分割线，与侧栏融成一块。
+        XCTAssertTrue(app.contains("window.titleVisibility = .hidden"), "极简顶栏标题应隐藏")
+        XCTAssertTrue(app.contains("window.titlebarSeparatorStyle = .none"), "极简顶栏应去掉分割线")
         XCTAssertTrue(app.contains("window.toolbarStyle = .unified"), "统一工具栏")
+    }
+
+    /// 主窗口隐藏了标题栏，`.navigationSubtitle` 不再显示；页面里看不到的常驻统计
+    /// （连接数与总速率、日志行数、共享监听状态）必须挪进底部状态条，不能跟着标题栏一起消失。
+    func testHiddenTitleBarStatsLiveInPageStatusBar() throws {
+        XCTAssertTrue(try source("KongshanApp.swift").contains("window.titleVisibility = .hidden"))
+        for file in ["ConnectionsView.swift", "LogsView.swift", "SharingView.swift"] {
+            XCTAssertTrue(try source(file).contains("PageStatusBar("), "\(file) 的统计应放进底部状态条")
+        }
+    }
+
+    /// 控件统一（2026-10-24）：分段选择用 `CapsuleSegmentedPicker`、表单用 `CardForm`/`CardSection`、
+    /// 按钮用 `.pill`/`.pillProminent`、输入框用 `.inputField()`。系统件混进来一个，界面就又是两套。
+    /// 默认 `Capsule()` 在当前 SDK 下描边两侧会冒出竖线，必须写 `Capsule(style: .circular)`。
+    func testControlsUseUnifiedComponents() throws {
+        let files = try FileManager.default.contentsOfDirectory(atPath: projectRoot().appending(path: "Sources/kongshan").path)
+            .filter { $0.hasSuffix(".swift") }
+        for file in files {
+            let code = try source(file).split(separator: "\n")
+                .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+                .joined(separator: "\n")
+            XCTAssertFalse(code.contains(".pickerStyle(.segmented)"), "\(file) 应改用 CapsuleSegmentedPicker")
+            XCTAssertFalse(code.contains(".borderedProminent"), "\(file) 应改用 .pillProminent")
+            XCTAssertFalse(code.contains(".buttonStyle(.bordered)"), "\(file) 应改用 .pill")
+            XCTAssertFalse(code.contains(".textFieldStyle(.roundedBorder)"), "\(file) 应改用 .inputField()")
+            XCTAssertFalse(code.contains("Capsule()"), "\(file) 应写 Capsule(style: .circular)")
+            XCTAssertNil(code.range(of: #"(?<![A-Za-z])Form \{"#, options: .regularExpression), "\(file) 应改用 CardForm")
+        }
     }
 
     /// 搜索用系统 `.searchable`，会进工具栏并自带快捷键；自绘搜索框没有这些。
@@ -118,43 +151,16 @@ final class NativeChromeGuardTests: XCTestCase {
     }
 
     /// 指标网格：**列数候选必须整除卡片数**，否则最后一行缺角——
-    /// 用户 2026-09-03 反馈的「首页有两个空的」就是 `.adaptive` 排出 4/5 列造成的。
-    ///
-    /// 这里不再硬编码卡片名单，而是直接从源码数出网格里的卡片数，再验证每个列数候选都能整除它。
-    /// 加卡、减卡时这条会自动跟着变——名单式断言只会在改动时报"缺少某某卡"，帮不上判断。
+    /// 双主卡宽度分配：宽窗口 HStack 按 `DashboardLayout` 的比例规范（左 0.64 / 右 0.36）、
+    /// 窄窗口竖排，不得回到 `.adaptive`（那会排出缺角的最后一行）。
+    /// HStack 两栏要么并排要么竖排，不存在"缺角"，所以守卫钉死"显式比例 + 禁自适应"。
     func testDashboardMetricsGridNeverLeavesAGaggedRow() throws {
         let dashboard = try source("DashboardView.swift")
         XCTAssertFalse(dashboard.contains("GridItem(.adaptive"), "自适应列会排出缺角的最后一行")
-        XCTAssertTrue(dashboard.contains("count: metricColumns"))
-
-        // 网格体：LazyVGrid 的尾随闭包到 `.background {` 之间。
-        let gridStart = try XCTUnwrap(dashboard.range(of: "count: metricColumns"))
-        let gridEnd = try XCTUnwrap(dashboard.range(of: ".background {", range: gridStart.upperBound..<dashboard.endIndex))
-        let body = dashboard[gridStart.upperBound..<gridEnd.lowerBound]
-        let cardCount = body
-            .split(separator: "\n")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { line in
-                guard !line.isEmpty, !line.hasPrefix("//"), !line.hasPrefix(")"), !line.hasPrefix("]") else { return false }
-                return line.hasSuffix("()") || line.hasSuffix("Box")
-            }
-            .count
-        XCTAssertGreaterThan(cardCount, 0, "没数出任何指标卡，断言本身失效了")
-
-        let candidates = try XCTUnwrap(
-            dashboard.range(of: "let candidates: [Int] = [").map { range -> [Int] in
-                let tail = dashboard[range.upperBound...]
-                let inside = tail.prefix { $0 != "]" }
-                return inside.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
-            }
-        )
-        XCTAssertFalse(candidates.isEmpty, "没解析出列数候选")
-        for candidate in candidates {
-            XCTAssertEqual(
-                cardCount % candidate, 0,
-                "\(cardCount) 张卡排 \(candidate) 列会缺角；候选列数必须整除卡片数"
-            )
-        }
+        XCTAssertTrue(dashboard.contains("DashboardTrafficGroup()"), "左卡（网络流量）应在")
+        XCTAssertTrue(dashboard.contains("OverviewCardBox()"), "右卡（出口与状态）应在")
+        XCTAssertTrue(dashboard.contains("metricColumns"), "宽窄切换仍由 metricColumns 驱动")
+        XCTAssertTrue(dashboard.contains("DashboardLayout.trafficShare"), "双卡宽度应按比例规范分配")
     }
 
     /// 运行时长不能用每秒自更新的 `.timer`：它嵌在指标网格里，每次刷新都要把整个

@@ -23,11 +23,17 @@ core_binary="$app_path/Contents/Resources/sing-box"
 [[ -f "$app_path/Contents/Info.plist" ]] || fail "Info.plist is missing"
 [[ -f "$app_path/Contents/Resources/THIRD_PARTY_NOTICES.md" ]] || fail "third-party notices are missing"
 
-file "$app_binary" | grep -q 'arm64' || fail "app executable is not arm64"
-file "$core_binary" | grep -q 'arm64' || fail "sing-box is not arm64"
+# 架构断言按主机来：Apple Silicon 上仍是 arm64，Intel Mac 上为本机架构。
+# 公开发布的产物固定是 arm64，那由 release.sh 的 verify_artifacts 单独把关。
+source "$project_dir/scripts/arch_lib.sh"
+host_arch=$(kongshan_host_arch) || fail "unsupported host architecture: $(uname -m)"
+file "$app_binary" | grep -q "$host_arch" || fail "app executable is not $host_arch"
+file "$core_binary" | grep -q "$host_arch" || fail "sing-box is not $host_arch"
 codesign --verify --deep --strict --verbose=2 "$app_path"
 plutil -lint "$app_path/Contents/Info.plist"
-"$core_binary" version | grep -q 'sing-box version 1.13.21' || fail "unexpected sing-box version"
+"$core_binary" version | grep -q 'sing-box version 1.14.4' || fail "unexpected sing-box version"
+# 免密码助手安装时要算内置内核的 cdhash，没签名就按设计拒绝安装（官方 amd64 包不带签名，见 build_app.sh）。
+codesign -dv --verbose=4 "$core_binary" 2>&1 | grep '^CDHash=' >/dev/null || { print -u2 -- "内置 sing-box 没有签名，免密码助手将无法安装"; exit 1; }
 
 if [[ ${KONGSHAN_VERIFY_SKIP_TESTS:-0} != 1 ]]; then
     source "$project_dir/scripts/test_bundle_lib.zsh"

@@ -56,6 +56,19 @@ final class ClashStreamingTests: XCTestCase {
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer runtime-secret")
     }
 
+    func testConnectionsStreamPassesRequestedInterval() async throws {
+        let fixture = StreamFixture(payloads: [
+            Data(#"{"downloadTotal":0,"uploadTotal":0,"connections":[],"memory":0}"#.utf8)
+        ])
+        let client = makeClient(fixture: fixture)
+
+        _ = try await first(await client.connectionStream(intervalMilliseconds: 5_000))
+
+        let request = try XCTUnwrap(fixture.requests.first)
+        let components = try XCTUnwrap(URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false))
+        XCTAssertEqual(components.queryItems, [URLQueryItem(name: "interval", value: "5000")])
+    }
+
     /// 连接页与仪表盘合用一条 `/connections`：这条流**必须同时带上累计量**，
     /// 否则连接页开着时仪表盘那条订阅被关掉，会话累计流量就断了——
     /// 而 `SessionTrafficAccumulator` 是靠绝对值喂的，断掉不会报错、只会静静地少算。

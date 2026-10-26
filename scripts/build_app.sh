@@ -4,9 +4,16 @@ set -euo pipefail
 project_dir=${0:A:h:h}
 cd "$project_dir"
 
+source "$project_dir/scripts/arch_lib.sh"
+host_arch=$(kongshan_host_arch) || {
+    print -u2 -- "不支持的 CPU 架构：$(uname -m)（只支持 arm64 / x86_64）"
+    exit 1
+}
+
 zsh scripts/fetch_sing_box.sh
 # 本机环境沙盒被禁用（sandbox-exec: Operation not permitted），必须显式 --disable-sandbox。
-SWIFTPM_ENABLE_SANDBOX=NO swift build -c release --arch arm64 --disable-sandbox
+# 按主机架构构建：Apple Silicon 出 arm64（发布用），Intel 出 x86_64（只供本机调试）。
+SWIFTPM_ENABLE_SANDBOX=NO swift build -c release --arch "$host_arch" --disable-sandbox
 
 # 版本号：VERSION 文件是唯一来源，每次构建自增修订号（x.y.Z）。
 # 用 KONGSHAN_KEEP_VERSION=1 可跳过自增（重出同一版时用）。
@@ -32,7 +39,7 @@ stage_dir=$(mktemp -d "$app_dir/.kongshan-build.XXXXXX")
 stage_app="$stage_dir/kongshan.app"
 
 cleanup() {
-    rm -rf "$stage_dir"
+    [[ ! -e "$stage_dir" ]] || trash "$stage_dir"
 }
 trap cleanup EXIT
 
@@ -42,8 +49,12 @@ trap cleanup EXIT
 #   .build/out/Products/Release/        （swiftbuild）
 # 两种都认下来，换工具链不至于让打包整个失效（2026-09-18 踩过：报
 # `install: .build/arm64-apple-macosx/release/kongshan: No such file or directory`）。
+# 优先取宿主架构那一份：同一工作区里可能同时留着上次交叉构建的别的架构产物。
 typeset -a release_dirs
-release_dirs=("$project_dir"/.build/*/release(N/))
+release_dirs=("$project_dir"/.build/${host_arch}-apple-macosx/release(N/))
+if (( ${#release_dirs[@]} == 0 )) || [[ ! -x "$release_dirs[1]/kongshan" ]]; then
+    release_dirs=("$project_dir"/.build/*/release(N/))
+fi
 if (( ${#release_dirs[@]} == 0 )) || [[ ! -x "$release_dirs[1]/kongshan" ]]; then
     release_dirs=("$project_dir"/.build/out/Products/Release(N/))
 fi
@@ -83,10 +94,23 @@ else
     codesign_args+=(--timestamp)
     [[ -z "${KONGSHAN_CODESIGN_KEYCHAIN:-}" ]] || codesign_args+=(--keychain "$KONGSHAN_CODESIGN_KEYCHAIN")
 fi
+# 内置内核单独签：`--deep` 不会去签 Contents/Resources 里的可执行文件。官方 arm64 包自带链接器
+# ad-hoc 签名，amd64 包完全不签——不签就算不出 cdhash，免密码助手安装时按设计拒绝
+# （Intel 上表现为「安装助手没反应」，2026-10-26 iMac 实测）。必须在签 App 之前签，App 的资源封印
+# 才包含签好的这份。不加 --options runtime：与官方 arm64 包同一形态，不改内核的运行约束。
+typeset -a kernel_codesign_args
+kernel_codesign_args=(--force --sign "$sign_identity")
+if [[ "$sign_identity" == "-" ]]; then
+    kernel_codesign_args+=(--timestamp=none)
+else
+    kernel_codesign_args+=(--timestamp)
+    [[ -z "${KONGSHAN_CODESIGN_KEYCHAIN:-}" ]] || kernel_codesign_args+=(--keychain "$KONGSHAN_CODESIGN_KEYCHAIN")
+fi
+codesign "${kernel_codesign_args[@]}" "$stage_app/Contents/Resources/sing-box"
 codesign "${codesign_args[@]}" "$stage_app"
 
 if [[ -e "$app_path" ]]; then
-    rm -rf "$app_path"
+    trash "$app_path"
 fi
 mv "$stage_app" "$app_path"
 # 构建副本只放在隐藏的 .build 中，并注销启动服务登记；正式运行副本只有 /Applications 中的一份。

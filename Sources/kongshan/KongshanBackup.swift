@@ -49,6 +49,9 @@ struct KongshanBackup: Codable, Equatable, Sendable {
             throw KongshanBackupError.unsupportedVersion(backup.version)
         }
         _ = try backup.routingSettings.validated()
+        // 设置项也要过同一道校验：间隔为 0 的自动更新会连轴刷新订阅，非法 DNS 会让下次启动生成不了配置。
+        _ = try backup.settings.dnsSettings.validated()
+        _ = try backup.settings.subscriptionUpdateSettings.validated()
         let sourceIDs = Set(backup.subscriptions.map(\.id))
         guard backup.subscriptions.allSatisfy({ source in
             ["http", "https"].contains(source.url.scheme?.lowercased() ?? "")

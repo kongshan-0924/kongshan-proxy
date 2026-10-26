@@ -115,7 +115,8 @@ final class MetricsWiringTests: XCTestCase {
     private func outboundReport(
         directAttempts: Int,
         directFailures: Int,
-        reason: String = "no route to internet"
+        reason: String = "no route to internet",
+        directResolutionFailures: Int = 0
     ) -> OutboundFailureReport {
         OutboundFailureReport(
             windowStart: Date(timeIntervalSince1970: 1_700_000_000),
@@ -126,7 +127,8 @@ final class MetricsWiringTests: XCTestCase {
             distinctReasonCount: 1,
             dominantReason: reason,
             directAttempts: directAttempts,
-            directFailures: directFailures
+            directFailures: directFailures,
+            directResolutionFailures: directResolutionFailures
         )
     }
 
@@ -157,6 +159,39 @@ final class MetricsWiringTests: XCTestCase {
         XCTAssertEqual(event?.title, "节点建连失败偏多")
         XCTAssertTrue(event?.detail?.contains("换一个节点") == true)
         XCTAssertTrue(event?.detail?.contains("本机网络正常") == true)
+    }
+
+    /// 少量解析超时不能把告警改判成「先查本机网络」，也不能把提醒整个吞掉。
+    func testMinorDirectResolutionTimeoutsDoNotBlameLocalNetwork() {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let state = makeState(root: root, journal: MetricsJournal(directory: root))
+
+        state.record(outboundReport(directAttempts: 40, directFailures: 0,
+                                    reason: "i/o timeout", directResolutionFailures: 1))
+
+        let event = state.runtimeEvents.last
+        XCTAssertEqual(event?.title, "节点建连失败偏多")
+        let detail = event?.detail ?? ""
+        XCTAssertFalse(detail.contains("无法确认本机网络"), detail)
+        XCTAssertTrue(detail.contains("不足以判定本机网络有问题"), detail)
+        XCTAssertTrue(detail.contains("换一个节点"), detail)
+    }
+
+    /// 解析超时占到直连两成以上时，仍要改判到本机网络/DNS。
+    func testSignificantDirectResolutionTimeoutsBlameLocalNetwork() {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let state = makeState(root: root, journal: MetricsJournal(directory: root))
+
+        state.record(outboundReport(directAttempts: 8, directFailures: 0,
+                                    reason: "i/o timeout", directResolutionFailures: 2))
+
+        let event = state.runtimeEvents.last
+        XCTAssertEqual(event?.title, "节点建连失败偏多")
+        let detail = event?.detail ?? ""
+        XCTAssertTrue(detail.contains("2/8 次解析超时"), detail)
+        XCTAssertTrue(detail.contains("先检查本机网络与 DNS"), detail)
     }
 
     /// 跨度不足 1 分钟要写秒。`%.0f 分钟` 会把 20 秒说成「0 分钟内」，

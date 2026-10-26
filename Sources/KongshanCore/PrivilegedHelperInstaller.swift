@@ -159,8 +159,9 @@ public enum PrivilegedHelperInstaller {
         var info: CFDictionary?
         guard SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
               let info else { return nil }
-        let dict = info as! [String: Any]
-        guard let cdhash = dict[kSecCodeInfoUnique as String] as? Data else { return nil }
+        // 强转失败返回 nil：安装侧经 failClosedCDHash 判为拒绝安装，不静默放过。
+        guard let dict = info as? [String: Any],
+              let cdhash = dict[kSecCodeInfoUnique as String] as? Data else { return nil }
         return cdhash.map { String(format: "%02x", $0) }.joined()
     }
 

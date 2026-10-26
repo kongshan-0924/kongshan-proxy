@@ -87,7 +87,10 @@ final class KongshanAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         signal(SIGPIPE, SIG_IGN)
         let menuBarController = MenuBarController(
             state: appState,
-            openMainWindow: { [weak self] in self?.showMainWindow() }
+            openMainWindow: { [weak self] page in
+                self?.showMainWindow()
+                if let page { self?.appState.requestPage(page) }
+            }
         )
         self.menuBarController = menuBarController
         menuBarController.start()
@@ -179,9 +182,12 @@ final class KongshanAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         menuBarController?.stop()
     }
 
+    /// 主窗口默认外框尺寸：用户日常窗口实测 867×697（2026-10-24），首页比例按它适配。
+    private static let defaultWindowSize = NSSize(width: 867, height: 697)
+
     private func makeMainWindowController() -> NSWindowController {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+            contentRect: NSRect(x: 0, y: 0, width: Self.defaultWindowSize.width, height: Self.defaultWindowSize.height),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -190,14 +196,14 @@ final class KongshanAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         // 内容区底色：详情面板由 SwiftUI 透明承载，实际透出的是窗口底色。
         // 默认的 windowBackgroundColor 与 GroupBox 同为浅灰，卡片立不起来。见 Theme 的说明。
         window.backgroundColor = Theme.windowBackgroundColor
-        // 真标题栏 + 统一工具栏：页面标题/副标题与操作都进工具栏，不再各页自绘页头。
-        // 副标题承载统计（邮件写"收件箱 — 12 封"，这里写"连接 — 12 条 · ↑ 1.2 MB/s"）。
-        window.titlebarAppearsTransparent = false
-        window.titleVisibility = .visible
+        // 极简顶栏（方案 A）：隐藏标题文字、去掉标题栏与内容之间的分割线，
+        // 左侧只留三灯与侧栏开关、右侧留检测与铃铛，与侧栏融合成一整块。
+        // 页面标题本来就在内容区（仪表盘顶部就是「已关闭 / 网络流量」），顶栏不缺信息。
+        window.titleVisibility = .hidden
+        window.titlebarSeparatorStyle = .none
         window.toolbarStyle = .unified
-        // 各页布局已做自适应（仪表盘自适应网格、代理页弹性列、日志工具条折行），
-        // 最小尺寸可以再放小一档，小屏/分屏也能用。
-        window.minSize = NSSize(width: 760, height: 500)
+        // 最小尺寸跟着比例规范走：侧栏 132 + 内容最小约 560，小屏/分屏可用，再小就挤压卡片了。
+        window.minSize = NSSize(width: 692, height: 520)
         // 菜单栏应用关闭窗口后仍需常驻，窗口对象必须留存以便再次打开。
         window.isReleasedWhenClosed = false
         // 不做跨会话位置记忆：既不用 frameAutosaveName，也关掉 macOS 的窗口状态还原（Resume）。
@@ -208,6 +214,8 @@ final class KongshanAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         let content = MainWindowContentHost(state: appState)
         mainWindowContent = content
         window.contentView = content.hostingView
+        // 按外框定尺寸（含工具栏），与用户实测的窗口一致；`contentRect` 不含工具栏，单用它会偏高。
+        window.setFrame(NSRect(origin: .zero, size: Self.defaultWindowSize), display: false)
         window.center()
         return NSWindowController(window: window)
     }

@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import KongshanCore
 import XCTest
 @testable import kongshan
 
@@ -41,14 +42,58 @@ final class MenuBarViewStabilityTests: XCTestCase {
 
     func testOpenPanelUsesInjectedNativeAction() throws {
         var openCount = 0
-        let controller = makeController { openCount += 1 }
+        let controller = makeController { _ in openCount += 1 }
         defer { controller.stop() }
         controller.rebuildMenu()
 
-        let item = try XCTUnwrap(controller.menu.items.first { $0.title == "打开仪表盘" })
+        let item = try XCTUnwrap(controller.menu.items.first { $0.title == "打开主窗口" })
         let action = try XCTUnwrap(item.action)
         XCTAssertTrue(NSApplication.shared.sendAction(action, to: item.target, from: item))
         XCTAssertEqual(openCount, 1)
+    }
+
+    /// 选中节点排在菜单截断之外（真实订阅一组四百多个）时要置顶补上并打勾，
+    /// 否则菜单里找不到当前选择。「在代理页选择全部」要直接切到代理页。
+    func testGroupMenuKeepsSelectionBeyondLimitAndOpensPolicyPage() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "kongshan-menu-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let state = AppState(storage: Storage(rootDirectory: root), automaticallyInitialize: false)
+        for index in 1...50 {
+            await state.addManual(ManualHysteria2(
+                name: "节点 \(index)", server: "n\(index).example.com", port: 443, password: "secret",
+                sni: "n\(index).example.com", skipCertificateVerification: false, obfsPassword: nil,
+                uploadMbps: nil, downloadMbps: nil
+            ))
+        }
+        let group = try XCTUnwrap(state.displayPolicyGroups.first { $0.kind == .selector })
+        await state.select(optionName: "节点 48", in: group.name)
+
+        var openedPage: SidebarPage??
+        let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        let controller = MenuBarController(state: state, statusItem: statusItem) { openedPage = $0 }
+        defer { controller.stop() }
+        let menu = controller.policyGroupMenu(group)
+
+        let checked = menu.items.filter { $0.state == .on }.map(\.title)
+        XCTAssertEqual(checked.count, 1)
+        XCTAssertTrue(checked.first?.hasPrefix("节点 48") == true, "\(checked)")
+        let more = try XCTUnwrap(menu.items.first { $0.title.hasPrefix("在代理页选择全部") })
+        XCTAssertTrue(NSApplication.shared.sendAction(try XCTUnwrap(more.action), to: more.target, from: more))
+        XCTAssertEqual(openedPage, .some(.policyGroups))
+    }
+
+    /// 面板与主窗口同一套外观；策略组不用 `Picker`（每个都要预建全部节点菜单项），改由控制器按需弹原生菜单。
+    func testPopoverFollowsMainWindowStyle() throws {
+        let popover = try String(
+            contentsOf: projectRoot().appending(path: "Sources/kongshan/MenuBarPopoverView.swift"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(popover.contains("CardGroupBoxStyle()"))
+        XCTAssertTrue(popover.contains(".buttonStyle(.pill)"))
+        XCTAssertFalse(popover.contains(".buttonStyle(.link)"))
+        XCTAssertNil(popover.range(of: #"(?<![A-Za-z])Picker\("#, options: .regularExpression), "策略组不用系统 Picker")
+        XCTAssertTrue(popover.contains("showGroupMenu"))
     }
 
     func testTrayUsesAppKitAndKeepsLiveRatesOutOfSwiftUI() throws {
@@ -224,7 +269,7 @@ final class MenuBarViewStabilityTests: XCTestCase {
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
     }
 
-    private func makeController(openMainWindow: @escaping () -> Void = {}) -> MenuBarController {
+    private func makeController(openMainWindow: @escaping (SidebarPage?) -> Void = { _ in }) -> MenuBarController {
         let state = AppState(automaticallyInitialize: false)
         let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         return MenuBarController(state: state, statusItem: statusItem, openMainWindow: openMainWindow)

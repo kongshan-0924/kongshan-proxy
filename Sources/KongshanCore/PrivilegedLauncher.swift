@@ -168,9 +168,17 @@ public enum PrivilegedCommandBuilder {
             "umask 077",
             "export PATH=/usr/bin:/bin:/usr/sbin:/sbin",
             "process=$(/bin/ps -p \(pid) -o command=)",
-            "if /usr/bin/printf '%s' \"$process\" | /usr/bin/grep -F -- \(resolvedPath) >/dev/null 2>&1; then /bin/kill -INT \(pid); else /bin/echo 'kongshan: refusing to stop an unexpected process' >&2; exit 64; fi"
+            "if /usr/bin/printf '%s' \"$process\" | /usr/bin/grep -F -- \(resolvedPath) >/dev/null 2>&1; then /bin/kill -INT \(pid); \(escalation(pid: pid)) else /bin/echo 'kongshan: refusing to stop an unexpected process' >&2; exit 64; fi"
         ].joined(separator: "; ")
         return appleScript(command: command)
+    }
+
+    /// 在同一段提权脚本里把信号升级上去（只要一次授权）：每级等 2 秒，不走就 TERM，再不走 KILL。
+    /// 睡眠唤醒后内核可能丢了 utun 进入假死，只发 SIGINT 杀不掉；之前不确认就删恢复记录，
+    /// 留下一个没人管的 root 内核占着路由。助手路径早已这样升级。
+    static func escalation(pid: Int32) -> String {
+        let wait = "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do /bin/kill -0 \(pid) 2>/dev/null || exit 0; /bin/sleep 0.1; done;"
+        return "\(wait) /bin/kill -TERM \(pid) 2>/dev/null; \(wait) /bin/kill -KILL \(pid) 2>/dev/null;"
     }
 
     public static func parsePID(_ output: String) throws -> Int32 {

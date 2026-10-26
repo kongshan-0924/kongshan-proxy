@@ -1,9 +1,9 @@
 # Third-Party Notices
 
-## sing-box 1.13.21
+## sing-box 1.14.4
 
 kongshan bundles the unmodified official darwin-arm64 binary from the
-[SagerNet/sing-box release](https://github.com/SagerNet/sing-box/releases/tag/v1.13.21).
+[SagerNet/sing-box release](https://github.com/SagerNet/sing-box/releases/tag/v1.14.4).
 sing-box is licensed under GPL-3.0-or-later. Its source and license are available in the
 [official repository](https://github.com/SagerNet/sing-box).
 

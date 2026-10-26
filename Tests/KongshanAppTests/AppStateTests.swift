@@ -1016,7 +1016,7 @@ final class AppStateTests: XCTestCase {
         let data = try Data(contentsOf: root.appending(path: "settings.json"))
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         let persisted = try XCTUnwrap(object["dnsSettings"] as? [String: Any])
-        XCTAssertEqual(persisted["domesticDoH"] as? String, custom.domesticDoH)
+        XCTAssertEqual(persisted["domesticDoH"] as? String, custom.domesticDNS)
         XCTAssertEqual(persisted["remoteDoH"] as? String, custom.remoteDoH)
     }
 
@@ -1040,6 +1040,31 @@ final class AppStateTests: XCTestCase {
         )
         let healthCalls = await fixture.health.callCount
         XCTAssertEqual(healthCalls, 2)
+        await fixture.state.stop()
+    }
+
+    /// DNS / TUN 设置与分流热重载共用一把锁。持锁期间进来的分流请求必须由持锁者接着跑完：
+    /// 此前 DNS 应用结束只放锁、不管排队的请求，改规则的调用方永远 await 不返回。
+    func testRoutingApplyQueuedBehindDNSApplyCompletes() async throws {
+        let fixture = try await makeRunningFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        final class Box: @unchecked Sendable { var routed: Bool? }
+        let box = Box()
+
+        let dns = Task { await fixture.state.applyDNSSettings(customDNSSettings) }
+        try await waitUntil { fixture.state.isApplyingRouting }
+        var updated = fixture.state.routingSettings
+        updated.bypassDomains = ["queued.local"]
+        updated.bypassCIDRs = []
+        let routing = Task { box.routed = await fixture.state.applyRoutingSettings(updated) }
+
+        await dns.value
+        try await waitUntil { box.routed != nil }
+        await routing.value
+        XCTAssertEqual(box.routed, true)
+        XCTAssertEqual(fixture.state.routingSettings.bypassDomains, ["queued.local"])
+        XCTAssertEqual(fixture.state.dnsSettings, customDNSSettings)
+        XCTAssertFalse(fixture.state.isApplyingRouting)
         await fixture.state.stop()
     }
 
@@ -1156,19 +1181,28 @@ final class AppStateTests: XCTestCase {
         )
         defer { try? FileManager.default.removeItem(at: fixture.root) }
 
-        fixture.state.startMenuBarMonitoring()
-        fixture.state.startDashboardMonitoring()
-        try await waitUntil {
-            streams.requestCount(path: "/traffic") == 1
-                && streams.requestCount(path: "/connections") == 1
+        // 流量流两方共用一条；`/connections` 按仪表盘是否在屏换档（只剩菜单栏 5 秒、仪表盘在 1 秒），
+        // 换档就是收掉旧订阅、按新间隔重订。
+        func connectionIntervals() -> [String?] {
+            streams.requests.filter { $0.url?.path == "/connections" }.map { request in
+                request.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false) }?
+                    .queryItems?.first { $0.name == "interval" }?.value
+            }
         }
+        fixture.state.startMenuBarMonitoring()
+        try await waitUntil { connectionIntervals() == ["5000"] }
+        fixture.state.startDashboardMonitoring()
+        try await waitUntil { connectionIntervals() == ["5000", "1000"] && streams.terminationCount == 1 }
+        XCTAssertEqual(streams.requestCount(path: "/traffic"), 1)
 
         fixture.state.stopDashboardMonitoring()
+        try await waitUntil { connectionIntervals() == ["5000", "1000", "5000"] && streams.terminationCount == 2 }
         try await Task.sleep(for: .milliseconds(30))
-        XCTAssertEqual(streams.terminationCount, 0)
+        XCTAssertEqual(streams.requestCount(path: "/traffic"), 1, "菜单栏还在，流量流不能被收掉")
+        XCTAssertEqual(streams.terminationCount, 2)
 
         fixture.state.stopMenuBarMonitoring()
-        try await waitUntil { streams.terminationCount == 2 }
+        try await waitUntil { streams.terminationCount == 4 }
         await fixture.state.stop()
     }
 
@@ -1836,7 +1870,7 @@ final class AppStateTests: XCTestCase {
 
         XCTAssertEqual(Darwin.kill(initialPID, SIGKILL), 0)
         try await waitUntilAsync {
-            if case .failed = fixture.state.status { return true }
+            if case .failed = fixture.state.status { return await notifications.count == 1 }
             return false
         }
 
@@ -2454,7 +2488,7 @@ final class AppStateTests: XCTestCase {
 
     private var customDNSSettings: DNSSettings {
         DNSSettings(
-            domesticDoH: "https://1.1.1.1/domestic-query",
+            domesticDNS: "https://1.1.1.1/domestic-query",
             remoteDoH: "https://9.9.9.9/remote-query"
         )
     }
@@ -2472,7 +2506,7 @@ final class AppStateTests: XCTestCase {
             let port = server["server_port"] as? Int
             return "https://\(host)\(port.map { ":\($0)" } ?? "")\(path)"
         }
-        return try DNSSettings(domesticDoH: url(from: domestic), remoteDoH: url(from: remote))
+        return try DNSSettings(domesticDNS: url(from: domestic), remoteDoH: url(from: remote))
     }
 
     /// 系统代理公开 relay 端口必须跨启动稳定；sing-box mixed 后端不能复用这个公开端口。
@@ -3216,6 +3250,34 @@ extension AppStateTests {
         XCTAssertTrue(text.contains("<redacted>"))
         XCTAssertFalse(text.contains("node-secret"))
         XCTAssertFalse(text.contains("runtime-secret"))
+    }
+
+    /// 规则集路径在用户目录下。配置段是 JSONSerialization 的输出（`/` 转义成 `\/`），
+    /// 按原形替换用户目录换不掉——两版导出都曾带出 `\/Users\/<用户名>`。
+    func testDiagnosticExportHidesHomeDirectoryInsideJSON() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "kongshan-diagnostics-home-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        try await storage.prepare()
+        let ruleSetPath = NSHomeDirectory() + "/Library/Application Support/kongshan/rule-sets/geosite-cn.srs"
+        let config: [String: Any] = [
+            "outbounds": [["type": "direct", "tag": "direct"]],
+            "route": ["rule_set": [["tag": "geosite-cn", "type": "local", "format": "binary", "path": ruleSetPath]]]
+        ]
+        try await storage.writeAtomically(
+            try JSONSerialization.data(withJSONObject: config),
+            to: root.appending(path: "config.json")
+        )
+        let userName = URL(fileURLWithPath: NSHomeDirectory()).lastPathComponent
+        let state = AppState(storage: storage, automaticallyInitialize: false)
+
+        for forSharing in [false, true] {
+            let text = try await state.exportDiagnostics(forSharing: forSharing)
+            XCTAssertTrue(text.contains("rule-sets"), "前提：规则集路径在导出里")
+            XCTAssertFalse(text.contains("\\/\(userName)\\/"), "forSharing=\(forSharing) 带出了用户名")
+            XCTAssertFalse(text.contains("/\(userName)/"), "forSharing=\(forSharing) 带出了用户名")
+        }
     }
 
     /// 可公开分享版：不带内核日志（逐条访问目标），节点地址与名字都换掉。

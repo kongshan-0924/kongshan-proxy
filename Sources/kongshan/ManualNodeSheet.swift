@@ -23,6 +23,8 @@ struct ManualNodeSheet: View {
     @State private var mode: Mode = .paste
     @State private var linkText = ""
     @State private var parsed: [ProxyNode] = []
+    /// 提交进行中：连点或连按回车不能把同一批节点加两次。
+    @State private var isSubmitting = false
 
     private enum Mode: String, CaseIterable, Identifiable {
         case paste = "粘贴链接"
@@ -35,7 +37,7 @@ struct ManualNodeSheet: View {
             HStack(spacing: 10) {
                 Image(systemName: "plus.circle.fill")
                     .font(.title3)
-                    .foregroundStyle(.tint)
+                    .foregroundStyle(.secondary)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("添加自建节点")
                         .font(.headline)
@@ -49,13 +51,9 @@ struct ManualNodeSheet: View {
             .padding(.top, 18)
             .padding(.bottom, 10)
 
-            Picker("", selection: $mode) {
-                ForEach(Mode.allCases) { Text($0.rawValue).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .padding(.horizontal, 20)
-            .padding(.bottom, 6)
+            CapsuleSegmentedPicker(options: Mode.allCases, selection: $mode) { $0.rawValue }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 6)
 
             if mode == .paste { pasteForm } else { manualForm }
 
@@ -71,8 +69,8 @@ struct ManualNodeSheet: View {
                     .keyboardShortcut(.cancelAction)
                 Button("添加") { mode == .paste ? addParsed() : addNode() }
                     .keyboardShortcut(.defaultAction)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(mode == .paste && parsed.isEmpty)
+                    .buttonStyle(.pillProminent)
+                    .disabled(isSubmitting || (mode == .paste && parsed.isEmpty))
             }
             .padding(16)
         }
@@ -82,8 +80,8 @@ struct ManualNodeSheet: View {
     // MARK: - 粘贴链接
 
     private var pasteForm: some View {
-        Form {
-            Section {
+        CardForm {
+            CardSection {
                 TextEditor(text: $linkText)
                     .font(.caption.monospaced())
                     .frame(minHeight: 140)
@@ -108,7 +106,7 @@ struct ManualNodeSheet: View {
             }
 
             if !parsed.isEmpty {
-                Section("解析结果") {
+                CardSection("解析结果") {
                     ForEach(parsed) { node in
                         HStack(spacing: 8) {
                             ProtocolTag(value: node.protocolType)
@@ -127,14 +125,13 @@ struct ManualNodeSheet: View {
             }
 
             if let localError {
-                Section {
+                CardSection {
                     Label(localError, systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.red)
                         .font(.callout)
                 }
             }
         }
-        .formStyle(.grouped)
     }
 
     /// 边打边解析。解析是纯字符串处理、无网络无 IO，几十行链接也是微秒级。
@@ -162,9 +159,11 @@ struct ManualNodeSheet: View {
 
     private func addParsed() {
         let nodes = parsed
-        guard !nodes.isEmpty else { return }
+        guard !nodes.isEmpty, !isSubmitting else { return }
+        isSubmitting = true
         Task {
             await state.addManualNodes(nodes)
+            isSubmitting = false
             if let message = state.errorMessage {
                 localError = message
                 state.dismissError()
@@ -177,31 +176,30 @@ struct ManualNodeSheet: View {
     // MARK: - 手动填写（Hysteria2）
 
     private var manualForm: some View {
-            Form {
-                Section("基本信息") {
-                    TextField("名称", text: $name)
-                    TextField("服务器", text: $server)
-                    TextField("端口", text: $port)
-                    SecureField("密码", text: $password)
+            CardForm {
+                CardSection("基本信息") {
+                    LabeledContent("名称") { TextField("名称", text: $name).labelsHidden().inputField().frame(maxWidth: 260) }
+                    LabeledContent("服务器") { TextField("服务器", text: $server).labelsHidden().inputField().frame(maxWidth: 260) }
+                    LabeledContent("端口") { TextField("端口", text: $port).labelsHidden().inputField().frame(maxWidth: 260) }
+                    LabeledContent("密码") { SecureField("密码", text: $password).labelsHidden().inputField().frame(maxWidth: 260) }
                 }
-                Section("TLS") {
-                    TextField("SNI（可选）", text: $sni)
+                CardSection("TLS") {
+                    LabeledContent("SNI") { TextField("SNI（可选）", text: $sni, prompt: Text("可选")).labelsHidden().inputField().frame(maxWidth: 260) }
                     Toggle("跳过证书验证", isOn: $skipCertificateVerification)
                 }
-                Section("可选参数") {
-                    TextField("Obfs 密码（salamander，可选）", text: $obfsPassword)
-                    TextField("上行 Mbps（可选）", text: $uploadMbps)
-                    TextField("下行 Mbps（可选）", text: $downloadMbps)
+                CardSection("可选参数") {
+                    LabeledContent("Obfs 密码") { TextField("Obfs 密码（salamander，可选）", text: $obfsPassword, prompt: Text("salamander，可选")).labelsHidden().inputField().frame(maxWidth: 260) }
+                    LabeledContent("上行 Mbps") { TextField("上行 Mbps（可选）", text: $uploadMbps, prompt: Text("可选")).labelsHidden().inputField().frame(maxWidth: 260) }
+                    LabeledContent("下行 Mbps") { TextField("下行 Mbps（可选）", text: $downloadMbps, prompt: Text("可选")).labelsHidden().inputField().frame(maxWidth: 260) }
                 }
                 if let localError {
-                    Section {
+                    CardSection {
                         Label(localError, systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.red)
                             .font(.callout)
                     }
                 }
             }
-            .formStyle(.grouped)
     }
 
     private func addNode() {
@@ -228,8 +226,11 @@ struct ManualNodeSheet: View {
             localError = error.localizedDescription
             return
         }
+        guard !isSubmitting else { return }
+        isSubmitting = true
         Task {
             await state.addManual(form)
+            isSubmitting = false
             if let message = state.errorMessage {
                 // 失败原因就地显示，不要表现成「点了没反应」。
                 localError = message

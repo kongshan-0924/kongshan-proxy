@@ -370,10 +370,10 @@ public actor ClashAPIClient {
         }
     }
 
-    public func connectionStream() -> AsyncThrowingStream<ConnectionSnapshot, Error> {
+    public func connectionStream(intervalMilliseconds: Int = 1000) -> AsyncThrowingStream<ConnectionSnapshot, Error> {
         guard let request = webSocketRequest(
             path: ["connections"],
-            queryItems: [URLQueryItem(name: "interval", value: "1000")]
+            queryItems: [URLQueryItem(name: "interval", value: String(intervalMilliseconds))]
         ) else {
             return failedStream(ClashAPIError.invalidResponse)
         }

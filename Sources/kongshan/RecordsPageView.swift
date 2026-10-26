@@ -37,11 +37,8 @@ struct RecordsPageView: View {
         .toolbar {
             // 分段切换放工具栏正中：访达的视图切换器就在这个位置。
             ToolbarItem(placement: .principal) {
-                Picker("记录类型", selection: $tab) {
-                    ForEach(Tab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
+                CapsuleSegmentedPicker(options: Tab.allCases, selection: $tab) { $0.rawValue }
+                    .fixedSize()
             }
         }
     }

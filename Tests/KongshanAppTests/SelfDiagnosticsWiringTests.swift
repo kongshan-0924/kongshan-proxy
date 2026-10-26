@@ -148,6 +148,54 @@ final class SelfDiagnosticsWiringTests: XCTestCase {
         XCTAssertFalse(detail.contains("203.0.113.9"), "不得暴露服务器地址：\(detail)")
         XCTAssertFalse(detail.contains(tag), "不得暴露原始出站 tag：\(detail)")
     }
+
+    func testDirectDNSFailuresPreventHealthyNetworkClaimAndWindowSettlesWithoutMoreLogs() throws {
+        let clock = TestClock(Date(timeIntervalSince1970: 1_790_000_000))
+        let state = makeState(clock: clock)
+        for id in 0..<8 {
+            state.inspectForOutboundFailure(CoreLogLine.parse(
+                "[\(id) 1ms] outbound/direct[direct]: outbound connection to site.example.invalid:443"
+            ))
+            let line = CoreLogLine.parse(
+                "[\(id) 10s] connection: open connection to site.example.invalid:443 using outbound/direct[direct]: lookup site.example.invalid: context deadline exceeded"
+            )
+            state.inspectForOutboundFailure(line)
+            state.inspectForOutboundFailure(line)
+        }
+        for id in 100..<130 {
+            state.inspectForOutboundFailure(CoreLogLine.parse(
+                "[\(id) 10s] connection: open connection to site.example.invalid:443 using outbound/anytls[node-test]: i/o timeout"
+            ))
+        }
+        clock.advance(601)
+        state.tickSelfDiagnostics()
+        let detail = try XCTUnwrap(state.runtimeEvents.last { $0.title == "节点建连失败偏多" }?.detail)
+        XCTAssertTrue(detail.contains("8 次解析超时"), detail)
+        XCTAssertFalse(detail.contains("本机网络正常"), detail)
+        XCTAssertTrue(detail.contains("先检查本机网络与 DNS"), detail)
+        XCTAssertNil(state.finishAnomalyWindowsForTesting(), "定时结算后不能在下一行到来时重复报告")
+    }
+
+    func testUnavailableNetworkDiscardsPendingFailuresAndRecoveryStartsFreshWindow() {
+        let clock = TestClock(Date(timeIntervalSince1970: 1_790_000_000))
+        let state = makeState(clock: clock)
+        func feed(_ start: Int) {
+            for id in start..<(start + 30) {
+                state.inspectForOutboundFailure(CoreLogLine.parse(
+                    "[\(id) 10s] connection: open connection to site.example.invalid:443 using outbound/anytls[node-test]: i/o timeout"
+                ))
+            }
+        }
+        feed(0)
+        state.networkPathChanged(isAvailable: false)
+        feed(100)
+        clock.advance(601)
+        state.tickSelfDiagnostics()
+        XCTAssertFalse(state.runtimeEvents.contains { $0.title == "节点建连失败偏多" })
+        state.networkPathChanged(isAvailable: true)
+        feed(200)
+        XCTAssertEqual(state.finishAnomalyWindowsForTesting()?.failures, 30)
+    }
 }
 
 /// 告警的判定文案与合并。

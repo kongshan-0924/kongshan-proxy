@@ -442,6 +442,19 @@ public struct OutboundFailureReport: Equatable, Sendable {
     /// 同窗口内直连出站的成败。直连不经过节点。
     public let directAttempts: Int
     public let directFailures: Int
+    /// 解析失败不能证明直连正常，也不能单独证明节点坏了。
+    public var directResolutionFailures: Int = 0
+
+    /// 直连解析超时是否多到足以否定「本机网络正常」。
+    ///
+    /// 只看「有没有」会把用户引向错误方向：断网瞬间经节点的拨号先报超时、直连恰好有一条
+    /// 卡在域名解析上，一次就足以改判。要求至少 2 次、且占直连次数两成以上，才当作
+    /// 本机网络或 DNS 可疑；否则仍按节点问题处理，只在说明里带上这几次。
+    /// `directAttempts` 已包含解析失败的尝试，分母不重复计。
+    public var directResolutionLooksSignificant: Bool {
+        guard directResolutionFailures >= 2, directAttempts > 0 else { return false }
+        return Double(directResolutionFailures) / Double(directAttempts) >= 0.2
+    }
 
     public var failureRate: Double {
         attempts > 0 ? Double(failures) / Double(attempts) : 0
@@ -511,6 +524,7 @@ public struct OutboundFailureDetector: Sendable {
         /// 问题就不在节点上——这是区分「节点坏了」与「本机没网」的判据。
         var directAttempts = 0
         var directFailures = 0
+        var directResolutionFailures = 0
         /// 本窗口已计过尝试 / 失败的连接 ID：**一条连接只算一次尝试、至多一次失败**。
         ///
         /// 内核对一条连接会写多行：拨号**开始**时就写 `outbound connection to`
@@ -650,8 +664,9 @@ public struct OutboundFailureDetector: Sendable {
     public mutating func ingest(_ line: CoreLogLine, at date: Date) -> OutboundFailureReport? {
         let attempt = Self.isAttemptLine(line)
         let failure = Self.isFailedAttempt(line)
-        guard attempt || failure else { return flush(at: date) }
         let isDirect = Self.isDirectOutbound(line)
+        let resolutionFailure = isDirect && DNSStallDetector.isResolutionStall(line)
+        guard attempt || failure || resolutionFailure else { return flush(at: date) }
         let tag = Self.outboundTag(in: line.message)
         // 既不是直连、也翻不出节点 tag（reject/block 等）：与两个口径都无关，跳过。
         guard isDirect || tag != nil else { return flush(at: date) }
@@ -660,11 +675,14 @@ public struct OutboundFailureDetector: Sendable {
         var current = window ?? Window(startedAt: date, lastAt: date)
         // 没有连接 ID 的行（内核的连接行都带 ID，理论上不会出现）退回按行计数。
         let newAttempt = line.connectionID.map { current.countedAttempts.insert($0).inserted } ?? true
-        let newFailure = failure
+        let newFailure = (failure || resolutionFailure)
             && (line.connectionID.map { current.countedFailures.insert($0).inserted } ?? true)
         if isDirect {
             if newAttempt { current.directAttempts += 1 }
-            if newFailure { current.directFailures += 1 }
+            if newFailure {
+                if resolutionFailure { current.directResolutionFailures += 1 }
+                else { current.directFailures += 1 }
+            }
         } else if let tag {
             if newAttempt { current.attempts[tag, default: 0] += 1 }
             if newFailure {
@@ -713,7 +731,8 @@ public struct OutboundFailureDetector: Sendable {
             distinctReasonCount: reasons.count,
             dominantReason: reasons.max { $0.value < $1.value }?.key ?? "未知原因",
             directAttempts: current.directAttempts,
-            directFailures: current.directFailures
+            directFailures: current.directFailures,
+            directResolutionFailures: current.directResolutionFailures
         )
     }
 

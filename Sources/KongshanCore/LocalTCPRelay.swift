@@ -427,7 +427,16 @@ private final class RelayPair: @unchecked Sendable {
 
     func start() {
         client.stateUpdateHandler = { [weak self] state in self?.handle(state) }
-        backend.stateUpdateHandler = { [weak self] state in self?.handle(state) }
+        backend.stateUpdateHandler = { [weak self] state in
+            // 后端是本机内核端口。端口没人监听（内核重启窗口、刚崩溃）时 NWConnection 不会 failed，
+            // 而是停在 waiting(ECONNREFUSED) 等网络「好转」：客户端连接既不通也不关，一直挂着。
+            // 本机端口不存在「稍后会好」的路径变化，直接关掉，让客户端立刻重连。
+            if case .waiting = state {
+                self?.cancel()
+                return
+            }
+            self?.handle(state)
+        }
         client.start(queue: queue)
         backend.start(queue: queue)
         pump(from: client, to: backend)

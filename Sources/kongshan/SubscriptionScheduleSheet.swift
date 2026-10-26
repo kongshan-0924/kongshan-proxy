@@ -9,11 +9,12 @@ struct SubscriptionScheduleSheet: View {
     @Environment(AppState.self) private var state
     @Environment(\.dismiss) private var dismiss
     @State private var draft = SubscriptionUpdateSettings.defaults
+    @State private var sheetError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Form {
-                Section {
+            CardForm {
+                CardSection {
                     Toggle("启用自动更新", isOn: $draft.enabled)
                     Stepper(
                         "更新间隔：\(draft.intervalHours) 小时",
@@ -33,10 +34,15 @@ struct SubscriptionScheduleSheet: View {
                          + "失败时保留原节点和缓存，并尝试发送本地通知。")
                 }
             }
-            .formStyle(.grouped)
 
             Divider()
             HStack {
+                if let message = sheetError {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .lineLimit(2)
+                }
                 Button("放弃修改") { draft = state.subscriptionUpdateSettings }
                     .disabled(draft == state.subscriptionUpdateSettings)
                 Spacer()
@@ -45,11 +51,16 @@ struct SubscriptionScheduleSheet: View {
                 Button("应用") {
                     Task {
                         await state.setSubscriptionUpdateSettings(draft)
-                        dismiss()
+                        if let message = state.errorMessage {
+                            sheetError = message
+                            state.dismissError()
+                        } else {
+                            dismiss()
+                        }
                     }
                 }
                 .keyboardShortcut(.defaultAction)
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.pillProminent)
                 .disabled(state.isBusy || !state.isReady || draft == state.subscriptionUpdateSettings)
             }
             .padding(14)

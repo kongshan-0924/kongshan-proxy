@@ -455,6 +455,9 @@ public enum HelperRequestDecision: Equatable, Sendable {
 
 /// 请求分发决策。纯函数，输入鉴权状态/上下文，输出该执行的动作。
 public enum HelperDecision {
+    /// 停止时内核已不在。客户端据此把「没东西可停」当作停止成功——想要的状态已经达到了。
+    public static let noKernelRunningMessage = "no kernel running"
+
     public static func decide(
         request: HelperRequest,
         isTrusted: Bool,
@@ -474,7 +477,7 @@ public enum HelperDecision {
             return .startKernel
         case .stopTun:
             // 没在跑的内核没东西可停。
-            guard kernelRunning else { return .reject(message: "no kernel running") }
+            guard kernelRunning else { return .reject(message: noKernelRunningMessage) }
             return .stopKernel
         }
     }

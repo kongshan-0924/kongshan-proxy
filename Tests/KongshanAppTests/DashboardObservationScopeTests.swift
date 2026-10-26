@@ -9,6 +9,35 @@ import XCTest
 /// 钉住两件事：源码层面高频状态不出现在整页作用域；行为层面速率变化不触发整页 body 求值。
 @MainActor
 final class DashboardObservationScopeTests: XCTestCase {
+    func testOcclusionPausesDashboardPublishingAndRetainsBackgroundTotals() {
+        let root = FileManager.default.temporaryDirectory.appending(path: "kongshan-occlusion-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let state = AppState(storage: Storage(rootDirectory: root), automaticallyInitialize: false)
+        state.startDashboardMonitoring()
+        state.receiveConnectionSnapshot(.init(connectionCount: 1, memory: 10, uploadTotal: 100, downloadTotal: 200))
+        let initialUpload = state.sessionUpload
+        let initialDownload = state.sessionDownload
+        state.setWindowContentVisible(false)
+        for index in 1...8 {
+            state.receiveTrafficForTesting(.init(up: Int64(index), down: Int64(index * 2)))
+            state.receiveConnectionSnapshot(.init(connectionCount: 8, memory: 80,
+                                                  uploadTotal: 100 + Int64(index * 10),
+                                                  downloadTotal: 200 + Int64(index * 20)))
+        }
+        XCTAssertEqual(state.uploadRate, 0)
+        XCTAssertEqual(state.activeConnectionCount, 1)
+        XCTAssertEqual(state.coreMemory, 10)
+        XCTAssertEqual(state.sessionUpload, initialUpload)
+        XCTAssertTrue(state.trafficHistory.isEmpty)
+        state.setWindowContentVisible(true)
+        XCTAssertFalse(state.trafficHistory.isEmpty, "恢复可见时同步后台攒下的曲线")
+        state.receiveConnectionSnapshot(.init(connectionCount: 8, memory: 80, uploadTotal: 180, downloadTotal: 360))
+        XCTAssertEqual(state.sessionUpload, initialUpload + 80)
+        XCTAssertEqual(state.sessionDownload, initialDownload + 160)
+        state.receiveTrafficForTesting(.init(up: 9, down: 18))
+        XCTAssertEqual(state.downloadRate, 18)
+    }
+
     private func projectRoot() -> URL {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

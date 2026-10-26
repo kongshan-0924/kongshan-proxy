@@ -41,6 +41,9 @@ final class PrivilegedLauncherTests: XCTestCase {
 
         XCTAssertTrue(script.contains("/bin/ps -p 42 -o command="))
         XCTAssertTrue(script.contains("/bin/kill -INT 42"))
+        // 同一段提权脚本里升级信号：假死的内核 SIGINT 杀不掉，不能不确认就删恢复记录。
+        XCTAssertTrue(script.contains("/bin/kill -TERM 42"))
+        XCTAssertTrue(script.contains("/bin/kill -KILL 42"))
         XCTAssertTrue(script.contains("Kong'\\\\''s App"))
         XCTAssertTrue(script.contains("exit 64"))
         // stop 同样用 grep -F 做固定字符串匹配。

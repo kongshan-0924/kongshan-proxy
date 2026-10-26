@@ -38,21 +38,17 @@ struct PolicyGroupsView: View {
             )
             .frame(maxWidth: .infinity)
         }
-        .sheet(isPresented: $showsTestURLSheet) { SpeedTestURLSheet() }
+        .sheet(isPresented: $showsTestURLSheet) { SpeedTestURLSheet().sheetChrome() }
         .navigationTitle("代理")
         .navigationSubtitle(subtitle(currentGroup: currentGroup, optionCount: options.count, selectedName: selectedName))
         .searchable(text: $searchText, placement: .toolbar, prompt: "搜索节点")
+        .buttonStyle(.pill)
         .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                Picker("出站模式", selection: state.outboundModeBinding) {
-                    ForEach(OutboundMode.allCases, id: \.self) { mode in
-                        Text(mode.displayName).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .help(state.outboundMode.detail)
-                .disabled(state.isBusy || !state.isReady)
+            ToolbarItemGroup(placement: .automatic) {
+                CapsuleSegmentedPicker(options: OutboundMode.allCases, selection: state.outboundModeBinding) { $0.displayName }
+                    .fixedSize()
+                    .help(state.outboundMode.detail)
+                    .disabled(state.isBusy || !state.isReady)
 
                 Menu {
                     Picker("排序", selection: $sortOption) {
@@ -124,15 +120,19 @@ struct PolicyGroupsView: View {
         // 窗口左侧那个才是真正的侧栏；这里是第二层列表，用 `.inset` 与右列同形，
         // 靠中间的 Divider 分隔——邮件的「邮箱 / 邮件列表」两列就是这个关系。
         .listStyle(.inset)
+        .scrollContentBackground(.hidden)
         // 弹性列宽：窗口拖宽时让位给右侧成员列表，拖窄时收缩但不低于 190。
         .frame(minWidth: 190, idealWidth: 220, maxWidth: 260)
     }
 
     private func groupRow(_ group: PolicyGroup) -> some View {
         let appearance = groupAppearance(group)
+        // 图标颜色统一：不再按类别上 20 种彩色（整列花花绿绿、与全 App 简洁线性风格不搭）。
+        // 形状仍按类别区分，颜色只留两档——自动选择用强调色点睛，其余一律中性灰。
+        let tint: Color = group.kind == .urltest ? .accentColor : .secondary
         return HStack(spacing: 9) {
-            Image(systemName: appearance.symbol)
-                .foregroundStyle(appearance.tint)
+            Image(systemName: appearance)
+                .foregroundStyle(tint)
                 .frame(width: 18)
             VStack(alignment: .leading, spacing: 1) {
                 Text(group.name)
@@ -154,46 +154,46 @@ struct PolicyGroupsView: View {
         return state.selectedMemberName(in: group.name, options: options) ?? "未选择"
     }
 
-    private func groupAppearance(_ group: PolicyGroup) -> (symbol: String, tint: Color) {
+    private func groupAppearance(_ group: PolicyGroup) -> String {
         let name = group.name.lowercased()
         if group.kind == .urltest || name.contains("自动") || name.contains("auto") {
-            return ("antenna.radiowaves.left.and.right", .green)
+            return "antenna.radiowaves.left.and.right"
         }
         if name.contains("故障") || name.contains("fallback") {
-            return ("arrow.triangle.swap", .orange)
+            return "arrow.triangle.swap"
         }
-        if name.contains("手动") || name.contains("manual") { return ("hand.tap.fill", .blue) }
+        if name.contains("手动") || name.contains("manual") { return "hand.tap.fill" }
         if name.contains("netflix") || name.contains("hbo") || name.contains("disney")
             || name.contains("youtube") || name.contains("bilibili") || name.contains("mytv")
             || name.contains("media") || name.contains("流媒体") {
-            return ("play.tv.fill", .red)
+            return "play.tv.fill"
         }
-        if name.contains("telegram") { return ("paperplane.fill", .cyan) }
+        if name.contains("telegram") { return "paperplane.fill" }
         if name == "ai" || name.contains("openai") || name.contains("claude")
             || name.contains("gemini") || name.contains("gpt") || name.contains("copilot") {
-            return ("sparkles", .mint)
+            return "sparkles"
         }
         if name.contains("github") || name.contains("gitlab") {
-            return ("chevron.left.forwardslash.chevron.right", .primary)
+            return "chevron.left.forwardslash.chevron.right"
         }
         if name.contains("twitter") || name.contains("x.com") {
-            return ("bubble.left.and.bubble.right.fill", .blue)
+            return "bubble.left.and.bubble.right.fill"
         }
-        if name.contains("crypto") || name.contains("币") { return ("bitcoinsign.circle.fill", .orange) }
+        if name.contains("crypto") || name.contains("币") { return "bitcoinsign.circle.fill" }
         if name.contains("steam") || name.contains("epic") || name.contains("xbox")
             || name.contains("playstation") || name.contains("bahamut") || name.contains("游戏") || name.contains("game") {
-            return ("gamecontroller.fill", .indigo)
+            return "gamecontroller.fill"
         }
         if name.contains("spotify") || name.contains("music") || name.contains("音乐") {
-            return ("music.note", .green)
+            return "music.note"
         }
-        if name.contains("apple") || name.contains("icloud") { return ("apple.logo", .primary) }
-        if name.contains("google") { return ("g.circle.fill", .blue) }
-        if name.contains("microsoft") || name.contains("onedrive") { return ("cloud.fill", .blue) }
-        if name.contains("direct") || name.contains("直连") { return ("arrow.right.circle.fill", .green) }
-        if name.contains("reject") || name.contains("广告") || name.contains("adblock") { return ("shield.lefthalf.filled", .red) }
-        if name.contains("prox") || name.contains("节点") || name.contains("global") { return ("globe.asia.australia.fill", .purple) }
-        return ("rectangle.3.group.fill", .purple)
+        if name.contains("apple") || name.contains("icloud") { return "apple.logo" }
+        if name.contains("google") { return "g.circle.fill" }
+        if name.contains("microsoft") || name.contains("onedrive") { return "cloud.fill" }
+        if name.contains("direct") || name.contains("直连") { return "arrow.right.circle.fill" }
+        if name.contains("reject") || name.contains("广告") || name.contains("adblock") { return "shield.lefthalf.filled" }
+        if name.contains("prox") || name.contains("节点") || name.contains("global") { return "globe.asia.australia.fill" }
+        return "rectangle.3.group.fill"
     }
 }
 
@@ -299,6 +299,7 @@ private struct PolicyMemberList: View {
             // 不用交替行底色：节点通常只有几条到几十条，交替条纹会一路铺到列表底部，
             // 空白处画出一排"幽灵行"，也正是用户反馈「代理这一列比较暗」的来源。
             .listStyle(.inset)
+            .scrollContentBackground(.hidden)
             .disabled(state.isBusy)
             .overlay {
                 if visibleOptions.isEmpty {
@@ -328,7 +329,7 @@ private struct PolicyMemberList: View {
         isSelectable: Bool
     ) -> some View {
         let metadata: NodeNameMetadata? = if case let .node(node) = option {
-            NodeNameMetadata.parse(node.name)
+            state.nodeCatalog.metadataByNodeID[node.id] ?? NodeNameMetadata.parse(node.name)
         } else {
             nil
         }
@@ -361,7 +362,7 @@ private struct PolicyMemberList: View {
                 }
                 ProtocolTag(value: node.protocolType)
                 // 延迟固定在行末：它是用户扫一屏节点时唯一要找的数字，定宽保证一列对齐。
-                delayLabel(delay)
+                DelayLabel(milliseconds: delay)
                     .frame(width: 64, alignment: .trailing)
             case .reference:
                 Text("策略引用")
@@ -391,30 +392,6 @@ private struct PolicyMemberList: View {
         switch option {
         case let .node(node): return "\(node.server):\(node.port)"
         case .reference: return "指向另一个策略 / 直连 / 拒绝"
-        }
-    }
-
-    @ViewBuilder
-    private func delayLabel(_ delay: Int??) -> some View {
-        switch delay {
-        case let .some(.some(value)):
-            let color = Theme.delayColor(value)
-            HStack(spacing: 4) {
-                Circle()
-                    .fill(color)
-                    .frame(width: 5, height: 5)
-                Text("\(value) ms")
-                    .font(.caption.weight(.medium).monospacedDigit())
-                    .foregroundStyle(color)
-            }
-        case .some(.none):
-            Label("超时", systemImage: "exclamationmark.triangle.fill")
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.red)
-        case .none:
-            Text("未测速")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
         }
     }
 

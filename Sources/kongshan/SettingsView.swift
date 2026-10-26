@@ -34,7 +34,6 @@ enum SettingsTab: String, CaseIterable, Identifiable {
 struct SettingsView: View {
     @Environment(AppState.self) private var state
     @State private var dnsDraft = DNSSettings.defaults
-    @State private var testURLDraft = ""
     @State private var tunDraft = TunSettings.defaults
     @State private var tab: SettingsTab
 
@@ -55,7 +54,7 @@ struct SettingsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Form {
+            CardForm {
                 // 四个分区各回答一个问题：通用＝这个 App 本身；接管＝它怎么接管系统；
                 // 网络＝域名怎么解析；维护＝磁盘上的东西。
                 // 运行时开关（系统代理 / TUN / 出站模式 / 局域网共享）一个都不在这里——
@@ -69,30 +68,32 @@ struct SettingsView: View {
                 case .maintenance: maintenanceSections
                 }
             }
-            .pageFormStyle()
         }
         .navigationTitle("设置")
         .navigationSubtitle(tab.title)
         .toolbar {
             // 分区切换放工具栏正中：访达的视图切换器就在这个位置。
             ToolbarItem(placement: .principal) {
-                Picker("分区", selection: $tab) {
-                    ForEach(SettingsTab.allCases) { Text($0.title).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
+                CapsuleSegmentedPicker(options: SettingsTab.allCases, selection: $tab) { $0.title }
+                    .fixedSize()
             }
         }
         .onAppear {
             dnsDraft = state.dnsSettings
-            testURLDraft = state.testURLString
             tunDraft = state.tunSettings
         }
         // 绕过设置在别处应用（如恢复默认）后，草稿同步跟上。
         // 开关是立即生效的，草稿要跟上，否则"有未应用的修改"会一直挂着。
         // 只在草稿未脏时跟随外部变化：脏着就同步会把用户没应用完的编辑冲掉。
         .onChange(of: state.tunSettings) { old, new in
-            if tunDraft == old { tunDraft = new }
+            if tunDraft == old {
+                tunDraft = new
+            } else {
+                // 草稿脏着时只吸收立即生效的两个开关：「应用」提交的是整份草稿，
+                // 不吸收的话会把刚打开的严格路由 / 内网 DNS 悄悄关回去。
+                if old.strictRoute != new.strictRoute { tunDraft.strictRoute = new.strictRoute }
+                if old.lanDNSEnabled != new.lanDNSEnabled { tunDraft.lanDNSEnabled = new.lanDNSEnabled }
+            }
         }
         .fileExporter(
             isPresented: $showsBackupExporter,
@@ -131,7 +132,6 @@ struct SettingsView: View {
                         if state.errorMessage == nil {
                             backupNotice = "已恢复"
                             dnsDraft = state.dnsSettings
-                            testURLDraft = state.testURLString
                         }
                     }
                 } catch {
@@ -146,7 +146,7 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var generalSections: some View {
-        Section("外观") {
+        CardSection("外观") {
             Picker("菜单栏图标", selection: menuBarIconStyleBinding) {
                 ForEach(MenuBarIconStyle.allCases) { style in
                     // 直接把三种图标画出来给用户挑，比只列名字直观得多。
@@ -163,7 +163,7 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
         }
 
-        Section("开机自启") {
+        CardSection("开机自启") {
             Toggle("登录时启动 kongshan", isOn: launchAtLoginBinding)
                 .disabled(
                     !state.isReady
@@ -197,7 +197,7 @@ struct SettingsView: View {
             }
         }
 
-        Section("关于") {
+        CardSection("关于") {
             LabeledContent("应用版本", value: Self.appVersion)
             LabeledContent("应用更新") {
                 Button("查看最新版本") {
@@ -205,7 +205,6 @@ struct SettingsView: View {
                         NSWorkspace.shared.open(url)
                     }
                 }
-                .controlSize(.small)
             }
             LabeledContent("内核") {
                 HStack(spacing: 8) {
@@ -216,7 +215,6 @@ struct SettingsView: View {
                     Button(state.isCheckingKernelUpdate ? "检查中…" : "检查内核更新") {
                         Task { await state.updateKernel() }
                     }
-                    .controlSize(.small)
                     .disabled(state.isCheckingKernelUpdate)
                 }
             }
@@ -225,7 +223,7 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var takeoverSections: some View {
-        Section {
+        CardSection {
             Toggle("严格路由（strict_route）", isOn: strictRouteBinding)
                 .disabled(state.isBusy || !state.isReady)
         } header: {
@@ -234,7 +232,7 @@ struct SettingsView: View {
             Text(tunFooterText)
         }
 
-        Section("免密码助手") {
+        CardSection("免密码助手") {
             LabeledContent("状态", value: helperStatusText)
             Text("免密码助手让 TUN 启停无需每次输入密码：安装需一次管理员授权，之后开机自动运行。未装时 TUN 仍可用（每次弹密码）。")
                 .font(.caption)
@@ -263,7 +261,7 @@ struct SettingsView: View {
                     Button("安装免密码助手") {
                         Task { await state.installHelper() }
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.pillProminent)
                     .disabled(state.isHelperOperationInProgress || tunActive)
                 case .installed:
                     Button("卸载") {
@@ -274,23 +272,47 @@ struct SettingsView: View {
                     Button("重新安装") {
                         Task { await state.installHelper() }
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.pillProminent)
                     .disabled(state.isHelperOperationInProgress || tunActive)
                 }
+            }
+            if let error = state.helperOperationError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
             }
         }
     }
 
     @ViewBuilder
     private var networkSections: some View {
-        Section("DNS 高级设置") {
-            TextField("国内 DoH", text: $dnsDraft.domesticDoH)
-            TextField("远程 DoH", text: $dnsDraft.remoteDoH)
-            TextField("引导解析器（可选）", text: $dnsDraft.bootstrapResolver)
-            Text("geosite-cn 使用国内 DoH 直连解析，其余域名走当前代理的远程 DoH。兼容性优先，默认不启用 fake-ip。系统代理模式只管理进入本地 mixed 代理的解析，不等同于接管 macOS 全局 DNS。")
+        CardSection("DNS 高级设置") {
+            LabeledContent("国内 DNS") {
+                TextField("国内 DNS", text: $dnsDraft.domesticDNS, prompt: Text("IP 或 https://…"))
+                    .labelsHidden()
+                    .font(.body.monospaced())
+                    .inputField()
+                    .frame(maxWidth: 360)
+            }
+            LabeledContent("远程 DoH") {
+                TextField("远程 DoH", text: $dnsDraft.remoteDoH, prompt: Text("https://…"))
+                    .labelsHidden()
+                    .font(.body.monospaced())
+                    .inputField()
+                    .frame(maxWidth: 360)
+            }
+            LabeledContent("引导解析器") {
+                TextField("引导解析器", text: $dnsDraft.bootstrapResolver, prompt: Text("可选，如 114.114.114.114"))
+                    .labelsHidden()
+                    .font(.body.monospaced())
+                    .inputField()
+                    .frame(maxWidth: 360)
+            }
+            Text("国内域名直连问国内 DNS：填 IP 走 UDP（默认，睡眠唤醒、长时间闲置后都不卡），填 https:// 地址走 DoH；其余域名走当前代理的远程 DoH。兼容性优先，默认不启用 fake-ip。系统代理模式只管理进入本地 mixed 代理的解析，不等同于接管 macOS 全局 DNS。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text("引导解析器负责解析出站节点自身的域名，必须是无连接的 UDP。留空时跟随国内 DoH 的地址；填入独立 IP（如 114.114.114.114）可与国内 DoH 解耦，避免一台上游抖动同时影响节点域名与国内域名解析。")
+            Text("引导解析器负责解析出站节点自身的域名，必须是无连接的 UDP。留空时跟随国内 DNS 的地址；填入独立 IP（如 114.114.114.114）可与国内 DNS 解耦，避免一台上游抖动同时影响节点域名与国内域名解析。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             HStack {
@@ -301,23 +323,30 @@ struct SettingsView: View {
                 Button("应用 DNS") {
                     Task {
                         await state.applyDNSSettings(dnsDraft)
-                        dnsDraft = state.dnsSettings
+                        // 只在生效后换成归一化的值；失败时留着输入，改一处就能重试。
+                        if state.dnsSettings == (try? dnsDraft.validated()) { dnsDraft = state.dnsSettings }
                     }
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.pillProminent)
                 .disabled(state.isBusy || !state.isReady || dnsDraft == state.dnsSettings)
             }
         }
 
-        Section("内网 DNS 分流") {
+        CardSection("内网 DNS 分流") {
             Toggle("把内网域名交给内网 DNS 解析", isOn: lanDNSEnabledBinding)
                 .disabled(state.isBusy || !state.isReady)
 
             LabeledContent("自动探测到的 DNS", value: detectedLANServersText)
             LabeledContent("自动探测到的域名", value: detectedLANDomainsText)
 
-            TextField("内网 DNS 服务器（留空＝用自动探测）", text: $tunDraft.lanDNSServer)
-                .disabled(!state.tunSettings.lanDNSEnabled || state.isBusy || !state.isReady)
+            LabeledContent("内网 DNS 服务器") {
+                TextField("内网 DNS 服务器", text: $tunDraft.lanDNSServer, prompt: Text("留空＝用自动探测"))
+                    .labelsHidden()
+                    .font(.body.monospaced())
+                    .inputField()
+                    .frame(maxWidth: 360)
+            }
+            .disabled(!state.tunSettings.lanDNSEnabled || state.isBusy || !state.isReady)
 
             Text("关掉它，内网域名会落到 Fake-IP 拿到一个 240.x 假地址，然后整段被路由进代理出口——表现就是内网设备一直加载。探测在接管系统 DNS 之前进行；网络不下发搜索域时，用下面的列表手填内网域名后缀。")
                 .font(.caption)
@@ -331,7 +360,7 @@ struct SettingsView: View {
             values: $tunDraft.lanDomainSuffixes
         )
 
-        Section {
+        CardSection {
             HStack {
                 if tunDraft != state.tunSettings {
                     StatusBadge(text: "未应用", tint: .orange)
@@ -340,7 +369,7 @@ struct SettingsView: View {
                 Button("应用内网 DNS 设置") {
                     Task { await state.applyTunSettings(tunDraft) }
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.pillProminent)
                 .disabled(state.isBusy || tunDraft == state.tunSettings)
             }
         } footer: {
@@ -350,7 +379,7 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var maintenanceSections: some View {
-        Section("备份与恢复") {
+        CardSection("备份与恢复") {
             HStack {
                 Button {
                     prepareBackupExport()
@@ -377,7 +406,7 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
         }
 
-        Section("数据与日志") {
+        CardSection("数据与日志") {
             LabeledContent("故障诊断") {
                 Menu {
                     Button("完整版（自用排查，含内核日志）") { prepareDiagnosticExport(forSharing: false) }
@@ -412,7 +441,7 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
         }
 
-        Section("清理") {
+        CardSection("清理") {
             LabeledContent("清理缓存", value: state.cacheSizeBytes > 0 ? AppState.formatBytes(state.cacheSizeBytes) : "—")
             Button("执行清理") {
                 Task { await state.clearRegenerableCaches() }
@@ -465,20 +494,6 @@ struct SettingsView: View {
         let dns = state.tunSettings.dnsServerAddress
         return "开关在仪表盘与菜单栏图标里。严格路由更彻底，但可能影响局域网、虚拟机或其他 VPN。"
             + "TUN 运行期间系统 DNS 会临时指向 \(dns) 以防解析绕过 TUN（macOS 特性），关闭或退出时自动还原。"
-    }
-
-    private var speedTestMethodBinding: Binding<SpeedTestMethod> {
-        Binding(
-            get: { state.speedTestMethod },
-            set: { method in Task { await state.setSpeedTestMethod(method) } }
-        )
-    }
-
-
-    private var activeModesText: String {
-        let ordered: [ProxyMode] = [.systemProxy, .tun]
-        let names = ordered.filter(state.activeModes.contains).map(\.displayName)
-        return names.isEmpty ? "未开启" : names.joined(separator: " + ")
     }
 
     private var helperStatusText: String {
@@ -547,33 +562,6 @@ struct SettingsView: View {
                 Task { await state.setLaunchAtLoginEnabled(enabled) }
             }
         )
-    }
-
-    private var mirrorBinding: Binding<RuleSetMirror> {
-        Binding(
-            get: { state.ruleSetSettings.mirror },
-            set: { mirror in
-                var settings = state.ruleSetSettings
-                settings.mirror = mirror
-                Task { await state.setRuleSetSettings(settings) }
-            }
-        )
-    }
-
-    private var ruleSetAutoUpdateBinding: Binding<Bool> {
-        Binding(
-            get: { state.ruleSetSettings.autoUpdate },
-            set: { enabled in
-                var settings = state.ruleSetSettings
-                settings.autoUpdate = enabled
-                Task { await state.setRuleSetSettings(settings) }
-            }
-        )
-    }
-
-    private var lastRuleSetUpdateText: String {
-        guard let date = state.ruleSetSettings.lastUpdatedAt else { return "从未更新" }
-        return date.formatted(date: .abbreviated, time: .shortened)
     }
 
     private var loginItemStatusTitle: String {

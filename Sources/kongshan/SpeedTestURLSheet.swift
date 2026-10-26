@@ -8,14 +8,15 @@ struct SpeedTestURLSheet: View {
     @Environment(AppState.self) private var state
     @Environment(\.dismiss) private var dismiss
     @State private var draft = ""
+    @State private var sheetError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Form {
-                Section {
+            CardForm {
+                CardSection {
                     TextField("测试 URL", text: $draft, prompt: Text("https://www.gstatic.com/generate_204"))
                         .labelsHidden()
-                        .textFieldStyle(.roundedBorder)
+                        .inputField()
                         .font(.body.monospaced())
                         .onSubmit(save)
                 } header: {
@@ -25,10 +26,15 @@ struct SpeedTestURLSheet: View {
                          + "建议用返回 204 空响应的地址：省掉服务端生成页面的时间，各地区节点之间才可比。")
                 }
             }
-            .formStyle(.grouped)
 
             Divider()
             HStack {
+                if let message = sheetError {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .lineLimit(2)
+                }
                 Spacer()
                 Button("取消") { dismiss() }
                     .keyboardShortcut(.cancelAction)
@@ -48,7 +54,13 @@ struct SpeedTestURLSheet: View {
         guard !value.isEmpty else { return }
         Task {
             await state.saveTestURL(value)
-            dismiss()
+            // 失败时留在弹层里就地说明：全局横幅被弹层挡着，关掉又会丢输入。
+            if let message = state.errorMessage {
+                sheetError = message
+                state.dismissError()
+            } else {
+                dismiss()
+            }
         }
     }
 }

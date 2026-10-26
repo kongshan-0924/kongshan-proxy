@@ -24,8 +24,9 @@ struct MessagesView: View {
             if tab == .warnings { warningList } else { eventList }
         }
         .navigationSubtitle(subtitle)
+        .buttonStyle(.pill)
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
+            ToolbarItem(placement: .automatic) {
                 Button {
                     state.dismissError()
                     state.clearWarnings()
@@ -40,26 +41,13 @@ struct MessagesView: View {
         // 让用户知道清除不会毁掉证据——否则「全部清除」看起来就是不可逆的销毁。
         // 放在底栏：邮件/访达的状态信息都在窗口底部那一条。
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            VStack(spacing: 0) {
-                Divider()
-                // 原来把两条完整路径塞进一行，中间截断后剩下 `/var/fo…ndjson` 这种谁也读不懂的碎片。
-                // 状态栏只说结论，路径交给按钮——访达里一看就全明白。
-                HStack(spacing: 8) {
-                    Label("警告、错误与运行指标另有存档，不受「全部清除」影响", systemImage: "archivebox")
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .help("警告与错误：\(state.diagnosticsArchivePath)\n运行指标：\(state.metricsArchivePath)")
-                    Spacer(minLength: 8)
-                    Button("在访达中显示") { state.revealArchivesInFinder() }
-                        .buttonStyle(.link)
-                        .font(.caption)
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 6)
-                .background(.bar)
+            // 原来把两条完整路径塞进一行，中间截断后剩下 `/var/fo…ndjson` 这种谁也读不懂的碎片。
+            // 状态栏只说结论，路径交给按钮——访达里一看就全明白。
+            PageStatusBar("\(subtitle) · 警告、错误与运行指标另有存档，不受「全部清除」影响", symbol: "archivebox") {
+                Button("在访达中显示") { state.revealArchivesInFinder() }
+                    .buttonStyle(.link)
             }
+            .help("警告与错误：\(state.diagnosticsArchivePath)\n运行指标：\(state.metricsArchivePath)")
         }
     }
 
@@ -85,6 +73,7 @@ struct MessagesView: View {
             }
         }
         .listStyle(.inset)
+        .scrollContentBackground(.hidden)
         .overlay {
             if state.errorMessage == nil && state.warnings.isEmpty {
                 ContentUnavailableView(
@@ -117,6 +106,7 @@ struct MessagesView: View {
                 }
             }
             .listStyle(.inset)
+            .scrollContentBackground(.hidden)
             .overlay {
                 if visibleEvents.isEmpty {
                     ContentUnavailableView(

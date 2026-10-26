@@ -32,6 +32,35 @@ final class ConnectionFeedWiringTests: XCTestCase {
         )
     }
 
+    /// 只剩菜单栏时这条流只喂累计量与每分钟指标，按 5 秒一帧；仪表盘一出现就回到 1 秒。
+    /// 换档靠收掉旧订阅再按新间隔重订——漏了任一头，要么关窗后照旧每秒全量解析，要么仪表盘一直 5 秒一跳。
+    @MainActor
+    func testDashboardConnectionStreamSlowsDownOffScreen() throws {
+        XCTAssertEqual(AppState.dashboardConnectionStreamInterval(dashboardOnScreen: true), 1_000)
+        XCTAssertEqual(AppState.dashboardConnectionStreamInterval(dashboardOnScreen: false), 5_000)
+        let state = try source("AppState.swift")
+        XCTAssertTrue(state.contains("client.connectionStream(intervalMilliseconds: interval)"))
+        for entry in ["func startDashboardMonitoring()", "func stopDashboardMonitoring()"] {
+            let start = try XCTUnwrap(state.range(of: entry))
+            let body = String(state[start.upperBound...].prefix(700))
+            XCTAssertTrue(
+                body.contains("dropDashboardConnectionStreamIfIntervalChanged()"),
+                "\(entry) 要按仪表盘是否在屏换档"
+            )
+        }
+    }
+
+    /// 连接页开着时卡顿检测用推流最近一帧，不再另拉一次；换内核时这帧要作废，免得拿旧内核的连接去判。
+    func testStallCheckReusesFeedDetailsWhileConnectionsPageIsOpen() throws {
+        let state = try source("AppState.swift")
+        XCTAssertTrue(state.contains("self.latestFeedDetails = feed.details"))
+        let start = try XCTUnwrap(state.range(of: "private func scheduleStallCheck()"))
+        let body = String(state[start.upperBound...].prefix(600))
+        XCTAssertTrue(body.contains("if connectionsFeedActive, let details = latestFeedDetails"))
+        let finish = try XCTUnwrap(state.range(of: "private func finishAnomalyWindows()"))
+        XCTAssertTrue(String(state[finish.upperBound...].prefix(400)).contains("latestFeedDetails = nil"))
+    }
+
     func testFeedLoopStillFeedsAuthoritativeTotals() throws {
         let state = try source("AppState.swift")
         let start = try XCTUnwrap(state.range(of: "func startConnectionsMonitoring()"))

@@ -40,6 +40,8 @@ final class TunConfigTests: XCTestCase {
         XCTAssertEqual(tun["strict_route"] as? Bool, true)
         // 强制 gvisor：system/mixed 栈的 TCP 转发在部分网络（多默认网关/企业网）会失效。
         XCTAssertEqual(tun["stack"] as? String, "gvisor")
+        // 1.14 TUN 默认自己设 macOS 网卡 DNS；系统 DNS 由空山接管与还原，必须关掉，否则两边互相覆盖。
+        XCTAssertEqual(tun["dns_mode"] as? String, "disabled")
         // 跳过 TUN 与跳过代理是两份独立列表，不得互相串用
         XCTAssertEqual(tun["route_exclude_address"] as? [String], settings.tunExcludeCIDRs)
         XCTAssertFalse((tun["route_exclude_address"] as? [String] ?? []).contains("10.0.0.0/8"))
@@ -258,13 +260,14 @@ final class TunConfigTests: XCTestCase {
     }
 
     func testTunRuleModeDNSUsesFakeIPButSystemProxyDoesNot() throws {
-        // TUN + 规则模式：DNS 应含 fakeip 服务器 + independent_cache（修 DNS-over-TUN 在多网关网络失效）
+        // TUN + 规则模式：DNS 应含 fakeip 服务器（修 DNS-over-TUN 在多网关网络失效）。
+        // 1.14 起缓存按上游服务器分开，不再需要（也不该写）已废弃的 independent_cache。
         let tunRoot = try json(try ConfigGenerator.generate(input(strictRoute: true, routingSettings: .defaults)))
         let tunDNS = try XCTUnwrap(tunRoot["dns"] as? [String: Any])
         let tunServers = try XCTUnwrap(tunDNS["servers"] as? [[String: Any]])
         XCTAssertTrue(tunServers.contains { $0["type"] as? String == "fakeip" }, "TUN 规则模式应有 fakeip 服务器")
         XCTAssertEqual(tunServers.first { $0["type"] as? String == "fakeip" }?["inet4_range"] as? String, "240.0.0.0/4")
-        XCTAssertEqual(tunDNS["independent_cache"] as? Bool, true)
+        XCTAssertNil(tunDNS["independent_cache"])
         let tunExperimental = try XCTUnwrap(tunRoot["experimental"] as? [String: Any])
         let fakeIPCache = try XCTUnwrap(tunExperimental["cache_file"] as? [String: Any])
         XCTAssertEqual(fakeIPCache["enabled"] as? Bool, true)

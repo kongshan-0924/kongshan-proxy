@@ -34,6 +34,7 @@ struct NodesView: View {
             }
             // 同代理页：配置一般只有一两条，交替条纹会在空白处画出一排幽灵行。
             .listStyle(.inset)
+            .scrollContentBackground(.hidden)
             .overlay {
                 if state.configItems.isEmpty {
                     ContentUnavailableView(
@@ -46,28 +47,17 @@ struct NodesView: View {
         }
         // 自动更新状态常驻底栏：解决「设置了却看不到效果」——「下次 18:30」一直可见。
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            VStack(spacing: 0) {
-                Divider()
-                HStack(spacing: 8) {
-                    Label(scheduleText, systemImage: "clock.arrow.2.circlepath")
-                        .lineLimit(1)
-                    Spacer(minLength: 8)
-                    Button("更改…") { showsScheduleSheet = true }
-                        .buttonStyle(.link)
-                        .font(.caption)
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 6)
-                .background(.bar)
+            PageStatusBar(scheduleText, symbol: "clock.arrow.2.circlepath") {
+                Button("更改…") { showsScheduleSheet = true }
+                    .buttonStyle(.link)
             }
         }
-        .sheet(isPresented: $showsScheduleSheet) { SubscriptionScheduleSheet() }
+        .sheet(isPresented: $showsScheduleSheet) { SubscriptionScheduleSheet().sheetChrome() }
         .navigationTitle("配置")
         .navigationSubtitle(configSummary)
+        .buttonStyle(.pill)
         .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
+            ToolbarItemGroup(placement: .automatic) {
                 Button {
                     Task { await state.refreshSubscriptions() }
                 } label: {
@@ -86,15 +76,17 @@ struct NodesView: View {
             }
         }
         .sheet(isPresented: $showingManualNode) {
-            ManualNodeSheet().environment(state)
+            ManualNodeSheet().environment(state).sheetChrome()
         }
         .sheet(item: $pendingImportURL) { url in
             SubscriptionImportSheet(url: url) { subscriptionURL = "" }
+                .sheetChrome()
         }
         .sheet(item: $renamingSource) { source in
             SubscriptionRenameSheet(source: source) { name in
                 Task { await state.renameSubscription(id: source.id, to: name) }
             }
+            .sheetChrome()
         }
         .confirmationDialog(
             "删除配置“\(pendingDelete?.name ?? "")”？",
@@ -129,7 +121,7 @@ struct NodesView: View {
 
                 Image(systemName: item.isLocal ? "server.rack" : "network.badge.shield.half.filled")
                     .font(.title3)
-                    .foregroundStyle(item.isLocal ? Color.orange : Color.blue)
+                    .foregroundStyle(.secondary)
                     .frame(width: 26)
 
                 VStack(alignment: .leading, spacing: 2) {
@@ -226,13 +218,13 @@ struct NodesView: View {
     private var importBar: some View {
         HStack(spacing: 8) {
             TextField("粘贴 Clash YAML 订阅链接", text: $subscriptionURL)
-                .textFieldStyle(.roundedBorder)
+                .inputField()
                 .onSubmit(beginImport)
             Button("导入") { beginImport() }
                 .disabled(subscriptionURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
     }
 
     private var configSummary: String {
@@ -276,10 +268,15 @@ private struct SubscriptionImportSheet: View {
                 .padding(.top, 18)
                 .padding(.bottom, 12)
 
-            Form {
-                Section {
-                    TextField("名称", text: $name, prompt: Text(url.host ?? "订阅"))
-                        .disabled(isImporting)
+            CardForm {
+                CardSection {
+                    LabeledContent("名称") {
+                        TextField("名称", text: $name, prompt: Text(url.host ?? "订阅"))
+                            .labelsHidden()
+                            .inputField()
+                            .frame(maxWidth: 240)
+                    }
+                    .disabled(isImporting)
                     Toggle("参与定时自动更新", isOn: $autoUpdate)
                         .disabled(isImporting)
                 } footer: {
@@ -298,7 +295,6 @@ private struct SubscriptionImportSheet: View {
                     }
                 }
             }
-            .formStyle(.grouped)
 
             Divider()
             HStack {
@@ -313,7 +309,7 @@ private struct SubscriptionImportSheet: View {
                     .keyboardShortcut(.cancelAction)
                 Button("导入") { beginImport() }
                     .keyboardShortcut(.defaultAction)
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.pillProminent)
                     .disabled(isImporting)
             }
             .padding(16)
@@ -352,7 +348,7 @@ private struct SubscriptionRenameSheet: View {
             Text("重命名订阅")
                 .font(.headline)
             TextField("名称", text: $name)
-                .textFieldStyle(.roundedBorder)
+                .inputField()
             HStack {
                 Spacer()
                 Button("取消") { dismiss() }
@@ -362,7 +358,7 @@ private struct SubscriptionRenameSheet: View {
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.pillProminent)
                 .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }

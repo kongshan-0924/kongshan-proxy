@@ -367,6 +367,38 @@ final class RuntimeAnomalyDetectorTests: XCTestCase {
         XCTAssertNil(detector.finish(at: origin.addingTimeInterval(31)), "结算后窗口要清空")
     }
 
+    /// 一两次直连解析超时不足以把锅甩给本机网络。
+    ///
+    /// 断网瞬间经节点的拨号先报超时、直连恰好有一条卡在域名解析上，旧实现只要 `> 0`
+    /// 就写「无法确认本机网络」并建议先查 DNS——用户被引向错误方向。
+    func testSingleDirectResolutionTimeoutIsNotSignificant() {
+        let report = OutboundFailureReport(
+            windowStart: origin, windowEnd: origin.addingTimeInterval(600),
+            outboundTag: "node-x", failures: 30, attempts: 30, distinctReasonCount: 1,
+            dominantReason: "i/o timeout", directAttempts: 40, directFailures: 0,
+            directResolutionFailures: 1
+        )
+        XCTAssertFalse(report.directResolutionLooksSignificant, "1 次不足以改判")
+
+        // 两次但只占直连的一小部分，同样不改判。
+        let diluted = OutboundFailureReport(
+            windowStart: origin, windowEnd: origin.addingTimeInterval(600),
+            outboundTag: "node-x", failures: 30, attempts: 30, distinctReasonCount: 1,
+            dominantReason: "i/o timeout", directAttempts: 40, directFailures: 0,
+            directResolutionFailures: 2
+        )
+        XCTAssertFalse(diluted.directResolutionLooksSignificant, "2/40 只占 5%，不足以改判")
+
+        // 达到「至少 2 次且占两成」才改判。
+        let significant = OutboundFailureReport(
+            windowStart: origin, windowEnd: origin.addingTimeInterval(600),
+            outboundTag: "node-x", failures: 30, attempts: 30, distinctReasonCount: 1,
+            dominantReason: "i/o timeout", directAttempts: 8, directFailures: 0,
+            directResolutionFailures: 2
+        )
+        XCTAssertTrue(significant.directResolutionLooksSignificant, "2/8 占 25%，应改判")
+    }
+
     /// 结算不等于放宽阈值：达不到门槛照样不报，否则每次停内核都会多出一条噪音。
     func testOutboundFinishStaysSilentBelowThreshold() {
         var detector = OutboundFailureDetector()

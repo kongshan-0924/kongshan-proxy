@@ -111,10 +111,12 @@ func extractClientIdentity(connfd: Int32) -> HelperClientIdentity? {
         var info: CFDictionary?
         if SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
            let info {
-            let dict = info as! [String: Any]
-            signingIdentifier = dict[kSecCodeInfoIdentifier as String] as? String
-            if let cdhash = dict[kSecCodeInfoUnique as String] as? Data {
-                cdHashHex = cdhash.map { String(format: "%02x", $0) }.joined()
+            // 强转失败按「取不到签名信息」处理：拒绝优先，不在这里崩掉 helper。
+            if let dict = info as? [String: Any] {
+                signingIdentifier = dict[kSecCodeInfoIdentifier as String] as? String
+                if let cdhash = dict[kSecCodeInfoUnique as String] as? Data {
+                    cdHashHex = cdhash.map { String(format: "%02x", $0) }.joined()
+                }
             }
         }
     }
@@ -195,9 +197,11 @@ func verifySingBoxSignature(at url: URL, pinnedCDHashHex: String?) throws {
         }
         return
     }
-    let dict = info as! [String: Any]
+    // 取不到签名信息字典时 actual = nil，交给下面的纯函数判定：钉了就拒绝，未钉放行。
+    // 这里不能强转：安全关键路径上崩掉比拒绝更糟（helper 退出后 TUN 无人托管）。
     var actualCDHashHex: String?
-    if let cdhash = dict[kSecCodeInfoUnique as String] as? Data {
+    if let dict = info as? [String: Any],
+       let cdhash = dict[kSecCodeInfoUnique as String] as? Data {
         actualCDHashHex = cdhash.map { String(format: "%02x", $0) }.joined()
     }
     // 纯函数判定（便于单测）：未钉放行，钉了必须匹配。
@@ -345,6 +349,9 @@ func stopSingBox(pid: Int32, expectedURL: URL) throws {
     guard pid > 1 else { throw HelperError.invalidPID }
     // §1.4 验证进程的可执行路径 == 内置 sing-box 路径，绝不按外部 PID 盲杀。
     let expected = expectedURL.resolvingSymlinksInPath().path
+    // 已经退出（含僵尸，kernelIsAlive 顺带收尸）就是停好了：僵尸取不到可执行路径，
+    // 走到下面的身份校验会被误判成「不是我们的进程」。
+    guard kernelIsAlive(pid) else { return }
     guard let actual = executablePath(ofPID: pid) else { throw HelperError.processMismatch(pid) }
     guard actual == expected else { throw HelperError.processMismatch(pid) }
 
@@ -507,6 +514,10 @@ func handleConnection(connfd: Int32) {
         return
     }
 
+    // 内核崩溃后是本进程的僵尸：先收尸并清掉记录。否则 status 一直报 running、startTun 被
+    // 「already running」顶回，stopTun 又因僵尸取不到可执行路径判成身份不符——只能等助手重启。
+    let recordedPID = state.kernelPIDValue()
+    if recordedPID > 0, !kernelIsAlive(recordedPID) { _ = state.clearKernelPID() }
     let kernelRunning = state.kernelPIDValue() > 0
     let decision = HelperDecision.decide(
         request: request,

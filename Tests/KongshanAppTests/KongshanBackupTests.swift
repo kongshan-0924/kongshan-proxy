@@ -43,6 +43,39 @@ final class KongshanBackupTests: XCTestCase {
         XCTAssertNil(target.errorMessage)
     }
 
+    /// 备份里的设置项也要过校验：手改出来的「间隔 0 小时」会让订阅连轴刷新，非法 DNS 会让下次启动生成不了配置。
+    func testBackupWithInvalidSettingsIsRejected() async throws {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let state = AppState(
+            storage: Storage(rootDirectory: root),
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            automaticallyInitialize: false
+        )
+        let data = try await state.exportBackup()
+        XCTAssertNoThrow(try KongshanBackup.decodeValidated(from: data))
+
+        func mutated(_ change: (inout [String: Any]) -> Void) throws -> Data {
+            var object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            var settings = try XCTUnwrap(object["settings"] as? [String: Any])
+            change(&settings)
+            object["settings"] = settings
+            return try JSONSerialization.data(withJSONObject: object)
+        }
+        let zeroInterval = try mutated { settings in
+            var update = settings["subscriptionUpdateSettings"] as? [String: Any] ?? [:]
+            update["intervalHours"] = 0
+            settings["subscriptionUpdateSettings"] = update
+        }
+        XCTAssertThrowsError(try KongshanBackup.decodeValidated(from: zeroInterval))
+        let badDNS = try mutated { settings in
+            var dns = settings["dnsSettings"] as? [String: Any] ?? [:]
+            dns["remoteDoH"] = "not-a-url"
+            settings["dnsSettings"] = dns
+        }
+        XCTAssertThrowsError(try KongshanBackup.decodeValidated(from: badDNS))
+    }
+
     func testFailedImportDoesNotMutateExistingState() async {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

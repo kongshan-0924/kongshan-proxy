@@ -415,39 +415,20 @@ public enum ConfigGenerator {
         // 是那条被复用的连接死了。UDP 每次查询独立收发，天然免疫这种陈旧连接。
         //
         // 安全上可接受：节点域名若被投毒，客户端会连到错误 IP，在 TLS/Reality 校验处
-        // 失败关闭，不会把凭据送出去。国内网站的解析仍走 DoH，隐私与抗投毒不受影响。
+        // 失败关闭，不会把凭据送出去。
         //
-        // 上游选址：默认跟随国内 DoH 的 IP（用户换掉阿里后，节点域名也不再问阿里）；
-        // 用户显式指定 `bootstrapResolver` 时使用独立上游，与国内 DoH 解耦，
+        // 上游选址：默认跟随国内 DNS 的 IP（用户换掉阿里后，节点域名也不再问阿里）；
+        // 用户显式指定 `bootstrapResolver` 时使用独立上游，与国内 DNS 解耦，
         // 一台上游抖动不会同时打掉两类解析。
         let bootstrap = input.dnsSettings.bootstrapResolver
             .trimmingCharacters(in: .whitespacesAndNewlines)
         servers.append([
             "type": "udp",
             "tag": "dns-bootstrap",
-            "server": bootstrap.isEmpty
-                ? (endpoints.domestic.hostIsIPAddress ? endpoints.domestic.host : "223.5.5.5")
-                : bootstrap,
+            "server": bootstrap.isEmpty ? (endpoints.domestic.ipAddress ?? "223.5.5.5") : bootstrap,
             "server_port": 53
         ])
-
-        var domestic = dohServer(
-            endpoint: endpoints.domestic,
-            tag: "dns-cn",
-            detour: nil
-        )
-        if !endpoints.domestic.hostIsIPAddress {
-            domestic["domain_resolver"] = "dns-bootstrap"
-        }
-        // 国内 DoH 长连接的保活：空闲 30 秒后开始探测、每 15 秒一次（内核默认 5 分钟后才开始、75 秒一次）。
-        // sing-box 的 DoH 客户端没有 HTTP/2 健康检查，连接在空闲期间被 NAT 悄悄回收后，下一批查询要先在
-        // 死连接上等到报错才重建：真机 2026-10-05 空闲 30 分钟后的一批查询各慢 1.2–1.9 秒，空闲 1 小时后
-        // 28 个查询各等约 5.3 秒；空闲 10 分钟以内只多一百多毫秒。保活让映射一直新鲜；仍断了也会在空闲中被发现、
-        // 丢弃，下次直接新建（约 0.2 秒）。代价是空闲时每 15 秒一个保活包。走代理的 dns-remote 不设：连接经节点，
-        // 未观察到这个问题。
-        domestic["tcp_keep_alive"] = Self.domesticDoHKeepAlive
-        domestic["tcp_keep_alive_interval"] = Self.domesticDoHKeepAliveInterval
-        servers.append(domestic)
+        servers.append(domesticServer(endpoints.domestic))
 
         // 内网 DNS：把内网域名交给内网自己的 DNS，而不是让它落到 fakeip。
         // 不加这条，内网域名会拿到 240.0.0.0/4 的假 IP，而假 IP 整段被路由进代理出口，
@@ -590,11 +571,31 @@ public enum ConfigGenerator {
             // 直连模式不应把解析绕到代理出口
             "final": input.outboundMode == .direct ? "dns-cn" : "dns-remote"
         ]
-        if useFakeIP {
-            // fakeip 需要独立缓存，避免与普通 DNS 缓存互相污染。
-            result["independent_cache"] = true
-        }
+        // 不再写 `independent_cache`：1.14 起 DNS 缓存键本身就带上游服务器标签，fakeip 与真实解析天然分开；
+        // 该字段在 1.14 废弃（启动告警）、1.16 移除。
         return result
+    }
+
+    /// 国内 DNS 默认走 UDP，同样是无连接，唤醒与长时间闲置后都不卡（见 `DNSSettings.domesticDNS`）。
+    /// 用户改回 DoH 时才是长连接，才需要保活。
+    private static func domesticServer(_ resolver: DomesticResolver) -> [String: Any] {
+        switch resolver {
+        case let .udp(address):
+            return ["type": "udp", "tag": "dns-cn", "server": address, "server_port": 53]
+        case let .doh(endpoint):
+            var domestic = dohServer(endpoint: endpoint, tag: "dns-cn", detour: nil)
+            if !endpoint.hostIsIPAddress {
+                domestic["domain_resolver"] = "dns-bootstrap"
+            }
+            // DoH 长连接的保活：空闲 30 秒后开始探测、每 15 秒一次（内核默认 5 分钟后才开始、75 秒一次）。
+            // sing-box 的 DoH 客户端没有 HTTP/2 健康检查，连接在空闲期间被 NAT 悄悄回收后，下一批查询要先在
+            // 死连接上等到报错才重建：真机 2026-10-05 空闲 30 分钟后的一批查询各慢 1.2–1.9 秒，空闲 1 小时后
+            // 28 个查询各等约 5.3 秒。保活管得了闲置、管不了睡眠——这正是默认改走 UDP 的原因。
+            // 走代理的 dns-remote 不设：连接经节点，未观察到这个问题。
+            domestic["tcp_keep_alive"] = domesticDoHKeepAlive
+            domestic["tcp_keep_alive_interval"] = domesticDoHKeepAliveInterval
+            return domestic
+        }
     }
 
     static let domesticDoHKeepAlive = "30s"
@@ -654,7 +655,11 @@ public enum ConfigGenerator {
                 // 强制 gvisor 用户态栈：system/mixed 栈的 TCP 转发在部分网络（多默认网关/企业网等）
                 // 会失效——只有 UDP/ICMP 通、网页(TCP)全打不开。gvisor 用户态栈普遍兼容
                 // （mihomo/其它客户端默认即此），实测能修好这类"TUN 开了网页全挂"。
-                "stack": "gvisor"
+                "stack": "gvisor",
+                // 1.14 起 TUN 默认 `hijack`：开了 auto_route 就自己去设 macOS 的网卡 DNS 并做 53 端口劫持。
+                // 系统 DNS 一直由空山接管（按网络位置快照、崩溃后由助手还原），两边一起管会互相覆盖，
+                // 内核异常退出时它设的那份还没人还原。关掉它，保持 1.13 的行为：DNS 只靠下面的 hijack-dns 路由规则。
+                "dns_mode": "disabled"
             ]
             if let routing = input.routing {
                 let settings = try routing.settings.validated()
@@ -1139,7 +1144,9 @@ public enum ConfigGenerator {
         if let alpn = node.alpn, !alpn.isEmpty {
             value["alpn"] = alpn
         }
-        if let fingerprint = node.utlsFingerprint {
+        // Reality 必须带 uTLS（内核：uTLS is required by reality client），订阅或链接没写指纹时
+        // 一个这样的节点就让整份配置校验失败。补 chrome，与 mihomo 的缺省一致。
+        if let fingerprint = node.utlsFingerprint ?? (node.realityPublicKey == nil ? nil : "chrome") {
             value["utls"] = ["enabled": true, "fingerprint": fingerprint]
         }
         if let publicKey = node.realityPublicKey {

@@ -34,11 +34,8 @@ struct DiagnosticsView: View {
         .navigationTitle("诊断")
         .toolbar {
             ToolbarItem(placement: .principal) {
-                Picker("诊断项目", selection: $tab) {
-                    ForEach(Tab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
+                CapsuleSegmentedPicker(options: Tab.allCases, selection: $tab) { $0.rawValue }
+                    .fixedSize()
             }
         }
     }
@@ -53,8 +50,8 @@ struct NetworkSelfCheckView: View {
     @Environment(AppState.self) private var state
 
     var body: some View {
-        Form {
-            Section {
+        CardForm {
+            CardSection {
                 Text("检查各网络服务是否残留 kongshan 的代理 / DNS 设置，清理后再验一次连通性。")
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -62,7 +59,7 @@ struct NetworkSelfCheckView: View {
             }
 
             if let report = state.networkRepairReport {
-                Section("检查结果") {
+                CardSection("检查结果") {
                     ForEach(report.items) { item in
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
                             Circle()
@@ -83,7 +80,7 @@ struct NetworkSelfCheckView: View {
                 if !report.services.isEmpty {
                     // 优先级是 2026-09-16 那次断网事故的要害：排在前面的服务出问题会拖垮整机解析，
                     // 而用户只会去看自己在用的那个（Wi-Fi）。这里把顺序摆出来。
-                    Section("网络服务优先级（macOS 按此顺序选用 DNS）") {
+                    CardSection("网络服务优先级（macOS 按此顺序选用 DNS）") {
                         ForEach(report.services) { svc in
                             HStack(spacing: 8) {
                                 Text("\(svc.order)")
@@ -102,22 +99,24 @@ struct NetworkSelfCheckView: View {
                     }
                 }
             } else if !state.isRepairingNetwork {
-                Section {
+                CardSection {
                     ContentUnavailableView {
                         Label("还没有自检", systemImage: "stethoscope")
                     } description: {
                         Text("检查接管残留、网络服务设置、残留内核进程与连通性，发现问题会就地修复。")
                     } actions: {
                         Button("开始自检") { Task { await state.runNetworkRepair() } }
-                            .buttonStyle(.borderedProminent)
+                            .buttonStyle(.pillProminent)
                     }
                 }
             }
         }
-        .pageFormStyle()
         .navigationSubtitle(subtitle)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if state.networkRepairReport != nil { PageStatusBar(subtitle) }
+        }
         .toolbar {
-            ToolbarItem(placement: .primaryAction) {
+            ToolbarItem(placement: .automatic) {
                 Button {
                     Task { await state.runNetworkRepair() }
                 } label: {
@@ -153,20 +152,17 @@ struct RouteHitTestView: View {
     @State private var isTesting = false
 
     var body: some View {
-        Form {
-            Section {
-                Picker("输入类型", selection: $kind) {
-                    ForEach(RouteTestKind.allCases) { Text($0.title).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
+        CardForm {
+            CardSection {
+                CapsuleSegmentedPicker(options: RouteTestKind.allCases, selection: $kind) { $0.title }
+                    .fixedSize()
 
                 HStack(spacing: 10) {
                     // `prompt` 作占位、`labelsHidden` 去掉左侧常驻标签：在 Form(.grouped) 里
                     // `TextField("标题", text:)` 的标题会被当成左侧标签，可编辑区被挤到右边缘。
                     TextField(kind.placeholder, text: $input, prompt: Text(kind.placeholder))
                         .labelsHidden()
-                        .textFieldStyle(.roundedBorder)
+                        .inputField()
                         .font(.body.monospaced())
                         .onSubmit(run)
                     if isTesting {
@@ -180,7 +176,7 @@ struct RouteHitTestView: View {
             }
 
             if let result {
-                Section("命中结果") {
+                CardSection("命中结果") {
                     LabeledContent("来源") {
                         Label(result.source.rawValue, systemImage: "checkmark.seal.fill")
                     }
@@ -197,7 +193,6 @@ struct RouteHitTestView: View {
                 }
             }
         }
-        .pageFormStyle()
         .navigationSubtitle(result == nil ? "输入一个目标看它会走哪里" : "命中 \(result!.target)")
         .onChange(of: kind) { _, _ in result = nil }
         .onChange(of: input) { _, _ in result = nil }
@@ -258,8 +253,8 @@ struct DeepDiagnosticsView: View {
     @State private var notice: String?
 
     var body: some View {
-        Form {
-            Section {
+        CardForm {
+            CardSection {
                 if state.isDiagnosticModeActive, let deadline = state.diagnosticModeEndsAt {
                     LabeledContent("内核输出级别", value: "Debug（临时）")
                     HStack {
@@ -277,7 +272,7 @@ struct DeepDiagnosticsView: View {
                             .foregroundStyle(.secondary)
                         Spacer()
                         Button("开启 15 分钟") { Task { await state.enableDiagnosticMode() } }
-                            .buttonStyle(.borderedProminent)
+                            .buttonStyle(.pillProminent)
                             .disabled(state.isBusy || state.isTestingAllDelays)
                     }
                 }
@@ -290,7 +285,7 @@ struct DeepDiagnosticsView: View {
                      + "切换会重载内核并断开当前连接；到期自动恢复，截止时间随设置持久化。")
             }
 
-            Section {
+            CardSection {
                 HStack {
                     Text("打包配置、运行事件与最近日志，排查问题时用。")
                         .font(.caption)
@@ -316,7 +311,6 @@ struct DeepDiagnosticsView: View {
                      + "节点服务器地址和规则，只发给信任的人；可公开分享版再去掉这些，可以贴到公开场合。")
             }
         }
-        .pageFormStyle()
         .navigationSubtitle(state.isDiagnosticModeActive ? "详细日志已开启" : "按需开启详细日志")
         .fileExporter(
             isPresented: $showsExporter,

@@ -15,7 +15,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     let menu = NSMenu()
 
     private let state: AppState
-    private let openMainWindow: () -> Void
+    /// 打开主窗口；带页面时同时切到那一页（节点太多、菜单放不下时去代理页）。
+    private let openMainWindow: (SidebarPage?) -> Void
     private var throughputCalculator = ThroughputRateCalculator()
     private var throughputTask: Task<Void, Never>?
     private var uploadText = "—"
@@ -27,7 +28,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     init(
         state: AppState,
         statusItem: NSStatusItem? = nil,
-        openMainWindow: @escaping () -> Void
+        openMainWindow: @escaping (SidebarPage?) -> Void
     ) {
         self.state = state
         self.statusItem = statusItem ?? NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -56,7 +57,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             while let self, !Task.isCancelled {
                 self.sampleThroughput()
                 do {
-                    try await Task.sleep(for: .seconds(2))
+                    // 允许 1 秒误差：系统可以把这次唤醒与其它定时器合并，长时间运行更省电。
+                    try await Task.sleep(for: .seconds(2), tolerance: .seconds(1))
                 } catch {
                     break
                 }
@@ -138,9 +140,19 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         popover.animates = true
         popover.delegate = self
         popover.contentViewController = NSHostingController(
-            rootView: MenuBarPopoverView(openMainWindow: openMainWindow).environment(state)
+            rootView: MenuBarPopoverView(
+                openMainWindow: { [weak self] in self?.openMainWindow(nil) },
+                showGroupMenu: { [weak self] name in self?.showGroupMenu(name) }
+            )
+            .environment(state)
         )
         return popover
+    }
+
+    /// 面板里点某个策略组：在鼠标处弹出与右键菜单同一份的节点菜单。打开时才构建，用完即弃。
+    func showGroupMenu(_ groupName: String) {
+        guard let group = state.displayPolicyGroups.first(where: { $0.name == groupName }) else { return }
+        policyGroupMenu(group).popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -155,7 +167,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         let status = NSMenuItem(title: state.statusText, action: nil, keyEquivalent: "")
         status.isEnabled = false
         menu.addItem(status)
-        menu.addItem(item(title: "打开仪表盘", action: #selector(openDashboard), keyEquivalent: "d"))
+        menu.addItem(item(title: "打开主窗口", action: #selector(openDashboard), keyEquivalent: "d"))
         menu.addItem(.separator())
 
         addOutboundModeMenu()
@@ -208,7 +220,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         self.downloadText = downloadText
         let iconStyle = state.menuBarIconStyle
         let iconState = state.menuBarIconState
-        let statusKey = "\(iconStyle.rawValue)-\(iconState)-\(uploadText)-\(downloadText)"
+        let statusText = state.statusText
+        let statusKey = "\(iconStyle.rawValue)-\(iconState)-\(uploadText)-\(downloadText)-\(statusText)"
         if renderedStatusKey != statusKey {
             let image = MenuBarIcon.statusImage(
                 style: iconStyle,
@@ -221,10 +234,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             statusItem.button?.image = image
             statusItem.button?.imagePosition = .imageOnly
             statusItem.button?.imageScaling = .scaleNone
+            // 提示与读屏文字跟图标一起只在内容变化时写：每 2 秒无条件写一遍是白工。
+            statusItem.button?.toolTip = "kongshan · \(statusText)"
+            statusItem.button?.setAccessibilityLabel("kongshan，\(statusText)，上传 \(uploadText)，下载 \(downloadText)")
             renderedStatusKey = statusKey
         }
-        statusItem.button?.toolTip = "kongshan · \(state.statusText)"
-        statusItem.button?.setAccessibilityLabel("kongshan，\(state.statusText)，上传 \(uploadText)，下载 \(downloadText)")
     }
 
     private func sampleThroughput() {
@@ -273,7 +287,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         }
     }
 
-    private func policyGroupMenu(_ group: PolicyGroup) -> NSMenu {
+    func policyGroupMenu(_ group: PolicyGroup) -> NSMenu {
         let submenu = NSMenu(title: group.name)
         submenu.autoenablesItems = false
         let options = state.groupOptions(group)
@@ -299,8 +313,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         submenu.addItem(fastest)
         submenu.addItem(.separator())
 
-        let selectedName = state.selectedMemberName(in: group.name)
-        for option in options.prefix(Self.menuOptionLimit) {
+        let selectedName = state.selectedMemberName(in: group.name, options: options)
+        var visible = Array(options.prefix(Self.menuOptionLimit))
+        // 当前选择排在截断之外时置顶补上：否则菜单里找不到勾选项，看上去像什么都没选。
+        if let selected = options.first(where: { $0.name == selectedName }),
+           !visible.contains(where: { $0.name == selectedName }) {
+            visible.insert(selected, at: 0)
+        }
+        for option in visible {
             let optionItem = item(title: optionTitle(option), action: #selector(selectOption))
             optionItem.representedObject = MenuSelection(group: group.name, option: option.name)
             optionItem.state = option.name == selectedName ? .on : .off
@@ -311,7 +331,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             submenu.addItem(.separator())
             submenu.addItem(item(
                 title: "在代理页选择全部（\(options.count) 个）…",
-                action: #selector(openDashboard)
+                action: #selector(openPolicyGroupsPage)
             ))
         }
         return submenu
@@ -357,7 +377,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func openDashboard() {
-        openMainWindow()
+        openMainWindow(nil)
+    }
+
+    @objc private func openPolicyGroupsPage() {
+        openMainWindow(.policyGroups)
     }
 
     @objc private func selectOutboundMode(_ sender: NSMenuItem) {
