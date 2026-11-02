@@ -20,7 +20,7 @@ final class SelectorSyncTests: XCTestCase {
 
     private var singBoxURL: URL {
         URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent().appending(path: "Vendor/sing-box/sing-box")
+            .deletingLastPathComponent().appending(path: VendoredKernel.relativePath)
     }
 
     /// 两个本地出站 + 两层 selector（H 默认指向组 G），不联网。

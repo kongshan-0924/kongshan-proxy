@@ -28,7 +28,7 @@ struct BackupSettings: Codable, Equatable, Sendable {
         outboundMode: .rule,
         groupSelections: [:],
         activeConfigID: nil,
-        speedTestMethod: .tcpPing
+        speedTestMethod: .urlTest
     )
 }
 

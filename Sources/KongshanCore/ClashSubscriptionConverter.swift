@@ -328,7 +328,9 @@ public enum ClashSubscriptionConverter {
                 // 旧写法把前者也当 uTLS 兜底，现在只收内核认得的指纹名，证书指纹自然被挡掉。
                 utlsFingerprint: clientFingerprint(raw) ?? supportedFingerprint(optionalString(raw, "fingerprint")),
                 realityPublicKey: optionalString(reality ?? [:], "public-key"),
-                realityShortID: optionalString(reality ?? [:], "short-id")
+                realityShortID: optionalString(reality ?? [:], "short-id"),
+                // VLESS 以往不带 ALPN（行为不变）；XHTTP 要靠它选 HTTP 版本。
+                alpn: transport?.kind == .xhttp ? alpn(raw, transport: transport) : nil
             )
 
         case "hysteria2", "hy2":
@@ -396,6 +398,28 @@ public enum ClashSubscriptionConverter {
                 serviceName: optionalString(options ?? [:], "grpc-service-name")
                     ?? optionalString(options ?? [:], "service-name")
             )
+        case "xhttp":
+            let options = raw["xhttp-opts"] as? [String: Any] ?? [:]
+            // 单独的下行地址要另起一套拨号，移植的内核支持但这里没接：当成单通道导入会连不上。
+            if options["download-settings"] != nil { throw NodeMappingError.unsupportedTransport("xhttp download-settings") }
+            // HTTP/3 版 XHTTP 没移植，内核加载时拒绝，会拖垮整份配置。
+            if alpn(raw, transport: nil)?.contains(where: { $0.lowercased() == "h3" }) == true {
+                throw NodeMappingError.unsupportedTransport("xhttp over HTTP/3")
+            }
+            let mode = optionalString(options, "mode")?.lowercased() ?? "auto"
+            guard TransportOptions.supportedXHTTPModes.contains(mode) else {
+                throw NodeMappingError.unsupportedTransport("xhttp mode=\(mode)")
+            }
+            let rawHeaders = options["headers"] as? [String: Any] ?? [:]
+            return TransportOptions(
+                kind: .xhttp,
+                path: optionalString(options, "path"),
+                headers: rawHeaders.reduce(into: [String: String]()) { $0[$1.key] = String(describing: $1.value) },
+                host: optionalString(options, "host"),
+                mode: mode,
+                xPaddingBytes: optionalString(options, "x-padding-bytes"),
+                noGRPCHeader: options["no-grpc-header"] as? Bool
+            )
         default:
             throw NodeMappingError.unsupportedTransport(network)
         }
@@ -443,7 +467,7 @@ public enum ClashSubscriptionConverter {
 
     /// 订阅的 `alpn`（数组，或逗号分隔的字符串）。带 ws / grpc 传输层时不用，见 `ProxyNode.alpn`。
     private static func alpn(_ raw: [String: Any], transport: TransportOptions?) -> [String]? {
-        guard transport == nil else { return nil }
+        guard transport == nil || transport?.kind == .xhttp else { return nil }
         let values: [String]
         if let list = raw["alpn"] as? [String] {
             values = list

@@ -41,7 +41,7 @@ final class NodeImportHardeningTests: XCTestCase {
         let vless = "vless://00000000-0000-0000-0000-000000000001@example.com:443?security=tls"
         XCTAssertNoThrow(try NodeShareLink.parse(vless + "&type=ws&path=%2Fws#n"))
         XCTAssertNoThrow(try NodeShareLink.parse(vless + "&type=tcp#n"))
-        for bad in ["&type=httpupgrade", "&type=xhttp", "&type=h2", "&type=tcp&headerType=http"] {
+        for bad in ["&type=httpupgrade", "&type=h2", "&type=tcp&headerType=http"] {
             XCTAssertThrowsError(try NodeShareLink.parse(vless + bad + "#n"), bad)
         }
         let vmess = #"{"v":"2","ps":"n","add":"example.com","port":"443","id":"00000000-0000-0000-0000-000000000001","net":"kcp"}"#
@@ -119,6 +119,64 @@ final class NodeImportHardeningTests: XCTestCase {
         XCTAssertThrowsError(try NodeShareLink.parse(vless + "&flow=bogus#n"))
         let vmess = #"{"v":"2","ps":"n","add":"a.example.com","port":"443","id":"00000000-0000-0000-0000-000000000001","scy":"aes-128-ctr"}"#
         XCTAssertThrowsError(try NodeShareLink.parse("vmess://" + base64(vmess)))
+    }
+
+    // MARK: - XHTTP
+
+    /// XHTTP 由内置内核（官方 + 移植的 XHTTP）支持：订阅与链接都要带上路径、Host、上下行方式与 ALPN（XHTTP 按它选 HTTP 版本）。
+    /// 单独下行地址与 HTTP/3 没接，导入时就拒，不让一个节点拖垮整份配置。
+    func testClashXHTTPNodesAreImported() throws {
+        let yaml = """
+        proxies:
+          - {name: xh, type: vless, server: cdn.example.com, port: 443, uuid: 00000000-0000-0000-0000-000000000001, tls: true, servername: cdn.example.com, alpn: [h2], client-fingerprint: chrome, network: xhttp, xhttp-opts: {host: cdn.example.com, mode: packet-up, path: /api/v2/abc}}
+          - {name: xh-h3, type: vless, server: cdn.example.com, port: 443, uuid: 00000000-0000-0000-0000-000000000001, tls: true, alpn: [h3], network: xhttp, xhttp-opts: {path: /x}}
+          - {name: xh-split, type: vless, server: cdn.example.com, port: 443, uuid: 00000000-0000-0000-0000-000000000001, tls: true, network: xhttp, xhttp-opts: {path: /x, download-settings: {server: dl.example.com}}}
+          - {name: xh-mode, type: vless, server: cdn.example.com, port: 443, uuid: 00000000-0000-0000-0000-000000000001, tls: true, network: xhttp, xhttp-opts: {path: /x, mode: bogus}}
+        """
+        let result = try ClashSubscriptionConverter.convert(yaml: yaml, sourceID: sourceID)
+        XCTAssertEqual(result.nodes.map(\.name), ["xh"])
+        XCTAssertEqual(result.warnings.filter { $0.contains("不支持的传输方式 xhttp") }.count, 3, "\(result.warnings)")
+        let node = result.nodes[0]
+        XCTAssertEqual(node.transport, TransportOptions(kind: .xhttp, path: "/api/v2/abc", host: "cdn.example.com", mode: "packet-up"))
+        XCTAssertEqual(node.alpn, ["h2"])
+    }
+
+    func testXHTTPShareLink() throws {
+        let base = "vless://00000000-0000-0000-0000-000000000001@cdn.example.com:443?security=tls&sni=cdn.example.com&type=xhttp"
+        let node = try NodeShareLink.parse(base + "&path=%2Fx&host=cdn.example.com&mode=stream-one&alpn=h2#n")
+        XCTAssertEqual(node.transport, TransportOptions(kind: .xhttp, path: "/x", host: "cdn.example.com", mode: "stream-one"))
+        XCTAssertEqual(node.alpn, ["h2"])
+        XCTAssertEqual(try NodeShareLink.parse(base + "#n").transport?.mode, "auto")
+        XCTAssertThrowsError(try NodeShareLink.parse(base + "&alpn=h3#n"))
+        XCTAssertThrowsError(try NodeShareLink.parse(base + "&mode=bogus#n"))
+        let split = #"{"downloadSettings":{"address":"dl.example.com"}}"#.addingPercentEncoding(withAllowedCharacters: .alphanumerics)!
+        XCTAssertThrowsError(try NodeShareLink.parse(base + "&extra=\(split)#n"))
+    }
+
+    /// 生成的 XHTTP 出站要能被内置内核接受（官方内核会报 unknown transport type: xhttp）。
+    func testXHTTPOutboundPassesBundledKernelCheck() async throws {
+        let node = ProxyNode(
+            name: "xh", protocolType: .vless, server: "cdn.example.com", port: 443,
+            uuid: "00000000-0000-0000-0000-000000000001", tlsEnabled: true, sni: "cdn.example.com",
+            transport: TransportOptions(kind: .xhttp, path: "/x", host: "cdn.example.com", mode: "packet-up", xPaddingBytes: "100-1000"),
+            utlsFingerprint: "chrome", alpn: ["h2"]
+        )
+        let data = try ConfigGenerator.generate(ConfigInput(
+            nodes: [node], selectedNodeID: node.id,
+            runtime: RuntimeParameters(mixedPort: 51_080, clashPort: 51_909, secret: "s")
+        ))
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let outbound = try XCTUnwrap((root["outbounds"] as? [[String: Any]])?.first { $0["type"] as? String == "vless" })
+        let transport = try XCTUnwrap(outbound["transport"] as? [String: Any])
+        XCTAssertEqual(transport["type"] as? String, "xhttp")
+        XCTAssertEqual(transport["mode"] as? String, "packet-up")
+        XCTAssertEqual(transport["x_padding_bytes"] as? String, "100-1000")
+        XCTAssertEqual((outbound["tls"] as? [String: Any])?["alpn"] as? [String], ["h2"])
+
+        let kernel = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().appending(path: VendoredKernel.relativePath)
+        let check = try await SingBoxProcess(binaryURL: kernel).check(config: data)
+        XCTAssertEqual(check.exitCode, 0, check.stderr)
     }
 
     // MARK: - 配置生成

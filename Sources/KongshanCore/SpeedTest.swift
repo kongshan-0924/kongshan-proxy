@@ -5,16 +5,17 @@ import SystemConfiguration
 
 /// 测速方式。
 public enum SpeedTestMethod: String, Codable, CaseIterable, Sendable {
-    /// 直连节点 server:port 做 TCP 握手计时。快、稳、不需要内核在跑，
-    /// 但只验证服务器可达，不验证代理链路。默认。
+    /// 直连节点 server:port 做 TCP 握手计时。快，但只验证服务器 TCP 端口可达，不验证代理链路；
+    /// Hysteria2 这类只开 UDP 的节点测不了。
     case tcpPing
-    /// 经 Clash API 让内核用当前代理请求测试 URL，测真实链路延迟。需要内核在跑。
+    /// 测速专用内核经各节点请求测试地址（`DelayTestKernel`），测真实链路延迟。默认。
+    /// 不依赖接管：代理 / TUN 没开也能测。
     case urlTest
 
     public var displayName: String {
         switch self {
-        case .tcpPing: "TCP 握手（快，直连）"
-        case .urlTest: "URL 测速（经代理）"
+        case .tcpPing: "TCP 握手（只测服务器可达）"
+        case .urlTest: "真实延迟（经节点访问测试地址）"
         }
     }
 }

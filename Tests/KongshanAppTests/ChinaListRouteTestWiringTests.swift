@@ -22,7 +22,7 @@ final class ChinaListRouteTestWiringTests: XCTestCase {
         let source = root.appending(path: "extra.json")
         try Data(#"{"version":1,"rules":[{"domain_suffix":["extra-cn.example"]}]}"#.utf8).write(to: source)
         let compiled = try await ProcessRunner.run(
-            executable: packageRoot.appending(path: "Vendor/sing-box/sing-box"),
+            executable: packageRoot.appending(path: VendoredKernel.relativePath),
             arguments: ["rule-set", "compile", source.path, "-o", ruleSets.appending(path: "geosite-cn-extra.srs").path],
             timeout: 10
         )

@@ -43,7 +43,7 @@ final class SingBoxProcessTests: XCTestCase {
             selectedNodeID: node.id,
             runtime: RuntimeParameters(mixedPort: 51_080, clashPort: 51_909, secret: "memory-only")
         ))
-        let core = SingBoxProcess(binaryURL: packageRoot.appending(path: "Vendor/sing-box/sing-box"))
+        let core = SingBoxProcess(binaryURL: packageRoot.appending(path: VendoredKernel.relativePath))
 
         let result = try await core.check(config: config)
 

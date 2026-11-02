@@ -171,6 +171,7 @@ public enum NodeShareLink {
         let (host, port, query) = try splitHostPort(hostPart)
 
         let security = (query["security"] ?? "none").lowercased()
+        let transport = try transport(from: query)
         return ProxyNode(
             name: name ?? host,
             protocolType: .vless,
@@ -180,7 +181,7 @@ public enum NodeShareLink {
             tlsEnabled: security == "tls" || security == "reality" || security == "xtls",
             sni: query["sni"] ?? query["peer"] ?? query["host"],
             skipCertificateVerification: isTruthy(query["allowInsecure"]) || isTruthy(query["insecure"]),
-            transport: try transport(from: query),
+            transport: transport,
             flow: try kernelVLESSFlow(query["flow"]),
             // 内核认不得的指纹（大小写不对、自造名字）会让整份配置校验失败、所有节点一起不能用：
             // 只收认得的，其余当没写（Reality 节点由配置生成补默认 chrome）。
@@ -189,7 +190,9 @@ public enum NodeShareLink {
             },
             // Reality 的公钥/短 ID 在链接里是 pbk/sid。
             realityPublicKey: security == "reality" ? query["pbk"] : nil,
-            realityShortID: security == "reality" ? try realityShortID(query["sid"]) : nil
+            realityShortID: security == "reality" ? try realityShortID(query["sid"]) : nil,
+            // XHTTP 按 ALPN 选 HTTP 版本（h2 / http/1.1）；其余传输不带，理由见 `ProxyNode.alpn`。
+            alpn: transport?.kind == .xhttp ? query["alpn"].map { $0.split(separator: ",").map(String.init) } : nil
         )
     }
 
@@ -320,6 +323,28 @@ public enum NodeShareLink {
             )
         case "grpc":
             return TransportOptions(kind: .grpc, serviceName: query["serviceName"] ?? query["path"])
+        case "xhttp", "splithttp":
+            let mode = (query["mode"] ?? "auto").lowercased()
+            guard TransportOptions.supportedXHTTPModes.contains(mode) else {
+                throw NodeShareLinkError.malformed("XHTTP 上下行方式 \(mode) 暂不支持")
+            }
+            // extra 是 Xray 的进阶 JSON；单独的下行地址（downloadSettings）没接，导入成单通道会连不上。
+            let extra = query["extra"].flatMap { Data($0.utf8) }
+                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+            if extra["downloadSettings"] != nil {
+                throw NodeShareLinkError.malformed("XHTTP 单独下行地址（downloadSettings）暂不支持")
+            }
+            if (query["alpn"] ?? "").lowercased().split(separator: ",").contains("h3") {
+                throw NodeShareLinkError.malformed("HTTP/3 的 XHTTP 暂不支持")
+            }
+            return TransportOptions(
+                kind: .xhttp,
+                path: query["path"] ?? "/",
+                host: query["host"],
+                mode: mode,
+                xPaddingBytes: extra["xPaddingBytes"] as? String,
+                noGRPCHeader: extra["noGRPCHeader"] as? Bool
+            )
         case "tcp", "":
             // tcp + headerType=http 是 HTTP 伪装，不是裸 TCP。
             if (query["headerType"] ?? "none").lowercased() != "none" {
@@ -327,7 +352,7 @@ public enum NodeShareLink {
             }
             return nil
         default:
-            // httpupgrade / xhttp / h2 / kcp 等这里没接：当成裸 TCP 导入会握手后不通，还看不出原因。
+            // httpupgrade / h2 / kcp 等这里没接：当成裸 TCP 导入会握手后不通，还看不出原因。
             throw NodeShareLinkError.malformed("传输方式 \(type) 暂不支持")
         }
     }

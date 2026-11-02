@@ -296,4 +296,74 @@ final class HelperTrustConfigDecodingTests: XCTestCase {
         // trust.json 为空文件 → 解码失败 → helper 拒绝。
         XCTAssertThrowsError(try JSONDecoder().decode(HelperTrustConfig.self, from: Data()))
     }
+
+    // MARK: - v5 证书认人
+
+    private func certificateTrust() -> HelperTrustConfig {
+        HelperTrustConfig(
+            clientExecutablePath: "/Applications/kongshan.app/Contents/MacOS/kongshan",
+            clientBundlePath: "/Applications/kongshan.app",
+            clientRequirement: #"identifier "com.kaysen.kongshan" and certificate root = H"abc""#,
+            singBoxExecutablePath: "/Library/Application Support/kongshan/helper/sing-box",
+            singBoxCDHashHex: "def456",
+            pinnedUID: 501
+        )
+    }
+
+    private func identity(requirementSatisfied: Bool, cdHash: String = "new-build") -> HelperClientIdentity {
+        HelperClientIdentity(
+            signatureValid: true,
+            signingIdentifier: HelperConstants.clientSigningIdentifier,
+            executablePath: "/Applications/kongshan.app",
+            cdHashHex: cdHash,
+            uid: 501,
+            requirementSatisfied: requirementSatisfied
+        )
+    }
+
+    /// 同一张证书签的新版本（cdhash 变了）不用重装；证书不符（ad-hoc 重签冒充）一律拒绝。
+    func testCertificateRequirementReplacesCDHashPin() {
+        let trust = certificateTrust()
+        XCTAssertTrue(trust.isCurrent, "只有证书要求、没有 cdhash 的配置是完整的")
+        XCTAssertTrue(HelperTrustEvaluation.isTrusted(identity: identity(requirementSatisfied: true), trust: trust))
+        XCTAssertFalse(HelperTrustEvaluation.isTrusted(identity: identity(requirementSatisfied: false), trust: trust))
+    }
+
+    /// 证书通过也不放松其余维度：路径、uid 照样校验。
+    func testCertificateRequirementKeepsPathAndUIDChecks() {
+        let trust = certificateTrust()
+        var moved = identity(requirementSatisfied: true)
+        moved.executablePath = "/tmp/kongshan.app"
+        XCTAssertFalse(HelperTrustEvaluation.isTrusted(identity: moved, trust: trust))
+        var otherUser = identity(requirementSatisfied: true)
+        otherUser.uid = 502
+        XCTAssertFalse(HelperTrustEvaluation.isTrusted(identity: otherUser, trust: trust))
+    }
+
+    /// ad-hoc 构建没有证书要求：仍只认 cdhash，`requirementSatisfied` 不起作用。
+    func testAdHocTrustStillPinsCDHash() {
+        var trust = certificateTrust()
+        trust.clientRequirement = nil
+        trust.pinnedCDHashHex = "abc123"
+        XCTAssertTrue(HelperTrustEvaluation.isTrusted(identity: identity(requirementSatisfied: false, cdHash: "abc123"), trust: trust))
+        XCTAssertFalse(HelperTrustEvaluation.isTrusted(identity: identity(requirementSatisfied: true, cdHash: "other"), trust: trust))
+    }
+
+    func testConfigWithNeitherCDHashNorRequirementIsNotCurrent() {
+        var trust = certificateTrust()
+        trust.clientRequirement = ""
+        XCTAssertFalse(trust.isCurrent)
+    }
+
+    /// App 更新不再强制重装助手后，旧助手和旧内核副本要靠 status 回复发现。
+    func testStatusResponseDetectsOutdatedHelperOrKernel() {
+        let current = HelperResponse(ok: true, helperVersion: HelperConstants.helperVersion, singBoxCDHashHex: "ABC")
+        XCTAssertTrue(current.matches(bundledSingBoxCDHashHex: "abc"))
+        XCTAssertFalse(current.matches(bundledSingBoxCDHashHex: "new-kernel"), "内核换了要重装")
+        XCTAssertFalse(current.matches(bundledSingBoxCDHashHex: nil))
+        let oldHelper = HelperResponse(ok: true, helperVersion: "0.2.0", singBoxCDHashHex: "abc")
+        XCTAssertFalse(oldHelper.matches(bundledSingBoxCDHashHex: "abc"), "助手版本落后要重装")
+        let beforeThisField = HelperResponse(ok: true, helperVersion: HelperConstants.helperVersion)
+        XCTAssertFalse(beforeThisField.matches(bundledSingBoxCDHashHex: "abc"))
+    }
 }

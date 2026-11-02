@@ -2,7 +2,7 @@
 
 一款面向 Apple Silicon Mac 的原生、轻量 sing-box 图形客户端。
 
-空山使用 SwiftUI + AppKit 构建，内置官方 sing-box 1.14.4，不自行实现代理协议或加密算法。它以“配置”为中心，支持系统代理与 TUN 单独或同时运行，重点解决日常使用中最实际的几个问题：切换要快、菜单要稳、资源要轻、退出后网络必须恢复。
+空山使用 SwiftUI + AppKit 构建，内置 sing-box 1.14.4（官方源码编译，另移植了 sing-box-lx 的 XHTTP 传输，见 `Kernel/xhttp/`），不自行实现代理协议或加密算法。它以“配置”为中心，支持系统代理与 TUN 单独或同时运行，重点解决日常使用中最实际的几个问题：切换要快、菜单要稳、资源要轻、退出后网络必须恢复。
 
 [下载最新版本](https://github.com/kongshan-0924/kongshan-proxy/releases/latest) · [版本历史](CHANGELOG.md)
 

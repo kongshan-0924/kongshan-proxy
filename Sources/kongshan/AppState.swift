@@ -4,23 +4,32 @@ import KongshanCore
 import Network
 import Observation
 
-/// 策略组里的一个可选成员：节点，或对另一个策略组 / DIRECT / REJECT 的引用。
+/// 策略组里的一个成员：节点，对另一个策略组 / DIRECT / REJECT 的引用，
+/// 或订阅里有、却没导入成节点的名字（内核不支持它的协议或传输方式，如 h2、kcp）。
 enum GroupOption: Identifiable, Sendable {
     case node(ProxyNode)
     case reference(String)
+    /// 生成配置时这类成员会被丢掉，选了也不生效；以前混在「策略引用」里，用户看不出它其实用不了。
+    case unavailable(String)
 
     var id: String {
         switch self {
         case let .node(node): node.id.uuidString
         case let .reference(name): "ref:\(name)"
+        case let .unavailable(name): "missing:\(name)"
         }
     }
 
     var name: String {
         switch self {
         case let .node(node): node.name
-        case let .reference(name): name
+        case let .reference(name), let .unavailable(name): name
         }
+    }
+
+    var isAvailable: Bool {
+        if case .unavailable = self { return false }
+        return true
     }
 }
 
@@ -102,8 +111,14 @@ final class AppState {
     /// (样本节点地址, 端口, 直连 DNS) → 网关会替目标完成握手时的原因（见 `TCPPinger.gatewayInterception`）。
     typealias GatewayInterceptionProbe = @Sendable (String, Int, [String]) async -> String?
     private static let delayPublishBatchSize = 24
-    private static let bulkURLTestConcurrency = 16
-    private static let bulkURLTestTimeoutMilliseconds = 3_000
+    /// 测速内核是独立进程、不和正常上网抢，可以比借主内核时（16）开得更宽。
+    private static let bulkURLTestConcurrency = 32
+    /// 同一台服务器同时最多测几个。机场节点多是中转：真实订阅 356 个节点只有 6 个入口，一台挂 89 个，
+    /// 一起压上去会被限流成假超时。iMac 实测（10-30，363 个节点）：不限 195 个成功 / 42 秒，每台 4 个 约 290 / 58 秒，
+    /// 每台 2 个 324 / 71 秒；批量里失败的节点逐个单测 12/15 能通。宁可慢一点也不给假超时。
+    static let urlTestPerServerConcurrency = 2
+    /// 真实延迟含代理握手，跨境多跳节点 1～2 秒很常见；4 秒以内都算活着。
+    private static let bulkURLTestTimeoutMilliseconds = 4_000
     /// 入参是要排除的地址（TUN 自身），返回探测到的内网 DNS 快照。
     typealias LANResolverProbing = @Sendable (Set<String>) async -> LANResolverSnapshot
 
@@ -221,7 +236,7 @@ final class AppState {
     var delays: [UUID: Int?] = [:]
     var mixedPort: UInt16?
     var testURLString = "http://www.gstatic.com/generate_204"
-    var speedTestMethod: SpeedTestMethod = .tcpPing
+    var speedTestMethod: SpeedTestMethod = .urlTest
     var errorMessage: String?
     var warnings: [String] = []
     private(set) var runtimeEvents: [RuntimeEvent] = []
@@ -711,6 +726,7 @@ final class AppState {
     @ObservationIgnored private let siteProbeProvider: SiteProbeProvider
     @ObservationIgnored private let tcpPingProvider: TCPPingProvider
     @ObservationIgnored private let gatewayInterceptionProbe: GatewayInterceptionProbe
+    @ObservationIgnored private let urlDelayTester: any URLDelayTesting
     @ObservationIgnored private let kernelLogStore: KernelLogStore
     @ObservationIgnored private let subscriptionUpdateScheduler: SubscriptionUpdateScheduler
     @ObservationIgnored private let notificationSender: any NotificationSending
@@ -892,6 +908,7 @@ final class AppState {
         siteProbeProvider: SiteProbeProvider? = nil,
         tcpPingProvider: TCPPingProvider? = nil,
         gatewayInterceptionProbe: GatewayInterceptionProbe? = nil,
+        urlDelayTester: (any URLDelayTesting)? = nil,
         lanResolverProbe: LANResolverProbing? = nil,
         networkAvailability: (@Sendable () async -> Bool)? = nil,
         networkLocations: NetworkLocationsProvider? = nil,
@@ -976,6 +993,10 @@ final class AppState {
         } else {
             self.gatewayInterceptionProbe = { _, _, _ in nil }
         }
+        self.urlDelayTester = urlDelayTester ?? DelayTestKernel(
+            binaryURL: binaryURL,
+            pidFileURL: storage.rootDirectory.appending(path: "delay-test-kernel.pid")
+        )
         self.now = now
         self.kernelLogStore = resolvedLogStore
         self.subscriptionUpdateScheduler = subscriptionUpdateScheduler ?? SubscriptionUpdateScheduler(now: now)
@@ -2007,6 +2028,8 @@ final class AppState {
         // 退出前先冲掉未完成的防抖落盘（用户切节点后 500ms 内退出会丢最后一次选择）。
         await flushPersistSettingsIfNeeded()
         finishSelfDiagnostics()
+        // 测速内核是 App 的子进程，App 退了它不会跟着退。
+        await urlDelayTester.shutdown()
         // 快照必须在 stop() **之前**取：stop 会清空 activeModes。
         // 只有正常退出会走到这里，所以崩溃/断电不会留下"曾开启"的假意图。
         await recordActiveModesSnapshot()
@@ -2585,15 +2608,20 @@ final class AppState {
     }
 
     /// 某个策略组里可展示/可选的成员。空成员＝该组含全部节点；
-    /// 有成员时保留原顺序，节点解析成节点、其余（子策略组 / DIRECT / REJECT）保留为引用。
+    /// 有成员时保留原顺序，节点解析成节点、子策略组 / DIRECT / REJECT 解析成引用，
+    /// 其余是没导入的节点（与 `ConfigGenerator` 一样解析不到就丢）。
     /// 机场塞进 proxies 的套餐信息条目（剩余流量/到期）不是可用节点，从选项里剔除。
     func groupOptions(_ group: PolicyGroup) -> [GroupOption] {
         let catalog = nodeCatalog
         guard !group.members.isEmpty else { return catalog.allTestableOptions }
+        let groupNames = Set(displayPolicyGroups.map(\.name))
         return group.members.compactMap { member in
             if let node = catalog.testableByName[member] { return .node(node) }
             if catalog.infoNames.contains(member) { return nil }
-            return .reference(member)
+            switch member.uppercased() {
+            case "DIRECT", "REJECT", "REJECT-DROP": return .reference(member)
+            default: return groupNames.contains(member) ? .reference(member) : .unavailable(member)
+            }
         }
     }
 
@@ -2633,7 +2661,7 @@ final class AppState {
                 return firstNode.name
             }
         }
-        return options.first?.name
+        return options.first(where: \.isAvailable)?.name
     }
 
     /// 选中成员是节点时返回它（供托盘/副标题展示）；是子组则返回 nil。
@@ -2722,9 +2750,11 @@ final class AppState {
             let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
             let tag = (json?["tag_name"] as? String) ?? ""
             let latest = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+            // 内置内核是官方版本加移植的 XHTTP，版本号带 `-xhttp` 后缀；和官方比只看前面的版本号。
+            let bundledBase = coreVersion.split(separator: "-").first.map(String.init) ?? coreVersion
             if latest.isEmpty {
                 appendWarning("内核更新检查失败：未取到最新版本号")
-            } else if latest == coreVersion {
+            } else if latest == bundledBase {
                 appendWarning("内核已是最新（\(latest)）")
             } else {
                 // 不要写成「更新 App 即随附新内核」：`releases/latest` 给的是最新稳定版，
@@ -2846,20 +2876,6 @@ final class AppState {
         connections.removeAll { $0.id == id }
     }
 
-    /// 测速依赖 Clash API，内核必须在跑。未运行时自动拉起「只跑内核」状态：
-    /// 只开本地 mixed inbound，不改系统代理也不建 TUN。用户可在托盘停止。
-    @discardableResult
-    func startCoreForTestingIfNeeded() async -> Bool {
-        if status == .on { return true }
-        guard !isBusy else { return false }
-        guard !activeConfigNodes.isEmpty else {
-            errorMessage = "当前配置没有可用节点"
-            return false
-        }
-        await start(modes: [])
-        return status == .on
-    }
-
     func testDelay(_ node: ProxyNode) async {
         // TCP 握手直连节点服务器，不需要内核在跑，快且稳。
         if speedTestMethod == .tcpPing {
@@ -2872,20 +2888,30 @@ final class AppState {
             applyDelay(result, to: node.id)
             return
         }
-        guard await startCoreForTestingIfNeeded() else { return }
-        guard let clashAPIClient, let testURL = URL(string: testURLString) else {
-            errorMessage = "内核控制接口不可用"
-            return
+        guard let testURL = await prepareURLDelayTester() else { return }
+        let result = await urlDelayTester.delay(
+            of: node, testURL: testURL, timeoutMilliseconds: Self.bulkURLTestTimeoutMilliseconds
+        )
+        await urlDelayTester.finishSoon()
+        applyDelay(result, to: node.id)
+    }
+
+    /// 拉起（或复用）测速专用内核。总是按当前配置的全部节点准备：单测一个、测一组、测全部
+    /// 用的是同一份配置，连着测不会反复重起内核。
+    private func prepareURLDelayTester() async -> URL? {
+        guard let testURL = URL(string: testURLString) else {
+            errorMessage = "测速地址无效"
+            return nil
         }
         do {
-            let value = try await clashAPIClient.delay(
-                node: ConfigGenerator.outboundTag(for: node),
-                testURL: testURL
+            try await urlDelayTester.prepare(
+                nodes: testableNodes,
+                resolver: directPingResolvers.first ?? TCPPinger.defaultResolvers[0]
             )
-            delays[node.id] = value
+            return testURL
         } catch {
-            delays.updateValue(nil, forKey: node.id)
-            errorMessage = "测速失败：\(error.localizedDescription)"
+            errorMessage = error.localizedDescription
+            return nil
         }
     }
 
@@ -2931,7 +2957,7 @@ final class AppState {
 
     static func gatewayInterceptionMessage(_ reason: String) -> String {
         "当前网络的网关会接管连接（\(reason)，常见于软路由的透明代理）：直连握手测到的是网关，不是节点，"
-            + "所以没有测。请在设置里把测速方式改成「URL 测速（经代理）」，或换到不经软路由的网络位置再测"
+            + "所以没有测。请在代理页「测速选项」里把测速方式改成「真实延迟」，或换到不经软路由的网络位置再测"
     }
 
     func testAllDelays() async {
@@ -3041,42 +3067,32 @@ final class AppState {
             return !Task.isCancelled
         }
 
-        // URL 方式：需要内核在跑，之后同样有界并发 + 逐个回填。
-        let startedTemporaryCore = status != .on
-        guard await startCoreForTestingIfNeeded() else { return false }
-        guard let client = clashAPIClient, let testURL = URL(string: testURLString) else {
-            errorMessage = "内核控制接口不可用"
-            if startedTemporaryCore, status == .on, activeModes.isEmpty { await stop(reason: "测速结束") }
-            return false
-        }
-        let targets: [(id: UUID, tag: String)] = testable.map {
-            (id: $0.id, tag: ConfigGenerator.outboundTag(for: $0))
-        }
+        // URL 方式（真实延迟）：测速专用内核经各节点请求测试地址，与接管开没开无关；同样有界并发 + 分批回填。
+        guard let testURL = await prepareURLDelayTester() else { return false }
+        let tester = urlDelayTester
+        let serverByID = Dictionary(testable.map { ($0.id, $0.server) }, uniquingKeysWith: { first, _ in first })
         await withTaskGroup(of: (UUID, DelayResult).self) { group in
-            var next = 0
+            var waiting = testable
+            var inFlight: [String: Int] = [:]
+            var running = 0
             var pending: [(UUID, DelayResult)] = []
-            let seed = min(Self.bulkURLTestConcurrency, targets.count)
             let timeoutMilliseconds = Self.bulkURLTestTimeoutMilliseconds
-            func delayTask(_ target: (id: UUID, tag: String)) -> @Sendable () async -> (UUID, DelayResult) {
-                { @Sendable in
-                    do {
-                        return (
-                            target.id,
-                            .success(try await client.delay(
-                                node: target.tag,
-                                testURL: testURL,
-                                timeoutMilliseconds: timeoutMilliseconds
-                            ))
-                        )
-                    }
-                    catch { return (target.id, .failure(error.localizedDescription)) }
+            let totalLimit = Self.bulkURLTestConcurrency
+            let perServerLimit = Self.urlTestPerServerConcurrency
+            // 总并发与单服务器并发两道上限，先到先测：排在前面的服务器满了就跳过去测别的服务器的节点。
+            func launchReady() {
+                while running < totalLimit, !Task.isCancelled,
+                      let index = waiting.firstIndex(where: { inFlight[$0.server, default: 0] < perServerLimit }) {
+                    let node = waiting.remove(at: index)
+                    inFlight[node.server, default: 0] += 1
+                    running += 1
+                    group.addTask { (node.id, await tester.delay(of: node, testURL: testURL, timeoutMilliseconds: timeoutMilliseconds)) }
                 }
             }
-            while next < seed {
-                guard !Task.isCancelled else { break }
-                group.addTask(operation: delayTask(targets[next])); next += 1
-            }
+            launchReady()
             while let (id, result) = await group.next() {
+                running -= 1
+                if let server = serverByID[id] { inFlight[server, default: 1] -= 1 }
                 pending.append((id, result))
                 completed += 1
                 publishProgress()
@@ -3087,14 +3103,13 @@ final class AppState {
                 if Task.isCancelled {
                     group.cancelAll()
                     break
-                } else if next < targets.count {
-                    group.addTask(operation: delayTask(targets[next])); next += 1
                 }
+                launchReady()
             }
             publishDelayResults(pending)
         }
         publishProgress(force: true)
-        if startedTemporaryCore, status == .on, activeModes.isEmpty { await stop(reason: "测速结束") }
+        await tester.finishSoon()
         return !Task.isCancelled
     }
 
@@ -4094,7 +4109,7 @@ final class AppState {
                 outboundMode: settings.outboundMode,
                 groupSelections: settings.groupSelections,
                 activeConfigID: settings.activeConfigID,
-                speedTestMethod: settings.speedTestMethod,
+                latencyTestMethod: settings.speedTestMethod,
                 menuBarIconStyle: menuBarIconStyle,
                 // 备份不含端口：那是本机运行时状态，导入别的机器的备份不该顶掉本机端口。
                 proxyRelayPort: preferredRelayPort,
@@ -4335,7 +4350,7 @@ final class AppState {
         if let settings = await loadPersisted(PersistedSettings.self, from: settingsURL, label: "设置") {
             selectedNodeID = settings.selectedNodeID
             testURLString = settings.testURL
-            speedTestMethod = settings.speedTestMethod ?? .tcpPing
+            speedTestMethod = settings.latencyTestMethod ?? .urlTest
             preferredMode = settings.preferredMode ?? .systemProxy
             tunSettings = settings.tunSettings ?? .defaults
             dnsSettings = settings.dnsSettings ?? .defaults
@@ -4558,7 +4573,7 @@ final class AppState {
                 outboundMode: outboundMode,
                 groupSelections: groupSelections,
                 activeConfigID: activeConfigID,
-                speedTestMethod: speedTestMethod,
+                latencyTestMethod: speedTestMethod,
                 menuBarIconStyle: menuBarIconStyle,
                 proxyRelayPort: preferredRelayPort,
                 diagnosticModeEndsAt: diagnosticModeEndsAt,
@@ -6932,7 +6947,9 @@ final class AppState {
     // MARK: - 特权助手（零弹窗 TUN）
 
     private func helperIsHealthy() async -> Bool {
-        (await helperClient.status())?.ok == true
+        guard let response = await helperClient.status() else { return false }
+        // 助手版本落后或 root 内核副本不是 App 内置的这份：按「需重装」处理，不拿旧内核跑新配置。
+        return response.matches(bundledSingBoxCDHashHex: PrivilegedHelperInstaller.bundledSingBoxCDHashHex)
     }
 
     /// 轮询等待助手就绪。bootstrap 之后 helper 建 socket 有几十到几百毫秒的空档，
@@ -7066,7 +7083,7 @@ final class AppState {
                 await refreshHelperInstallStatus()
                 appendWarning(
                     "助手已安装但自检未通过。请确认 kongshan.app 位于 /应用程序 下；"
-                        + "若刚更新过 App，请再点一次「重新安装」（App 签名变化后助手需要重新授权）"
+                        + "若刚更新过 App，请再点一次「重新安装」（内核或助手更新后需要重新授权）"
                 )
             }
         } catch {
@@ -7102,7 +7119,7 @@ final class AppState {
             return bundled
         }
         return URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .appending(path: "Vendor/sing-box/sing-box")
+            .appending(path: VendoredKernel.relativePath)
     }
 
     /// 物理网络是否有全局（非链路本地）IPv6 地址。
@@ -7187,7 +7204,8 @@ private struct PersistedSettings: Codable {
     let groupSelections: [String: String]?
     /// 当前生效配置 ID 与测速方式，旧版设置文件没有这些字段。
     var activeConfigID: UUID?
-    var speedTestMethod: SpeedTestMethod?
+    /// 键名换过：旧键 `speedTestMethod` 存的多是当年的默认 TCP 握手，换键让升级后一律从默认的真实延迟起步。
+    var latencyTestMethod: SpeedTestMethod?
     /// 菜单栏图标样式。旧版设置文件没有该字段。
     var menuBarIconStyle: MenuBarIconStyle?
     /// 旧版 sing-box mixed 端口。保留仅为向后解码；新版不再写入，避免回滚版本把稳定

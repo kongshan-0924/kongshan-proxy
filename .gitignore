@@ -4,6 +4,8 @@ dist/
 *.xcuserstate
 .DS_Store
 .worktrees/
+# Intel 测试机用的 amd64 内核，只在本地（scripts/arch_lib.sh）
+Vendor/sing-box/sing-box-amd64
 
 __pycache__/
 

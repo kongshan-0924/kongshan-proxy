@@ -94,7 +94,9 @@ public enum PrivilegedHelperInstaller {
         // 光验 identifier 挡不住"覆盖主可执行 + codesign -s - -i 同 identifier 重签"；钉 cdhash
         // 让重签因 hash 变化被拒。须配合 build 的 hardened runtime（忽略 DYLD 注入）才完整堵住
         // "同用户进程冒充 App 驱动 root helper"。代价：重构建 App（cdhash 变）需重装助手。
-        let clientCDHashHex = try requireCDHashHex(at: clientExecutableURL)
+        // 证书签名的 App 改按证书认人（v5），更新不用重装；ad-hoc 构建没有可靠的身份，继续钉 cdhash。
+        let clientRequirement = stableClientRequirement(at: Bundle.main.bundleURL)
+        let clientCDHashHex = clientRequirement == nil ? try requireCDHashHex(at: clientExecutableURL) : nil
 
         // 修复 C.1：plist 指向 root-only helper 拷贝（用户改不动），不再直指 bundle。
         let installedHelperPath = installedHelperURL.path
@@ -112,6 +114,7 @@ public enum PrivilegedHelperInstaller {
             clientExecutablePath: clientPath,
             clientBundlePath: clientBundlePath,
             clientCDHashHex: clientCDHashHex,
+            clientRequirement: clientRequirement,
             singBoxInstalledPath: installedSingBoxPath,
             singBoxCDHashHex: singBoxCDHashHex
         )
@@ -163,6 +166,24 @@ public enum PrivilegedHelperInstaller {
         guard let dict = info as? [String: Any],
               let cdhash = dict[kSecCodeInfoUnique as String] as? Data else { return nil }
         return cdhash.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// App 内置内核的 cdhash，与助手 status 回复比对，见 `HelperResponse.matches`。
+    public static var bundledSingBoxCDHashHex: String? { computeCDHashHex(at: bundledSingBoxURL) }
+
+    /// 证书签名时返回 App 的 designated requirement（含证书），ad-hoc 或读不到时返回 nil（回退钉 cdhash）。
+    static func stableClientRequirement(at bundleURL: URL) -> String? {
+        var staticCode: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(bundleURL as CFURL, [], &staticCode) == errSecSuccess, let staticCode else { return nil }
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+              let dict = info as? [String: Any],
+              let certificates = dict[kSecCodeInfoCertificates as String] as? [Any], !certificates.isEmpty else { return nil }
+        var requirement: SecRequirement?
+        guard SecCodeCopyDesignatedRequirement(staticCode, [], &requirement) == errSecSuccess, let requirement else { return nil }
+        var text: CFString?
+        guard SecRequirementCopyString(requirement, [], &text) == errSecSuccess else { return nil }
+        return text as String?
     }
 
     /// 修复 C②：算 sing-box cdhash；失败 fail-closed（拒绝安装），不静默写 null。
@@ -259,6 +280,7 @@ public enum PrivilegedHelperInstaller {
         clientExecutablePath: String,
         clientBundlePath: String,
         clientCDHashHex: String?,
+        clientRequirement: String? = nil,
         singBoxInstalledPath: String,
         singBoxCDHashHex: String?,
         clientUID: UInt32 = UInt32(getuid())
@@ -267,6 +289,7 @@ public enum PrivilegedHelperInstaller {
             clientExecutablePath: clientExecutablePath,
             clientBundlePath: clientBundlePath,
             pinnedCDHashHex: clientCDHashHex,
+            clientRequirement: clientRequirement,
             singBoxExecutablePath: singBoxInstalledPath,
             singBoxCDHashHex: singBoxCDHashHex,
             pinnedUID: clientUID,

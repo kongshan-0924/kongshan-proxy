@@ -250,7 +250,7 @@ final class RuleSetServiceTests: XCTestCase {
     }
 
     private var singBoxURL: URL {
-        packageRoot.appending(path: "Vendor/sing-box/sing-box")
+        packageRoot.appending(path: VendoredKernel.relativePath)
     }
 
     private var packageRoot: URL {

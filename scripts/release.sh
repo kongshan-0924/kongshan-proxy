@@ -50,7 +50,40 @@ prepare() {
     KONGSHAN_KEEP_VERSION=1 zsh scripts/verify_m4.sh
     zsh scripts/make_dmg.sh
     verify_artifacts
+    write_stamp
+}
 
+# 在另一台 Mac（默认 ssh 主机 imac，Intel）上构建，本机不跑 swift build：
+# 那边跑全量测试与 x86_64 门禁（M1–M4，产物留给测试机），再交叉构建 arm64；取回 arm64 的 App 与 DMG，
+# 本机做发布产物检查并写验证戳，之后照常 install / publish。arm64 产物没在真机上跑过 M1–M4，
+# install 装完会打开它，有问题当场能看到。
+prepare_remote() {
+    [[ -z $(git status --porcelain) ]] \
+        || fail "prepare 前工作区必须完全干净；验证戳必须绑定一个确定提交"
+    local host=${1:-${KONGSHAN_BUILD_HOST:-imac}}
+    local remote=kongshan-test/src
+    local expected=$(version)
+    print -- "同步代码到 $host:$remote"
+    rsync -a --delete --exclude .git --exclude .build --exclude dist --exclude .vscode \
+        --exclude Vendor/sing-box/sing-box-amd64 ./ "$host:$remote/"
+    ssh -o ServerAliveInterval=30 "$host" "cd $remote && export KONGSHAN_KEEP_VERSION=1 \
+        && zsh scripts/verify_m4.sh && zsh scripts/make_dmg.sh \
+        && export KONGSHAN_TARGET_ARCH=arm64 KONGSHAN_APP_PATH=.build/arm64/kongshan.app \
+        && zsh scripts/build_app.sh && zsh scripts/make_dmg.sh" \
+        || fail "$host 上的测试或构建失败"
+    mkdir -p "$project_dir/.build" "$project_dir/dist"
+    rsync -a --delete "$host:$remote/.build/arm64/kongshan.app/" "$project_dir/.build/kongshan.app/"
+    rsync -a "$host:$remote/dist/kongshan-$expected.dmg" "$project_dir/dist/"
+    # 本地 dist 只留最新（与 make_dmg.sh 同规则）。
+    local -a stale
+    stale=("$project_dir"/dist/kongshan-*.dmg(N))
+    stale=(${stale:#*/kongshan-$expected.dmg})
+    (( ${#stale} == 0 )) || trash "${stale[@]}"
+    verify_artifacts
+    write_stamp
+}
+
+write_stamp() {
     local expected=$(version)
     local dmg="$project_dir/dist/kongshan-$expected.dmg"
     local digest=$(shasum -a 256 "$dmg" | awk '{print $1}')
@@ -194,6 +227,10 @@ sys.exit(1 if (names & current) else 0)
 # awk 退出时 ps 早已写完，所以长期没出事；2026-09-18 PID 回绕到 24225 后那行排到了前面，
 # 实测旧写法 **200 次失败 195 次**，安装在「新版已启动」之后被腰斩（退出码 141）。
 # 改为读完全部输入、在 END 里输出首个匹配：ps 永远写得完，同样 200 次 0 失败。
+no_kongshan_kernel() {
+    ! pgrep -f '/kongshan.*/sing-box' >/dev/null 2>&1
+}
+
 installed_app_pid() {
     ps -axo pid=,command= | awk '$2 == "/Applications/kongshan.app/Contents/MacOS/kongshan" && !pid { pid = $1 } END { if (pid) print pid }'
 }
@@ -245,6 +282,15 @@ backup_configuration() {
     tar -tzf "$archive" >/dev/null
     print -- "配置备份：$archive"
     print -- "配置备份 SHA-256：$(shasum -a 256 "$archive" | awk '{print $1}')"
+
+    # 只留最近 5 份：每份都含完整订阅与节点凭据，攒着既占地方也扩大泄露面。
+    # 更早的移进废纸篓（可拖回），不直接删；系统没有 trash 命令时宁可不清理。
+    local -a all_backups stale_backups
+    all_backups=("$backup_dir"/kongshan-config-*.tar.gz(N.om))
+    stale_backups=("${(@)all_backups[6,-1]}")
+    if (( ${#stale_backups[@]} > 0 )) && command -v trash >/dev/null 2>&1; then
+        trash "${stale_backups[@]}" && print -- "已把 ${#stale_backups[@]} 份更早的配置备份移进废纸篓（只保留最近 5 份）"
+    fi
 }
 
 install_verified() {
@@ -264,7 +310,8 @@ install_verified() {
         [[ -z $(any_app_pid) ]] || fail "旧版未在 20 秒内正常退出；未发送 TERM/KILL，也未替换"
     fi
 
-    pgrep -f '/kongshan.*/sing-box' >/dev/null 2>&1 && fail "仍有 kongshan sing-box 进程；未替换"
+    # 内核（含测速内核）是 App 的子进程，会比 App 晚一点退出：2026-11-02 进程消失后立刻查，误拦过一次。
+    wait_until 50 no_kongshan_kernel || fail "旧版退出 10 秒后仍有 kongshan sing-box 进程；未替换"
     # 还原写入发生在退出流程末尾，晚于进程消失；给它 5 秒落地再判。
     wait_until 25 recovery_snapshots_are_gone \
         || fail "系统恢复快照在 5 秒内仍未清除；未替换"
@@ -457,10 +504,11 @@ publish() {
 
 case ${1:-} in
     prepare) prepare ;;
+    prepare-remote) prepare_remote "${2:-}" ;;
     install) install_verified ;;
     publish) publish ;;
     *)
-        print -u2 -- "用法：scripts/release.sh prepare|install|publish"
+        print -u2 -- "用法：scripts/release.sh prepare|prepare-remote [ssh 主机]|install|publish"
         exit 64
         ;;
 esac

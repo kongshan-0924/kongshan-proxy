@@ -25,3 +25,7 @@
 192.167.1.1
 192.169.0.1
 11.0.0.1
+# sing-box-lx 移植进来的 XHTTP 单测数据（Kernel/xhttp/overlay/transport/v2rayxhttp/url_query_test.go），第三方原文
+149.56.109.62
+# sing-box 许可证里的作者联系邮箱（Kernel/xhttp/LICENSE.sing-box-lx），第三方原文
+contact-sagernet@sekai.icu

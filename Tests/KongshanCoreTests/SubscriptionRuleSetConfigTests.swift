@@ -71,7 +71,7 @@ final class SubscriptionRuleSetConfigTests: XCTestCase {
 
     private var singBoxURL: URL {
         URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent().appending(path: "Vendor/sing-box/sing-box")
+            .deletingLastPathComponent().appending(path: VendoredKernel.relativePath)
     }
 
     /// 真实订阅的规则顺序（节选）。

@@ -1169,7 +1169,42 @@ public enum ConfigGenerator {
             var value: [String: Any] = ["type": "grpc"]
             if let serviceName = options.serviceName { value["service_name"] = serviceName }
             return value
+        case .xhttp:
+            var value: [String: Any] = ["type": "xhttp", "path": options.path ?? "/"]
+            if let host = options.host { value["host"] = host }
+            if let mode = options.mode { value["mode"] = mode }
+            if !options.headers.isEmpty { value["headers"] = options.headers }
+            if let padding = options.xPaddingBytes { value["x_padding_bytes"] = padding }
+            if options.noGRPCHeader == true { value["no_grpc_header"] = true }
+            return value
         }
+    }
+
+    /// 测速专用内核的配置：只有节点出站与 Clash API，不监听任何代理端口、不建 TUN、不带分流。
+    ///
+    /// - `default_interface` 把所有出站连接绑在物理网卡上：主内核开着 TUN 时，测速连接也不会被它的
+    ///   默认路由接走、经当前节点绕一圈（0.2.12 修过的 TCP 测速同一问题）。
+    /// - 节点域名用 `resolver` 直连解析，与主内核的 `dns-bootstrap` 同一上游。
+    /// - 缺字段的节点跳过，不让一个坏节点拖垮整份配置；它们测速时会报「节点不在测速内核里」。
+    public static func delayTestConfig(
+        nodes: [ProxyNode],
+        resolver: String,
+        interfaceName: String?,
+        clashPort: UInt16,
+        secret: String
+    ) throws -> Data {
+        var route: [String: Any] = ["default_domain_resolver": "bootstrap", "final": "direct"]
+        if let interfaceName { route["default_interface"] = interfaceName }
+        let config: [String: Any] = [
+            "log": ["level": "error", "timestamp": false],
+            "dns": ["servers": [["type": "udp", "tag": "bootstrap", "server": resolver]]],
+            "outbounds": nodes.compactMap { try? outbound($0) } + [["type": "direct", "tag": "direct"]],
+            "route": route,
+            "experimental": [
+                "clash_api": ["external_controller": "127.0.0.1:\(clashPort)", "secret": secret]
+            ]
+        ]
+        return try encode(config)
     }
 
     private static func encode(_ object: [String: Any]) throws -> Data {

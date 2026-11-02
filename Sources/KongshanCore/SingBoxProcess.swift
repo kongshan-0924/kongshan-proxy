@@ -7,6 +7,16 @@ public struct SingBoxLogLine: Sendable {
     public let text: String
 }
 
+/// 仓库里本机架构的内核（相对仓库根，见 scripts/arch_lib.sh）：arm64 入库，amd64 只在 Intel 测试机本地。
+/// 测试与 `swift run` 直接用它；打包后的 App 用 bundle 里的那份。
+public enum VendoredKernel {
+    #if arch(x86_64)
+    public static let relativePath = "Vendor/sing-box/sing-box-amd64"
+    #else
+    public static let relativePath = "Vendor/sing-box/sing-box"
+    #endif
+}
+
 public actor SingBoxProcess {
     public typealias LogHandler = @Sendable (SingBoxLogLine) -> Void
     public typealias LogErrorHandler = @Sendable (String) -> Void

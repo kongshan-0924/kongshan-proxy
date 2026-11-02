@@ -29,7 +29,7 @@ file "$app_binary" | grep -q "$host_arch"
 file "$core_binary" | grep -q "$host_arch"
 codesign --verify --deep --strict --verbose=2 "$app_path"
 plutil -lint "$app_path/Contents/Info.plist"
-"$core_binary" version | grep -q 'sing-box version 1.14.4'
+"$core_binary" version | grep -q 'sing-box version 1.14.4-xhttp'
 
 verification_dir=$(mktemp -d /tmp/kongshan-m3-verify.XXXXXX)
 geosite_cn="$verification_dir/geosite-cn.srs"

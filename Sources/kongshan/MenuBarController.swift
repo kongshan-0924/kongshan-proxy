@@ -324,6 +324,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             let optionItem = item(title: optionTitle(option), action: #selector(selectOption))
             optionItem.representedObject = MenuSelection(group: group.name, option: option.name)
             optionItem.state = option.name == selectedName ? .on : .off
+            optionItem.isEnabled = option.isAvailable
             submenu.addItem(optionItem)
         }
 
@@ -338,7 +339,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     private func optionTitle(_ option: GroupOption) -> String {
-        guard case let .node(node) = option else { return option.name }
+        guard case let .node(node) = option else { return option.isAvailable ? option.name : "\(option.name)（未导入）" }
         let metadata = NodeNameMetadata.parse(node.name)
         let flag = metadata.flag.flatMap { node.name.contains($0) ? nil : $0 + " " } ?? ""
         let multiplier = metadata.multiplierText.map { "  \($0)" } ?? ""

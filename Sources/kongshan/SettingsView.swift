@@ -238,9 +238,9 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if state.helperInstallStatus == .needsReinstall {
-                // 本项目是 ad-hoc 签名，助手只能靠钉死 App 的 cdhash 来认人，
-                // 因此 App 一更新（cdhash 变）助手就必须重装一次。说清楚，别让用户以为坏了。
-                Text("助手在，但不认识当前这个 App —— 通常是 App 更新过（签名变了），或 App 被移动过位置。点「重新安装」授权一次即可，之后继续零弹窗。")
+                // 证书签名的 App 更新不用重装；换内核、助手自身更新、ad-hoc 构建或 App 换了位置时才会走到这里。
+                // 说清楚，别让用户以为坏了。
+                Text("助手需要更新 —— 通常是内置内核或助手换了新版，或 App 被移动过位置。点「重新安装」授权一次即可，之后继续零弹窗。")
                     .font(.caption)
                     .foregroundStyle(.orange)
             }

@@ -13,23 +13,41 @@ public struct TransportOptions: Codable, Hashable, Sendable {
     public enum Kind: String, Codable, Sendable {
         case websocket
         case grpc
+        /// Xray 的 XHTTP。官方 sing-box 没有，内置内核是官方版本加移植的 XHTTP（Kernel/xhttp）。
+        case xhttp
     }
+
+    /// XHTTP 的上下行方式。HTTP/3（alpn h3）没移植，见 `Kernel/xhttp/README.md`。
+    public static let supportedXHTTPModes: Set<String> = ["auto", "packet-up", "stream-up", "stream-one"]
 
     public var kind: Kind
     public var path: String?
     public var headers: [String: String]
     public var serviceName: String?
+    /// 以下只给 XHTTP：Host 头、上下行方式、填充长度（如 "100-1000"）、关掉 gRPC 伪装头。
+    public var host: String?
+    public var mode: String?
+    public var xPaddingBytes: String?
+    public var noGRPCHeader: Bool?
 
     public init(
         kind: Kind,
         path: String? = nil,
         headers: [String: String] = [:],
-        serviceName: String? = nil
+        serviceName: String? = nil,
+        host: String? = nil,
+        mode: String? = nil,
+        xPaddingBytes: String? = nil,
+        noGRPCHeader: Bool? = nil
     ) {
         self.kind = kind
         self.path = path
         self.headers = headers
         self.serviceName = serviceName
+        self.host = host
+        self.mode = mode
+        self.xPaddingBytes = xPaddingBytes
+        self.noGRPCHeader = noGRPCHeader
     }
 }
 
@@ -60,7 +78,7 @@ public struct ProxyNode: Identifiable, Codable, Hashable, Sendable {
     /// pluginName="obfs-local"、pluginOptions="obfs=http;obfs-host=…"。缺省＝无插件。
     public var pluginName: String?
     public var pluginOptions: String?
-    /// TLS 的 ALPN（订阅的 `alpn`）。只给不带传输层（ws / grpc）的 TLS 节点用：
+    /// TLS 的 ALPN（订阅的 `alpn`）。给不带传输层的 TLS 节点和 XHTTP 用（XHTTP 按它选 HTTP 版本）；
     /// ws 走 HTTP/1.1 升级，协商成 h2 反而连不上；grpc 由内核自己定。
     public var alpn: [String]?
 

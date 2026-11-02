@@ -30,7 +30,7 @@ final class SubscriptionRuleSetServiceTests: XCTestCase {
 
     private let binary = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        .appending(path: "Vendor/sing-box/sing-box")
+        .appending(path: VendoredKernel.relativePath)
     private var root: URL!
     private var server: FakeServer!
     private var service: SubscriptionRuleSetService!

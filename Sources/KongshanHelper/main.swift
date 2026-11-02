@@ -16,7 +16,7 @@ import SystemConfiguration
 //   §1.5 不在自动化里真安装 daemon（安装由用户在真机点一次授权）。
 //   §1.6 不弱化 PrivilegedLauncher 兜底（未装助手时 TUN 仍走它）。
 
-let helperVersion = "0.2.0"
+let helperVersion = HelperConstants.helperVersion
 
 /// 日志文件（root 拥有、**0640 root:admin**，App 所属的管理员账户可读以查看 TUN 日志）。
 /// 日志只含 sing-box 运行日志，不含凭据（secret 只在内存、config 经 stdin 不落盘），
@@ -74,7 +74,8 @@ let state = HelperState()
 
 /// 从连接 FD 提取对端身份：audit_token → SecCode → 签名信息 + 可执行路径。
 /// 提取失败返回 nil（调用方按拒绝处理）。
-func extractClientIdentity(connfd: Int32) -> HelperClientIdentity? {
+/// - Parameter clientRequirement: trust 里的证书要求（v5）；nil = ad-hoc 构建，靠 cdhash 认人。
+func extractClientIdentity(connfd: Int32, clientRequirement: String? = nil) -> HelperClientIdentity? {
     // §5.1 取对端审计令牌。失败→拒绝（返回 nil）。
     var token = audit_token_t()
     var tokenLen = socklen_t(MemoryLayout<audit_token_t>.size)
@@ -101,6 +102,15 @@ func extractClientIdentity(connfd: Int32) -> HelperClientIdentity? {
     let reqCreated = (SecRequirementCreateWithString(reqString as CFString, [], &requirement) == errSecSuccess)
     let checkStatus = SecCodeCheckValidityWithErrors(code, [], requirement, nil)
     let signatureValid = reqCreated && (checkStatus == errSecSuccess)
+
+    // v5：证书要求同样校验正在运行的这个进程（audit_token 来的 code），字符串解析失败按不满足。
+    var requirementSatisfied = false
+    if let clientRequirement, !clientRequirement.isEmpty {
+        var pinned: SecRequirement?
+        if SecRequirementCreateWithString(clientRequirement as CFString, [], &pinned) == errSecSuccess, let pinned {
+            requirementSatisfied = SecCodeCheckValidityWithErrors(code, [], pinned, nil) == errSecSuccess
+        }
+    }
 
     // 取签名信息：identifier + cdhash（kSecCodeInfoUnique）。
     // SecCodeCopySigningInformation 需要 SecStaticCode，先由 guest code 转换。
@@ -150,7 +160,8 @@ func extractClientIdentity(connfd: Int32) -> HelperClientIdentity? {
         signingIdentifier: signingIdentifier,
         executablePath: executablePath,
         cdHashHex: cdHashHex,
-        uid: euid
+        uid: euid,
+        requirementSatisfied: requirementSatisfied
     )
 }
 
@@ -497,7 +508,7 @@ func handleConnection(connfd: Int32) {
     }
     trust = loadedTrust
 
-    guard let identity = extractClientIdentity(connfd: connfd),
+    guard let identity = extractClientIdentity(connfd: connfd, clientRequirement: trust.clientRequirement),
           HelperTrustEvaluation.isTrusted(identity: identity, trust: trust) else {
         return  // §1.2 未鉴权 → 拒绝。
     }
@@ -533,7 +544,8 @@ func handleConnection(connfd: Int32) {
             ok: true,
             message: kernelRunning ? "running" : "idle",
             kernelPID: kernelRunning ? state.kernelPIDValue() : nil,
-            helperVersion: helperVersion
+            helperVersion: helperVersion,
+            singBoxCDHashHex: trust.singBoxCDHashHex
         ), connfd: connfd)
 
     case .startKernel:

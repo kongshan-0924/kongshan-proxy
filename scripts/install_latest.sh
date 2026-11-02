@@ -126,6 +126,15 @@ backup_configuration() {
     chmod 600 "$archive"
     tar -tzf "$archive" >/dev/null
     print -- "配置已备份：$archive"
+
+    # 只留最近 5 份：每份都含完整订阅与节点凭据，攒着既占地方也扩大泄露面。
+    # 更早的移进废纸篓（可拖回），不直接删；系统没有 trash 命令时宁可不清理。
+    local -a all_backups stale_backups
+    all_backups=("$backup_dir"/kongshan-config-*.tar.gz(N.om))
+    stale_backups=("${(@)all_backups[6,-1]}")
+    if (( ${#stale_backups[@]} > 0 )) && command -v trash >/dev/null 2>&1; then
+        trash "${stale_backups[@]}" && print -- "已把 ${#stale_backups[@]} 份更早的配置备份移进废纸篓（只保留最近 5 份）"
+    fi
 }
 
 # ---------------------------------------------------------------- 取最新版信息

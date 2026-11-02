@@ -1,0 +1,83 @@
+--- a/constant/v2ray.go
++++ b/constant/v2ray.go
+@@ -6,4 +6,6 @@
+ 	V2RayTransportTypeQUIC        = "quic"
+ 	V2RayTransportTypeGRPC        = "grpc"
+ 	V2RayTransportTypeHTTPUpgrade = "httpupgrade"
++	// lx: XHTTP transport (Xray-compatible), registered behind build tag with_xhttp. See SPECS/TASKS/002.
++	V2RayTransportTypeXHTTP = "xhttp"
+ )
+--- a/option/v2ray_transport.go
++++ b/option/v2ray_transport.go
+@@ -18,6 +18,9 @@
+ 	QUICOptions        V2RayQUICOptions        `json:"-"`
+ 	GRPCOptions        V2RayGRPCOptions        `json:"-"`
+ 	HTTPUpgradeOptions V2RayHTTPUpgradeOptions `json:"-"`
++	// lx:begin xhttp
++	XHTTPOptions V2RayXHTTPOptions `json:"-"`
++	// lx:end xhttp
+ }
+ 
+ type V2RayTransportOptions _V2RayTransportOptions
+@@ -35,6 +38,10 @@
+ 		v = o.GRPCOptions
+ 	case C.V2RayTransportTypeHTTPUpgrade:
+ 		v = o.HTTPUpgradeOptions
++	// lx:begin xhttp
++	case C.V2RayTransportTypeXHTTP:
++		v = o.XHTTPOptions
++	// lx:end xhttp
+ 	case "":
+ 		return nil, E.New("missing transport type")
+ 	default:
+@@ -60,6 +67,10 @@
+ 		v = &o.GRPCOptions
+ 	case C.V2RayTransportTypeHTTPUpgrade:
+ 		v = &o.HTTPUpgradeOptions
++	// lx:begin xhttp
++	case C.V2RayTransportTypeXHTTP:
++		v = &o.XHTTPOptions
++	// lx:end xhttp
+ 	default:
+ 		return E.New("unknown transport type: " + o.Type)
+ 	}
+@@ -78,6 +89,9 @@
+ 			{Value: C.V2RayTransportTypeQUIC, StructType: reflect.TypeFor[V2RayQUICOptions]()},
+ 			{Value: C.V2RayTransportTypeGRPC, StructType: reflect.TypeFor[V2RayGRPCOptions]()},
+ 			{Value: C.V2RayTransportTypeHTTPUpgrade, StructType: reflect.TypeFor[V2RayHTTPUpgradeOptions]()},
++			// lx:begin xhttp
++			{Value: C.V2RayTransportTypeXHTTP, StructType: reflect.TypeFor[V2RayXHTTPOptions]()},
++			// lx:end xhttp
+ 		}, nil)
+ 	})
+ }
+--- a/transport/v2ray/transport.go
++++ b/transport/v2ray/transport.go
+@@ -48,21 +48,12 @@
+ 	if options.Type == "" {
+ 		return nil, nil
+ 	}
+-	switch options.Type {
+-	case C.V2RayTransportTypeHTTP:
+-		return v2rayhttp.NewClient(ctx, dialer, serverAddr, options.HTTPOptions, tlsConfig)
+-	case C.V2RayTransportTypeGRPC:
+-		return NewGRPCClient(ctx, dialer, serverAddr, options.GRPCOptions, tlsConfig)
+-	case C.V2RayTransportTypeWebsocket:
+-		return v2raywebsocket.NewClient(ctx, dialer, serverAddr, options.WebsocketOptions, tlsConfig)
+-	case C.V2RayTransportTypeQUIC:
+-		if tlsConfig == nil {
+-			return nil, C.ErrTLSRequired
+-		}
+-		return NewQUICClient(ctx, dialer, serverAddr, options.QUICOptions, tlsConfig)
+-	case C.V2RayTransportTypeHTTPUpgrade:
+-		return v2rayhttpupgrade.NewClient(ctx, dialer, serverAddr, options.HTTPUpgradeOptions, tlsConfig)
+-	default:
++	// lx:begin xhttp — switch replaced by the client transport registry (registry.go);
++	// built-in types are registered there, downstream types (xhttp) register via init().
++	constructor, loaded := lookupClientTransport(options.Type)
++	if !loaded {
+ 		return nil, E.New("unknown transport type: " + options.Type)
+ 	}
++	return constructor(ctx, dialer, serverAddr, options, tlsConfig)
++	// lx:end xhttp
+ }

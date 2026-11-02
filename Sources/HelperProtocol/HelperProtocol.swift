@@ -29,7 +29,11 @@ public enum HelperConstants {
     /// socket 是 0666、目录 0711 可穿越，同机任意本地账号（含非管理员）只要启动同一份
     /// `/Applications/kongshan.app` 就通过全部校验，可无密码 `startTun` 以 root 劫持整机路由与 DNS。
     /// 同时 v4 起助手会在 App 消失后按快照还原系统 DNS（需要 uid 才知道读谁的快照）。
-    public static let trustConfigVersion: Int = 4
+    /// v5：证书签名的 App 改用 `clientRequirement` 认人，App 更新不再需要重装助手；ad-hoc 构建仍钉 cdhash。
+    public static let trustConfigVersion: Int = 5
+    /// 助手程序自身的版本，App 与助手编译进同一个值。助手代码有改动时手动加一：
+    /// App 更新不再强制重装助手后，旧助手不会被顺带换掉，要靠它发现版本落后、提示重装。
+    public static let helperVersion = "0.3.0"
     /// root 内核允许监听的回环地址。
     public static let loopbackAddress = "127.0.0.1"
     /// root 内核允许监听的非特权服务端口区间。
@@ -59,12 +63,31 @@ public struct HelperResponse: Codable, Sendable, Equatable {
     public var message: String
     public var kernelPID: Int32?
     public var helperVersion: String?
+    /// status 回复里带上钉死的 sing-box cdhash：TUN 跑的是助手目录里的 root 副本，
+    /// App 换了内置内核时要靠它发现两边不一致，否则 TUN 会悄悄继续用旧内核。
+    public var singBoxCDHashHex: String?
 
-    public init(ok: Bool, message: String = "", kernelPID: Int32? = nil, helperVersion: String? = nil) {
+    public init(
+        ok: Bool,
+        message: String = "",
+        kernelPID: Int32? = nil,
+        helperVersion: String? = nil,
+        singBoxCDHashHex: String? = nil
+    ) {
         self.ok = ok
         self.message = message
         self.kernelPID = kernelPID
         self.helperVersion = helperVersion
+        self.singBoxCDHashHex = singBoxCDHashHex
+    }
+
+    /// 助手是否跟得上当前 App：助手版本一致，且 root 内核副本就是 App 内置的这份。
+    /// 跟不上时 App 提示重装，TUN 不走这个助手。
+    public func matches(bundledSingBoxCDHashHex: String?) -> Bool {
+        guard ok, helperVersion == HelperConstants.helperVersion,
+              let pinned = singBoxCDHashHex, !pinned.isEmpty,
+              let bundled = bundledSingBoxCDHashHex else { return false }
+        return pinned.lowercased() == bundled.lowercased()
     }
 }
 
@@ -84,8 +107,13 @@ public struct HelperTrustConfig: Codable, Sendable, Equatable {
     /// `identity.executablePath == trust.clientExecutablePath` **永远为假**，
     /// helper 静默拒绝所有连接、App 一直显示"需重装"，免密码助手实际从未生效。
     public var clientBundlePath: String?
-    /// 钉死调用方 cdhash（十六进制）。nil 仅表示旧配置。
+    /// 钉死调用方 cdhash（十六进制）。ad-hoc 构建用它认人；有 `clientRequirement` 时为 nil。
     public var pinnedCDHashHex: String?
+    /// v5：App 的代码签名要求（安装时取 App 的 designated requirement，含证书）。
+    /// 有它就按证书认人：同一张证书签的新版 App 不用重装助手。信任根因此从「管理员密码」变成
+    /// 「证书私钥」，私钥在构建机 `~/kongshan-signing` 的专用钥匙串里，不进仓库（见 scripts/build_app.sh）。
+    /// ad-hoc 签名零成本可伪造，它的 designated requirement 只是 cdhash，安装时不写这个字段。
+    public var clientRequirement: String?
     /// helper exec 的 sing-box 绝对路径（安装时记录 bundle 内 sing-box 位置）。
     /// 修复 C：helper 不再从自身位置相对推导 sing-box，改从 trust.json 读，防 bundle 被移走后路径漂移。
     public var singBoxExecutablePath: String?
@@ -110,6 +138,7 @@ public struct HelperTrustConfig: Codable, Sendable, Equatable {
         clientExecutablePath: String,
         clientBundlePath: String? = nil,
         pinnedCDHashHex: String? = nil,
+        clientRequirement: String? = nil,
         singBoxExecutablePath: String? = nil,
         singBoxCDHashHex: String? = nil,
         pinnedUID: UInt32? = nil,
@@ -118,6 +147,7 @@ public struct HelperTrustConfig: Codable, Sendable, Equatable {
         self.clientExecutablePath = clientExecutablePath
         self.clientBundlePath = clientBundlePath
         self.pinnedCDHashHex = pinnedCDHashHex
+        self.clientRequirement = clientRequirement
         self.singBoxExecutablePath = singBoxExecutablePath
         self.singBoxCDHashHex = singBoxCDHashHex
         self.pinnedUID = pinnedUID
@@ -130,7 +160,7 @@ public struct HelperTrustConfig: Codable, Sendable, Equatable {
         version == HelperConstants.trustConfigVersion
             && !clientExecutablePath.isEmpty
             && !(clientBundlePath ?? "").isEmpty
-            && !(pinnedCDHashHex ?? "").isEmpty
+            && !((pinnedCDHashHex ?? "").isEmpty && (clientRequirement ?? "").isEmpty)
             && !(singBoxExecutablePath ?? "").isEmpty
             && !(singBoxCDHashHex ?? "").isEmpty
             && pinnedUID != nil
@@ -358,19 +388,23 @@ public struct HelperClientIdentity: Equatable, Sendable {
     /// 对端进程的有效 uid（取自同一个 audit_token，与签名信息同源、无竞态）。
     /// nil 表示未提取到 → 按拒绝处理。
     public var uid: UInt32?
+    /// 对端是否满足 trust 里的 `clientRequirement`（SecCode 校验）。没有该字段时不用看。
+    public var requirementSatisfied: Bool
 
     public init(
         signatureValid: Bool,
         signingIdentifier: String?,
         executablePath: String?,
         cdHashHex: String?,
-        uid: UInt32? = nil
+        uid: UInt32? = nil,
+        requirementSatisfied: Bool = false
     ) {
         self.signatureValid = signatureValid
         self.signingIdentifier = signingIdentifier
         self.executablePath = executablePath
         self.cdHashHex = cdHashHex
         self.uid = uid
+        self.requirementSatisfied = requirementSatisfied
     }
 }
 
@@ -392,8 +426,11 @@ public enum HelperTrustEvaluation {
         // 拒绝优先：新 schema 必须有 clientBundlePath（`isCurrent` 已强制），缺了直接拒。
         guard let bundlePath = trust.clientBundlePath, !bundlePath.isEmpty,
               identity.executablePath == bundlePath else { return false }
-        // §5.1 可选加固：钉 cdhash。pinned 为空字符串也视为不钉。
-        if let pinned = trust.pinnedCDHashHex, !pinned.isEmpty {
+        // v5：有证书要求就按证书认人，拒绝优先；否则（ad-hoc 构建）钉 cdhash。
+        if let requirement = trust.clientRequirement, !requirement.isEmpty {
+            guard identity.requirementSatisfied else { return false }
+        } else if let pinned = trust.pinnedCDHashHex, !pinned.isEmpty {
+            // §5.1 可选加固：钉 cdhash。pinned 为空字符串也视为不钉。
             guard let actual = identity.cdHashHex,
                   actual.lowercased() == pinned.lowercased() else { return false }
         }

@@ -87,7 +87,7 @@ struct PolicyGroupsView: View {
                 } label: {
                     Label("测速选项", systemImage: "slider.horizontal.3")
                 }
-                .help("测速并选最快，以及怎么测：TCP 握手直连节点服务器，快且稳；URL 测速经当前代理请求测试地址，测真实链路但更慢")
+                .help("测速并选最快，以及怎么测：真实延迟经各节点访问测试地址，代理没开也能测；TCP 握手只测节点服务器能不能连上")
             }
         }
     }
@@ -150,7 +150,7 @@ struct PolicyGroupsView: View {
 
     private func subtitle(for group: PolicyGroup) -> String {
         let options = state.groupOptions(group)
-        if group.kind == .urltest { return "自动选路 · \(options.count) 个" }
+        if group.kind == .urltest { return "自动选路 · \(options.filter(\.isAvailable).count) 个" }
         return state.selectedMemberName(in: group.name, options: options) ?? "未选择"
     }
 
@@ -223,7 +223,7 @@ private struct PolicyMemberList: View {
                 case let .node(node):
                     return node.name.localizedCaseInsensitiveContains(query)
                         || node.server.localizedCaseInsensitiveContains(query)
-                case let .reference(name):
+                case let .reference(name), let .unavailable(name):
                     return name.localizedCaseInsensitiveContains(query)
                 }
             }
@@ -259,7 +259,8 @@ private struct PolicyMemberList: View {
         let selection = Binding<String?>(
             get: { selectedName },
             set: { name in
-                guard isSelectable, let name else { return }
+                guard isSelectable, let name,
+                      options.contains(where: { $0.name == name && $0.isAvailable }) else { return }
                 state.proxyPageClickedMember[currentGroup.name] = name
                 guard name != selectedName else { return }
                 Task { await state.select(optionName: name, in: currentGroup.name) }
@@ -349,6 +350,7 @@ private struct PolicyMemberList: View {
             }
             Text(option.name)
                 .fontWeight(isSelected ? .semibold : .regular)
+                .foregroundStyle(option.isAvailable ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 8)
@@ -368,6 +370,10 @@ private struct PolicyMemberList: View {
                 Text("策略引用")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            case .unavailable:
+                Text("未导入")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
             }
         }
         .padding(.vertical, 2)
@@ -384,6 +390,7 @@ private struct PolicyMemberList: View {
         switch option {
         case .node: return nil
         case .reference: return "arrow.turn.down.right"
+        case .unavailable: return "nosign"
         }
     }
 
@@ -392,6 +399,7 @@ private struct PolicyMemberList: View {
         switch option {
         case let .node(node): return "\(node.server):\(node.port)"
         case .reference: return "指向另一个策略 / 直连 / 拒绝"
+        case .unavailable: return "订阅里有这个节点，但内核不支持它的协议或传输方式（如 h2、kcp、HTTP/3 的 XHTTP），导入时已跳过，选不了也测不了"
         }
     }
 

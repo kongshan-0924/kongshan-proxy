@@ -12,7 +12,7 @@ host_arch=$(kongshan_host_arch) || {
 
 zsh scripts/fetch_sing_box.sh
 # 本机环境沙盒被禁用（sandbox-exec: Operation not permitted），必须显式 --disable-sandbox。
-# 按主机架构构建：Apple Silicon 出 arm64（发布用），Intel 出 x86_64（只供本机调试）。
+# 按目标架构构建（默认本机，见 arch_lib.sh）：arm64 发布用，x86_64 只供 Intel 测试机。
 SWIFTPM_ENABLE_SANDBOX=NO swift build -c release --arch "$host_arch" --disable-sandbox
 
 # 版本号：VERSION 文件是唯一来源，每次构建自增修订号（x.y.Z）。
@@ -73,7 +73,12 @@ done
 mkdir -p "$stage_app/Contents/MacOS" "$stage_app/Contents/Resources"
 install -m 755 "$release_dir/kongshan" "$stage_app/Contents/MacOS/kongshan"
 install -m 755 "$release_dir/KongshanHelper" "$stage_app/Contents/MacOS/KongshanHelper"
-install -m 755 Vendor/sing-box/sing-box "$stage_app/Contents/Resources/sing-box"
+# 同一工作区可能留着另一个架构的产物（交叉构建），装进去之前确认架构对得上。
+[[ $(lipo -archs "$release_dir/kongshan") == "$host_arch" ]] || {
+    print -u2 -- "release 产物架构不是 $host_arch：$(lipo -archs "$release_dir/kongshan")（在 $release_dir）"
+    exit 1
+}
+install -m 755 "$(kongshan_singbox_vendor_path)" "$stage_app/Contents/Resources/sing-box"
 install -m 644 Resources/Info.plist "$stage_app/Contents/Info.plist"
 install -m 644 Resources/THIRD_PARTY_NOTICES.md "$stage_app/Contents/Resources/THIRD_PARTY_NOTICES.md"
 install -m 644 Resources/AppIcon.icns "$stage_app/Contents/Resources/AppIcon.icns"
@@ -106,8 +111,21 @@ else
     kernel_codesign_args+=(--timestamp)
     [[ -z "${KONGSHAN_CODESIGN_KEYCHAIN:-}" ]] || kernel_codesign_args+=(--keychain "$KONGSHAN_CODESIGN_KEYCHAIN")
 fi
-codesign "${kernel_codesign_args[@]}" "$stage_app/Contents/Resources/sing-box"
-codesign "${codesign_args[@]}" "$stage_app"
+# 证书签名的 App 更新不用重装免密码助手（见 HelperTrustConfig.clientRequirement）。本机有 ~/kongshan-signing/sign.sh
+# 就用它签（私钥在那个目录的专用钥匙串里，不进仓库）；没有就 ad-hoc。
+# KONGSHAN_SIGN_HOST 可指定 ssh 主机，把待签 App 传到那台机器签完取回；设成 adhoc 强制不用证书。
+sign_host=${KONGSHAN_SIGN_HOST:-}
+[[ -z $sign_host && -f ~/kongshan-signing/sign.sh ]] && sign_host=local
+if [[ $sign_host == local ]]; then
+    zsh ~/kongshan-signing/sign.sh "$stage_app"
+elif [[ -n $sign_host && $sign_host != adhoc ]]; then
+    rsync -a --delete "$stage_app/" "$sign_host:kongshan-signing/stage.app/"
+    ssh "$sign_host" 'zsh ~/kongshan-signing/sign.sh ~/kongshan-signing/stage.app'
+    rsync -a --delete "$sign_host:kongshan-signing/stage.app/" "$stage_app/"
+else
+    codesign "${kernel_codesign_args[@]}" "$stage_app/Contents/Resources/sing-box"
+    codesign "${codesign_args[@]}" "$stage_app"
+fi
 
 if [[ -e "$app_path" ]]; then
     trash "$app_path"

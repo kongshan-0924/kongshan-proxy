@@ -6,6 +6,34 @@ import XCTest
 @testable import KongshanCore
 @testable import kongshan
 
+private actor FakeURLDelayTester: URLDelayTesting {
+    private(set) var log: [String] = []
+    private(set) var peakPerServer: [String: Int] = [:]
+    private var inFlight: [String: Int] = [:]
+    private let prepareError: Error?
+    private let latency: Duration?
+
+    init(prepareError: Error? = nil, latency: Duration? = nil) {
+        self.prepareError = prepareError
+        self.latency = latency
+    }
+
+    func prepare(nodes: [ProxyNode], resolver: String) async throws {
+        log.append("prepare:\(nodes.count)")
+        if let prepareError { throw prepareError }
+    }
+
+    func delay(of node: ProxyNode, testURL: URL, timeoutMilliseconds: Int) async -> DelayResult {
+        inFlight[node.server, default: 0] += 1
+        peakPerServer[node.server] = max(peakPerServer[node.server] ?? 0, inFlight[node.server]!)
+        if let latency { try? await Task.sleep(for: latency) }
+        inFlight[node.server, default: 1] -= 1
+        return .success(120)
+    }
+    func finishSoon() async { log.append("finish") }
+    func shutdown() async { log.append("shutdown") }
+}
+
 private actor CallCounter {
     private var value = 0
 
@@ -122,6 +150,7 @@ final class AppStateTests: XCTestCase {
             tcpPingProvider: { host, _, _ in .success(host == "fast.example" ? 18 : 90) },
             automaticallyInitialize: false
         )
+        state.speedTestMethod = .tcpPing
         await state.addManual(manualNode(name: "慢节点", server: "slow.example"))
         await state.addManual(manualNode(name: "快节点", server: "fast.example"))
 
@@ -147,6 +176,7 @@ final class AppStateTests: XCTestCase {
             gatewayInterceptionProbe: { _, _, _ in "向公网不存在的地址握手也成功了" },
             automaticallyInitialize: false
         )
+        state.speedTestMethod = .tcpPing
         await state.addManual(manualNode(name: "原节点", server: "first.example"))
         await state.addManual(manualNode(name: "其他节点", server: "second.example"))
         let originalID = state.selectedNodeID
@@ -159,7 +189,7 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(state.selectedNodeID, originalID, "不能按网关的假延迟去换节点")
         XCTAssertTrue(state.delays.values.allSatisfy { $0 == nil })
         XCTAssertTrue(state.errorMessage?.contains("网关会接管连接") == true, state.errorMessage ?? "")
-        XCTAssertTrue(state.errorMessage?.contains("URL 测速") == true)
+        XCTAssertTrue(state.errorMessage?.contains("真实延迟") == true)
     }
 
     func testTestAndSelectFastestKeepsSelectionWhenEveryTestFails() async {
@@ -171,6 +201,7 @@ final class AppStateTests: XCTestCase {
             tcpPingProvider: { _, _, _ in .failure("timeout") },
             automaticallyInitialize: false
         )
+        state.speedTestMethod = .tcpPing
         await state.addManual(manualNode(name: "原节点", server: "first.example"))
         await state.addManual(manualNode(name: "其他节点", server: "second.example"))
         let originalID = state.selectedNodeID
@@ -216,6 +247,7 @@ final class AppStateTests: XCTestCase {
             },
             automaticallyInitialize: false
         )
+        state.speedTestMethod = .tcpPing
         state.subscriptions = [source]
         state.nodes = [included, excluded]
         state.activeConfigID = source.id
@@ -233,6 +265,34 @@ final class AppStateTests: XCTestCase {
         XCTAssertFalse(state.delays.keys.contains(excluded.id))
     }
 
+    /// 订阅组里列了、却没导入成节点的名字（内核不支持 XHTTP 等）：以前显示成「策略引用」，
+    /// 用户以为是另一个策略；现在单独标出，不能选，也不会被当成默认选择。
+    func testGroupMembersThatWereNotImportedAreMarkedUnavailable() {
+        let root = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = SubscriptionSource(name: "sub", url: URL(string: "https://example.com/sub.yaml")!)
+        let node = ProxyNode(
+            sourceID: source.id, name: "香港", protocolType: .shadowsocks,
+            server: "hk.example", port: 443, password: "secret", method: "aes-128-gcm"
+        )
+        let state = AppState(
+            storage: Storage(rootDirectory: root),
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            automaticallyInitialize: false
+        )
+        state.subscriptions = [source]
+        state.nodes = [node]
+        state.activeConfigID = source.id
+        let auto = PolicyGroup(name: "自动", kind: .urltest, members: ["香港", "东京-XHTTP"])
+        let main = PolicyGroup(name: "主组", kind: .selector, members: ["东京-XHTTP", "自动", "香港", "direct"])
+        state.discoveredPolicyGroups[source.id] = [main, auto]
+
+        let options = state.groupOptions(main)
+        XCTAssertEqual(options.map(\.id), ["missing:东京-XHTTP", "ref:自动", node.id.uuidString, "ref:direct"])
+        XCTAssertEqual(options.map(\.isAvailable), [false, true, true, true])
+        XCTAssertEqual(state.selectedMemberName(in: "自动"), "香港", "默认选择要跳过用不了的成员")
+    }
+
     func testAllDelaysPublishesResultsInBatches() async {
         let root = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -242,6 +302,7 @@ final class AppStateTests: XCTestCase {
             tcpPingProvider: { _, _, _ in .success(25) },
             automaticallyInitialize: false
         )
+        state.speedTestMethod = .tcpPing
         state.nodes = (0..<20).map { index in
             ProxyNode(
                 name: "node-\(index)",
@@ -280,6 +341,7 @@ final class AppStateTests: XCTestCase {
             },
             automaticallyInitialize: false
         )
+        state.speedTestMethod = .tcpPing
         state.nodes = (0..<100).map { index in
             ProxyNode(
                 name: "node-\(index)",
@@ -1840,22 +1902,63 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(stoppedHealthCount, 2)
     }
 
-    func testTerminationStopsCoreStartedOnlyForDelayTesting() async throws {
-        let fixture = try await makeRunningFixture()
+    /// 真实延迟测速走独立的测速内核：没开接管时不再把主内核拉起来（旧做法会让整页进入忙碌态），
+    /// 测完让测速内核空闲后自停，App 退出时一并收掉。
+    func testURLDelayTestUsesIsolatedKernelWithoutStartingMainCore() async throws {
+        let tester = FakeURLDelayTester()
+        let fixture = try await makeRunningFixture(urlDelayTester: tester)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        await fixture.state.stop()
+        XCTAssertEqual(fixture.state.speedTestMethod, .urlTest, "默认测真实延迟")
+
+        await fixture.state.testAllDelays()
+        await fixture.state.testDelay(fixture.state.nodes[0])
+
+        let mainPID = await fixture.core.currentPID
+        XCTAssertNil(mainPID, "测速不能拉起主内核")
+        XCTAssertEqual(fixture.state.status, .off)
+        XCTAssertEqual(fixture.state.delays[fixture.state.nodes[0].id], 120)
+        let log = await tester.log
+        XCTAssertEqual(log, ["prepare:1", "finish", "prepare:1", "finish"], "单测与全测都按全部节点准备，测完交回空闲自停")
+
+        _ = await fixture.state.prepareForTermination()
+        let afterQuit = await tester.log
+        XCTAssertEqual(afterQuit.last, "shutdown")
+    }
+
+    /// 中转机场的几百个节点只有几个入口：同一台服务器同时最多测 2 个，否则被限流成假超时（iMac 10-30 实测）。
+    func testURLDelayTestLimitsConcurrencyPerServer() async throws {
+        let tester = FakeURLDelayTester(latency: .milliseconds(20))
+        let fixture = try await makeRunningFixture(urlDelayTester: tester)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        await fixture.state.stop()
+        let template = fixture.state.nodes[0]
+        fixture.state.nodes = (0..<30).map { index in
+            var node = template
+            node.id = UUID()
+            node.name = "节点 \(index)"
+            node.server = index < 20 ? "relay.example" : "other-\(index).example"
+            return node
+        }
+
+        await fixture.state.testAllDelays()
+
+        let peak = await tester.peakPerServer
+        XCTAssertEqual(peak["relay.example"], AppState.urlTestPerServerConcurrency)
+        XCTAssertEqual(fixture.state.delays.count, 30)
+    }
+
+    func testURLDelayTestReportsKernelStartFailure() async throws {
+        let tester = FakeURLDelayTester(prepareError: DelayTestKernelError.startFailed("FATAL decode config"))
+        let fixture = try await makeRunningFixture(urlDelayTester: tester)
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         await fixture.state.stop()
 
-        let started = await fixture.state.startCoreForTestingIfNeeded()
-        let runningPID = await fixture.core.currentPID
-        XCTAssertTrue(started)
-        XCTAssertTrue(fixture.state.activeModes.isEmpty)
-        XCTAssertNotNil(runningPID)
+        await fixture.state.testAllDelays()
 
-        let safeToTerminate = await fixture.state.prepareForTermination()
-        let stoppedPID = await fixture.core.currentPID
-        XCTAssertTrue(safeToTerminate)
-        XCTAssertEqual(fixture.state.status, .off)
-        XCTAssertNil(stoppedPID)
+        XCTAssertTrue(fixture.state.errorMessage?.contains("测速内核没能启动") == true, fixture.state.errorMessage ?? "")
+        XCTAssertTrue(fixture.state.delays.isEmpty)
+        XCTAssertFalse(fixture.state.isTestingAllDelays)
     }
 
     func testSystemCrashRestartFailureRestoresProxyAndNotifies() async throws {
@@ -2254,7 +2357,8 @@ final class AppStateTests: XCTestCase {
         notificationSender: (any NotificationSending)? = nil,
         lanResolverProbe: AppState.LANResolverProbing? = nil,
         sshProxyTargets: [SSHProxyTarget] = [],
-        sshProxyConfigManager: (any SSHProxyConfigManaging)? = nil
+        sshProxyConfigManager: (any SSHProxyConfigManaging)? = nil,
+        urlDelayTester: (any URLDelayTesting)? = nil
     ) async throws -> RunningFixture {
         let root = temporaryDirectory()
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -2289,6 +2393,7 @@ final class AppStateTests: XCTestCase {
             sshProxyConfigManager: sshProxyConfigManager,
             runtimeFactory: { _ in runtime },
             healthVerifier: health.verify(client:),
+            urlDelayTester: urlDelayTester,
             lanResolverProbe: lanResolverProbe,
             automaticallyInitialize: false
         )
@@ -2752,7 +2857,7 @@ final class AppStateTests: XCTestCase {
     }
 
     private var singBoxURL: URL {
-        packageRoot.appending(path: "Vendor/sing-box/sing-box")
+        packageRoot.appending(path: VendoredKernel.relativePath)
     }
 
     private var packageRoot: URL {

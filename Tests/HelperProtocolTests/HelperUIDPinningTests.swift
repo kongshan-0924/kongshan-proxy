@@ -67,7 +67,7 @@ final class HelperUIDPinningTests: XCTestCase {
         XCTAssertFalse(legacy.isCurrent, "缺 pinnedUID 的配置不能被当成当前 schema")
     }
 
-    func testFullyPopulatedV4ConfigIsCurrent() {
+    func testFullyPopulatedCurrentConfigIsCurrent() {
         let current = HelperTrustConfig(
             clientExecutablePath: bundlePath + "/Contents/MacOS/kongshan",
             clientBundlePath: bundlePath,
@@ -78,7 +78,7 @@ final class HelperUIDPinningTests: XCTestCase {
             version: HelperConstants.trustConfigVersion
         )
         XCTAssertTrue(current.isCurrent)
-        XCTAssertEqual(HelperConstants.trustConfigVersion, 4, "uid 钉死随 v4 引入，改版本号要同步改重装路径的预期")
+        XCTAssertEqual(HelperConstants.trustConfigVersion, 5, "v5 引入证书认人，改版本号要同步改重装路径的预期")
     }
 
     /// 旧 trust.json（没有 pinnedUID 字段）必须仍能解码——解码失败会让 helper 连

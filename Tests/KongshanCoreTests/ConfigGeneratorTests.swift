@@ -143,7 +143,7 @@ final class ConfigGeneratorTests: XCTestCase {
             selectedNodeID: node.id,
             runtime: RuntimeParameters(mixedPort: 31_180, clashPort: 31_181, secret: "test-secret")
         ))
-        let binary = packageRoot.appending(path: "Vendor/sing-box/sing-box")
+        let binary = packageRoot.appending(path: VendoredKernel.relativePath)
         let result = try await SingBoxProcess(binaryURL: binary).check(config: config)
         XCTAssertEqual(result.exitCode, 0, result.stderr)
     }
