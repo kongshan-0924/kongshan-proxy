@@ -301,4 +301,13 @@ done
 print -- ""
 print -- "已安装并打开 kongshan $version（PID $pid_after）"
 [[ -d "$backup" ]] && print -- "旧版备份（可拖回「应用程序」回滚）：$backup"
-print -- "提示：新版签名已变，下次开启 TUN 时会要求重装一次特权助手（输入一次密码），属正常现象。"
+# 助手按证书认人（v0.2.23 起），App 更新本身不用重装；只有内置内核换了、或现有助手还是按旧方式认人时才要授权一次。
+# 助手目录里的内核副本普通用户可读，与新 App 的内核比 cdhash 即可判断。
+code_hash() { codesign -dv --verbose=4 "$1" 2>&1 | awk -F= '/^CDHash=/ && !h { h = $2 } END { print h }' }
+helper_kernel="/Library/Application Support/kongshan/helper/sing-box"
+if [[ ! -e "$helper_kernel" ]]; then
+    print -- "提示：首次开启 TUN 时会请求安装特权助手（输入一次密码）。"
+elif [[ $(code_hash "$target_app/Contents/Resources/sing-box") != $(code_hash "$helper_kernel") \
+        || $(codesign -dr - "$target_app" 2>&1) != *certificate* ]]; then
+    print -- "提示：这次更新换了内置内核（或助手需要升级），下次开启 TUN 时会要求重装一次特权助手（输入一次密码），属正常现象。"
+fi
