@@ -152,17 +152,29 @@ release_json=$(curl -fsSL --max-time 30 "${proxy_args[@]}" \
     "https://api.github.com/repos/$repo/releases/latest") \
     || fail "取不到最新版本信息（api.github.com）"
 
-release_fields=$(print -r -- "$release_json" | /usr/bin/python3 -c '
-import json, sys
+# 按本机架构选包：Intel 用 `kongshan-<版本>-x86_64.dmg`，Apple Silicon 用不带后缀的那个
+# （v0.2.23 及更早只有 arm64 一个包）。
+case $(uname -m) in
+    arm64) machine_arch=arm64 ;;
+    x86_64) machine_arch=x86_64 ;;
+    *) fail "不支持的 CPU 架构：$(uname -m)" ;;
+esac
+release_fields=$(print -r -- "$release_json" | KONGSHAN_ARCH=$machine_arch /usr/bin/python3 -c '
+import json, os, sys
 release = json.load(sys.stdin)
-assets = [a for a in release.get("assets", []) if a.get("name", "").endswith(".dmg")]
+dmgs = [a for a in release.get("assets", []) if a.get("name", "").endswith(".dmg")]
+intel = os.environ["KONGSHAN_ARCH"] == "x86_64"
+assets = [a for a in dmgs if a["name"].endswith("-x86_64.dmg") == intel]
 if len(assets) != 1:
-    sys.exit(2)
+    sys.exit(3 if intel and not assets else 2)
 asset = assets[0]
 digest = asset.get("digest") or ""
 print(release["tag_name"], asset["name"], asset["browser_download_url"], asset["size"],
       digest.removeprefix("sha256:") or "-")
-') || fail "最新 Release 里没有唯一的 DMG 安装包"
+') || {
+    [[ $? == 3 ]] && fail "最新 Release 还没有 Intel（x86_64）安装包"
+    fail "最新 Release 里没有唯一的 $machine_arch 安装包"
+}
 read -r tag dmg_name dmg_url dmg_size dmg_digest <<< "$release_fields"
 version=${tag#v}
 [[ "$dmg_digest" != "-" ]] || fail "Release 没有提供 SHA-256 摘要，无法校验下载内容，拒绝安装"
@@ -209,8 +221,8 @@ source_app="$mount_point/kongshan.app"
 [[ -d "$source_app" ]] || fail "安装包里没有 kongshan.app"
 codesign --verify --deep --strict "$source_app" >/dev/null 2>&1 || fail "安装包内 App 签名校验失败"
 [[ $(app_version "$source_app") == "$version" ]] || fail "安装包内 App 版本与 Release 不一致"
-[[ "$(file "$source_app/Contents/MacOS/kongshan")" == *arm64* ]] || fail "安装包内 App 不是 arm64"
-print -- "安装包校验通过：kongshan $version（签名完整、arm64）"
+[[ "$(file "$source_app/Contents/MacOS/kongshan")" == *$machine_arch* ]] || fail "安装包内 App 不是 $machine_arch"
+print -- "安装包校验通过：kongshan $version（签名完整、$machine_arch）"
 
 if [[ "$mode" == check ]]; then
     print -- "--check：只做了下载与校验，未改动已安装的 App"

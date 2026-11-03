@@ -1,8 +1,7 @@
 #!/bin/zsh
 # 主机架构相关的常量。build_app / release 的门禁与内核下载共用。
 #
-# 发布包仍然是 Apple Silicon 专用（README 写明），但开发机上允许按主机架构出本地构建：
-# Intel Mac 上出 x86_64，用来跑测试、试功能；不会拿去公开发布。
+# 每次发布两个包：arm64 与 x86_64（release.sh prepare-remote 在 Intel 测试机上一起出）。
 
 # 目标架构默认是本机；KONGSHAN_TARGET_ARCH=arm64|x86_64 可交叉构建另一个架构
 # （iMac 上同时出 x86_64 自用与 arm64 给 MacBook，见 release.sh prepare-remote）。

@@ -32,6 +32,16 @@ verify_artifacts() {
     file "$app/Contents/MacOS/kongshan" | grep -q arm64 || fail "App 不是 arm64"
     file "$app/Contents/Resources/sing-box" | grep -q arm64 || fail "sing-box 不是 arm64"
     hdiutil verify "$dmg" >/dev/null
+    # Intel 包（prepare-remote 才有）：有就一并核对，发布时必须有。
+    local intel_app="$project_dir/.build/x86_64/kongshan.app" intel_dmg="$project_dir/dist/kongshan-$expected-x86_64.dmg"
+    if [[ -d "$intel_app" || -f "$intel_dmg" ]]; then
+        [[ -d "$intel_app" && -f "$intel_dmg" ]] || fail "Intel 包不完整：App 与 DMG 要同时在"
+        [[ $(app_version "$intel_app") == "$expected" ]] || fail "Intel App 与 VERSION 不一致"
+        codesign --verify --deep --strict "$intel_app" || fail "Intel App 签名校验失败"
+        file "$intel_app/Contents/MacOS/kongshan" | grep -q x86_64 || fail "Intel App 不是 x86_64"
+        file "$intel_app/Contents/Resources/sing-box" | grep -q x86_64 || fail "Intel 包的 sing-box 不是 x86_64"
+        hdiutil verify "$intel_dmg" >/dev/null
+    fi
 }
 
 # 工具链前置检查：缺 xctest 或 swift 时，verify_m4 会先编译几十分钟，再在测试阶段
@@ -74,10 +84,15 @@ prepare_remote() {
     mkdir -p "$project_dir/.build" "$project_dir/dist"
     rsync -a --delete "$host:$remote/.build/arm64/kongshan.app/" "$project_dir/.build/kongshan.app/"
     rsync -a "$host:$remote/dist/kongshan-$expected.dmg" "$project_dir/dist/"
+    # Intel 包：发布时与 arm64 一起上传。
+    mkdir -p "$project_dir/.build/x86_64"
+    rsync -a --delete "$host:$remote/.build/kongshan.app/" "$project_dir/.build/x86_64/kongshan.app/"
+    rsync -a "$host:$remote/dist/kongshan-$expected-x86_64.dmg" "$project_dir/dist/"
     # 本地 dist 只留最新（与 make_dmg.sh 同规则）。
     local -a stale
     stale=("$project_dir"/dist/kongshan-*.dmg(N))
     stale=(${stale:#*/kongshan-$expected.dmg})
+    stale=(${stale:#*/kongshan-$expected-x86_64.dmg})
     (( ${#stale} == 0 )) || trash "${stale[@]}"
     verify_artifacts
     write_stamp
@@ -89,14 +104,17 @@ write_stamp() {
     local digest=$(shasum -a 256 "$dmg" | awk '{print $1}')
     local cdhash=$(app_cdhash "$project_dir/.build/kongshan.app")
     [[ -n "$cdhash" ]] || fail "无法读取 App CDHash"
+    local intel_dmg="$project_dir/dist/kongshan-$expected-x86_64.dmg" intel_digest=-
+    [[ -f "$intel_dmg" ]] && intel_digest=$(shasum -a 256 "$intel_dmg" | awk '{print $1}')
     local commit=$(git rev-parse HEAD)
     mkdir -p "$project_dir/.build"
-    print -r -- "$commit $expected $digest $cdhash" > "$project_dir/.build/release-verified.txt"
+    print -r -- "$commit $expected $digest $cdhash $intel_digest" > "$project_dir/.build/release-verified.txt"
     # 构建出的 App 版本通常高于已安装的那份；若就此重启，登录项会拉起它。见 `unregister_build_app`。
     unregister_build_app
     print -- "发布候选已验证：v$expected"
     print -- "SHA-256 $digest"
     print -- "App CDHash $cdhash"
+    [[ $intel_digest == - ]] || print -- "Intel DMG SHA-256 $intel_digest"
 }
 
 # 验证戳绑定的提交与 HEAD 之间**只差文档**时放行。
@@ -127,7 +145,7 @@ stamp_commit_covers_head() {
 require_verification_stamp() {
     local stamp="$project_dir/.build/release-verified.txt"
     [[ -f "$stamp" ]] || fail "缺少验证戳，请先运行 scripts/release.sh prepare"
-    read -r stamped_commit stamped_version stamped_digest stamped_cdhash < "$stamp"
+    read -r stamped_commit stamped_version stamped_digest stamped_cdhash stamped_intel_digest < "$stamp"
     stamp_commit_covers_head "$stamped_commit" \
         || fail "提交在验证后发生变化（非文档改动），请重新 prepare"
     if [[ "$stamped_commit" != $(git rev-parse HEAD) ]]; then
@@ -139,6 +157,10 @@ require_verification_stamp() {
         || fail "DMG 在验证后发生变化，请重新 prepare"
     [[ -n "$stamped_cdhash" && "$stamped_cdhash" == $(app_cdhash "$project_dir/.build/kongshan.app") ]] \
         || fail "App 在验证后发生变化，请重新 prepare"
+    if [[ -n "${stamped_intel_digest:-}" && "$stamped_intel_digest" != - ]]; then
+        [[ "$stamped_intel_digest" == $(shasum -a 256 "$project_dir/dist/kongshan-$stamped_version-x86_64.dmg" | awk '{print $1}') ]] \
+            || fail "Intel DMG 在验证后发生变化，请重新 prepare"
+    fi
     verify_artifacts
 }
 
@@ -427,7 +449,7 @@ export_tree() {
 
 # CHANGELOG 里有本版段落就用它，否则只写版本号；末尾附 DMG 的 SHA-256。
 release_notes() {
-    local expected=$1 digest=$2
+    local expected=$1 digest=$2 intel_digest=$3
     local section=$(awk -v head="## v$expected " 'index($0, head) == 1 { on = 1; next } on && /^## / { on = 0 } on' CHANGELOG.md)
     if [[ -n "${section//[[:space:]]/}" ]]; then
         print -r -- "$section"
@@ -435,7 +457,9 @@ release_notes() {
         print -r -- "kongshan $expected"
     fi
     print
-    print -r -- "安装包 SHA-256：\`$digest\`"
+    print -r -- "Apple Silicon（arm64）安装包 \`kongshan-$expected.dmg\` SHA-256：\`$digest\`"
+    print
+    print -r -- "Intel（x86_64）安装包 \`kongshan-$expected-x86_64.dmg\` SHA-256：\`$intel_digest\`"
 }
 
 publish() {
@@ -451,6 +475,11 @@ publish() {
     local tag="v$expected"
     local dmg="$project_dir/dist/kongshan-$expected.dmg"
     local digest=$(shasum -a 256 "$dmg" | awk '{print $1}')
+    # 每次都发两个包：Apple Silicon 与 Intel（prepare-remote 产出）。
+    local intel_dmg="$project_dir/dist/kongshan-$expected-x86_64.dmg"
+    local intel_app="$project_dir/.build/x86_64/kongshan.app"
+    [[ -f "$intel_dmg" && -d "$intel_app" ]] || fail "缺少 Intel 包；用 scripts/release.sh prepare-remote 构建两个架构"
+    local intel_digest=$(shasum -a 256 "$intel_dmg" | awk '{print $1}')
 
     # 1. 开发仓库（私有）：打标签、推送。
     if git rev-parse "$tag" >/dev/null 2>&1; then
@@ -466,10 +495,11 @@ publish() {
     git fetch -q "$public_remote"
     local tree=$(export_tree)
     local message="kongshan $expected"
-    local notes=$(release_notes "$expected" "$digest")
+    local notes=$(release_notes "$expected" "$digest" "$intel_digest")
     local app="$project_dir/.build/kongshan.app"
     python3 scripts/leak_guard.py --tree "$tree" --message "$message"$'\n'"$notes" \
         --binary "$app/Contents/MacOS/kongshan" "$app/Contents/MacOS/KongshanHelper" \
+            "$intel_app/Contents/MacOS/kongshan" "$intel_app/Contents/MacOS/KongshanHelper" \
         || fail "私有信息闸门未通过，未推送公开仓库"
 
     local commit
@@ -494,7 +524,8 @@ publish() {
 
     # 3. 公开 Release：一键安装脚本从这里取最新版（scripts/install_latest.sh）。
     gh release view "$tag" -R "$public_repo" >/dev/null 2>&1 && fail "Release $tag 已存在"
-    gh release create "$tag" "$dmg#kongshan-$expected.dmg" -R "$public_repo" \
+    gh release create "$tag" "$dmg#kongshan-$expected.dmg（Apple Silicon）" \
+        "$intel_dmg#kongshan-$expected-x86_64.dmg（Intel）" -R "$public_repo" \
         --verify-tag \
         --title "kongshan $expected" \
         --notes "$notes" \
@@ -502,13 +533,53 @@ publish() {
     print -- "已发布 $tag：开发仓库已推送，公开仓库快照 ${commit[1,12]}"
 }
 
+# 公开仓库 main 跟上 HEAD，不发版、不打标签：修一键安装脚本、README 这类不进 App 的改动。
+# 与 publish 同一套导出、闸门与 noreply 身份；差异里有 App 代码就拒绝，那要走 prepare + publish。
+# 2026-11-03：给已发布的版本补 Intel 包后，公开仓库里的旧一键安装脚本（要求只有一个 DMG）随即失效，
+# 当时只能手工拼快照、被推送钩子拦下——这条命令就是那种修补的正规路径。
+sync_public() {
+    local message=${1:-}
+    [[ -n "$message" ]] || fail "用法：scripts/release.sh sync-public \"<提交说明>\""
+    [[ -z $(git status --porcelain) ]] || fail "工作区必须干净"
+    [[ $(git branch --show-current) == main ]] || fail "只允许从 main 推送"
+    [[ -s "$denylist" ]] || fail "缺少私有黑名单 $denylist；没有它闸门查不出个人域名与姓名"
+    ensure_public_remote
+    git fetch -q "$public_remote"
+    local parent=$(git rev-parse "refs/remotes/$public_remote/main")
+    local tree=$(export_tree)
+    if [[ $(git rev-parse "$parent^{tree}") == "$tree" ]]; then
+        print -- "公开仓库已与 HEAD 一致，无需推送"
+        return 0
+    fi
+    local -a changed
+    changed=(${(f)"$(git diff --name-only "$parent" "$tree")"})
+    local f
+    for f in $changed; do
+        case $f in
+            Sources/*|Resources/*|Vendor/*|Kernel/*|Package.swift|Package.resolved)
+                fail "公开仓库与 HEAD 的差异含 App 代码（$f），要走 prepare-remote + publish 发新版" ;;
+        esac
+    done
+    print -- "将更新到公开仓库的文件：${(j:、:)changed}"
+    python3 scripts/leak_guard.py --tree "$tree" --message "$message" \
+        || fail "私有信息闸门未通过，未推送公开仓库"
+    local commit=$(GIT_AUTHOR_NAME=$public_name GIT_AUTHOR_EMAIL=$public_email \
+                   GIT_COMMITTER_NAME=$public_name GIT_COMMITTER_EMAIL=$public_email \
+                   git commit-tree "$tree" -p "$parent" -m "$message")
+    git push origin main
+    KONGSHAN_PUBLIC_EXPORT=1 git push "$public_remote" "${commit}:refs/heads/main"
+    git fetch -q "$public_remote"
+    print -- "公开仓库 main 已更新：${commit[1,12]}"
+}
+
 case ${1:-} in
     prepare) prepare ;;
     prepare-remote) prepare_remote "${2:-}" ;;
+    sync-public) sync_public "${2:-}" ;;
     install) install_verified ;;
     publish) publish ;;
     *)
-        print -u2 -- "用法：scripts/release.sh prepare|prepare-remote [ssh 主机]|install|publish"
+        print -u2 -- "用法：scripts/release.sh prepare|prepare-remote [ssh 主机]|install|publish|sync-public "<说明>""
         exit 64
         ;;
 esac

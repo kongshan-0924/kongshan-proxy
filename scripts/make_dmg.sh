@@ -13,7 +13,7 @@ if [[ ! -d "$app_path" ]]; then
 fi
 
 version=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$app_path/Contents/Info.plist")
-# 非 arm64 的本地构建加架构后缀，避免在 dist 里冒充可发布的正式包。
+# x86_64 包加架构后缀（kongshan-<版本>-x86_64.dmg），与 arm64 包一起发布。
 source "$project_dir/scripts/arch_lib.sh"
 host_arch=$(kongshan_host_arch)
 dmg_name="kongshan-$version.dmg"

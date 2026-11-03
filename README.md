@@ -1,6 +1,6 @@
 # kongshan 空山
 
-一款面向 Apple Silicon Mac 的原生、轻量 sing-box 图形客户端。
+一款面向 Mac（Apple Silicon 与 Intel）的原生、轻量 sing-box 图形客户端。
 
 空山使用 SwiftUI + AppKit 构建，内置 sing-box 1.14.4（官方源码编译，另移植了 sing-box-lx 的 XHTTP 传输，见 `Kernel/xhttp/`），不自行实现代理协议或加密算法。它以“配置”为中心，支持系统代理与 TUN 单独或同时运行，重点解决日常使用中最实际的几个问题：切换要快、菜单要稳、资源要轻、退出后网络必须恢复。
 
@@ -188,9 +188,10 @@ macOS 的「位置」（Apple 菜单 → 位置）各有一套网络服务设置
 
 ## 系统要求与限制
 
-- Apple Silicon Mac（arm64）
+- Apple Silicon（arm64）或 Intel（x86_64）Mac，每个版本各有一个安装包，一键安装脚本按本机架构自动选
 - macOS 14 或更高版本
-- 当前发布包为 ad-hoc 签名，首次打开和 App 更新后的助手授权受 macOS 安全策略影响
+- 发布包用自签证书签名，未经 Apple 公证，首次打开受 macOS 安全策略影响；免密码助手按证书认人，
+  App 更新后不用重新授权（换内置内核或助手本身更新时除外）
 - 订阅只支持 Clash YAML 格式
 - TUN 固定使用 gVisor + Fake-IP；同时运行多个 TUN/VPN 客户端可能互相争抢路由
 - 系统代理只转发 TCP，且只影响遵循 macOS 代理设置的应用；UDP（如 QUIC）、不读取系统代理的程序，以及按应用进程分流，都需要开启 TUN；两者同开时，遵循系统代理的应用不受按进程规则约束
