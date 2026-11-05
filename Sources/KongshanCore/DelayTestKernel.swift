@@ -168,7 +168,7 @@ public enum DelayTestKernelError: Error, LocalizedError {
     public var errorDescription: String? {
         switch self {
         case let .startFailed(detail):
-            detail.isEmpty ? "测速内核没能启动" : "测速内核没能启动：\(detail)"
+            detail.isEmpty ? "测延迟内核没能启动" : "测延迟内核没能启动：\(detail)"
         }
     }
 }

@@ -37,3 +37,5 @@ KONGSHAN_SINGBOX_TEST=1 zsh scripts/build_sing_box.sh amd64 /tmp/sing-box-amd64 
 1. 改 `build_sing_box.sh` 的 `version`、`upstream_commit`、`go_toolchain`（看官方 `.github/workflows/build.yml`）。
 2. 对照 lx 对应版本更新 `overlay/` 与 `core.patch`（`diff -u 官方 lx` 三个核心文件）；补丁打不上时编译会直接失败。
 3. `KONGSHAN_SINGBOX_TEST=1` 编两个架构，把新的 SHA-256 写进 `arch_lib.sh`，再走分流改动的验证流程。
+4. **升到 1.15 及以上时**：1.15 废弃了 TUN 的 `stack`（1.17 删除），改用 sing-tun 自带协议栈。要删掉 `ConfigGenerator` 里 TUN 入站的 `stack`，
+   同步改助手的配置白名单与 README「TUN 固定使用 gVisor」一句；2026-11-03 用 1.15.0-alpha.13 检查真实配置结构，这是唯一的废弃告警。

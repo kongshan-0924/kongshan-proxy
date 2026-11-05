@@ -231,7 +231,7 @@ final class RenderSnapshotTests: XCTestCase {
         let running = makeState()
         // 同上：宽/窄仪表盘要能验证「当前出口 IP」卡片上的风险行。
         running.applyExitAnalysisSnapshotFixture()
-        running.status = .on
+        running.setRunningForTesting(modes: [.systemProxy])
 
         render(
             DashboardView().environment(running),
@@ -389,7 +389,7 @@ final class RenderSnapshotTests: XCTestCase {
         let size = CGSize(width: 867, height: 645)
         let running = makeState()
         running.applyExitAnalysisSnapshotFixture()
-        running.status = .on
+        running.setRunningForTesting(modes: [.systemProxy])
         for page in SidebarPage.allCases {
             render(MainWindowView(initialPage: page).environment(running), name: "user-\(page.rawValue)", size: size)
         }
@@ -456,8 +456,8 @@ final class RenderSnapshotTests: XCTestCase {
         state.activeConfigID = source.id
         state.discoveredPolicyGroups[source.id] = [
             PolicyGroup(name: "节点选择", kind: .selector, members: ["🇭🇰 香港 IEPL 01", "🇭🇰 香港 IEPL 02", "🇯🇵 东京 BGP", "🇸🇬 新加坡 01", "🇺🇸 洛杉矶 CN2"]),
-            PolicyGroup(name: "流媒体", kind: .selector, members: ["🇭🇰 香港 IEPL 01", "🇸🇬 新加坡 01"]),
-            PolicyGroup(name: "自动选择", kind: .urltest, members: [])
+            PolicyGroup(name: "流媒体", kind: .selector, members: ["节点选择"]),
+            PolicyGroup(name: "自动选择", kind: .urltest, members: ["节点选择"])
         ]
         state.discoveredRules[source.id] = [
             SubscriptionRule(type: .domainSuffix, value: "google.com", target: "节点选择"),

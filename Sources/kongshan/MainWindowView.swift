@@ -54,6 +54,7 @@ struct MainWindowView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(Theme.canvasBackground)
+        .tint(Theme.accent)
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Button {
@@ -396,6 +397,13 @@ private struct SidebarStatusFooter: View {
     @Environment(AppState.self) private var state
     let onTap: () -> Void
 
+    private var shortStatus: String {
+        guard state.isOn else { return state.status == .off ? "已关闭" : state.statusText }
+        if state.activeModes.isEmpty { return "未接管" }
+        if state.activeModes.count > 1 { return "双接管" }
+        return state.activeModes.contains(.tun) ? "TUN" : "系统代理"
+    }
+
     var body: some View {
         Button(action: onTap) {
             VStack(alignment: .leading, spacing: 6) {
@@ -408,7 +416,7 @@ private struct SidebarStatusFooter: View {
 
                     VStack(alignment: .leading, spacing: 1) {
                         HStack(spacing: 4) {
-                            Text(state.statusText)
+                            Text(shortStatus)
                                 .font(.caption.weight(.medium))
                                 .foregroundStyle(.primary)
                                 .lineLimit(1)

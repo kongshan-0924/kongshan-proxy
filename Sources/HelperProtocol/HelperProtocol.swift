@@ -33,7 +33,7 @@ public enum HelperConstants {
     public static let trustConfigVersion: Int = 5
     /// 助手程序自身的版本，App 与助手编译进同一个值。助手代码有改动时手动加一：
     /// App 更新不再强制重装助手后，旧助手不会被顺带换掉，要靠它发现版本落后、提示重装。
-    public static let helperVersion = "0.3.0"
+    public static let helperVersion = "0.3.1"
     /// root 内核允许监听的回环地址。
     public static let loopbackAddress = "127.0.0.1"
     /// root 内核允许监听的非特权服务端口区间。
@@ -441,6 +441,15 @@ public enum HelperTrustEvaluation {
             guard let actual = identity.uid, actual == pinnedUID else { return false }
         }
         return true
+    }
+}
+
+/// 助手退出（launchctl bootout、SIGTERM）时要不要先还原系统 DNS。
+/// App 在就由 App 收尾（它看到内核没了会自己还原）；App 不在、内核还在跑时没人管，
+/// 停了内核 TUN 就没了而 DNS 还指着它，整机解析全废——与自愈路径同理，先还原再停（2026-10-25 审计）。
+public enum HelperShutdownPolicy {
+    public static func shouldRestoreDNS(kernelRunning: Bool, clientAlive: Bool) -> Bool {
+        kernelRunning && !clientAlive
     }
 }
 

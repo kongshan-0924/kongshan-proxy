@@ -37,8 +37,7 @@ struct SettingsView: View {
     @State private var tunDraft = TunSettings.defaults
     @State private var tab: SettingsTab
 
-    /// `initialTab` 只为离屏快照而设：设置页有五个分区，而 `tab` 是 @State，
-    /// 外部无法指定，于是除「通用」外的四个分区从来没有被渲染验证过。
+    /// `initialTab` 只为离屏快照而设：四个分区都可以独立渲染验证。
     init(initialTab: SettingsTab = .general) {
         _tab = State(initialValue: initialTab)
     }
@@ -47,10 +46,12 @@ struct SettingsView: View {
     @State private var showsBackupImporter = false
     @State private var isPreparingBackup = false
     @State private var backupNotice: String?
-    @State private var diagnosticDocument: TextExportDocument?
-    @State private var showsDiagnosticExporter = false
-    @State private var isPreparingDiagnostics = false
-    @State private var exportsShareableDiagnostics = false
+    /// 导出前问口令（可留空）；导入加密备份时问口令。备份含节点凭据（2026-10-25 审计 S6）。
+    @State private var showsExportPasswordPrompt = false
+    @State private var exportPassword = ""
+    @State private var exportPasswordConfirm = ""
+    @State private var pendingEncryptedBackup: Data?
+    @State private var importPassword = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -109,17 +110,6 @@ struct SettingsView: View {
             }
             backupDocument = nil
         }
-        .fileExporter(
-            isPresented: $showsDiagnosticExporter,
-            document: diagnosticDocument,
-            contentType: .plainText,
-            defaultFilename: exportsShareableDiagnostics ? "kongshan-diagnostics-shareable" : "kongshan-diagnostics"
-        ) { result in
-            if case let .failure(error) = result {
-                state.errorMessage = "导出诊断失败：\(error.localizedDescription)"
-            }
-            diagnosticDocument = nil
-        }
         .fileImporter(isPresented: $showsBackupImporter, allowedContentTypes: [.json]) { result in
             switch result {
             case let .success(url):
@@ -127,12 +117,10 @@ struct SettingsView: View {
                 defer { if access { url.stopAccessingSecurityScopedResource() } }
                 do {
                     let data = try Data(contentsOf: url)
-                    Task {
-                        await state.importBackup(data)
-                        if state.errorMessage == nil {
-                            backupNotice = "已恢复"
-                            dnsDraft = state.dnsSettings
-                        }
+                    if BackupEncryption.isEncrypted(data) {
+                        pendingEncryptedBackup = data
+                    } else {
+                        restore(data, password: nil)
                     }
                 } catch {
                     state.errorMessage = "读取备份失败：\(error.localizedDescription)"
@@ -173,7 +161,7 @@ struct SettingsView: View {
             LabeledContent("登录项状态", value: loginItemStatusTitle)
             Toggle("登录后自动恢复上次的接管", isOn: autoRestoreBinding)
                 .disabled(!state.isReady || state.loginItemStatus != .enabled)
-            Text("仅在开机自启场景生效：登录后若上次是开着系统代理，会等网络就绪再自动开启；网络不可达或启动失败时不接管，并发系统通知告知。当前版本不自动恢复 TUN——它在助手需要重装时会弹管理员密码框，届时会跳过并在消息页留下记录。")
+            Text("仅在开机自启场景生效：登录后等待网络就绪，再恢复上次正常退出时的系统代理与 TUN。恢复 TUN 需要可用的免密码助手；助手不可用时跳过整组接管并通知原因，不会在登录时突然弹出密码框。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if state.loginItemStatus == .requiresApproval {
@@ -309,7 +297,7 @@ struct SettingsView: View {
                     .inputField()
                     .frame(maxWidth: 360)
             }
-            Text("国内域名直连问国内 DNS：填 IP 走 UDP（默认，睡眠唤醒、长时间闲置后都不卡），填 https:// 地址走 DoH；其余域名走当前代理的远程 DoH。兼容性优先，默认不启用 fake-ip。系统代理模式只管理进入本地 mixed 代理的解析，不等同于接管 macOS 全局 DNS。")
+            Text("国内域名直连问国内 DNS：填 IP 走 UDP（默认，睡眠唤醒、长时间闲置后都不卡），填 https:// 地址走 DoH；其余域名走当前代理的远程 DoH。TUN 默认使用 Fake-IP；系统代理只处理进入本地 mixed 代理的流量，不接管 macOS 全局 DNS。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Text("引导解析器负责解析出站节点自身的域名，必须是无连接的 UDP。留空时跟随国内 DNS 的地址；填入独立 IP（如 114.114.114.114）可与国内 DNS 解耦，避免一台上游抖动同时影响节点域名与国内域名解析。")
@@ -382,11 +370,28 @@ struct SettingsView: View {
         CardSection("备份与恢复") {
             HStack {
                 Button {
-                    prepareBackupExport()
+                    exportPassword = ""
+                    exportPasswordConfirm = ""
+                    showsExportPasswordPrompt = true
                 } label: {
                     Label("导出配置与设置", systemImage: "square.and.arrow.up")
                 }
                 .disabled(isPreparingBackup)
+                .alert("给备份设个口令？", isPresented: $showsExportPasswordPrompt) {
+                    SecureField("口令", text: $exportPassword)
+                    SecureField("再输一次", text: $exportPasswordConfirm)
+                    Button("加密导出") {
+                        guard !exportPassword.isEmpty, exportPassword == exportPasswordConfirm else {
+                            state.errorMessage = exportPassword.isEmpty ? "口令为空；不想加密请选「不加密导出」" : "两次输入的口令不一样"
+                            return
+                        }
+                        prepareBackupExport(password: exportPassword)
+                    }
+                    Button("不加密导出") { prepareBackupExport(password: nil) }
+                    Button("取消", role: .cancel) {}
+                } message: {
+                    Text("备份里有订阅链接和节点凭据。设了口令，导入时要输同一个口令；口令忘了备份就打不开。")
+                }
 
                 Button {
                     showsBackupImporter = true
@@ -394,6 +399,22 @@ struct SettingsView: View {
                     Label("导入备份", systemImage: "square.and.arrow.down")
                 }
                 .disabled(state.isOn || state.isBusy)
+                .alert("输入备份口令", isPresented: Binding(
+                    get: { pendingEncryptedBackup != nil },
+                    set: { if !$0 { pendingEncryptedBackup = nil } }
+                )) {
+                    SecureField("口令", text: $importPassword)
+                    Button("导入") {
+                        guard let data = pendingEncryptedBackup else { return }
+                        let password = importPassword
+                        pendingEncryptedBackup = nil
+                        importPassword = ""
+                        restore(data, password: password)
+                    }
+                    Button("取消", role: .cancel) { importPassword = "" }
+                } message: {
+                    Text("这份备份导出时设了口令。")
+                }
 
                 if isPreparingBackup { ProgressView().controlSize(.small) }
                 Spacer()
@@ -401,21 +422,14 @@ struct SettingsView: View {
                     StatusBadge(text: backupNotice, tint: .green)
                 }
             }
-            Text("备份包含订阅链接、订阅配置快照、节点凭据和全部设置，可能含敏感信息；不包含日志、运行时密钥或恢复文件。导入前需先停止代理。")
+            Text("备份包含订阅链接、订阅配置快照、节点凭据和全部设置，可能含敏感信息，导出时可设口令加密；不包含日志、运行时密钥或恢复文件。导入前需先停止代理。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
 
         CardSection("数据与日志") {
             LabeledContent("故障诊断") {
-                Menu {
-                    Button("完整版（自用排查，含内核日志）") { prepareDiagnosticExport(forSharing: false) }
-                    Button("可公开分享版（去掉日志、地址与名字）") { prepareDiagnosticExport(forSharing: true) }
-                } label: {
-                    Label("导出诊断", systemImage: "stethoscope")
-                }
-                .fixedSize()
-                .disabled(isPreparingDiagnostics)
+                Button("打开诊断") { state.requestPage(.diagnostics) }
             }
             LabeledContent("数据目录") {
                 Button("在 Finder 中显示") {
@@ -453,30 +467,26 @@ struct SettingsView: View {
         }
         .task { await state.refreshCacheSize() }
     }
-    private func prepareBackupExport() {
+    private func restore(_ data: Data, password: String?) {
+        Task {
+            await state.importBackup(data, password: password)
+            if state.errorMessage == nil {
+                backupNotice = "已恢复"
+                dnsDraft = state.dnsSettings
+            }
+        }
+    }
+
+    private func prepareBackupExport(password: String?) {
         isPreparingBackup = true
         backupNotice = nil
         Task {
             defer { isPreparingBackup = false }
             do {
-                backupDocument = BackupDocument(data: try await state.exportBackup())
+                backupDocument = BackupDocument(data: try await state.exportBackup(password: password))
                 showsBackupExporter = true
             } catch {
                 state.errorMessage = "准备备份失败：\(error.localizedDescription)"
-            }
-        }
-    }
-
-    private func prepareDiagnosticExport(forSharing: Bool) {
-        isPreparingDiagnostics = true
-        exportsShareableDiagnostics = forSharing
-        Task {
-            defer { isPreparingDiagnostics = false }
-            do {
-                diagnosticDocument = TextExportDocument(text: try await state.exportDiagnostics(forSharing: forSharing))
-                showsDiagnosticExporter = true
-            } catch {
-                state.errorMessage = "准备诊断失败：\(error.localizedDescription)"
             }
         }
     }

@@ -4,47 +4,45 @@ import SwiftUI
 
 /// 视觉常量与格式化工具。
 ///
-/// 取向是**原生 macOS**：系统语义色、系统文本样式（`.headline` / `.body` / `.caption`），
-/// 容器一律用 `GroupBox` / `Form` / `List` / `Table` 这些系统件；不自绘投影、渐变图标块和
-/// 圆角描边卡片——那一套是 web 仪表盘的语汇，放进 macOS 窗口里怎么调都像外来物。
-/// 依据与逐页方案见 `docs/design/NATIVE_UI.md`。
+/// 取向前置是原生 macOS 的列表、表格和文本样式；青灰色只标识当前链路与选中项，
+/// 协议、技术指标和次级操作不再争抢颜色。设计依据见 `docs/design/NATIVE_UI.md`。
 enum Theme {
-    /// 主窗口内容区（画布）底色：极浅冷灰（#F2F3F6）。
-    ///
-    /// 2026-10-23 用户反馈「整体太暗、像置灰失焦」。根因是此前画布纯白、卡片微灰
-    ///（primary 0.035）——卡片比画布暗，整屏看着像蒙了一层灰。恢复正常层次：
-    /// **画布用极浅冷灰、卡片纯白浮起**（卡片亮于画布），画面通透不发灰。
-    /// 深色模式画布深灰、卡片比它再亮一档。
     static let windowBackgroundColor = NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor(srgbRed: 0.110, green: 0.118, blue: 0.133, alpha: 1)
-            : NSColor(srgbRed: 0.949, green: 0.953, blue: 0.965, alpha: 1)
+            ? NSColor(srgbRed: 0.067, green: 0.090, blue: 0.098, alpha: 1)
+            : NSColor(srgbRed: 0.957, green: 0.965, blue: 0.969, alpha: 1)
     }
 
-    /// 内容区画布底色：与 windowBackgroundColor 同步。
     static let canvasBackground = Color(nsColor: windowBackgroundColor)
 
-    /// 侧边栏冷银灰底色（#E8EBF0），比画布略深一档以分清区域，屏蔽系统桌面透出的暖黄杂质。
     static let sidebarFill = Color(nsColor: NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor(srgbRed: 0.068, green: 0.075, blue: 0.090, alpha: 1)
-            : NSColor(srgbRed: 0.910, green: 0.921, blue: 0.941, alpha: 1)
+            ? NSColor(srgbRed: 0.055, green: 0.075, blue: 0.082, alpha: 1)
+            : NSColor(srgbRed: 0.906, green: 0.925, blue: 0.922, alpha: 1)
     })
 
-    /// 卡片（`GroupBox`）的底与描边。
-    ///
-    /// 卡片纯白浮在浅灰画布上（深色模式比画布亮一档），描边用发丝线划清边界。
-    /// 用动态 NSColor 而不是 primary 透明度：透明度会让卡片吃画布色、始终比画布暗。
     static let cardFill = Color(nsColor: NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor(srgbRed: 0.165, green: 0.173, blue: 0.192, alpha: 1)
+            ? NSColor(srgbRed: 0.106, green: 0.137, blue: 0.145, alpha: 1)
             : NSColor(srgbRed: 1.0, green: 1.0, blue: 1.0, alpha: 1)
     })
     static let cardStroke = Color.primary.opacity(0.12)
     static let cardRadius: CGFloat = 10
 
-    /// 上传/下载速率语义色。仪表盘速率列、图例、菜单栏弹窗三处原先各自硬编码
-    /// 蓝/绿，归到一处：改配色只动这里。
+    /// 链路、当前选择与主操作共用矿物青；状态错误与警告仍用系统语义色。
+    static let accent = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(srgbRed: 0.471, green: 0.722, blue: 0.678, alpha: 1)
+            : NSColor(srgbRed: 0.180, green: 0.435, blue: 0.420, alpha: 1)
+    })
+    /// 强调色填充上的文字。深色模式的强调色偏亮，白字对比度只有约 2.3:1，改用近黑（约 8:1）；
+    /// 浅色模式白字约 5.8:1。
+    static let onAccent = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(srgbRed: 0.055, green: 0.075, blue: 0.082, alpha: 1)
+            : .white
+    })
+
     static let uploadTint = Color.blue
     static let downloadTint = Color.green
 
@@ -102,14 +100,8 @@ enum Theme {
     }
 
     static func protocolTint(_ value: ProxyProtocol) -> Color {
-        switch value {
-        case .shadowsocks: .blue
-        case .trojan: .purple
-        case .vmess: .teal
-        case .vless: .mint
-        case .hysteria2: .orange
-        case .anytls: .indigo
-        }
+        _ = value
+        return .secondary
     }
 }
 
@@ -158,10 +150,10 @@ extension AppState {
         )
     }
 
-    /// 状态主色：运行中按模式区分，过渡态橙色，失败红色，关闭灰色。
+    /// 运行与选中统一使用链路青；过渡、失败和关闭保留系统语义。
     var statusTint: Color {
         switch status {
-        case .on: activeMode == .tun ? .blue : .green
+        case .on: Theme.accent
         case .starting, .stopping: .orange
         case .failed: .red
         case .off: .secondary
@@ -405,8 +397,8 @@ struct PillButtonStyle: ButtonStyle {
             .lineLimit(1)
             .padding(.horizontal, 12)
             .padding(.vertical, 5)
-            .foregroundStyle(prominent ? Color.white : Color.primary)
-            .background(prominent ? Color.accentColor : Theme.cardFill, in: Capsule(style: .circular))
+            .foregroundStyle(prominent ? Theme.onAccent : Color.primary)
+            .background(prominent ? Theme.accent : Theme.cardFill, in: Capsule(style: .circular))
             .overlay {
                 if !prominent {
                     Capsule(style: .circular).strokeBorder(Theme.cardStroke, lineWidth: 1)
@@ -461,7 +453,8 @@ struct CardForm<Content: View>: View {
                 content
             }
             .padding(20)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: 760, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
         }
         .background(Theme.canvasBackground)
         .toggleStyle(CardRowToggleStyle())

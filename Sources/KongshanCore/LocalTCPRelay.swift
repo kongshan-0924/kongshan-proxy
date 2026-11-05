@@ -73,8 +73,21 @@ public final class LocalTCPRelay: LocalTCPRelaying, @unchecked Sendable {
 
     public func start(preferredPort: UInt16?) async throws -> UInt16 {
         if let existing = lock.withLock({ boundPort }) { return existing }
+        // 挑端口时试绑一下就放掉，真正监听在后：中间被别的进程占走会 EADDRINUSE。换一个随机端口重试，
+        // 最多 3 次（2026-11-02 iMac 测试里并行的另一个测试包撞上过一次）。
+        var preferred = preferredPort
+        for attempt in 1...3 {
+            let port = try await RuntimeSecrets.stableHighPort(preferred: preferred)
+            do {
+                return try await listen(onLoopbackPort: port)
+            } catch LocalTCPRelayError.portInUse where attempt < 3 {
+                preferred = nil
+            }
+        }
+        throw LocalTCPRelayError.listenerCancelled
+    }
 
-        let port = try await RuntimeSecrets.stableHighPort(preferred: preferredPort)
+    private func listen(onLoopbackPort port: UInt16) async throws -> UInt16 {
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
             throw LocalTCPRelayError.invalidPort(port)
         }
@@ -84,7 +97,12 @@ public final class LocalTCPRelay: LocalTCPRelaying, @unchecked Sendable {
             host: NWEndpoint.Host(HelperConstants.loopbackAddress),
             port: nwPort
         )
-        let candidate = try NWListener(using: parameters)
+        let candidate: NWListener
+        do {
+            candidate = try NWListener(using: parameters)
+        } catch NWError.posix(.EADDRINUSE) {
+            throw LocalTCPRelayError.portInUse(port)
+        }
 
         return try await withCheckedThrowingContinuation { continuation in
             let gate = StartGate(continuation: continuation)
@@ -102,7 +120,18 @@ public final class LocalTCPRelay: LocalTCPRelaying, @unchecked Sendable {
                     gate.succeed(port)
                 case let .failed(error):
                     candidate.cancel()
-                    gate.fail(LocalTCPRelayError.listenerFailed(error.localizedDescription))
+                    // ready 之后才失败（网卡被拔等）：清掉记录，否则下次 start 直接返回这个已经不在听的端口（2026-10-25 审计）。
+                    self.lock.withLock {
+                        if self.listener === candidate {
+                            self.listener = nil
+                            self.boundPort = nil
+                        }
+                    }
+                    if case .posix(.EADDRINUSE) = error {
+                        gate.fail(LocalTCPRelayError.portInUse(port))
+                    } else {
+                        gate.fail(LocalTCPRelayError.listenerFailed(error.localizedDescription))
+                    }
                 case .cancelled:
                     gate.fail(LocalTCPRelayError.listenerCancelled)
                 default:
@@ -162,6 +191,12 @@ public final class LocalTCPRelay: LocalTCPRelaying, @unchecked Sendable {
                     gate.succeed(port)
                 case let .failed(error):
                     candidate.cancel()
+                    self.lock.withLock {
+                        if self.lanListener === candidate {
+                            self.lanListener = nil
+                            self.lanPort = nil
+                        }
+                    }
                     if case .posix(.EADDRINUSE) = error {
                         gate.fail(LocalTCPRelayError.portInUse(port))
                     } else {

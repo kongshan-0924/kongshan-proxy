@@ -250,15 +250,9 @@ final class RuleSetServiceTests: XCTestCase {
     }
 
     private var singBoxURL: URL {
-        packageRoot.appending(path: VendoredKernel.relativePath)
+        TestPaths.vendoredKernel
     }
 
-    private var packageRoot: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-    }
 }
 
 private final class ValidationRecorder: @unchecked Sendable {

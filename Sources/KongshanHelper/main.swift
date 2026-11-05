@@ -902,13 +902,18 @@ func setupSocket() -> Int32 {
     return fd
 }
 
-/// 优雅退出：停内核（若在跑）、关 socket、unlink socket 文件。
+/// 优雅退出：App 不在时先还原 DNS（见 `HelperShutdownPolicy`），再停内核（若在跑）、关 socket、unlink socket 文件。
 /// 修复 C：sing-box 路径从 trust.json 读（与 handleConnection/checkClientLiveness 同源）。
 /// trust 缺失/损坏时无法验证 PID 身份 → §1.4 拒绝优先，不盲杀（宁可残留也不杀错）。
 func shutdownHelper(listenFD: Int32) {
     let pid = state.clearKernelPID()
     if pid > 0, let trust = HelperSecurity.loadTrustConfig(),
        let singBox = singBoxURL(from: trust) {
+        let client = state.clientPIDValue()
+        if let uid = trust.pinnedUID,
+           HelperShutdownPolicy.shouldRestoreDNS(kernelRunning: kernelIsAlive(pid), clientAlive: client > 0 && kill(client, 0) == 0) {
+            restoreSystemDNSAfterClientLoss(uid: uid)
+        }
         try? stopSingBox(pid: pid, expectedURL: singBox)
     }
     shutdown(listenFD, Int32(SHUT_RDWR))

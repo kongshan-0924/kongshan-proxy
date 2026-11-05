@@ -43,11 +43,23 @@ final class SingBoxProcessTests: XCTestCase {
             selectedNodeID: node.id,
             runtime: RuntimeParameters(mixedPort: 51_080, clashPort: 51_909, secret: "memory-only")
         ))
-        let core = SingBoxProcess(binaryURL: packageRoot.appending(path: VendoredKernel.relativePath))
+        let core = SingBoxProcess(binaryURL: TestPaths.vendoredKernel)
 
         let result = try await core.check(config: config)
 
         XCTAssertEqual(result.exitCode, 0, result.stderr)
+    }
+
+    /// 延迟补发的信号只发给同一个可执行文件：PID 被复用给别的程序时不能误杀。
+    func testDelayedKillChecksExecutableIdentity() throws {
+        let sleeper = Process()
+        sleeper.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        sleeper.arguments = ["30"]
+        try sleeper.run()
+        defer { sleeper.terminate() }
+        XCTAssertTrue(SingBoxProcess.isRunning(sleeper.processIdentifier, executablePath: "/bin/sleep"))
+        XCTAssertFalse(SingBoxProcess.isRunning(sleeper.processIdentifier, executablePath: "/usr/local/bin/sing-box"))
+        XCTAssertFalse(SingBoxProcess.isRunning(0, executablePath: "/bin/sleep"))
     }
 
     func testSingBoxProcessStartsAndStops() async throws {
@@ -156,12 +168,6 @@ final class SingBoxProcessTests: XCTestCase {
         await core.stop()
     }
 
-    private var packageRoot: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-    }
 
     private func makeScript(_ source: String) throws -> URL {
         let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)

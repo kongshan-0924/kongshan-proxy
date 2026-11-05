@@ -300,14 +300,14 @@ final class MenuBarController: NSObject, NSMenuDelegate {
 
         let testAll = item(
             title: state.isTestingAllDelays
-                ? "取消测速（\(state.speedTestProgress.label)）"
-                : "测速全部",
+                ? "取消测延迟（\(state.speedTestProgress.label)）"
+                : "测延迟全部",
             action: state.isTestingAllDelays ? #selector(cancelAllDelays) : #selector(testAllDelays)
         )
         testAll.isEnabled = !state.testableNodes.isEmpty
         submenu.addItem(testAll)
 
-        let fastest = item(title: "测速并自动选最快", action: #selector(testAndSelectFastest))
+        let fastest = item(title: "测延迟并自动选最快", action: #selector(testAndSelectFastest))
         fastest.representedObject = group.name
         fastest.isEnabled = !state.testableNodes.isEmpty && !state.isTestingAllDelays
         submenu.addItem(fastest)

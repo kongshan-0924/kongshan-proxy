@@ -2,7 +2,7 @@ import KongshanCore
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// 「诊断」页：出口 / 自检 / 命中 / 深度 四个分段。
+/// 「诊断」页：出口 / 网络自检 / 规则命中 / 日志与导出 四个分段。
 ///
 /// 2026-09-17 之前，排查能力散在六处：出口分析（独立页）、网络自检与限时诊断（设置→网络）、
 /// 规则命中测试（规则页折叠分区）、导出脱敏诊断（设置→更多）。
@@ -14,9 +14,9 @@ import UniformTypeIdentifiers
 struct DiagnosticsView: View {
     enum Tab: String, CaseIterable {
         case exit = "出口"
-        case selfCheck = "自检"
-        case routeTest = "命中"
-        case deep = "深度"
+        case selfCheck = "网络自检"
+        case routeTest = "规则命中"
+        case deep = "日志与导出"
     }
 
     @State private var tab: Tab = .exit

@@ -3,6 +3,7 @@ import Foundation
 import KongshanCore
 import Network
 import Observation
+import SystemConfiguration
 
 /// 策略组里的一个成员：节点，对另一个策略组 / DIRECT / REJECT 的引用，
 /// 或订阅里有、却没导入成节点的名字（内核不支持它的协议或传输方式，如 h2、kcp）。
@@ -111,7 +112,7 @@ final class AppState {
     /// (样本节点地址, 端口, 直连 DNS) → 网关会替目标完成握手时的原因（见 `TCPPinger.gatewayInterception`）。
     typealias GatewayInterceptionProbe = @Sendable (String, Int, [String]) async -> String?
     private static let delayPublishBatchSize = 24
-    /// 测速内核是独立进程、不和正常上网抢，可以比借主内核时（16）开得更宽。
+    /// 测延迟内核是独立进程、不和正常上网抢，可以比借主内核时（16）开得更宽。
     private static let bulkURLTestConcurrency = 32
     /// 同一台服务器同时最多测几个。机场节点多是中转：真实订阅 356 个节点只有 6 个入口，一台挂 89 个，
     /// 一起压上去会被限流成假超时。iMac 实测（10-30，363 个节点）：不限 195 个成功 / 42 秒，每台 4 个 约 290 / 58 秒，
@@ -158,7 +159,7 @@ final class AppState {
     ///
     /// 真机 2026-10-08 开 TUN 后 CPU 采样：主线程在代理页左列给每个策略组算副标题，
     /// 每次都把全部节点重新筛一遍「套餐信息」（每个节点名跑一次正则）。几十个策略组 × 462 个节点，
-    /// 测速回填一批、状态变一次就整套重算，界面跟着卡。
+    /// 测延迟回填一批、状态变一次就整套重算，界面跟着卡。
     struct NodeCatalog {
         let activeNodes: [ProxyNode]
         let testable: [ProxyNode]
@@ -167,7 +168,7 @@ final class AppState {
         /// 「未列成员 = 全部节点」的组共用这一份选项，不必每次求值都对数百个节点重新 map。
         let allTestableOptions: [GroupOption]
         /// 节点名解析（国旗、倍率等）：每次解析都要做小写化、关键词匹配和三个正则，
-        /// 代理页每行渲染、测速每批回填都会重算，按节点缓存。
+        /// 代理页每行渲染、测延迟每批回填都会重算，按节点缓存。
         let metadataByNodeID: [UUID: NodeNameMetadata]
     }
 
@@ -345,7 +346,7 @@ final class AppState {
         nodeCatalog.activeNodes
     }
 
-    /// 可测速/可选择的节点：当前配置里排除机场塞进来的套餐信息条目。
+    /// 可测延迟/可选择的节点：当前配置里排除机场塞进来的套餐信息条目。
     var testableNodes: [ProxyNode] {
         nodeCatalog.testable
     }
@@ -763,7 +764,7 @@ final class AppState {
     @ObservationIgnored private var notedPendingTakeoversLoaded = false
     /// 本次运行是否已经说明过"走了一次性授权"。见 startTUN 的 .fallback 分支。
     @ObservationIgnored private var notedFallbackAuthorization = false
-    /// 一轮批量测速里各类失败原因的计数，用于结束时汇总。
+    /// 一轮批量测延迟里各类失败原因的计数，用于结束时汇总。
     @ObservationIgnored private var delayFailureReasons: [String: Int] = [:]
     @ObservationIgnored private var currentConfig: Data?
     @ObservationIgnored private var dashboardTasks: [Task<Void, Never>] = []
@@ -833,6 +834,8 @@ final class AppState {
     /// 合并进同一次补挂的诉求：路径事件与位置切换前后脚到，后到的不能把先到的「强制按换网处理」冲掉。
     @ObservationIgnored private var pendingReassertTrigger: String?
     @ObservationIgnored private var pendingReassertForcesIdentityChange = false
+    /// 忙时推迟的补挂是否要重置连接（唤醒那一次）：不带过去的话，重试时死连接就不重置了（2026-10-25 审计）。
+    @ObservationIgnored private var pendingReassertResetsConnections = false
     /// 残留清扫撞上「另一项操作正在执行」时，稍后静默补一次，见 `sweepTakeoverResidue`。
     @ObservationIgnored private var deferredResidueSweepTask: Task<Void, Never>?
     /// 同类告警的合并状态，见 `recordCoalescedAlert`。
@@ -1107,7 +1110,7 @@ final class AppState {
                 if !self.exitDiagnosticsIsStale, self.exitDiagnosticsError == nil { return }
             }
             guard let self, !Task.isCancelled, self.status == .on else { return }
-            self.appendWarning("\(Self.exitUnreachableAfterSwitchPrefix)：切到「\(nodeName)」约 1 分钟仍探测不到出口，这个节点可能连不上——请到节点页测速或换一个节点")
+            self.appendWarning("\(Self.exitUnreachableAfterSwitchPrefix)：切到「\(nodeName)」约 1 分钟仍探测不到出口，这个节点可能连不上——请到节点页测延迟或换一个节点")
         }
     }
 
@@ -1151,11 +1154,11 @@ final class AppState {
 
     /// 启动后的一次出口自检。内核起得来、控制接口健康，不代表**节点**通——
     /// 节点被墙/服务器挂了时，App 会显示"已开启"而用户什么网页都打不开，且毫无线索。
-    /// 接管已生效却探测不到出口时给一条明确提示，指向真正该做的事（测速/换节点）。
+    /// 接管已生效却探测不到出口时给一条明确提示，指向真正该做的事（测延迟/换节点）。
     private func verifyExitAfterStart() async {
         await refreshExitDiagnostics()
         guard status == .on, !activeModes.isEmpty, exitDiagnosticsError != nil else { return }
-        appendWarning("\(Self.exitUnreachableWarningPrefix)，当前节点可能连不上——请到节点页测速或换一个节点")
+        appendWarning("\(Self.exitUnreachableWarningPrefix)，当前节点可能连不上——请到节点页测延迟或换一个节点")
     }
 
     var selectedNode: ProxyNode? {
@@ -1184,7 +1187,7 @@ final class AppState {
         case .starting:
             return preferredMode == .tun ? "正在启动 TUN…" : "正在启动系统代理…"
         case .on:
-            // 内核可以在不接管任何流量的情况下运行（测速、节点管理只需要这个状态）
+            // 内核可以在不接管任何流量的情况下运行（测延迟、节点管理只需要这个状态）
             guard !activeModes.isEmpty else { return "内核已就绪（未接管）" }
             let ordered: [ProxyMode] = [.systemProxy, .tun]
             let names = ordered.filter(activeModes.contains).map(\.displayName)
@@ -1273,7 +1276,7 @@ final class AppState {
     }
 
     /// 启动内核。`modes` 为空表示只跑内核（本地 mixed inbound + Clash API），
-    /// 不改系统代理也不建 TUN——测速、节点管理都只需要这个状态。
+    /// 不改系统代理也不建 TUN——测延迟、节点管理都只需要这个状态。
     private func start(modes: Set<ProxyMode>) async {
         guard !isBusy, status != .on, activeModes.isEmpty else { return }
         guard !activeConfigNodes.isEmpty else {
@@ -1885,8 +1888,9 @@ final class AppState {
         pathChangeTask = nil
         pendingReassertTrigger = nil
         pendingReassertForcesIdentityChange = false
+        pendingReassertResetsConnections = false
         let stoppingModes = activeModes
-        // 内核可能在「未接管」状态下运行（测速用），此时没有模式但仍要停进程。
+        // 内核可能在「未接管」状态下运行（测延迟用），此时没有模式但仍要停进程。
         guard !stoppingModes.isEmpty || runtime != nil else {
             await cancelCoreExitMonitoring()
             clearRuntimeState()
@@ -2028,7 +2032,7 @@ final class AppState {
         // 退出前先冲掉未完成的防抖落盘（用户切节点后 500ms 内退出会丢最后一次选择）。
         await flushPersistSettingsIfNeeded()
         finishSelfDiagnostics()
-        // 测速内核是 App 的子进程，App 退了它不会跟着退。
+        // 测延迟内核是 App 的子进程，App 退了它不会跟着退。
         await urlDelayTester.shutdown()
         // 快照必须在 stop() **之前**取：stop 会清空 activeModes。
         // 只有正常退出会走到这里，所以崩溃/断电不会留下"曾开启"的假意图。
@@ -2568,7 +2572,7 @@ final class AppState {
     private func hotReloadAfterNodeChange() async -> Bool {
         guard status == .on else { return true }
         if activeConfigNodes.isEmpty || activeModes.isEmpty {
-            // 节点删光后配置生成必然失败；「只跑内核」的测速态也没有回滚需求。
+            // 节点删光后配置生成必然失败；「只跑内核」的测延迟态也没有回滚需求。
             // 两种情况都直接停掉，而不是让热重载报错回滚到含幽灵节点的旧配置。
             await stop(reason: activeConfigNodes.isEmpty ? "当前配置已无可用节点" : "已取消全部接管")
             return status == .off
@@ -2583,7 +2587,7 @@ final class AppState {
     @ObservationIgnored private static let manualGroupID = UUID(uuidString: "00000000-0000-0000-0000-0000000A0001")!
     @ObservationIgnored private static let autoGroupID = UUID(uuidString: "00000000-0000-0000-0000-0000000A0002")!
 
-    /// 当前配置的主组名（机场轮辐主组，如 TAGSS）——用户在这里挑主节点。
+    /// 当前配置的主组名（机场轮辐主组，如「🚀 节点选择」）——用户在这里挑主节点。
     /// 与 ConfigGenerator 用同一套识别逻辑，保证 App 与生成的 config 一致。
     var primaryGroupName: String? {
         // 每个策略组的副标题都会问一次；成员上百时逐个转大写比较，同样只在策略组变了才重算。
@@ -2719,7 +2723,7 @@ final class AppState {
         await select(optionName: node.name, in: group)
     }
 
-    /// 默认在「主组」里挑节点：有机场组时主组是机场的轮辐主组（如 TAGSS），
+    /// 默认在「主组」里挑节点：有机场组时主组是机场的轮辐主组（如「🚀 节点选择」），
     /// 没有时退到内置「手动选择」。直接硬编码"手动选择"会在机场组模式下 404——
     /// ConfigGenerator 在有机场组时根本不生成「手动选择」出站。
     func select(_ node: ProxyNode) async {
@@ -2896,11 +2900,11 @@ final class AppState {
         applyDelay(result, to: node.id)
     }
 
-    /// 拉起（或复用）测速专用内核。总是按当前配置的全部节点准备：单测一个、测一组、测全部
+    /// 拉起（或复用）测延迟专用内核。总是按当前配置的全部节点准备：单测一个、测一组、测全部
     /// 用的是同一份配置，连着测不会反复重起内核。
     private func prepareURLDelayTester() async -> URL? {
         guard let testURL = URL(string: testURLString) else {
-            errorMessage = "测速地址无效"
+            errorMessage = "测延迟地址无效"
             return nil
         }
         do {
@@ -2921,8 +2925,8 @@ final class AppState {
         case let .failure(reason):
             delays.updateValue(nil, forKey: id)
             // 界面上只能显示"超时"两个字，用户分不清是节点死了还是本机连域名都解析不出来。
-            // 单节点测速把真实原因带出来。
-            errorMessage = "测速失败：\(Self.readableDelayFailure(reason))"
+            // 单节点测延迟把真实原因带出来。
+            errorMessage = "测延迟失败：\(Self.readableDelayFailure(reason))"
         }
     }
 
@@ -2943,7 +2947,7 @@ final class AppState {
         return reason
     }
 
-    /// TCP 握手测速时直连解析节点域名用的 DNS：与内核解析节点域名的 `dns-bootstrap` 同一上游
+    /// TCP 握手测延迟时直连解析节点域名用的 DNS：与内核解析节点域名的 `dns-bootstrap` 同一上游
     /// （用户指定的引导解析器，或国内 DNS 的 IP），再加两台公共 DNS 与探测到的内网 DNS 兜底
     /// （公司网络可能不放行外部 DNS）。都是 IP，不会再去问系统解析器。
     var directPingResolvers: [String] {
@@ -2957,16 +2961,16 @@ final class AppState {
 
     static func gatewayInterceptionMessage(_ reason: String) -> String {
         "当前网络的网关会接管连接（\(reason)，常见于软路由的透明代理）：直连握手测到的是网关，不是节点，"
-            + "所以没有测。请在代理页「测速选项」里把测速方式改成「真实延迟」，或换到不经软路由的网络位置再测"
+            + "所以没有测。请在代理页「测延迟选项」里把测延迟方式改成「真实延迟」，或换到不经软路由的网络位置再测"
     }
 
     func testAllDelays() async {
         // 防重入：托盘与节点页都能触发，重复点击会叠加出成百上千个并发请求。
         guard !isTestingAllDelays else { return }
-        // 测速只针对当前生效配置里的可用节点，避免对上百个节点全量握手。
+        // 测延迟只针对当前生效配置里的可用节点，避免对上百个节点全量握手。
         let testable = testableNodes
         guard !testable.isEmpty else {
-            errorMessage = "当前配置没有可测速的节点"
+            errorMessage = "当前配置没有可测延迟的节点"
             return
         }
         await testDelays(testable)
@@ -3006,7 +3010,7 @@ final class AppState {
         defer {
             isTestingAllDelays = false
             if Task.isCancelled {
-                appendWarning("测速已取消，已保留 \(speedTestProgress.completed) 个结果")
+                appendWarning("测延迟已取消，已保留 \(speedTestProgress.completed) 个结果")
             } else {
                 summarizeDelayFailures(total: testable.count)
             }
@@ -3067,7 +3071,7 @@ final class AppState {
             return !Task.isCancelled
         }
 
-        // URL 方式（真实延迟）：测速专用内核经各节点请求测试地址，与接管开没开无关；同样有界并发 + 分批回填。
+        // URL 方式（真实延迟）：测延迟专用内核经各节点请求测试地址，与接管开没开无关；同样有界并发 + 分批回填。
         guard let testURL = await prepareURLDelayTester() else { return false }
         let tester = urlDelayTester
         let serverByID = Dictionary(testable.map { ($0.id, $0.server) }, uniquingKeysWith: { first, _ in first })
@@ -3113,14 +3117,14 @@ final class AppState {
         return !Task.isCancelled
     }
 
-    /// 一轮测速几乎全挂时，把主要原因说出来。
+    /// 一轮测延迟几乎全挂时，把主要原因说出来。
     /// "全部超时"最常见的真因是节点域名在本机解析不了（代理没开时尤其如此），
     /// 而界面上每一行都只写"超时"，用户只会以为节点全死了、反复换节点也没用。
     private func summarizeDelayFailures(total: Int) {
         let failures = delayFailureReasons.values.reduce(0, +)
         guard total > 0, failures >= max(3, total * 3 / 5) else { return }
         guard let (reason, count) = delayFailureReasons.max(by: { $0.value < $1.value }) else { return }
-        appendWarning("测速 \(failures)/\(total) 个节点失败，主要原因：\(reason)（\(count) 个）")
+        appendWarning("测延迟 \(failures)/\(total) 个节点失败，主要原因：\(reason)（\(count) 个）")
     }
 
     private func publishDelayResults(_ results: [(UUID, DelayResult)]) {
@@ -3147,7 +3151,7 @@ final class AppState {
                 return node
             } ?? []
         guard !candidates.isEmpty else {
-            errorMessage = "当前策略没有可测速的节点"
+            errorMessage = "当前策略没有可测延迟的节点"
             return
         }
 
@@ -3157,14 +3161,14 @@ final class AppState {
             return (node, value)
         }.min { $0.1 < $1.1 }
         guard let fastest else {
-            errorMessage = "没有测速成功的节点，已保留当前选择"
+            errorMessage = "没有测延迟成功的节点，已保留当前选择"
             return
         }
         await select(fastest.0, in: group)
     }
 
-    /// 保存测速地址。界面上绑定的是草稿，校验通过才写进运行值，
-    /// 避免输入中途的半截 URL 被测速直接用掉。
+    /// 保存测延迟地址。界面上绑定的是草稿，校验通过才写进运行值，
+    /// 避免输入中途的半截 URL 被测延迟直接用掉。
     func saveTestURL(_ raw: String) async {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
@@ -4058,7 +4062,8 @@ final class AppState {
         Self.abbreviatedHomePath(metricsJournal.fileURL)
     }
 
-    func exportBackup() async throws -> Data {
+    /// - Parameter password: 非空时整份备份按口令加密（`BackupEncryption`），留空导出明文 JSON（旧行为）。
+    func exportBackup(password: String? = nil) async throws -> Data {
         var caches: [UUID: Data] = [:]
         for source in subscriptions {
             if let data = try await storage.readIfPresent(from: storage.cacheURL(for: source)) {
@@ -4079,7 +4084,7 @@ final class AppState {
             speedTestMethod: speedTestMethod,
             configSelections: Self.encodeSelectionMemory(configSelectionMemory)
         )
-        return try JSONEncoder.sorted.encode(KongshanBackup(
+        let plain = try JSONEncoder.sorted.encode(KongshanBackup(
             version: KongshanBackup.currentVersion,
             createdAt: now(),
             subscriptions: subscriptions,
@@ -4088,14 +4093,25 @@ final class AppState {
             routingSettings: routingSettings,
             subscriptionCaches: caches
         ))
+        guard let password, !password.isEmpty else { return plain }
+        return try BackupEncryption.seal(plain, password: password)
     }
 
-    func importBackup(_ data: Data) async {
+    /// - Parameter password: 加密备份的口令；明文备份忽略它。
+    func importBackup(_ data: Data, password: String? = nil) async {
         guard status == .off, !isBusy else {
             errorMessage = "请先停止代理和内核，再导入备份"
             return
         }
         do {
+            var data = data
+            if BackupEncryption.isEncrypted(data) {
+                guard let password, !password.isEmpty else {
+                    errorMessage = "这是加过密的备份，需要输入导出时设的口令"
+                    return
+                }
+                data = try BackupEncryption.open(data, password: password)
+            }
             let backup = try KongshanBackup.decodeValidated(from: data)
             let settings = backup.settings
             let persisted = PersistedSettings(
@@ -5803,6 +5819,7 @@ final class AppState {
         pathChangeTask = nil
         pendingReassertTrigger = nil
         pendingReassertForcesIdentityChange = false
+        pendingReassertResetsConnections = false
     }
 
     /// 不把掉线前的窗口留到重连后结算；原始日志仍照常留存。
@@ -5817,11 +5834,16 @@ final class AppState {
     ///   - trigger: 写进事件的触发点。
     ///   - forceIdentityChange: 按「换了网」处理（刷新内网 DNS、重载内核、断开旧连接）。切换网络位置时 IP
     ///     可能不变，但网关、DNS 已经换了一套。几次调度合并时只要有一次要求就保留。
-    private func scheduleTakeoverReassert(trigger: String = "网络变化", forceIdentityChange: Bool = false) {
+    private func scheduleTakeoverReassert(
+        trigger: String = "网络变化",
+        forceIdentityChange: Bool = false,
+        resetConnections: Bool = false
+    ) {
         // 未接管时也要跑：VPN 类虚拟网络服务随其 App 启停出现/消失，快照里待还原的服务可能这会儿
         // 刚回到列表里；残留清扫也只有在换网点上才有机会发现。真正的分流在 reassertTakeoversAfterNetworkChange。
         if trigger != "网络变化" || pendingReassertTrigger == nil { pendingReassertTrigger = trigger }
         pendingReassertForcesIdentityChange = pendingReassertForcesIdentityChange || forceIdentityChange
+        pendingReassertResetsConnections = pendingReassertResetsConnections || resetConnections
         pathChangeTask?.cancel()
         pathChangeTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(2))
@@ -5829,9 +5851,13 @@ final class AppState {
             self.pathChangeTask = nil
             let trigger = self.pendingReassertTrigger ?? "网络变化"
             let force = self.pendingReassertForcesIdentityChange
+            let reset = self.pendingReassertResetsConnections
             self.pendingReassertTrigger = nil
             self.pendingReassertForcesIdentityChange = false
-            await self.reassertTakeoversAfterNetworkChange(trigger: trigger, forceIdentityChange: force)
+            self.pendingReassertResetsConnections = false
+            await self.reassertTakeoversAfterNetworkChange(
+                resetConnections: reset, trigger: trigger, forceIdentityChange: force
+            )
         }
     }
 
@@ -5846,7 +5872,9 @@ final class AppState {
         guard !isBusy else {
             // 正在热重载或启停时不能叠着做，但也不能丢：新网络服务的补挂、死连接的重置都只有这一次机会。
             // 稍后再来，直到不忙为止（2 秒一次，开销可忽略）。
-            scheduleTakeoverReassert(trigger: trigger, forceIdentityChange: forceIdentityChange)
+            scheduleTakeoverReassert(
+                trigger: trigger, forceIdentityChange: forceIdentityChange, resetConnections: resetConnections
+            )
             return
         }
         guard status == .on else {
@@ -5973,7 +6001,26 @@ final class AppState {
             let text = String(decoding: buffer[0..<end].map { UInt8(bitPattern: $0) }, as: UTF8.self)
             entries.append("\(name)=\(text)")
         }
+        // 同一个 IP、只换了网关（手动改路由器、软路由与直连之间切换）也算换网：DNS 与出口都可能变了，
+        // 只看 IP 时这种情况不重探 LAN DNS（2026-10-25 审计）。取各物理网卡**所属网络服务**的网关，
+        // 不取全局默认网关——开 TUN 时全局默认路由指向 utun，取它会让每次开关 TUN 都被当成换网。
+        entries.append(contentsOf: physicalRouters().map { "\($0.key)>\($0.value)" })
         return entries.sorted().joined(separator: ",")
+    }
+
+    /// en* 网卡 → 它所在网络服务的 IPv4 网关（SystemConfiguration 的 `State:/Network/Service/*/IPv4`）。
+    nonisolated private static func physicalRouters() -> [String: String] {
+        guard let store = SCDynamicStoreCreate(nil, "kongshan.network-signature" as CFString, nil, nil),
+              let keys = SCDynamicStoreCopyKeyList(store, "State:/Network/Service/[^/]+/IPv4" as CFString) as? [String]
+        else { return [:] }
+        var routers: [String: String] = [:]
+        for key in keys {
+            guard let value = SCDynamicStoreCopyValue(store, key as CFString) as? [String: Any],
+                  let interface = value["InterfaceName"] as? String, interface.hasPrefix("en"),
+                  let router = value["Router"] as? String else { continue }
+            routers[interface] = router
+        }
+        return routers
     }
 
     /// 睡眠唤醒后：网络多半已变、核心可能假死（进程还在但拒绝连接）。
@@ -6280,7 +6327,7 @@ final class AppState {
 
     // MARK: - 运行期自诊断
 
-    /// 采样间隔。取 15 秒是权衡：足够短到能把「持续异常」和「测速那种十几秒的正常尖峰」
+    /// 采样间隔。取 15 秒是权衡：足够短到能把「持续异常」和「测延迟那种十几秒的正常尖峰」
     /// 分开，又足够长到自诊断本身的开销可以忽略（一次 getrusage + 两次 mach 调用）。
     private static let selfDiagnosticsInterval = Duration.seconds(15)
 
@@ -6524,22 +6571,22 @@ final class AppState {
         let advice: String
         if report.directResolutionLooksSignificant {
             directNote = "同期直连有 \(report.directResolutionFailures)/\(report.directAttempts) 次解析超时，无法确认本机网络是否可用"
-            advice = "先检查本机网络与 DNS；网络正常后若仍失败，再测速或换节点"
+            advice = "先检查本机网络与 DNS；网络正常后若仍失败，再测延迟或换节点"
         } else if report.directResolutionFailures > 0 {
             // 一两次解析超时不足以把锅甩给本机网络，但也不能说直连「失败 N 次」——那是把
             // 解析超时重复算了一遍。如实说明，仍给节点侧建议。
             directNote = "同期直连 \(report.directAttempts) 次中有 \(report.directResolutionFailures) 次解析超时，不足以判定本机网络有问题"
-            advice = "多为节点或线路问题，可到代理页测速后换一个节点；若反复出现再检查本机 DNS"
+            advice = "多为节点或线路问题，可到代理页测延迟后换一个节点；若反复出现再检查本机 DNS"
         } else if !report.hasEnoughDirectSamples {
             directNote = "同期直连仅 \(report.directAttempts) 次，样本不足，无法据此判断本机网络"
-            advice = "多为节点或线路问题，可到代理页测速后换一个节点"
+            advice = "多为节点或线路问题，可到代理页测延迟后换一个节点"
         } else if report.directSaysLocalNetworkUnstable {
             let rate = Int((Double(report.directFailures) / Double(report.directAttempts) * 100).rounded())
             directNote = "同期直连 \(report.directAttempts) 次中也失败 \(report.directFailures) 次（\(rate)%），本机网络不稳定"
             advice = "可能正在切换网络或信号不好，先确认本机网络，换节点未必有用"
         } else {
             directNote = "同期直连 \(report.directAttempts) 次中失败 \(report.directFailures) 次，本机网络正常"
-            advice = "多为节点或线路问题，可到代理页测速后换一个节点"
+            advice = "多为节点或线路问题，可到代理页测延迟后换一个节点"
         }
         let detail = [counts, reason, directNote, advice].joined(separator: "；")
         recordCoalescedAlert(key: "节点|\(report.outboundTag)|\(report.dominantReason)",
@@ -7202,7 +7249,7 @@ private struct PersistedSettings: Codable {
     let outboundMode: OutboundMode?
     /// 各策略组当前选中的成员（组名 → 成员名），旧版设置文件没有该字段。
     let groupSelections: [String: String]?
-    /// 当前生效配置 ID 与测速方式，旧版设置文件没有这些字段。
+    /// 当前生效配置 ID 与测延迟方式，旧版设置文件没有这些字段。
     var activeConfigID: UUID?
     /// 键名换过：旧键 `speedTestMethod` 存的多是当年的默认 TCP 握手，换键让升级后一律从默认的真实延迟起步。
     var latencyTestMethod: SpeedTestMethod?
@@ -7248,7 +7295,7 @@ private enum AppStateError: Error, LocalizedError {
         case let .coreHealthFailed(message):
             "sing-box 控制接口未就绪：\(message)"
         case .invalidTestURL:
-            "测速地址必须是 HTTP 或 HTTPS URL"
+            "测延迟地址必须是 HTTP 或 HTTPS URL"
         case .missingRuntimeState:
             "运行时状态不完整，无法更新分流规则"
         case let .tunCleanupFailed(message):

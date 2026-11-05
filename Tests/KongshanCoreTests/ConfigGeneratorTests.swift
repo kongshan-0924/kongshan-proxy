@@ -143,7 +143,7 @@ final class ConfigGeneratorTests: XCTestCase {
             selectedNodeID: node.id,
             runtime: RuntimeParameters(mixedPort: 31_180, clashPort: 31_181, secret: "test-secret")
         ))
-        let binary = packageRoot.appending(path: VendoredKernel.relativePath)
+        let binary = TestPaths.vendoredKernel
         let result = try await SingBoxProcess(binaryURL: binary).check(config: config)
         XCTAssertEqual(result.exitCode, 0, result.stderr)
     }
@@ -156,12 +156,6 @@ final class ConfigGeneratorTests: XCTestCase {
         RuntimeParameters(mixedPort: 31_080, clashPort: 31_909, secret: "runtime-secret")
     }
 
-    private var packageRoot: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-    }
 
     private var nodes: [ProxyNode] {
         [

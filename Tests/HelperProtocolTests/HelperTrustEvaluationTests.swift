@@ -366,4 +366,11 @@ final class HelperTrustConfigDecodingTests: XCTestCase {
         let beforeThisField = HelperResponse(ok: true, helperVersion: HelperConstants.helperVersion)
         XCTAssertFalse(beforeThisField.matches(bundledSingBoxCDHashHex: "abc"))
     }
+
+    /// 助手被 bootout / SIGTERM：App 不在且内核还在跑时先还原 DNS，其余情况交给 App 或无需处理。
+    func testShutdownRestoresDNSOnlyWhenClientIsGone() {
+        XCTAssertTrue(HelperShutdownPolicy.shouldRestoreDNS(kernelRunning: true, clientAlive: false))
+        XCTAssertFalse(HelperShutdownPolicy.shouldRestoreDNS(kernelRunning: true, clientAlive: true))
+        XCTAssertFalse(HelperShutdownPolicy.shouldRestoreDNS(kernelRunning: false, clientAlive: false))
+    }
 }

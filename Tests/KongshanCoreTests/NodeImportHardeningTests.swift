@@ -121,6 +121,21 @@ final class NodeImportHardeningTests: XCTestCase {
         XCTAssertThrowsError(try NodeShareLink.parse("vmess://" + base64(vmess)))
     }
 
+    /// relay 是链式代理，不能当成「挑一个」的 selector：跳过并告警，引用它的组里显示为「未导入」。
+    func testClashRelayGroupsAreSkipped() throws {
+        let yaml = """
+        proxies:
+          - {name: a, type: ss, server: a.example.com, port: 443, cipher: aes-128-gcm, password: pw}
+          - {name: b, type: ss, server: b.example.com, port: 443, cipher: aes-128-gcm, password: pw}
+        proxy-groups:
+          - {name: chain, type: relay, proxies: [a, b]}
+          - {name: pick, type: select, proxies: [chain, a]}
+        """
+        let result = try ClashSubscriptionConverter.convert(yaml: yaml, sourceID: sourceID)
+        XCTAssertEqual(result.policyGroups.map(\.name), ["pick"])
+        XCTAssertTrue(result.warnings.contains { $0.contains("relay") && $0.contains("chain") }, "\(result.warnings)")
+    }
+
     // MARK: - XHTTP
 
     /// XHTTP 由内置内核（官方 + 移植的 XHTTP）支持：订阅与链接都要带上路径、Host、上下行方式与 ALPN（XHTTP 按它选 HTTP 版本）。
@@ -173,8 +188,7 @@ final class NodeImportHardeningTests: XCTestCase {
         XCTAssertEqual(transport["x_padding_bytes"] as? String, "100-1000")
         XCTAssertEqual((outbound["tls"] as? [String: Any])?["alpn"] as? [String], ["h2"])
 
-        let kernel = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent().appending(path: VendoredKernel.relativePath)
+        let kernel = TestPaths.vendoredKernel
         let check = try await SingBoxProcess(binaryURL: kernel).check(config: data)
         XCTAssertEqual(check.exitCode, 0, check.stderr)
     }

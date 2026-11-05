@@ -22,30 +22,14 @@ private extension EnvironmentValues {
 private enum DashboardLayout {
     /// 卡片统一圆角与间距节奏（8 的倍数）。
     static let cardGap: CGFloat = 16
-    /// 卡片外框：`CardGroupBoxStyle` 上下各 12，卡片实际占高 = 内容高 + 24。
-    static let cardChrome: CGFloat = 24
-    /// 顶部状态卡内容高的估算：身份行 46 + 分隔 29 + 控制行 30 + 内边距 8。
-    /// 状态卡本身按内容自适应（窄窗口控制行会折成两行），这个值只用来换算双卡高度。
-    static let statusCardEstimatedHeight: CGFloat = 113
-    /// 双主卡宽比 3:2：左流量卡内容多；右卡按用户日常窗口（867pt 宽）分到约 270pt，出口 IP 与遥测四项刚好排下。
+    /// 双主卡宽比 3:2；右侧只保留链路健康，技术遥测默认收进「运行详情」。
     static let trafficShare: CGFloat = 0.6
     static let overviewShare: CGFloat = 0.4
-    /// 右卡最窄宽度：再窄，出口 IP 与遥测四项就排不下。
     static let overviewMinWidth: CGFloat = 260
-    /// 页面左右内边距（各 20）。
     static let horizontalPadding: CGFloat = 20
-    /// 两卡并排所需的最小宽度：右卡按比例分到的宽度不能低于 `overviewMinWidth`（≈666）。
-    /// 阈值与比例必须由同一组常量推出，否则阈值以上、比例宽度以下的区间右卡会顶出边界。
     static var twoColumnMinWidth: CGFloat { overviewMinWidth / overviewShare + cardGap }
-    /// 双主卡高度区间：贴合内容（右卡出口区+遥测四项+底栏约 300），只在 320~360 微调。
-    static let cardMinHeight: CGFloat = 320
-    static let cardMaxHeight: CGFloat = 360
-    /// 页面上下内边距（20 + 30）。
-    static let verticalPadding: CGFloat = 50
-    /// 可视高里留给双卡内容以外的部分：状态卡（内容+外框）+ 卡间距 + 双卡自身外框 + 页面上下内边距。
-    static var reservedVertical: CGFloat {
-        statusCardEstimatedHeight + cardChrome + cardGap + cardChrome + verticalPadding
-    }
+    /// 有数据时让图表利用可视高度；没有数据时由 `cardHeight` 使用紧凑占位。
+    static let reservedVertical: CGFloat = 230
 }
 
 /// 仪表盘（简洁大气、零嵌套灰块的原生 macOS 架构）。
@@ -58,12 +42,19 @@ struct DashboardView: View {
 
     var body: some View {
         let _ = Self.noteBodyEvaluation()
-        GeometryReader { geo in
+        // 链路模型读 delays / 出口检测，放进 RouteHeaderView 自己构造：整页只看接管与否，
+        // 测延迟每回填一批只重算头部卡，不带着整页重排。
+        let hasTakeover = state.isOn && !state.activeModes.isEmpty
+        return GeometryReader { geo in
+            let contentWidth = max(0, geo.size.width - DashboardLayout.horizontalPadding * 2)
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    statusGroup
+                    RouteHeaderView(isCompact: contentWidth < 680)
                     coreOnlyBanner
-                    metrics(gridWidth: max(0, geo.size.width - DashboardLayout.horizontalPadding * 2))
+                    if !hasTakeover, !state.nodes.isEmpty {
+                        DashboardIdleContent()
+                    }
+                    metrics(gridWidth: contentWidth, hasTakeover: hasTakeover)
 
                     if state.nodes.isEmpty {
                         ContentUnavailableView {
@@ -79,11 +70,8 @@ struct DashboardView: View {
                 }
                 .padding(.horizontal, DashboardLayout.horizontalPadding)
                 .padding(.top, 20)
-                // 底部多留一档：主卡别贴到窗口下缘（用户 2026-10-23 反馈）。与 verticalPadding 同步。
                 .padding(.bottom, 30)
             }
-            // 宽高都直接取页面可视区，不经 @State 中转：双卡宽度若从双卡区自己量，会形成反馈环——
-            // 一旦并排算宽了就再也缩不回来，窄窗口里整页横向溢出（2026-10-24 离屏快照发现）。
             .environment(\.dashboardCardHeight, cardHeight(viewportHeight: geo.size.height))
         }
         .background(Theme.canvasBackground)
@@ -105,176 +93,36 @@ struct DashboardView: View {
         return "\(state.statusText) · \(state.selectedNode?.name ?? "未选择节点")"
     }
 
-    // MARK: - 第一层：顶部状态与控制主卡（两行舒展结构，彻底根治控件挤压与文字竖排）
-
-    private var identityColumn: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(state.statusTint)
-                    .frame(width: 9, height: 9)
-                Text(state.statusText)
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(.primary)
-                if state.isOn {
-                    StatusBadge(text: "出站 · \(state.outboundMode.displayName)", tint: state.statusTint)
-                }
-            }
-
-            HStack(spacing: 8) {
-                if let selected = state.selectedNode {
-                    Button {
-                        state.requestPage(.policyGroups)
-                    } label: {
-                        HStack(spacing: 6) {
-                            Text(selected.name)
-                                .font(.callout.weight(.medium))
-                                .foregroundStyle(.primary)
-                                .lineLimit(1)
-                            ProtocolTag(value: selected.protocolType)
-                            SelectedNodeDelayLabel(nodeID: selected.id)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .help("点击前往代理页切换节点")
-                } else {
-                    Text("未启用或未选择节点")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-
-                if let config = activeConfig {
-                    Divider().frame(height: 12)
-                    Button {
-                        state.requestPage(.nodes)
-                    } label: {
-                        HStack(spacing: 4) {
-                            Text(config.name)
-                                .font(.callout)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                            Text("· \(config.nodeCount) 个节点")
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .help("当前生效配置，点击前往配置页")
-                }
-            }
-        }
-    }
-
-    /// 双主卡高度：只在 `cardMinHeight~cardMaxHeight`（320~360）之间随窗口微调，
-    /// 始终贴合内容，多出的高度留成下方外边距而不是撑进卡片里。
     private func cardHeight(viewportHeight: CGFloat) -> CGFloat {
-        min(DashboardLayout.cardMaxHeight, max(DashboardLayout.cardMinHeight, viewportHeight - DashboardLayout.reservedVertical))
+        min(320, max(260, viewportHeight - DashboardLayout.reservedVertical))
     }
 
-    private var statusGroup: some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 14) {
-                // 身份列 + 实时速率单行排布；窄窗口由身份列内部截断消化。
-                HStack(alignment: .center, spacing: 16) {
-                    identityColumn
-                    Spacer(minLength: 24)
-                    DashboardLiveRatePair()
-                }
-
-                Divider()
-
-                controlRow
-            }
-            .padding(4)
-        }
-    }
-
-    /// 控制行：宽度够时一行（模式选择器居左、接管开关居右）；
-    /// 窄窗口 + 代理开启（多出「断开全部」）放不下时折成两行，不让开关顶出卡片。
-    private var controlRow: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 16) {
-                outboundPicker
-                Spacer(minLength: 16)
-                takeoverControls
-            }
-            VStack(alignment: .leading, spacing: 10) {
-                outboundPicker
-                HStack(spacing: 16) {
-                    takeoverControls
-                    Spacer(minLength: 0)
-                }
-            }
-        }
-    }
-
-    private var outboundPicker: some View {
-        CapsuleSegmentedPicker(options: OutboundMode.allCases, selection: state.outboundModeBinding) { $0.displayName }
-            .frame(width: 210)
-            .help(state.outboundMode.detail)
-            .disabled(state.isBusy || !state.isReady)
-    }
+    // MARK: - 第二层：流量与链路健康
 
     @ViewBuilder
-    private var takeoverControls: some View {
-        if state.isBusy {
-            ProgressView()
-                .controlSize(.small)
-                .help(state.statusText)
-        }
-
-        modeToggle(title: ProxyMode.systemProxy.displayName, mode: .systemProxy)
-        modeToggle(title: ProxyMode.tun.displayName, mode: .tun)
-
-        if state.isOn {
-            Button {
-                Task { await state.stop() }
-            } label: {
-                Label("断开全部", systemImage: "power")
-            }
-            .controlSize(.small)
-            .fixedSize(horizontal: true, vertical: false)
-            .disabled(state.isBusy)
-        }
-    }
-
-    /// 显式 `fixedSize(horizontal: true, vertical: false)` 防止任何窄宽度下开关标签被挤压成竖排一字一行。
-    private func modeToggle(title: String, mode: ProxyMode) -> some View {
-        Toggle(title, isOn: state.takeoverModeBinding(mode))
-            .toggleStyle(.switch)
-            .controlSize(.small)
-            .fixedSize(horizontal: true, vertical: false)
-            .disabled(state.isBusy || !state.isReady)
-    }
-
-    // MARK: - 第二层：双主卡片（左：网络流量 · 右：出口与系统状态）
-
-    /// 两张大白卡并排，按规范 **3:2**（左流量 0.6 / 右出口 0.4）；
-    /// 宽度不足 `twoColumnMinWidth` 时竖排。
-    private func metrics(gridWidth: CGFloat) -> some View {
-        let metricColumns = gridWidth >= DashboardLayout.twoColumnMinWidth ? 2 : 1
-        let shareWidth = gridWidth - DashboardLayout.cardGap
-        return Group {
-            if metricColumns == 2 {
-                HStack(alignment: .top, spacing: DashboardLayout.cardGap) {
-                    DashboardTrafficGroup()
-                        .frame(width: shareWidth * DashboardLayout.trafficShare)
-                    OverviewCardBox()
-                        .frame(width: shareWidth * DashboardLayout.overviewShare)
-                }
-            } else {
-                VStack(spacing: DashboardLayout.cardGap) {
-                    DashboardTrafficGroup()
-                    OverviewCardBox()
+    private func metrics(gridWidth: CGFloat, hasTakeover: Bool) -> some View {
+        if hasTakeover {
+            let metricColumns = gridWidth >= DashboardLayout.twoColumnMinWidth ? 2 : 1
+            let shareWidth = gridWidth - DashboardLayout.cardGap
+            Group {
+                if metricColumns == 2 {
+                    HStack(alignment: .top, spacing: DashboardLayout.cardGap) {
+                        DashboardTrafficGroup()
+                            .frame(width: shareWidth * DashboardLayout.trafficShare)
+                        OverviewCardBox()
+                            .frame(width: shareWidth * DashboardLayout.overviewShare)
+                    }
+                    // 两卡取较高者等高：左卡没数据时的紧凑占位不再把右卡压扁。
+                    .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    VStack(spacing: DashboardLayout.cardGap) {
+                        DashboardTrafficGroup()
+                        OverviewCardBox()
+                    }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var activeConfig: AppState.ConfigItem? {
-        state.configItems.first { $0.id == state.activeConfigID }
     }
 
     @ViewBuilder
@@ -283,7 +131,7 @@ struct DashboardView: View {
             HStack(spacing: 9) {
                 Image(systemName: "info.circle.fill")
                     .foregroundStyle(.blue)
-                Text("内核正在运行但未接管网络（仅用于测速）。")
+                Text("内核正在运行但未接管网络（仅用于测延迟）。")
                     .font(.callout)
                 Spacer(minLength: 8)
                 Button("停止内核") { Task { await state.stop() } }
@@ -300,7 +148,12 @@ struct DashboardView: View {
 
     private struct DashboardTrafficGroup: View {
         @State private var range: TrafficRange = .recent
+        @Environment(AppState.self) private var state
         @Environment(\.dashboardCardHeight) private var cardHeight
+
+        private var hasData: Bool {
+            !state.trafficHistory.isEmpty || !state.trafficMinutes.isEmpty
+        }
 
         var body: some View {
             GroupBox {
@@ -317,12 +170,26 @@ struct DashboardView: View {
 
                     Divider()
 
-                    TrafficStatsRow(range: range)
-
-                    TrafficPlot(range: range)
+                    if hasData {
+                        TrafficStatsRow(range: range)
+                        TrafficPlot(range: range)
+                    } else {
+                        ContentUnavailableView {
+                            Label("等待流量数据", systemImage: "chart.xyaxis.line")
+                        } description: {
+                            Text("内核推送第一批数据后开始绘制波形。")
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
                 }
                 .padding(4)
-                .frame(maxWidth: .infinity, minHeight: cardHeight, maxHeight: cardHeight, alignment: .topLeading)
+                .frame(
+                    maxWidth: .infinity,
+                    minHeight: hasData ? cardHeight : 160,
+                    // 没数据时可以被右卡撑高（两卡等高），有数据时图表固定高度。
+                    maxHeight: hasData ? cardHeight : .infinity,
+                    alignment: .topLeading
+                )
             }
         }
     }
@@ -600,7 +467,7 @@ private struct TrafficPlot: View {
 
 private struct OverviewCardBox: View {
     @Environment(AppState.self) private var state
-    @Environment(\.dashboardCardHeight) private var cardHeight
+    @State private var showsRuntimeDetails = false
 
     var body: some View {
         GroupBox {
@@ -609,21 +476,33 @@ private struct OverviewCardBox: View {
                 Divider()
                 exitSection
                 Divider()
-                telemetryCrossGrid
-                // 卡片随窗口拉高时，把底部动态栏推到底、出口与遥测之间的空隙自然撑开，
-                // 内容垂直分布而不是挤在顶部、下面空一截。
+                Button {
+                    state.requestPage(.connections)
+                } label: {
+                    LabeledContent("活跃连接") { ActiveConnectionCountText() }
+                        .font(.callout)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                DisclosureGroup("运行详情", isExpanded: $showsRuntimeDetails) {
+                    RuntimeTelemetryGrid()
+                        .padding(.top, 8)
+                }
+                .font(.callout)
                 Spacer(minLength: 0)
                 Divider()
                 activityFooter
             }
             .padding(4)
-            .frame(maxWidth: .infinity, minHeight: cardHeight, maxHeight: cardHeight, alignment: .topLeading)
+            // 高度不封顶：没流量数据时左卡只有 160 高，这里若跟着封顶，出口、运行详情与底栏会溢出卡外。
+            // 两卡等高由外层 HStack 的 fixedSize 统一，本卡只把多出的高度留给 Spacer。
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
     }
 
     private var headerRow: some View {
         HStack(alignment: .center, spacing: 8) {
-            Text("出口与状态")
+            Text("链路健康")
                 .font(.headline)
 
             if state.exitDiagnosticsIsStale {
@@ -714,82 +593,6 @@ private struct OverviewCardBox: View {
             }
             .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
         }
-    }
-
-    // 2. 四项系统遥测指标：用干净的十字细线（Crosshair Divider）分割，不再套 4 个灰色补丁块
-    private var telemetryCrossGrid: some View {
-        VStack(spacing: 12) {
-            HStack(alignment: .top, spacing: 16) {
-                cleanMetricCell(
-                    title: "活跃连接",
-                    value: "\(state.activeConnectionCount)",
-                    subtitle: "累计 \(Theme.bytesOrDash(state.sessionTotal))"
-                )
-                .contentShape(Rectangle())
-                .onTapGesture { state.requestPage(.connections) }
-                .help("点击前往连接页")
-
-                Divider().frame(height: 48)
-
-                cleanMetricCell(
-                    title: "内存（内核 / 空山）",
-                    value: memoryText,
-                    subtitle: state.coreVersion == "—" ? "sing-box 待命" : "内核 \(state.coreVersion)"
-                )
-            }
-
-            Divider()
-
-            HStack(alignment: .top, spacing: 16) {
-                cleanMetricCell(
-                    title: "客户端负载",
-                    value: state.lastMetrics.map { String(format: "%.1f%%", $0.cpu) } ?? "0.0%",
-                    subtitle: "每分钟采样一次"
-                )
-
-                Divider().frame(height: 48)
-
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("运行时长")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    RuntimeDurationLabel()
-                        .font(.title3.weight(.semibold).monospacedDigit())
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                    Text(state.isOn ? "本次持续接管" : "等待开启接管")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-    }
-
-    private var memoryText: String {
-        let core = Theme.bytesOrDash(Int64(clamping: state.coreMemory))
-        let app = state.lastMetrics.map { "\($0.rss) MB" } ?? "—"
-        return "\(core) / \(app)"
-    }
-
-    private func cleanMetricCell(title: String, value: String, subtitle: String) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            Text(value)
-                .font(.title3.weight(.semibold).monospacedDigit())
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-            Text(subtitle)
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.tertiary)
-                .lineLimit(1)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // 3. 底部单行运行动态栏
@@ -915,6 +718,97 @@ struct DashboardLiveRatePair: View {
     }
 }
 
+/// 活跃连接数，每秒变：单独成视图，只有这一小块跟着重算（`DashboardObservationScopeTests`）。
+private struct ActiveConnectionCountText: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        Text("\(state.activeConnectionCount) 条")
+            .monospacedDigit()
+    }
+}
+
+/// 「运行详情」展开后的四项遥测：连接、内存、负载、时长都是高频值，单独成视图不带着整张卡重算。
+private struct RuntimeTelemetryGrid: View {
+    @Environment(AppState.self) private var state
+
+    // 2. 四项系统遥测指标：用干净的十字细线（Crosshair Divider）分割，不再套 4 个灰色补丁块
+    var body: some View {
+        VStack(spacing: 12) {
+            HStack(alignment: .top, spacing: 16) {
+                cleanMetricCell(
+                    title: "活跃连接",
+                    value: "\(state.activeConnectionCount)",
+                    subtitle: "累计 \(Theme.bytesOrDash(state.sessionTotal))"
+                )
+                .contentShape(Rectangle())
+                .onTapGesture { state.requestPage(.connections) }
+                .help("点击前往连接页")
+
+                Divider().frame(height: 48)
+
+                cleanMetricCell(
+                    title: "内存（内核 / 空山）",
+                    value: memoryText,
+                    subtitle: state.coreVersion == "—" ? "sing-box 待命" : "内核 \(state.coreVersion)"
+                )
+            }
+
+            Divider()
+
+            HStack(alignment: .top, spacing: 16) {
+                cleanMetricCell(
+                    title: "客户端负载",
+                    value: state.lastMetrics.map { String(format: "%.1f%%", $0.cpu) } ?? "0.0%",
+                    subtitle: "每分钟采样一次"
+                )
+
+                Divider().frame(height: 48)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("运行时长")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    RuntimeDurationLabel()
+                        .font(.title3.weight(.semibold).monospacedDigit())
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    Text(state.isOn ? "本次持续接管" : "等待开启接管")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+    }
+
+    private var memoryText: String {
+        let core = Theme.bytesOrDash(Int64(clamping: state.coreMemory))
+        let app = state.lastMetrics.map { "\($0.rss) MB" } ?? "—"
+        return "\(core) / \(app)"
+    }
+
+    private func cleanMetricCell(title: String, value: String, subtitle: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Text(value)
+                .font(.title3.weight(.semibold).monospacedDigit())
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+            Text(subtitle)
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 /// 运行时长。
 private struct RuntimeDurationLabel: View {
     @Environment(AppState.self) private var state
@@ -965,17 +859,5 @@ extension DashboardLiveRatePair {
         #if DEBUG
         bodyEvaluations += 1
         #endif
-    }
-}
-
-/// 当前节点的延迟。只有它观察 `delays`。
-private struct SelectedNodeDelayLabel: View {
-    @Environment(AppState.self) private var state
-    let nodeID: UUID
-
-    var body: some View {
-        if let delay = state.delays[nodeID] {
-            DelayLabel(milliseconds: delay)
-        }
     }
 }

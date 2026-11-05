@@ -52,6 +52,11 @@ private final class ProcessExecution: @unchecked Sendable {
     private let lock = NSLock()
     private var completed = false
     private var continuation: CheckedContinuation<ProcessResult, Error>?
+    /// 输出边跑边读：等进程退出再读的话，输出超过管道缓冲（约 64 KB）时子进程写阻塞、永远不退出，
+    /// 只能等到超时（2026-10-25 审计）。两条管道各在一个后台线程上读到 EOF。
+    private let drained = DispatchGroup()
+    private var output = Data()
+    private var errorOutput = Data()
 
     init(executable: URL, arguments: [String], standardInput: Data?, timeout: TimeInterval) {
         self.standardInput = standardInput
@@ -91,6 +96,15 @@ private final class ProcessExecution: @unchecked Sendable {
                 return
             }
 
+            for (pipe, isError) in [(outputPipe, false), (errorPipe, true)] {
+                drained.enter()
+                DispatchQueue.global(qos: .utility).async { [self] in
+                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                    lock.withLock { if isError { errorOutput = data } else { output = data } }
+                    drained.leave()
+                }
+            }
+
             if let standardInput {
                 try? inputPipe.fileHandleForWriting.write(contentsOf: standardInput)
             }
@@ -103,8 +117,9 @@ private final class ProcessExecution: @unchecked Sendable {
     }
 
     private func processTerminated(exitCode: Int32) {
-        let output = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        let error = errorPipe.fileHandleForReading.readDataToEndOfFile()
+        // 进程退出后管道写端关闭，后台读取随即读到 EOF；孙进程继承了管道、还开着时最多再等 2 秒。
+        _ = drained.wait(timeout: .now() + 2)
+        let (output, error) = lock.withLock { (self.output, self.errorOutput) }
         complete(.success(ProcessResult(
             exitCode: exitCode,
             stdout: String(decoding: output, as: UTF8.self),

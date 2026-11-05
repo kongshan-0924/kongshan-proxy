@@ -147,7 +147,7 @@ struct CustomRoutingRulesView: View {
                 }
             }
         } footer: {
-            Text("拦截广告用规则集屏蔽广告域名。下面四类规则都存在本机，不随订阅更新变化；订阅自带的规则在「订阅」分段。")
+            Text("代理开着时开关立即生效，没开时下次开启生效。下面四类规则都存在本机，不随订阅更新变化；订阅自带的规则在「订阅」分段。")
         }
         .disabled(state.isApplyingRouting)
     }
@@ -278,7 +278,7 @@ struct CustomRoutingRulesView: View {
                     )
             }
 
-            Text("可用空格、逗号或换行分隔多个目标；整批校验通过后只重载一次内核，现有连接会在重载时断开。")
+            Text("可用空格、逗号或换行分隔多个目标；代理开着时整批校验通过后重载一次内核立即生效，现有连接会断开。")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
 
@@ -445,7 +445,7 @@ struct CustomRoutingRulesView: View {
                     )
             }
 
-            Text("规则保存在本机，开启代理后生效；只修改空山托管的 SSH 配置片段，不会读取或保存 SSH 密码、私钥。")
+            Text("代理开着时添加后立即生效；只修改空山托管的 SSH 配置片段，不会读取或保存 SSH 密码、私钥。")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
 

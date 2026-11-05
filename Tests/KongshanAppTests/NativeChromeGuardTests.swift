@@ -24,7 +24,7 @@ final class NativeChromeGuardTests: XCTestCase {
 
     private let viewFiles = [
         "Theme.swift", "MainWindowView.swift", "NodesView.swift", "SettingsView.swift", "ManualNodeSheet.swift",
-        "DashboardView.swift", "PolicyGroupsView.swift", "RoutingView.swift", "ConnectionsView.swift",
+        "DashboardView.swift", "DashboardRoute.swift", "RouteHeaderView.swift", "PolicyGroupsView.swift", "RoutingView.swift", "ConnectionsView.swift",
         "LogsView.swift", "MessagesView.swift", "MenuBarPopoverView.swift"
     ]
 
@@ -150,17 +150,36 @@ final class NativeChromeGuardTests: XCTestCase {
         XCTAssertTrue(dashboard.contains("transaction.animation = nil"), "图表必须关动画")
     }
 
-    /// 指标网格：**列数候选必须整除卡片数**，否则最后一行缺角——
-    /// 双主卡宽度分配：宽窗口 HStack 按 `DashboardLayout` 的比例规范（左 0.64 / 右 0.36）、
-    /// 窄窗口竖排，不得回到 `.adaptive`（那会排出缺角的最后一行）。
-    /// HStack 两栏要么并排要么竖排，不存在"缺角"，所以守卫钉死"显式比例 + 禁自适应"。
-    func testDashboardMetricsGridNeverLeavesAGaggedRow() throws {
+    /// 首页以 RouteRail 为主，只在实际接管时展开监控，避免关闭后仍摆一整页空指标。
+    func testDashboardUsesRouteHeaderAndOnlyShowsMetricsDuringTakeover() throws {
         let dashboard = try source("DashboardView.swift")
-        XCTAssertFalse(dashboard.contains("GridItem(.adaptive"), "自适应列会排出缺角的最后一行")
-        XCTAssertTrue(dashboard.contains("DashboardTrafficGroup()"), "左卡（网络流量）应在")
-        XCTAssertTrue(dashboard.contains("OverviewCardBox()"), "右卡（出口与状态）应在")
-        XCTAssertTrue(dashboard.contains("metricColumns"), "宽窄切换仍由 metricColumns 驱动")
+        XCTAssertTrue(dashboard.contains("RouteHeaderView(isCompact:"))
+        XCTAssertTrue(dashboard.contains("if hasTakeover"))
+        XCTAssertTrue(dashboard.contains("DashboardTrafficGroup()"))
+        XCTAssertTrue(dashboard.contains("DashboardIdleContent()"), "未接管时要有配置与活动概览，不能只留空白")
+        XCTAssertFalse(dashboard.contains("GridItem(.adaptive"), "双卡仍用显式比例，不用自适应缺角网格")
         XCTAssertTrue(dashboard.contains("DashboardLayout.trafficShare"), "双卡宽度应按比例规范分配")
+    }
+
+    func testRouteModelDoesNotObserveHighFrequencyTraffic() throws {
+        let route = try source("DashboardRoute.swift")
+        for forbidden in ["trafficHistory", "trafficMinutes", "uploadRate", "downloadRate", "activeConnectionCount"] {
+            XCTAssertFalse(route.contains(forbidden), "链路模型不能在整页作用域读取高频状态：\(forbidden)")
+        }
+    }
+
+    func testMenuBarCollapsesSecondaryPolicyGroups() throws {
+        let popover = try source("MenuBarPopoverView.swift")
+        XCTAssertTrue(popover.contains("preferredGroups"))
+        XCTAssertTrue(popover.contains("showsAllGroups"))
+        XCTAssertTrue(popover.contains("全部策略组"))
+    }
+
+    func testSettingsCopyMatchesCurrentTUNBehavior() throws {
+        let settings = try source("SettingsView.swift")
+        XCTAssertFalse(settings.contains("当前版本不自动恢复 TUN"))
+        XCTAssertFalse(settings.contains("默认不启用 fake-ip"))
+        XCTAssertTrue(settings.contains("TUN 默认使用 Fake-IP"))
     }
 
     /// 运行时长不能用每秒自更新的 `.timer`：它嵌在指标网格里，每次刷新都要把整个

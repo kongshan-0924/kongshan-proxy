@@ -669,15 +669,9 @@ final class DNSConfigTests: XCTestCase {
     }
 
     private var singBoxURL: URL {
-        packageRoot.appending(path: VendoredKernel.relativePath)
+        TestPaths.vendoredKernel
     }
 
-    private var packageRoot: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-    }
 
     private func runtimeParameters() throws -> RuntimeParameters {
         let mixed = try RuntimeSecrets.availableHighPort()

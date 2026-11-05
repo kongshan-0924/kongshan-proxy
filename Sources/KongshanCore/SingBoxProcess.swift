@@ -114,12 +114,14 @@ public actor SingBoxProcess {
         guard let process else { return }
         stopping = true
         let processID = process.processIdentifier
+        let binaryPath = binaryURL.resolvingSymlinksInPath().path
         process.interrupt()
+        // 延迟补发前核对 PID 还是这个内核：它已经退出、PID 被系统复用给别的进程时不能误杀（2026-10-25 审计）。
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
-            if kill(processID, 0) == 0 { kill(processID, SIGTERM) }
+            if Self.isRunning(processID, executablePath: binaryPath) { kill(processID, SIGTERM) }
         }
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.2) {
-            if kill(processID, 0) == 0 { kill(processID, SIGKILL) }
+            if Self.isRunning(processID, executablePath: binaryPath) { kill(processID, SIGKILL) }
         }
         await Task.detached { [process] in process.waitUntilExit() }.value
         clearStreams()
@@ -129,6 +131,13 @@ public actor SingBoxProcess {
         logDrainTask = nil
         self.process = nil
         stopping = false
+    }
+
+    nonisolated static func isRunning(_ pid: Int32, executablePath: String) -> Bool {
+        guard pid > 0, kill(pid, 0) == 0 else { return false }
+        var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        guard proc_pidpath(pid, &buffer, UInt32(MAXPATHLEN)) > 0 else { return false }
+        return String(cString: buffer) == executablePath
     }
 
     /// 日志块交给**单一消费者**按到达顺序落盘。

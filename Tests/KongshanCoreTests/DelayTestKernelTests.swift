@@ -86,8 +86,6 @@ final class DelayTestKernelTests: XCTestCase {
     }
 
     private var singBoxURL: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appending(path: VendoredKernel.relativePath)
+        TestPaths.vendoredKernel
     }
 }

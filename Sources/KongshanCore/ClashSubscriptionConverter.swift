@@ -64,6 +64,9 @@ public enum ClashSubscriptionConverter {
         var groups: [PolicyGroup] = []
         for entry in raw {
             guard let name = entry["name"] as? String else { continue }
+            // relay 是链式代理（依次经过每个成员），不是「挑一个」：当成 selector 会让流量只走其中一跳。
+            // sing-box 没有对应的组，跳过，由 `relayGroupNames` 报告（2026-10-25 审计）。
+            if (entry["type"] as? String)?.lowercased() == "relay" { continue }
             let kind: PolicyGroup.Kind = switch (entry["type"] as? String)?.lowercased() {
             case "url-test", "fallback", "load-balance": .urltest
             default: .selector
@@ -78,6 +81,12 @@ public enum ClashSubscriptionConverter {
             groups.append(group)
         }
         return groups
+    }
+
+    static func relayGroupNames(from root: [String: Any]) -> [String] {
+        ((root["proxy-groups"] as? [[String: Any]]) ?? []).compactMap { entry in
+            (entry["type"] as? String)?.lowercased() == "relay" ? entry["name"] as? String : nil
+        }
     }
 
     /// 解析 Clash 的 `rules:`，保持订阅原顺序（首个命中生效，顺序就是语义）。
@@ -170,6 +179,10 @@ public enum ClashSubscriptionConverter {
             )
         }
         let groups = policyGroups(from: root)
+        let relayGroups = relayGroupNames(from: root)
+        if !relayGroups.isEmpty {
+            warnings.append("链式代理组（relay）暂不支持，已跳过：" + relayGroups.joined(separator: "、"))
+        }
         var rules = subscriptionRules(from: root)
         guard rules.count <= SubscriptionInputLimits.ruleLimit else {
             throw SubscriptionConversionError.tooManyEntries(

@@ -209,7 +209,7 @@ final class AppStateTests: XCTestCase {
         await state.testAndSelectFastest(in: "手动选择")
 
         XCTAssertEqual(state.selectedNodeID, originalID)
-        XCTAssertTrue(state.errorMessage?.contains("没有测速成功") == true)
+        XCTAssertTrue(state.errorMessage?.contains("没有测延迟成功") == true)
     }
 
     func testTestAndSelectFastestOnlyTestsCurrentPolicyMembers() async {
@@ -1902,8 +1902,8 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(stoppedHealthCount, 2)
     }
 
-    /// 真实延迟测速走独立的测速内核：没开接管时不再把主内核拉起来（旧做法会让整页进入忙碌态），
-    /// 测完让测速内核空闲后自停，App 退出时一并收掉。
+    /// 真实延迟测延迟走独立的测延迟内核：没开接管时不再把主内核拉起来（旧做法会让整页进入忙碌态），
+    /// 测完让测延迟内核空闲后自停，App 退出时一并收掉。
     func testURLDelayTestUsesIsolatedKernelWithoutStartingMainCore() async throws {
         let tester = FakeURLDelayTester()
         let fixture = try await makeRunningFixture(urlDelayTester: tester)
@@ -1915,7 +1915,7 @@ final class AppStateTests: XCTestCase {
         await fixture.state.testDelay(fixture.state.nodes[0])
 
         let mainPID = await fixture.core.currentPID
-        XCTAssertNil(mainPID, "测速不能拉起主内核")
+        XCTAssertNil(mainPID, "测延迟不能拉起主内核")
         XCTAssertEqual(fixture.state.status, .off)
         XCTAssertEqual(fixture.state.delays[fixture.state.nodes[0].id], 120)
         let log = await tester.log
@@ -1956,7 +1956,7 @@ final class AppStateTests: XCTestCase {
 
         await fixture.state.testAllDelays()
 
-        XCTAssertTrue(fixture.state.errorMessage?.contains("测速内核没能启动") == true, fixture.state.errorMessage ?? "")
+        XCTAssertTrue(fixture.state.errorMessage?.contains("测延迟内核没能启动") == true, fixture.state.errorMessage ?? "")
         XCTAssertTrue(fixture.state.delays.isEmpty)
         XCTAssertFalse(fixture.state.isTestingAllDelays)
     }
@@ -2098,7 +2098,7 @@ final class AppStateTests: XCTestCase {
         for definition in declared {
             if let tag = definition["tag"] as? String, let path = definition["path"] as? String { paths[tag] = path }
         }
-        for tag in ["sub-ai", "sub-ai-dns", "sub-direct", "sub-direct-dns"] {
+        for tag in ["sub-ai", "sub-ai:dns", "sub-direct", "sub-direct:dns"] {
             XCTAssertNotNil(paths[tag], "\(tag) 要写进配置（未下载时是占位）")
         }
         let aiFile = URL(fileURLWithPath: try XCTUnwrap(paths["sub-ai"]))
@@ -2857,15 +2857,9 @@ final class AppStateTests: XCTestCase {
     }
 
     private var singBoxURL: URL {
-        packageRoot.appending(path: VendoredKernel.relativePath)
+        TestPaths.vendoredKernel
     }
 
-    private var packageRoot: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-    }
 
     private func temporaryDirectory() -> URL {
         FileManager.default.temporaryDirectory

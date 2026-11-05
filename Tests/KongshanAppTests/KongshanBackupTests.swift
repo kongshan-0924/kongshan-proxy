@@ -43,6 +43,43 @@ final class KongshanBackupTests: XCTestCase {
         XCTAssertNil(target.errorMessage)
     }
 
+    /// 设了口令的备份：内容不再是明文，导入要同一个口令；没口令或口令错都不导入、不动现有数据。
+    func testPasswordProtectedBackupRoundTrip() async throws {
+        let sourceRoot = temporaryDirectory()
+        let targetRoot = temporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: sourceRoot)
+            try? FileManager.default.removeItem(at: targetRoot)
+        }
+        let source = AppState(
+            storage: Storage(rootDirectory: sourceRoot),
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            automaticallyInitialize: false
+        )
+        await source.addManual(ManualHysteria2(
+            name: "加密备份节点", server: "hy.example.com", port: 443, password: "secret-pw-placeholder",
+            sni: "hy.example.com", skipCertificateVerification: false, obfsPassword: nil, uploadMbps: 20, downloadMbps: 100
+        ))
+        let data = try await source.exportBackup(password: "correct horse")
+        XCTAssertTrue(BackupEncryption.isEncrypted(data))
+        XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("secret-pw-placeholder"), "节点凭据不能以明文出现")
+
+        let target = AppState(
+            storage: Storage(rootDirectory: targetRoot),
+            singBoxProcess: SingBoxProcess(binaryURL: URL(fileURLWithPath: "/usr/bin/false")),
+            automaticallyInitialize: false
+        )
+        await target.importBackup(data)
+        XCTAssertTrue(target.manualNodes.isEmpty)
+        XCTAssertTrue(target.errorMessage?.contains("口令") == true, target.errorMessage ?? "")
+        await target.importBackup(data, password: "wrong")
+        XCTAssertTrue(target.manualNodes.isEmpty)
+        XCTAssertTrue(target.errorMessage?.contains("口令不对") == true, target.errorMessage ?? "")
+        await target.importBackup(data, password: "correct horse")
+        XCTAssertEqual(target.manualNodes.map(\.name), ["加密备份节点"])
+        XCTAssertNil(target.errorMessage)
+    }
+
     /// 备份里的设置项也要过校验：手改出来的「间隔 0 小时」会让订阅连轴刷新，非法 DNS 会让下次启动生成不了配置。
     func testBackupWithInvalidSettingsIsRejected() async throws {
         let root = temporaryDirectory()

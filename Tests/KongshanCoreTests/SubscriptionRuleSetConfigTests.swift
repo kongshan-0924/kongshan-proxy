@@ -48,7 +48,7 @@ final class SubscriptionRuleSetConfigTests: XCTestCase {
             let dns = withDNS ? try await compile(#"{"version":1,"rules":[{"domain_suffix":["\#(name).example"]}]}"#, "\(name).dns") : nil
             prepared[name] = PreparedSubscriptionRuleSet(
                 name: name, routeTag: "sub-\(name)", routeFile: route,
-                dnsTag: withDNS ? "sub-\(name)-dns" : nil, dnsFile: dns,
+                dnsTag: withDNS ? "sub-\(name):dns" : nil, dnsFile: dns,
                 sourceFile: route, entryCount: 1, fetchedAt: Date(), expiresAt: .distantFuture
             )
         }
@@ -70,8 +70,7 @@ final class SubscriptionRuleSetConfigTests: XCTestCase {
     }
 
     private var singBoxURL: URL {
-        URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent().appending(path: VendoredKernel.relativePath)
+        TestPaths.vendoredKernel
     }
 
     /// 真实订阅的规则顺序（节选）。
@@ -259,7 +258,7 @@ final class SubscriptionRuleSetConfigTests: XCTestCase {
     func testDNSMirrorsRoutingOrderAndTargets() throws {
         let subscription = dnsRules(try config()).filter { ruleSetTags($0).contains { $0.hasPrefix("sub-") } }
         XCTAssertEqual(subscription.map(ruleSetTags), [
-            ["sub-local-direct-dns"], ["sub-ai-dns"], ["sub-apple-dns"], ["sub-proxy-dns"], ["sub-cn-dns"],
+            ["sub-local-direct:dns"], ["sub-ai:dns"], ["sub-apple:dns"], ["sub-proxy:dns"], ["sub-cn:dns"],
         ])
         XCTAssertEqual(subscription.map { $0["server"] as? String },
                        ["dns-cn", "dns-fakeip", "dns-cn", "dns-fakeip", "dns-cn"])
@@ -267,7 +266,7 @@ final class SubscriptionRuleSetConfigTests: XCTestCase {
 
     /// 两跳：苹果服务 → 全球直连 → DIRECT。只看一跳会把它当成代理，苹果域名就拿到假 IP。
     func testTwoHopDirectTargetResolvesToDomesticDNS() throws {
-        let apple = dnsRules(try config()).first { ruleSetTags($0) == ["sub-apple-dns"] }
+        let apple = dnsRules(try config()).first { ruleSetTags($0) == ["sub-apple:dns"] }
         XCTAssertEqual(apple?["server"] as? String, "dns-cn")
     }
 
@@ -276,15 +275,15 @@ final class SubscriptionRuleSetConfigTests: XCTestCase {
         let root = try config(groupDefaults: ["全球直连": "节点选择"])
         // 切走后 local-direct 与后面同走 fakeip 的 ai 相邻（中间的拦截集在 DNS 里本就不生成），
         // 会合并成一条——按「包含」找，不按整条相等找。
-        let direct = dnsRules(root).first { ruleSetTags($0).contains("sub-local-direct-dns") }
+        let direct = dnsRules(root).first { ruleSetTags($0).contains("sub-local-direct:dns") }
         XCTAssertEqual(direct?["server"] as? String, "dns-fakeip")
     }
 
     /// 代理目标在 fakeip 下只接 A / AAAA（与默认 fakeip 规则一致）；不开 TUN 时走远端解析。
     func testProxyTargetDNSServerDependsOnFakeIP() throws {
-        let tun = dnsRules(try config()).first { ruleSetTags($0) == ["sub-ai-dns"] }
+        let tun = dnsRules(try config()).first { ruleSetTags($0) == ["sub-ai:dns"] }
         XCTAssertEqual(tun?["query_type"] as? [String], ["A", "AAAA"])
-        let proxyOnly = dnsRules(try config(modes: [.systemProxy])).first { ruleSetTags($0) == ["sub-ai-dns"] }
+        let proxyOnly = dnsRules(try config(modes: [.systemProxy])).first { ruleSetTags($0) == ["sub-ai:dns"] }
         XCTAssertEqual(proxyOnly?["server"] as? String, "dns-remote")
         XCTAssertNil(proxyOnly?["query_type"])
     }
@@ -303,7 +302,7 @@ final class SubscriptionRuleSetConfigTests: XCTestCase {
     func testDNSUsesDomainOnlyVariantsAndDeclaresThem() throws {
         let root = try config()
         let dnsTags = Set(dnsRules(root).flatMap(ruleSetTags).filter { $0.hasPrefix("sub-") })
-        XCTAssertTrue(dnsTags.allSatisfy { $0.hasSuffix("-dns") })
+        XCTAssertTrue(dnsTags.allSatisfy { $0.hasSuffix(":dns") })
         let declared = Set(((root["route"] as? [String: Any])?["rule_set"] as? [[String: Any]])?
             .compactMap { $0["tag"] as? String } ?? [])
         XCTAssertTrue(dnsTags.isSubset(of: declared), "DNS 引用的规则集必须已声明")

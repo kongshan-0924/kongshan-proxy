@@ -35,23 +35,12 @@ struct ExitAnalysisView: View {
         .buttonStyle(.pill)
         .toolbar {
             ToolbarItemGroup(placement: .automatic) {
-                Button {
-                    Task { await state.refreshSiteProbes() }
-                } label: {
-                    Label("重新自测", systemImage: "checkmark.shield")
-                }
-                .keyboardShortcut("r", modifiers: [.command, .shift])
-                .disabled(state.isProbingSites)
-                .help("直接请求这些站点，看当前出口会不会被拦")
-
-                Button {
-                    Task { await state.refreshExitDiagnostics() }
-                } label: {
-                    Label("刷新出口", systemImage: "arrow.clockwise")
+                Button(action: runFullCheck) {
+                    Label("全部重新检测", systemImage: "arrow.clockwise")
                 }
                 .keyboardShortcut("r", modifiers: .command)
-                .disabled(state.isRefreshingExitDiagnostics)
-                .help("重新检测出口 IP、归属、风险与 DNS")
+                .disabled(state.isRefreshingExitDiagnostics || state.isProbingSites)
+                .help("重新检测出口 IP、DNS 与站点可达性")
 
                 Button {
                     NSPasteboard.general.clearContents()

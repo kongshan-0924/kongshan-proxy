@@ -28,14 +28,19 @@ struct MessagesView: View {
         .toolbar {
             ToolbarItem(placement: .automatic) {
                 Button {
-                    state.dismissError()
-                    state.clearWarnings()
-                    state.clearRuntimeEvents()
+                    if tab == .warnings {
+                        state.dismissError()
+                        state.clearWarnings()
+                    } else {
+                        state.clearRuntimeEvents()
+                    }
                 } label: {
-                    Label("全部清除", systemImage: "trash")
+                    Label(tab == .warnings ? "清除警告" : "清空事件显示", systemImage: "trash")
                 }
-                .disabled(state.errorMessage == nil && state.warnings.isEmpty && state.runtimeEvents.isEmpty)
-                .help("清空消息页；告警与指标的存档不受影响")
+                .disabled(tab == .warnings
+                          ? state.errorMessage == nil && state.warnings.isEmpty
+                          : state.runtimeEvents.isEmpty)
+                .help("只清理当前分段；告警与指标的存档不受影响")
             }
         }
         // 让用户知道清除不会毁掉证据——否则「全部清除」看起来就是不可逆的销毁。

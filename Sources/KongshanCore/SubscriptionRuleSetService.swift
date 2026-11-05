@@ -304,6 +304,16 @@ public actor SubscriptionRuleSetService {
     private static func limitCount(
         _ providers: [SubscriptionRuleProvider], warnings: inout [String]
     ) -> [SubscriptionRuleProvider] {
+        // 只差大小写的两份规则集在 APFS（默认不区分大小写）上会落进同一个缓存文件、互相覆盖。
+        // 保留先出现的那份，后面的跳过并告警（2026-10-25 审计）。
+        var seenStems = Set<String>()
+        let providers = providers.filter { provider in
+            guard seenStems.insert(fileStem(for: provider.name).lowercased()).inserted else {
+                warnings.append("规则集「\(provider.name)」与前面的规则集只差大小写，会共用同一个缓存文件，已跳过")
+                return false
+            }
+            return true
+        }
         guard providers.count > SubscriptionInputLimits.ruleSetCountLimit else { return providers }
         warnings.append(
             "订阅引用了 \(providers.count) 份规则集，超过 \(SubscriptionInputLimits.ruleSetCountLimit) 份上限，多出的已忽略"
@@ -533,7 +543,9 @@ public actor SubscriptionRuleSetService {
 
     /// 内核配置里的 tag。加前缀避免与内置规则集（geosite-cn / geoip-cn / …）撞名。
     static func routeTag(for name: String) -> String { "sub-\(fileStem(for: name))" }
-    static func dnsTag(for name: String) -> String { "sub-\(fileStem(for: name))-dns" }
+    /// 用 `:` 隔开：它不在文件名字符集里，`x-dns` 规则集的 route tag（`sub-x-dns`）就不会和 `x` 的 DNS tag 撞名
+    /// （旧写法 `sub-x-dns` 两者相同，内核按重复 tag 整份拒绝，2026-10-25 审计）。
+    static func dnsTag(for name: String) -> String { "sub-\(fileStem(for: name)):dns" }
 
     private static func cachedMetadata(for provider: SubscriptionRuleProvider, in directory: URL) -> Metadata? {
         let files = Files(directory: directory, stem: fileStem(for: provider.name))

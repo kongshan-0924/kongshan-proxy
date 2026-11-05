@@ -391,7 +391,24 @@ install_verified() {
         [[ $(installed_app_pid) == "$pid_after" ]] \
             || fail "新版启动后未能稳定运行（PID $pid_after 已消失）；旧版备份仍在 $backup"
     done
+    post_install_smoke "$target_app" "$pid_after" || fail "装后自检失败；旧版备份仍在 $backup"
     print -- "已安装并打开 v$expected；旧版可恢复备份：$backup"
+}
+
+# 装后在本机真跑一遍内置内核：arm64 包是在 Intel 测试机上交叉构建的，M1–M4 只跑过 x86_64 那份，
+# 这里补上 arm64 实机这一环——内核能执行、版本对、XHTTP 已编进去、最小配置能过 check，App 仍在运行。
+post_install_smoke() {
+    local app=$1 pid=$2
+    local kernel="$app/Contents/Resources/sing-box"
+    "$kernel" version | grep -q "sing-box version $(sed -n 's/^version=//p' scripts/build_sing_box.sh)-xhttp" \
+        || { print -u2 -- "内置内核版本不对或无法执行"; return 1 }
+    print -r -- '{"log":{"disabled":true},"outbounds":[{"type":"direct","tag":"direct"}]}' \
+        | "$kernel" check -c /dev/stdin || { print -u2 -- "内置内核最小配置 check 失败"; return 1 }
+    print -r -- '{"log":{"disabled":true},"outbounds":[{"type":"vless","tag":"x","server":"example.com","server_port":443,"uuid":"00000000-0000-0000-0000-000000000001","tls":{"enabled":true,"server_name":"example.com"},"transport":{"type":"xhttp","path":"/x","mode":"packet-up"}}]}' \
+        | "$kernel" check -c /dev/stdin || { print -u2 -- "内置内核不认 XHTTP"; return 1 }
+    sleep 2
+    [[ $(installed_app_pid) == "$pid" ]] || { print -u2 -- "App 启动后退出了"; return 1 }
+    print -- "装后自检通过：$("$kernel" version | head -1)，XHTTP 可用，App PID $pid 运行中"
 }
 
 # ── 公开发布 ───────────────────────────────────────────────────────────────

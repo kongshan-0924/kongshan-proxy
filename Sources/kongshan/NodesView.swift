@@ -70,7 +70,7 @@ struct NodesView: View {
                 Button {
                     showingManualNode = true
                 } label: {
-                    Label("自建节点", systemImage: "plus")
+                    Label("添加节点", systemImage: "plus")
                 }
                 .help("添加自建节点")
             }
@@ -115,13 +115,9 @@ struct NodesView: View {
             Task { await state.setActiveConfig(item.id) }
         } label: {
             HStack(spacing: 11) {
-                Image(systemName: isActive ? "checkmark.circle.fill" : "circle")
-                    .font(.title3)
-                    .foregroundStyle(isActive ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.tertiary))
-
                 Image(systemName: item.isLocal ? "server.rack" : "network.badge.shield.half.filled")
                     .font(.title3)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(isActive ? AnyShapeStyle(Theme.accent) : AnyShapeStyle(.secondary))
                     .frame(width: 26)
 
                 VStack(alignment: .leading, spacing: 2) {
@@ -155,6 +151,7 @@ struct NodesView: View {
             .contextMenu { rowMenuItems(item) }
         }
         .buttonStyle(.plain)
+        .listRowBackground(isActive ? Theme.accent.opacity(0.07) : Color.clear)
         .disabled(state.isBusy)
     }
 

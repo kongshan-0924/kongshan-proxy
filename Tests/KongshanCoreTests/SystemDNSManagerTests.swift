@@ -141,6 +141,51 @@ final class SystemDNSManagerTests: XCTestCase {
         ])
     }
 
+    /// 接管期间 DNS 被外部重置成 X：补挂成 [server, X] 后，下一次补挂不能把 X 当成用户加的去覆盖快照，
+    /// 停止接管时仍还原成接管前的原值（2026-10-25 审计）。用户真的再改了才更新快照。
+    func testExternalResetDuringTakeoverKeepsOriginalSnapshot() async throws {
+        let root = temporaryDNSDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recorder = DNSSetupRecorder(
+            recoveryURL: root.appending(path: "dns-recovery.json"),
+            services: ["Wi-Fi"],
+            dnsByService: ["Wi-Fi": ["8.8.8.8"]]
+        )
+        let manager = SystemDNSManager(storage: Storage(rootDirectory: root), runner: recorder.run(arguments:timeout:))
+        try await manager.enable(server: "172.19.0.2")
+
+        await recorder.setDNS(["192.168.1.1"], for: "Wi-Fi")
+        try await manager.reassert(server: "172.19.0.2")
+        try await manager.reassert(server: "172.19.0.2")
+        var mutations = await recorder.mutationArguments
+        XCTAssertEqual(mutations.last, ["-setdnsservers", "Wi-Fi", "172.19.0.2", "192.168.1.1"], "补挂保留外部写入的服务器")
+
+        try await manager.restore()
+        mutations = await recorder.mutationArguments
+        XCTAssertEqual(mutations.last, ["-setdnsservers", "Wi-Fi", "8.8.8.8"], "仍还原成接管前的原值")
+    }
+
+    func testUserEditAfterExternalResetStillUpdatesSnapshot() async throws {
+        let root = temporaryDNSDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let recorder = DNSSetupRecorder(
+            recoveryURL: root.appending(path: "dns-recovery.json"),
+            services: ["Wi-Fi"],
+            dnsByService: ["Wi-Fi": ["8.8.8.8"]]
+        )
+        let manager = SystemDNSManager(storage: Storage(rootDirectory: root), runner: recorder.run(arguments:timeout:))
+        try await manager.enable(server: "172.19.0.2")
+        await recorder.setDNS(["192.168.1.1"], for: "Wi-Fi")
+        try await manager.reassert(server: "172.19.0.2")
+
+        // 用户之后自己加了 1.1.1.1：这才是情况 2，快照跟着更新。
+        await recorder.setDNS(["172.19.0.2", "1.1.1.1"], for: "Wi-Fi")
+        try await manager.reassert(server: "172.19.0.2")
+        try await manager.restore()
+        let mutations = await recorder.mutationArguments
+        XCTAssertEqual(mutations.last, ["-setdnsservers", "Wi-Fi", "1.1.1.1"])
+    }
+
     func testReassertAndRestoreWithoutSnapshotDoNothing() async throws {
         let root = temporaryDNSDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -359,6 +404,11 @@ private actor DNSSetupRecorder {
         self.services = services
         self.dnsByService = dnsByService
         self.failOnceFor = failOnceFor
+    }
+
+    /// 外部改了某个服务的 DNS（DHCP 续租、别的工具）。
+    func setDNS(_ servers: [String], for service: String) {
+        dnsByService[service] = servers
     }
 
     func setServices(_ services: [String]) {

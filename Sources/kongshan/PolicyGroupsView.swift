@@ -2,7 +2,7 @@ import KongshanCore
 import SwiftUI
 
 /// 代理页。左列是当前配置带出的策略（含内置 手动选择/自动选择），
-/// 右列是所选策略的成员：节点显示协议与延迟、可测速；也可能是指向其他策略的引用。
+/// 右列是所选策略的成员：节点显示协议与延迟、可测延迟；也可能是指向其他策略的引用。
 ///
 /// 成员用**列表选中即切换**：Surge / ClashX 都是一行一个节点、点一下就选，
 /// 不是卡片网格。列表是 AppKit 承载的，上百个节点每秒刷延迟也不重排整屏。
@@ -14,7 +14,7 @@ struct PolicyGroupsView: View {
     @State private var showsTestURLSheet = false
 
     var body: some View {
-        // 本视图**不读 `delays` 与测速进度**：测速时它们每秒变好几次，读了就整页（含左列几十个策略组）
+        // 本视图**不读 `delays` 与测延迟进度**：测延迟时它们每秒变好几次，读了就整页（含左列几十个策略组）
         // 跟着重算。延迟只在右列 `PolicyMemberList` 里读，进度只在 `SpeedTestToolbarButton` 里读。
         let groups = state.displayPolicyGroups
         let rememberedGroup = selectedGroupName ?? state.proxyPageGroupName
@@ -64,17 +64,17 @@ struct PolicyGroupsView: View {
 
                 SpeedTestToolbarButton()
 
-                // 测速的「怎么测」与「测完做什么」都收进这一个菜单：此前它们是并排的
-                // 三个无标签灰图标（测速 / 选最快 / 参数），彼此形状相近、一眼分不清是干什么的，
+                // 测延迟的「怎么测」与「测完做什么」都收进这一个菜单：此前它们是并排的
+                // 三个无标签灰图标（测延迟 / 选最快 / 参数），彼此形状相近、一眼分不清是干什么的，
                 // 正是用户 09-17 说「代理页有点拥挤」的那一处。
-                // 「测速全部」仍是独立按钮：⌘R 挂在真 Button 上才可靠。
+                // 「测延迟全部」仍是独立按钮：⌘R 挂在真 Button 上才可靠。
                 Menu {
-                    Button("测速并选最快") { state.startFastestTest(in: currentGroup.name) }
+                    Button("测延迟并选最快") { state.startFastestTest(in: currentGroup.name) }
                         .disabled(state.testableNodes.isEmpty || state.isTestingAllDelays || !isSelectable)
                     Divider()
-                    // 测速参数迁自 设置→网络·测速：想改「怎么测」的人，上一秒刚在这里按过测速、
+                    // 测延迟参数迁自 设置→网络·测延迟：想改「怎么测」的人，上一秒刚在这里按过测延迟、
                     // 觉得结果不对。放在「测」旁边比隔两页更符合第一直觉。
-                    Picker("测速方式", selection: state.speedTestMethodBinding) {
+                    Picker("测延迟方式", selection: state.speedTestMethodBinding) {
                         ForEach(SpeedTestMethod.allCases, id: \.self) { method in
                             Text(method.displayName).tag(method)
                         }
@@ -85,9 +85,9 @@ struct PolicyGroupsView: View {
                         Button("测试地址…") { showsTestURLSheet = true }
                     }
                 } label: {
-                    Label("测速选项", systemImage: "slider.horizontal.3")
+                    Label("测延迟选项", systemImage: "slider.horizontal.3")
                 }
-                .help("测速并选最快，以及怎么测：真实延迟经各节点访问测试地址，代理没开也能测；TCP 握手只测节点服务器能不能连上")
+                .help("测延迟并选最快，以及怎么测：真实延迟经各节点访问测试地址，代理没开也能测；TCP 握手只测节点服务器能不能连上")
             }
         }
     }
@@ -199,7 +199,7 @@ struct PolicyGroupsView: View {
 
 /// 代理页右列：所选策略的成员。
 ///
-/// 单独成一个视图，是为了把 `delays` 的观察关在这里：测速时延迟每秒回填好几批，
+/// 单独成一个视图，是为了把 `delays` 的观察关在这里：测延迟时延迟每秒回填好几批，
 /// 只有这一列需要跟着重绘。
 private struct PolicyMemberList: View {
     @Environment(AppState.self) private var state
@@ -271,7 +271,7 @@ private struct PolicyMemberList: View {
                 HStack(spacing: 7) {
                     Image(systemName: "bolt.badge.automatic")
                         .foregroundStyle(.secondary)
-                    Text("「\(currentGroup.name)」由内核按测速自动选路，无法手动指定。")
+                    Text("「\(currentGroup.name)」由内核按测延迟自动选路，无法手动指定。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -293,7 +293,7 @@ private struct PolicyMemberList: View {
                     }
                 }
                 // 回到本页或换策略组时定位：先找用户在这个组里最后点过的，没点过就找正在用的。
-                // 只在这两个时机滚，用户自己点选、测速回填都不动列表位置。
+                // 只在这两个时机滚，用户自己点选、测延迟回填都不动列表位置。
                 .onAppear { revealRemembered(in: visibleOptions, using: proxy) }
                 .onChange(of: currentGroup.name) { _, _ in revealRemembered(in: visibleOptions, using: proxy) }
             }
@@ -415,7 +415,7 @@ private struct PolicyMemberList: View {
     }
 }
 
-/// 「测速全部 / 取消」。测速进度每回填一批就变一次，单独成视图才不会带着整页重绘。
+/// 「测延迟全部 / 取消」。测延迟进度每回填一批就变一次，单独成视图才不会带着整页重绘。
 private struct SpeedTestToolbarButton: View {
     @Environment(AppState.self) private var state
 
@@ -430,12 +430,12 @@ private struct SpeedTestToolbarButton: View {
             if state.isTestingAllDelays {
                 Label("取消 \(state.speedTestProgress.label)", systemImage: "xmark.circle")
             } else {
-                Label("测速全部", systemImage: "gauge.with.needle")
+                Label("测延迟全部", systemImage: "gauge.with.needle")
             }
         }
         .keyboardShortcut("r", modifiers: .command)
         .disabled(state.testableNodes.isEmpty)
-        .help(state.isTestingAllDelays ? "取消正在进行的测速（⌘R）" : "对当前配置的全部节点测速（⌘R）")
+        .help(state.isTestingAllDelays ? "取消正在进行的测延迟（⌘R）" : "对当前配置的全部节点测延迟（⌘R）")
     }
 }
 

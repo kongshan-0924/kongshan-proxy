@@ -157,6 +157,17 @@ final class TakeoverResidueWiringTests: XCTestCase {
             "接管中换网也要按类清扫另一类的遗留"
         )
     }
+
+    /// 唤醒时正忙：推迟 2 秒的那次重试必须照样重置连接，睡眠里已经死掉的连接只有这一次机会（2026-10-25 审计）。
+    func testBusyWakeReassertKeepsConnectionReset() throws {
+        let source = try appStateSource()
+        let reassert = try body(of: "func reassertTakeoversAfterNetworkChange(", in: source)
+        XCTAssertTrue(reassert.contains("forceIdentityChange: forceIdentityChange, resetConnections: resetConnections"),
+                      "忙时推迟要把 resetConnections 带进调度")
+        let schedule = try body(of: "private func scheduleTakeoverReassert(", in: source)
+        XCTAssertTrue(schedule.contains("pendingReassertResetsConnections = pendingReassertResetsConnections || resetConnections"))
+        XCTAssertTrue(schedule.contains("resetConnections: reset, trigger: trigger, forceIdentityChange: force"))
+    }
 }
 
 /// 系统代理设置变化（SCDynamicStore 通知）后的兜底清扫。

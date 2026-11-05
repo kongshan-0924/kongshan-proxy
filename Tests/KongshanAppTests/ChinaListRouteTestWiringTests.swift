@@ -9,9 +9,6 @@ import XCTest
 /// v0.2.10 的扩展名单让这类站多了很多，用户一测就像修复没生效。
 @MainActor
 final class ChinaListRouteTestWiringTests: XCTestCase {
-    private var packageRoot: URL {
-        URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-    }
 
     func testRouteTestReportsDomainsInTheCachedExtraList() async throws {
         let root = FileManager.default.temporaryDirectory
@@ -22,7 +19,7 @@ final class ChinaListRouteTestWiringTests: XCTestCase {
         let source = root.appending(path: "extra.json")
         try Data(#"{"version":1,"rules":[{"domain_suffix":["extra-cn.example"]}]}"#.utf8).write(to: source)
         let compiled = try await ProcessRunner.run(
-            executable: packageRoot.appending(path: VendoredKernel.relativePath),
+            executable: TestPaths.vendoredKernel,
             arguments: ["rule-set", "compile", source.path, "-o", ruleSets.appending(path: "geosite-cn-extra.srs").path],
             timeout: 10
         )

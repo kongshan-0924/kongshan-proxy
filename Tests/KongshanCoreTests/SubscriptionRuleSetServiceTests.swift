@@ -28,9 +28,7 @@ final class SubscriptionRuleSetServiceTests: XCTestCase {
         }
     }
 
-    private let binary = URL(fileURLWithPath: #filePath)
-        .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        .appending(path: VendoredKernel.relativePath)
+    private let binary = TestPaths.vendoredKernel
     private var root: URL!
     private var server: FakeServer!
     private var service: SubscriptionRuleSetService!
@@ -77,7 +75,7 @@ final class SubscriptionRuleSetServiceTests: XCTestCase {
         let result = await download([provider("direct")])
         let prepared = try XCTUnwrap(result.prepared["direct"], "\(result.warnings)")
         XCTAssertEqual(prepared.routeTag, "sub-direct")
-        XCTAssertEqual(prepared.dnsTag, "sub-direct-dns")
+        XCTAssertEqual(prepared.dnsTag, "sub-direct:dns")
         XCTAssertEqual(prepared.entryCount, 3)
         XCTAssertTrue(FileManager.default.fileExists(atPath: prepared.routeFile.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: try XCTUnwrap(prepared.dnsFile).path))
@@ -89,12 +87,26 @@ final class SubscriptionRuleSetServiceTests: XCTestCase {
 
     /// 只有 IP / 进程条件的规则集，DNS 版本是空规则集（DNS 规则只能按域名匹配）。
     /// 总是有 DNS 版本，配置才与内容无关：内容变了只换文件、不用改配置。
+    /// 名为 `x-dns` 的规则集和 `x` 的 DNS 变体不能撞 tag；只差大小写的两份规则集只留第一份（2026-10-25 审计）。
+    func testTagsNeverCollideAndCaseOnlyDuplicatesAreSkipped() async throws {
+        server.serve("/x.yaml", mixed)
+        server.serve("/x-dns.yaml", mixed)
+        server.serve("/Direct.yaml", mixed)
+        server.serve("/direct.yaml", mixed)
+        let result = await download([provider("x"), provider("x-dns"), provider("Direct"), provider("direct")])
+        let tags = result.prepared.values.flatMap { [$0.routeTag] + ($0.dnsTag.map { [$0] } ?? []) }
+        XCTAssertEqual(tags.count, Set(tags).count, "tag 不能重复：\(tags.sorted())")
+        XCTAssertNotNil(result.prepared["Direct"])
+        XCTAssertNil(result.prepared["direct"])
+        XCTAssertTrue(result.warnings.contains { $0.contains("「direct」") && $0.contains("大小写") }, "\(result.warnings)")
+    }
+
     func testDomainlessRuleSetGetsEmptyDNSVariant() async throws {
         server.serve("/ips.yaml", ipOnly)
         let result = await download([provider("ips")])
         let prepared = try XCTUnwrap(result.prepared["ips"])
         let empty = try await compiledEmptyRuleSet()
-        XCTAssertEqual(prepared.dnsTag, "sub-ips-dns")
+        XCTAssertEqual(prepared.dnsTag, "sub-ips:dns")
         XCTAssertEqual(try Data(contentsOf: try XCTUnwrap(prepared.dnsFile)), empty)
     }
 
@@ -137,7 +149,7 @@ final class SubscriptionRuleSetServiceTests: XCTestCase {
         XCTAssertTrue(prepared.isPlaceholder)
         XCTAssertEqual(prepared.entryCount, 0)
         XCTAssertEqual(prepared.routeTag, "sub-direct")
-        XCTAssertEqual(prepared.dnsTag, "sub-direct-dns")
+        XCTAssertEqual(prepared.dnsTag, "sub-direct:dns")
         let empty = try await compiledEmptyRuleSet()
         XCTAssertEqual(try Data(contentsOf: prepared.routeFile), empty)
         XCTAssertEqual(try Data(contentsOf: try XCTUnwrap(prepared.dnsFile)), empty)

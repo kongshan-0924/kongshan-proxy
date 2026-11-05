@@ -58,7 +58,7 @@ final class DashboardObservationScopeTests: XCTestCase {
         for forbidden in [
             "state.uploadRate", "state.downloadRate", "state.activeConnectionCount", "state.coreMemory",
             "state.lastMetrics", "state.trafficHistory", "state.sessionTotal", "state.sessionUpload",
-            "state.sessionDownload"
+            "state.sessionDownload", "state.delays", "DashboardRoute("
         ] {
             XCTAssertFalse(pageScope.contains(forbidden), "整页作用域不能读高频状态：\(forbidden)")
         }
@@ -99,6 +99,47 @@ final class DashboardObservationScopeTests: XCTestCase {
             "速率视图自己必须跟着更新——否则说明更新根本没送达，下一条断言就没有意义"
         )
         XCTAssertEqual(DashboardView.bodyEvaluations, pageBefore, "速率变化不能让整页 body 重新求值")
+    }
+
+    /// 测延迟时 `delays` 每秒回填好几批：只有链路头部卡（显示当前节点延迟）跟着重算，整页不动。
+    func testDelayBackfillDoesNotReevaluateWholePage() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "kongshan-dashboard-delay-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let state = AppState(storage: Storage(rootDirectory: root), automaticallyInitialize: false)
+        state.isReady = true
+        let source = SubscriptionSource(name: "sub.example.com", url: URL(string: "https://sub.example.com/sub")!)
+        let node = ProxyNode(sourceID: source.id, name: "香港 01", protocolType: .shadowsocks, server: "example.com", port: 443)
+        state.subscriptions = [source]
+        state.nodes = [node]
+        state.activeConfigID = source.id
+        state.selectedNodeID = node.id
+
+        let hosting = NSHostingView(rootView: AnyView(DashboardView().environment(state)))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 700),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hosting
+        window.setFrameOrigin(NSPoint(x: -10_000, y: -10_000))
+        window.orderFront(nil)
+        defer { window.orderOut(nil) }
+        hosting.layoutSubtreeIfNeeded()
+        pump(0.6)
+
+        let pageBefore = DashboardView.bodyEvaluations
+        let headerBefore = RouteHeaderView.bodyEvaluations
+        for index in 1...8 {
+            state.delays[node.id] = 40 + index
+            pump(0.1)
+        }
+        hosting.layoutSubtreeIfNeeded()
+        pump(0.3)
+
+        XCTAssertGreaterThan(RouteHeaderView.bodyEvaluations, headerBefore, "头部卡必须跟着延迟更新，否则下一条断言没有意义")
+        XCTAssertEqual(DashboardView.bodyEvaluations, pageBefore, "延迟回填不能让整页 body 重新求值")
     }
 
     private func pump(_ seconds: TimeInterval) {

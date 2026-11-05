@@ -227,15 +227,9 @@ final class RoutingConfigTests: XCTestCase {
     }
 
     private var singBoxURL: URL {
-        packageRoot.appending(path: VendoredKernel.relativePath)
+        TestPaths.vendoredKernel
     }
 
-    private var packageRoot: URL {
-        URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-    }
 
     private func json(_ data: Data) throws -> [String: Any] {
         try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])

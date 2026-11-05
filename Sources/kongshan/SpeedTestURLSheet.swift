@@ -1,7 +1,7 @@
 import KongshanCore
 import SwiftUI
 
-/// 测速地址。迁自 设置→网络·测速。
+/// 测延迟地址。迁自 设置→网络·测速。
 ///
 /// 用 sheet 而不是把 TextField 塞进菜单：菜单里放不下输入框，而任意 URL 的输入能力要保留。
 struct SpeedTestURLSheet: View {
@@ -22,7 +22,7 @@ struct SpeedTestURLSheet: View {
                 } header: {
                     Text("测试地址")
                 } footer: {
-                    Text("真实延迟测速经各个节点请求这个地址，测的是完整代理链路。"
+                    Text("真实延迟测量经各个节点请求这个地址，测的是完整代理链路。"
                          + "建议用返回 204 空响应的地址：省掉服务端生成页面的时间，各地区节点之间才可比。")
                 }
             }

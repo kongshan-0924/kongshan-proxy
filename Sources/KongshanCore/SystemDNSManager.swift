@@ -17,12 +17,23 @@ public struct DNSServiceSnapshot: Codable, Equatable, Sendable {
     /// 特权助手在 App 异常退出后还原 DNS 时也按它过滤（`HelperDNSRestore`）。
     public let locationID: String?
     public let locationName: String?
+    /// 接管期间这项被外部重置（DHCP 续租、别的工具改了 DNS）后，补挂时**顺带保留**的那些服务器。
+    /// 它们不是用户加的：下一次补挂看到 `[server] + 这些` 时不能当成情况 2 去覆盖 `servers` 原值，
+    /// 否则停止接管时还原成外部写入的值，接管前的原值就丢了（2026-10-25 审计）。旧快照没有这个字段。
+    public let carriedServers: [String]?
 
-    public init(name: String, servers: [String], locationID: String? = nil, locationName: String? = nil) {
+    public init(
+        name: String,
+        servers: [String],
+        locationID: String? = nil,
+        locationName: String? = nil,
+        carriedServers: [String]? = nil
+    ) {
         self.name = name
         self.servers = servers
         self.locationID = locationID
         self.locationName = locationName
+        self.carriedServers = carriedServers
     }
 
     func tagged(with location: NetworkLocation?) -> DNSServiceSnapshot {
@@ -31,6 +42,13 @@ public struct DNSServiceSnapshot: Codable, Equatable, Sendable {
 
     func withServers(_ servers: [String]) -> DNSServiceSnapshot {
         DNSServiceSnapshot(name: name, servers: servers, locationID: locationID, locationName: locationName)
+    }
+
+    func carrying(_ carried: [String]) -> DNSServiceSnapshot {
+        DNSServiceSnapshot(
+            name: name, servers: servers, locationID: locationID, locationName: locationName,
+            carriedServers: carried.isEmpty ? nil : carried
+        )
     }
 
     var slot: (name: String, locationID: String?) { (name, locationID) }
@@ -238,8 +256,9 @@ public actor SystemDNSManager {
     /// 静默丢失用户的修改。现在分三种情况：
     /// 1. `current == [server]`：用户没动，无需补挂，保留快照原值。
     /// 2. `current` 含 `server` 且有别的服务器：用户加了 DNS → 把加的并入快照（restore 时还原成用户加的），不补挂。
+    ///    例外：这些服务器正是情况 3 补挂时顺带保留的（`carriedServers`），那是外部写入的，不是用户加的，快照不动。
     /// 3. `current` 不含 `server`：hijack 服务器被移除（新服务或被重置）→ 补挂 `[server] + current`，保留用户已有的服务器；
-    ///    新服务（不在快照里）才并入快照，已存在快照的保留原值（restore 仍写回原始值）。
+    ///    新服务（不在快照里）才并入快照，已存在快照的保留原值（restore 仍写回原始值），并记下顺带保留了哪些。
     public func reassert(server: String) async throws {
         try beginTransaction()
         defer { transactionInProgress = false }
@@ -268,6 +287,7 @@ public actor SystemDNSManager {
                     // 即便该服务不在原快照里，refreshedExisting 的项也只会被 merged 用同名覆盖，
                     // 不在 snapshot.services 里的服务本来就走 discovered 路径或不入快照——这里无副作用。
                     let userAdded = current.servers.filter { $0 != server }
+                    if let inSnapshot, inSnapshot.carriedServers == userAdded { continue }
                     refreshedExisting.append(DNSServiceSnapshot(name: service, servers: userAdded).tagged(with: location))
                 }
                 // 情况 1：保留快照原值，无需补挂。
@@ -276,11 +296,13 @@ public actor SystemDNSManager {
 
             // 情况 3：hijack 服务器被移除。
             stale.append(service)
-            if inSnapshot == nil {
+            if let inSnapshot {
+                // 已在快照的服务被重置：保留快照原值，restore 时仍写回原始值；记下这次顺带保留的服务器。
+                refreshedExisting.append(inSnapshot.carrying(current.servers))
+            } else {
                 // 新服务（或新位置里的同名服务）：把当前状态（不含 server）并入快照，restore 时还原到这次的状态。
                 discovered.append(DNSServiceSnapshot(name: service, servers: current.servers).tagged(with: location))
             }
-            // 已在快照的服务被重置：保留快照原值（不更新），restore 时仍写回原始值。
         }
 
         // 合并：snapshot 为基底，refreshedExisting 覆盖当前位置的同名项（保留用户修改），discovered 追加（新服务）。

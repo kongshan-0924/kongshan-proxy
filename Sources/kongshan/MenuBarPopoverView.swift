@@ -12,13 +12,14 @@ struct MenuBarPopoverView: View {
     /// 点策略组那一行：由 `MenuBarController` 在鼠标处弹出原生菜单，选项与右键菜单同一份、打开时才构建。
     ///
     /// 不在面板里放 `Picker`：真实订阅十几个组、每组四百多个节点，每个 `Picker` 都要预先建好全部菜单项，
-    /// 弹出面板和测速刷新延迟时整批重建；截断到前 N 个又会让排在后面的已选节点对不上标签。
+    /// 弹出面板和测延迟刷新时整批重建；截断到前 N 个又会让排在后面的已选节点对不上标签。
     let showGroupMenu: (String) -> Void
 
     static let width: CGFloat = 300
     /// 组多时只露这么多行，其余在卡片里滚动，面板不至于顶出屏幕。
     private static let visibleGroupRows = 7
     private static let groupRowHeight: CGFloat = 28
+    @State private var showsAllGroups = false
 
     var body: some View {
         VStack(spacing: 10) {
@@ -32,6 +33,7 @@ struct MenuBarPopoverView: View {
         .padding(12)
         .frame(width: Self.width)
         .background(Theme.canvasBackground)
+        .tint(Theme.accent)
         .groupBoxStyle(CardGroupBoxStyle())
         .buttonStyle(.pill)
     }
@@ -116,26 +118,46 @@ struct MenuBarPopoverView: View {
         state.displayPolicyGroups.filter { $0.kind == .selector }
     }
 
+    private var preferredGroups: [PolicyGroup] {
+        let groups = selectorGroups
+        guard let primary = state.primaryGroupName,
+              let match = groups.first(where: { $0.name == primary }) else {
+            return Array(groups.prefix(1))
+        }
+        return [match]
+    }
+
     private var groupCard: some View {
         GroupBox {
-            let groups = selectorGroups
-            let rows = VStack(spacing: 0) {
-                ForEach(groups, id: \.name) { group in
-                    MenuBarGroupRow(group: group, height: Self.groupRowHeight) {
-                        showGroupMenu(group.name)
+            let groups = showsAllGroups ? selectorGroups : preferredGroups
+            VStack(alignment: .leading, spacing: 8) {
+                let rows = VStack(spacing: 0) {
+                    ForEach(groups, id: \.name) { group in
+                        MenuBarGroupRow(group: group, height: Self.groupRowHeight) {
+                            showGroupMenu(group.name)
+                        }
                     }
                 }
-            }
-            if groups.count > Self.visibleGroupRows {
-                ScrollView {
+                if groups.count > Self.visibleGroupRows {
+                    ScrollView { rows }
+                        .scrollIndicators(.never)
+                        .frame(height: Self.groupRowHeight * (CGFloat(Self.visibleGroupRows) + 0.5))
+                } else {
                     rows
                 }
-                // 不留滚动条槽：常显滚动条（鼠标用户）会挤掉节点名。露出的半行已经提示下面还有。
-                .scrollIndicators(.never)
-                // 露出半行，提示下面还有。
-                .frame(height: Self.groupRowHeight * (CGFloat(Self.visibleGroupRows) + 0.5))
-            } else {
-                rows
+                if selectorGroups.count > preferredGroups.count {
+                    Button {
+                        showsAllGroups.toggle()
+                    } label: {
+                        Label(
+                            showsAllGroups ? "只显示主策略" : "全部策略组（\(selectorGroups.count)）",
+                            systemImage: showsAllGroups ? "chevron.up" : "chevron.down"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
             }
         } label: {
             HStack {
@@ -153,7 +175,7 @@ struct MenuBarPopoverView: View {
             Button("取消 \(state.speedTestProgress.label)") { state.cancelDelayTests() }
                 .monospacedDigit()
         } else {
-            Button("测速") { state.startAllDelayTests() }
+            Button("测延迟") { state.startAllDelayTests() }
                 .disabled(state.testableNodes.isEmpty)
         }
     }
