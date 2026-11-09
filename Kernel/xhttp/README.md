@@ -22,12 +22,15 @@
 ## 编译
 
 ```bash
-zsh scripts/build_sing_box.sh            # 按本机架构，输出到 Vendor/sing-box/sing-box
+zsh scripts/build_sing_box.sh all        # 升级内核：两个架构都编进 Vendor，并更新 arch_lib.sh 的 SHA-256
+zsh scripts/build_sing_box.sh arm64 /tmp/sing-box-arm64   # 只编一个架构到指定位置
 KONGSHAN_SINGBOX_TEST=1 zsh scripts/build_sing_box.sh amd64 /tmp/sing-box-amd64   # 先跑移植进来的单测
 ```
 
-需要 Go 与 Xcode 命令行工具（与官方 macOS 构建一样 `CGO_ENABLED=1`）。Go 钉在官方该版本用的 1.26.10，
-本机版本不同会自动下载。构建可复现：同一版 Go 重编得到同一个 SHA-256，钉在 `scripts/arch_lib.sh`。
+内核固定在一台构建机上编（`KONGSHAN_BUILD_HOST`，缺省见脚本开头）：在别的机器上运行会同步脚本与补丁过去编译、取回产物；
+构建机经跳板连不上时自动直连。需要 Go 与 Xcode 命令行工具（与官方 macOS 构建一样 `CGO_ENABLED=1`），Go 钉在官方该版本用的 1.26.10，
+构建机版本不同会自动下载。构建可复现：**同一台机器**重编得到同一个 SHA-256，钉在 `scripts/arch_lib.sh`；
+换机器或构建机升级 Xcode / SDK 后 SHA-256 会变（CGO 链接系统 SDK），用 `all` 重编后提交新的钉住值。
 
 编译选项是官方的 `release/DEFAULT_BUILD_TAGS_OTHERS` 加 `with_xhttp`，比官方 macOS 包少 `with_naive_outbound`
 （naive 协议，kongshan 不用）。
@@ -36,6 +39,7 @@ KONGSHAN_SINGBOX_TEST=1 zsh scripts/build_sing_box.sh amd64 /tmp/sing-box-amd64 
 
 1. 改 `build_sing_box.sh` 的 `version`、`upstream_commit`、`go_toolchain`（看官方 `.github/workflows/build.yml`）。
 2. 对照 lx 对应版本更新 `overlay/` 与 `core.patch`（`diff -u 官方 lx` 三个核心文件）；补丁打不上时编译会直接失败。
-3. `KONGSHAN_SINGBOX_TEST=1` 编两个架构，把新的 SHA-256 写进 `arch_lib.sh`，再走分流改动的验证流程。
+3. `KONGSHAN_SINGBOX_TEST=1 zsh scripts/build_sing_box.sh all`：跑单测、编两个架构、写新的 SHA-256；提交 `Vendor/sing-box/sing-box`
+   与 `arch_lib.sh`，再走分流改动的验证流程。内核 cdhash 变了，装新版后要重装一次免密码助手。
 4. **升到 1.15 及以上时**：1.15 废弃了 TUN 的 `stack`（1.17 删除），改用 sing-tun 自带协议栈。要删掉 `ConfigGenerator` 里 TUN 入站的 `stack`，
    同步改助手的配置白名单与 README「TUN 固定使用 gVisor」一句；2026-11-03 用 1.15.0-alpha.13 检查真实配置结构，这是唯一的废弃告警。

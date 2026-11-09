@@ -29,7 +29,7 @@ struct RuleSetDatabaseSheet: View {
                             ProgressView().controlSize(.small)
                             Text("正在更新…")
                                 .font(.caption)
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(Theme.textSecondary)
                         }
                         Spacer()
                         Button("立即更新") {
@@ -47,27 +47,33 @@ struct RuleSetDatabaseSheet: View {
                         ) { source in
                             Text(source.url.absoluteString)
                                 .font(.caption.monospaced())
-                                .foregroundStyle(.secondary)
+                                .foregroundStyle(Theme.textSecondary)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                                 .textSelection(.enabled)
+                                .help(source.url.absoluteString)
                         }
                     }
                     Text("国内 IP、国内域名与广告名单来自 sing-box 官方开源仓库 SagerNet/sing-geoip 与 sing-geosite；国内域名扩展名单来自 MetaCubeX/meta-rules-dat（v2fly cn 与 dnsmasq-china-list 合并）。下载后用打包内核校验通过才替换缓存；失败或关闭自动更新时沿用最后一次成功的缓存，扩展名单拿不到时不用。")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
-                                }
+                        .foregroundStyle(Theme.textSecondary)
+                }
             }
 
-            Divider()
+            Theme.separator.frame(height: 0.5)
             HStack {
                 Spacer()
                 Button("完成") { dismiss() }
                     .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.pill)
             }
-            .padding(14)
+            .padding(16)
         }
         .frame(width: 520, height: 420)
+        .foregroundStyle(Theme.textPrimary)
+        .background(Theme.canvasBackground)
+        .tint(Theme.accent)
+        .buttonStyle(.pill)
     }
 
     private var mirrorBinding: Binding<RuleSetMirror> {

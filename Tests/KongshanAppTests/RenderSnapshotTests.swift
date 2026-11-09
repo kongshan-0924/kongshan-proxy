@@ -246,30 +246,6 @@ final class RenderSnapshotTests: XCTestCase {
             dark: true
         )
 
-        // 菜单栏左键迷你面板：浅色空闲态与深色运行态各一张。
-        render(
-            MenuBarPopoverView(openMainWindow: {}, showGroupMenu: { _ in }).environment(state),
-            name: "menubar-popover",
-            size: CGSize(width: 300, height: 560)
-        )
-        // 真实订阅常见十几个选择组：组卡要限高滚动，面板不能顶出屏幕。
-        let savedGroups = state.discoveredPolicyGroups[state.snapshotSourceID!]
-        state.discoveredPolicyGroups[state.snapshotSourceID!] = (1...14).map {
-            PolicyGroup(name: "策略组 \($0)", kind: .selector)
-        }
-        render(
-            MenuBarPopoverView(openMainWindow: {}, showGroupMenu: { _ in }).environment(state),
-            name: "menubar-popover-many-groups",
-            size: CGSize(width: 300, height: 640)
-        )
-        state.discoveredPolicyGroups[state.snapshotSourceID!] = savedGroups
-        render(
-            MenuBarPopoverView(openMainWindow: {}, showGroupMenu: { _ in }).environment(running),
-            name: "menubar-popover-dark",
-            size: CGSize(width: 300, height: 560),
-            dark: true
-        )
-
         // 自适应对照：同一页面窄/宽各渲染一张，核对网格列数与工具条折行是否随宽度变化。
         render(
             DashboardView().environment(running),
@@ -381,12 +357,39 @@ final class RenderSnapshotTests: XCTestCase {
         }
     }
 
-    /// 按用户日常窗口（外框 867×697，扣掉统一工具栏约 52pt 后内容区 867×645）渲染主窗口全部页面。
+    /// 按用户选定窗口（960×640，侧栏 188 + 内容 772）渲染主窗口全部页面。
     /// 运行态 + 出口检测结果都摆上，核对比例、按钮、字体、输入框是否一致。
+    /// 日志页不在滚动容器里：运行事件 / 警告卡内列表没有高度上限时，200 条事件会把页面最小高度撑到几千点，
+    /// 窗口被内容拉长（2026-11-09 用户截图）。页面最小高度必须远小于默认窗口高 640。
+    func testRecordsPageDoesNotGrowWithManyRuntimeEvents() {
+        let state = makeState()
+        for index in 0..<200 {
+            state.recordRuntimeEvent(level: index % 3 == 0 ? .warning : .info, title: "事件 \(index)",
+                                     detail: "第 \(index) 条运行事件的说明", announce: false)
+        }
+        // 用真实主窗口承载（与 KongshanApp 同样的 fullSizeContentView 与承载视图），看窗口会不会被内容撑高。
+        state.lastMainWindowPage = .records
+        let content = MainWindowContentHost(state: state)
+        let window = UnclampedWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 640),
+                                     styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+                                     backing: .buffered, defer: false)
+        window.contentView = content.hostingView
+        window.setFrame(NSRect(x: -10_000, y: -10_000, width: 960, height: 640), display: false)
+        window.orderFront(nil)
+        defer { window.orderOut(nil) }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        content.hostingView.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        XCTAssertEqual(window.frame.height, 640, "日志页不能把窗口撑高")
+        // 页面自身的最小高度也要低于窗口 minSize 高 560，否则最小窗口里卡片底部被裁。
+        let page = NSHostingController(rootView: RecordsPageView().environment(state).frame(width: 772))
+        XCTAssertLessThan(page.sizeThatFits(in: CGSize(width: 772, height: 0)).height, 560)
+    }
+
     func testRenderUserWindowSnapshots() throws {
         try XCTSkipIf(ProcessInfo.processInfo.environment["KONGSHAN_SNAPSHOT_DIR"] == nil)
         try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
-        let size = CGSize(width: 867, height: 645)
+        let size = CGSize(width: 960, height: 640)
         let running = makeState()
         running.applyExitAnalysisSnapshotFixture()
         running.setRunningForTesting(modes: [.systemProxy])
@@ -396,8 +399,8 @@ final class RenderSnapshotTests: XCTestCase {
         render(MainWindowView(initialPage: .dashboard).environment(running), name: "user-dashboard-dark", size: size, dark: true)
         let idle = makeState()
         render(MainWindowView(initialPage: .dashboard).environment(idle), name: "user-dashboard-off", size: size)
-        // 设置页其余三个分区与诊断各子页：内容区宽 = 867 - 侧栏 132。
-        let detail = CGSize(width: 735, height: 645)
+        // 设置页其余三个分区与诊断各子页：内容区宽 = 960 - 侧栏 188。
+        let detail = CGSize(width: 772, height: 640)
         for tab in SettingsTab.allCases where tab != .general {
             render(SettingsView(initialTab: tab).environment(running), name: "user-settings-\(tab.rawValue)", size: detail)
         }
@@ -405,6 +408,8 @@ final class RenderSnapshotTests: XCTestCase {
         render(RouteHitTestView().environment(running), name: "user-diag-route", size: detail)
         render(DeepDiagnosticsView().environment(running), name: "user-diag-deep", size: detail)
         render(SharingView().environment(running), name: "user-sharing", size: detail)
+        // 连接页「局域网」分段就是完整共享页（2026-11-09 审计：曾被换成缺端口 / 白名单的简版）。
+        render(ConnectionsView(scope: .constant(.lan)).environment(running), name: "user-connections-lan", size: detail)
         render(SubscriptionRulesBrowserView().environment(running), name: "user-routing-subscription", size: detail)
         // 弹层：与真实弹出时同样挂胶囊按钮。
         render(ManualNodeSheet().environment(running).sheetChrome(), name: "user-sheet-manual", size: CGSize(width: 470, height: 580))
@@ -576,4 +581,9 @@ private final class SnapshotRelay: LocalTCPRelaying, @unchecked Sendable {
                            lastActiveAt: now.addingTimeInterval(-600))
         ]
     }
+}
+
+/// 离屏测试窗口：ssh 下没有屏幕，系统会把窗口约束成怪尺寸；这里原样保留请求的外框。
+private final class UnclampedWindow: NSWindow {
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
 }

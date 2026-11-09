@@ -5,7 +5,7 @@ import SwiftUI
 /// 局域网共享页。
 ///
 /// 把本机的分流与节点共享给同网段的设备：对方在系统或浏览器里把 HTTP / SOCKS5 代理
-/// 填成「本机 IP:端口」即可。入口是**独立于本机代理入口的另一个监听**，
+/// 填成「本机 IP:端口」即可。入口是独立于本机代理入口的另一个监听，
 /// 开关它不会影响本机自己走的系统代理。
 struct SharingView: View {
     @Environment(AppState.self) private var state
@@ -16,14 +16,14 @@ struct SharingView: View {
     @State private var lanAddresses: [String] = []
 
     var body: some View {
-        CardForm {
-            switchSection
-            if state.lanSharing.enabled { addressSection }
-            configurationSection
-            clientsSection
+        TilePage {
+            TileMasonry(minColumnWidth: 300, maxColumns: 2) {
+                shareTile
+                accessTile
+                configTile
+                LANClientsTile()
+            }
         }
-        .navigationTitle("共享")
-        .navigationSubtitle(subtitle)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if state.lanSharing.enabled { PageStatusBar(subtitle) }
         }
@@ -49,193 +49,234 @@ struct SharingView: View {
         return "监听 \(port) · \(active) 个设备在用 · 共 \(state.lanClients.count) 个来访过"
     }
 
-    // MARK: - 开关
+    // MARK: - 小窗 1：「共享」
 
-    private var switchSection: some View {
-        CardSection {
-            Toggle("共享给局域网", isOn: enabledBinding)
-                .disabled(!state.isReady)
-            if state.lanSharing.enabled, state.lanSharingBoundPort == nil, state.lanSharingFailure == nil {
-                Label("代理未开启，共享入口会在开启代理后自动启动。", systemImage: "info.circle")
-                    .foregroundStyle(.secondary)
+    private var shareTile: some View {
+        TileCard(
+            "共享",
+            symbol: "antenna.radiowaves.left.and.right",
+            height: nil,
+            trailing: {
+                Toggle("", isOn: enabledBinding)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .disabled(!state.isReady)
+                    .help("开启或关闭局域网共享")
+            },
+            content: {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        StatusBadge(
+                            text: state.lanSharing.enabled
+                                ? (state.lanSharingBoundPort != nil ? "共享运行中" : (state.lanSharingFailure != nil ? "未启动" : "等待代理开启"))
+                                : "已关闭",
+                            style: !state.lanSharing.enabled ? Theme.neutral
+                                : state.lanSharingFailure != nil ? Theme.danger
+                                : state.lanSharingBoundPort != nil ? Theme.current
+                                : Theme.warning
+                        )
+                        if let port = state.lanSharingBoundPort {
+                            Text("端口 \(port)")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(Theme.textSecondary)
+                        }
+                    }
+
+                    if state.lanSharingFailure == nil, state.lanSharing.enabled, state.lanSharingBoundPort == nil {
+                        Text("代理未开启，共享入口将在代理开启后自动启动。")
+                            .font(.caption)
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+
+                    if state.lanSharing.enabled, state.lanSharingBoundPort != nil {
+                        let addresses = lanAddresses
+                        if addresses.isEmpty {
+                            Text("未检测到局域网地址（请检查网络连接）")
+                                .font(.caption)
+                                .foregroundStyle(Theme.textSecondary)
+                        } else {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("本机局域网地址")
+                                    .font(.caption)
+                                    .foregroundStyle(Theme.textSecondary)
+                                ForEach(addresses, id: \.self) { address in
+                                    HStack(spacing: 8) {
+                                        Text(address)
+                                            .font(.system(.title3, design: .monospaced, weight: .bold))
+                                            .textSelection(.enabled)
+                                        Spacer()
+                                        copyButton(address, help: "拷贝本机局域网 IP")
+                                    }
+                                }
+                            }
+                            .padding(.top, 2)
+                        }
+                    }
+
+                    Text("同网段设备可将代理指向本机，共用当前节点与规则。")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                        .lineLimit(1)
+                        .help("同网段的设备把 HTTP 与 SOCKS5 代理都填成此地址与端口，就能走本机的分流规则与节点。开关独立于本机代理，开关它不会影响本机网络。")
+                }
+                .padding(.vertical, 4)
             }
-        } header: {
-            Text("局域网共享")
-        } footer: {
-            Text("同网段的设备把 HTTP 与 SOCKS5 代理都填成下面的地址，就能走本机的分流规则与节点。同一个端口同时支持这两种协议。入口独立于本机代理，开关它不会中断你自己正在走的连接。")
-        }
+        )
     }
 
-    // MARK: - 地址
+    // MARK: - 小窗 2：「接入方式」
 
-    /// 分成「服务器」「端口」两行：手机和电脑的代理设置里这两项本来就是分开填的，
-    /// 合成「IP:端口」一行时用户不知道冒号后面该往哪填。
-    private var addressSection: some View {
-        CardSection {
-            if let port = state.lanSharingBoundPort {
-                let addresses = lanAddresses
-                if addresses.isEmpty {
-                    Label("当前没有可用的局域网地址（未连接网络？）", systemImage: "exclamationmark.triangle")
-                        .foregroundStyle(.orange)
+    private var accessTile: some View {
+        TileCard("接入方式", symbol: "iphone.gen3", height: nil) {
+            VStack(alignment: .leading, spacing: 6) {
+                if let port = state.lanSharingBoundPort {
+                    let addresses = lanAddresses
+                    if addresses.isEmpty {
+                        TileEmptyNote(text: "当前没有可用的局域网地址")
+                    } else {
+                        ForEach(addresses, id: \.self) { address in
+                            TileRow(symbol: "server.rack", "代理服务器", subtitle: address, subtitleMonospaced: true, showsDivider: true) {
+                                copyButton(address, help: "拷贝服务器 IP")
+                            }
+                        }
+                        TileRow(symbol: "number", "端口", subtitle: String(port), subtitleMonospaced: true, showsDivider: true) {
+                            copyButton(String(port), help: "拷贝端口")
+                        }
+                        TileRow(symbol: "checkmark.shield", "协议类型", subtitle: "HTTP 与 SOCKS5 同端口均支持", showsDivider: false)
+                    }
+                } else if let failure = state.lanSharingFailure {
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(Theme.danger.icon)
+                            .font(.caption)
+                        Text(failure)
+                            .font(.caption)
+                            .foregroundStyle(Theme.danger.text)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.vertical, 8)
                 } else {
-                    ForEach(addresses, id: \.self) { address in
-                        copyableRow("服务器", value: address)
-                    }
-                    copyableRow("端口", value: String(port))
-                    LabeledContent("类型") {
-                        Text("HTTP 或 SOCKS5，任选其一，都用这个端口")
-                            .foregroundStyle(.secondary)
-                    }
+                    TileRow(symbol: "number", "配置端口", subtitle: String(draft.port), subtitleMonospaced: true, showsDivider: false)
+                    TileEmptyNote(text: "开启共享后在此显示填写入参")
                 }
-            } else if let failure = state.lanSharingFailure {
-                Label(failure, systemImage: "exclamationmark.triangle")
-                    .foregroundStyle(.orange)
-            }
-        } header: {
-            Text("在其他设备的代理设置里填写")
-        } footer: {
-            Text("手机：Wi-Fi 详情 → 配置代理 → 手动，填上面的服务器与端口。连不上时依次检查：① 设备与本机连的是同一个 Wi-Fi（同一网段）；② 路由器没有开启「AP 隔离」或「客户端隔离」；③ 系统设置 → 隐私与安全性 → 本地网络里 kongshan 是打开的；④ 若开着 macOS 防火墙，首次需允许 kongshan 接受传入连接。地址随网络变化，换 Wi-Fi 后请重新确认。")
-        }
-    }
 
-    private func copyableRow(_ title: String, value: String) -> some View {
-        LabeledContent(title) {
-            HStack(spacing: 8) {
-                Text(value)
-                    .font(.body.monospaced())
-                    .textSelection(.enabled)
-                Button {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(value, forType: .string)
-                } label: {
-                    Image(systemName: "doc.on.doc")
-                }
-                .buttonStyle(.borderless)
-                .help("拷贝\(title)")
-            }
-        }
-    }
-
-    // MARK: - 配置
-
-    private var configurationSection: some View {
-        CardSection {
-            LabeledContent("监听端口") {
-                TextField("端口", value: $draft.port, format: .number.grouping(.never))
-                    .labelsHidden()
-                    .font(.body.monospaced())
-                    .inputField()
-                    .frame(width: 92)
-            }
-
-            if draft.allowedCIDRs.isEmpty {
-                Text("未限制来源：同网段的任何私网地址都能接入。")
+                Text("手机：Wi-Fi 详情 → 配置代理 → 手动，填入服务器与端口。")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.textSecondary)
+                    .padding(.top, 4)
+                    .help("连不上时依次检查：\n① 设备与本机处于同一 Wi-Fi（同一网段）；\n② 路由器未开启「AP 隔离」；\n③ 系统设置 → 隐私与安全性 → 本地网络中 kongshan 已开启；\n④ macOS 防火墙已允许传入连接。")
             }
-            ForEach(Array(draft.allowedCIDRs.enumerated()), id: \.offset) { index, value in
-                HStack(spacing: 8) {
-                    Image(systemName: "network")
-                        .foregroundStyle(.secondary)
-                        .frame(width: 16)
-                    Text(value)
-                        .font(.body.monospaced())
-                    Spacer(minLength: 8)
-                    Button(role: .destructive) {
-                        draft.allowedCIDRs.remove(at: index)
-                    } label: {
-                        Image(systemName: "minus.circle.fill")
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.borderless)
-                    .help("删除该网段")
-                }
-            }
-            HStack(spacing: 8) {
-                TextField("允许的来源", text: $newCIDR, prompt: Text("192.168.1.0/24 或 192.168.1.7"))
-                    .labelsHidden()
-                    .font(.body.monospaced())
-                    .inputField()
-                    .onSubmit(addCIDR)
-                Button("添加网段") { addCIDR() }
-                    .disabled(newCIDR.trimmingCharacters(in: .whitespaces).isEmpty)
-            }
+            .padding(.vertical, 4)
+        }
+    }
 
-            HStack {
+    // MARK: - 小窗 3：「配置」
+
+    private var configTile: some View {
+        TileCard(
+            "配置",
+            symbol: "gearshape",
+            detail: draft != state.lanSharing ? "未应用" : nil,
+            height: nil,
+            trailing: {
                 if draft != state.lanSharing {
-                    StatusBadge(text: "有未应用的修改", tint: .orange)
+                    HStack(spacing: 6) {
+                        Button("放弃") {
+                            draft = state.lanSharing
+                        }
+                        .buttonStyle(.pill)
+                        .help("放弃所有未应用的修改")
+
+                        Button("应用") {
+                            Task { await state.applyLANSharing(draft) }
+                        }
+                        .buttonStyle(.pillProminent)
+                        .help("应用端口与白名单设置")
+                    }
                 }
-                Spacer()
-                Button("放弃修改") { draft = state.lanSharing }
-                    .disabled(draft == state.lanSharing)
-                Button("应用") {
-                    Task { await state.applyLANSharing(draft) }
+            },
+            fixedHeader: {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Text("监听端口")
+                            .font(.callout)
+                            .foregroundStyle(Theme.textSecondary)
+                        TextField("端口", value: $draft.port, format: .number.grouping(.never), prompt: Theme.inputPrompt("端口"))
+                            .labelsHidden()
+                            .font(.callout.monospacedDigit())
+                            .inputField()
+                            .frame(width: 80)
+                        Spacer()
+                        Text("范围 1024–49151")
+                            .font(.caption)
+                            .foregroundStyle(Theme.textTertiary)
+                    }
+
+                    HStack(spacing: 8) {
+                        TextField("添加白名单网段", text: $newCIDR, prompt: Theme.inputPrompt("如 192.168.1.0/24"))
+                            .labelsHidden()
+                            .font(.callout.monospaced())
+                            .inputField()
+                            .onSubmit(addCIDR)
+                        Button("添加") { addCIDR() }
+                            .buttonStyle(.pill)
+                            .disabled(newCIDR.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
                 }
-                .buttonStyle(.pillProminent)
-                .disabled(draft == state.lanSharing)
+            },
+            content: {
+                if draft.allowedCIDRs.isEmpty {
+                    // 「未限制来源」不是无害空态：用 warning 标记明确安全含义，不降为灰色占位。
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(Theme.warning.icon)
+                            .font(.caption)
+                        Text("未限制来源：同网段私网地址均可接入")
+                            .font(.caption)
+                            .foregroundStyle(Theme.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.vertical, 4)
+                    .help("来源白名单留空表示允许全部私网地址；填了则只允许列出的网段。无论如何都不接受公网来源。")
+                } else {
+                    ForEach(Array(draft.allowedCIDRs.enumerated()), id: \.offset) { index, cidr in
+                        TileRow(
+                            symbol: "network",
+                            cidr,
+                            monospaced: true,
+                            showsDivider: index != draft.allowedCIDRs.count - 1
+                        ) {
+                            Button(role: .destructive) {
+                                draft.allowedCIDRs.remove(at: index)
+                            } label: {
+                                Image(systemName: "minus.circle.fill")
+                                    .foregroundStyle(Theme.textSecondary)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("删除网段 \(cidr)")
+                            .help("删除该网段")
+                        }
+                    }
+                }
             }
-        } header: {
-            Text("配置")
-        } footer: {
-            Text("端口需在 1024–49151 之间。来源白名单留空表示允许全部私网地址；填了则只允许列出的网段。无论如何都不接受公网来源——机器万一拿到公网 IP，也不会变成互联网上的开放代理。同网段内不做身份校验，公共 Wi-Fi 请谨慎开启。应用端口或白名单的改动会重建共享入口，已连接的设备需要重连。")
-        }
+        )
     }
 
-    // MARK: - 客户端
+    // MARK: - 辅助
 
-    @ViewBuilder
-    private var clientsSection: some View {
-        CardSection {
-            if !state.lanSharing.enabled {
-                Text("开启共享后，这里会列出正在使用的设备。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else if state.lanClients.isEmpty {
-                Text("还没有设备接入。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(state.lanClients) { client in
-                    clientRow(client)
-                }
-            }
-        } header: {
-            Text("已接入的设备")
-        } footer: {
-            if state.lanSharing.enabled, !state.lanClients.isEmpty {
-                Text("断开的设备仍会留在列表里显示累计用量，直到关闭共享。速率按每秒采样的差值计算。")
-            }
+    private func copyButton(_ value: String, help: String = "拷贝") -> some View {
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(value, forType: .string)
+        } label: {
+            Image(systemName: "doc.on.doc")
+                .font(.caption)
+                .frame(minWidth: 24, minHeight: 24)
+                .contentShape(Rectangle())
         }
-    }
-
-    private func clientRow(_ client: LANClientLiveStats) -> some View {
-        let active = client.stats.activeConnections > 0
-        return HStack(spacing: 10) {
-            Circle()
-                .fill(active ? Color.green : Color.secondary.opacity(0.4))
-                .frame(width: 7, height: 7)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(client.address)
-                    .font(.body.monospaced())
-                    .textSelection(.enabled)
-                Text(active
-                     ? "\(client.stats.activeConnections) 条连接"
-                     : "已断开 · 最后活动 \(client.stats.lastActiveAt.formatted(date: .omitted, time: .shortened))")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 8)
-            VStack(alignment: .trailing, spacing: 2) {
-                // 高频数值不做动画，理由同仪表盘：弹簧插值会按刷新率持续重绘。
-                Text("↑ \(Theme.rateOrDash(client.uploadRate))   ↓ \(Theme.rateOrDash(client.downloadRate))")
-                    .font(.callout.monospacedDigit())
-                    .foregroundStyle(client.totalRate > 0 ? .primary : .secondary)
-                Text("累计 \(Theme.bytesOrDash(client.stats.total))")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.tertiary)
-            }
-        }
-        .padding(.vertical, 2)
+        .buttonStyle(.borderless)
+        .accessibilityLabel(help)
+        .help(help)
     }
 
     private var enabledBinding: Binding<Bool> {
@@ -244,8 +285,6 @@ struct SharingView: View {
             set: { enabled in
                 var next = state.lanSharing
                 next.enabled = enabled
-                // 开关立即生效；端口与白名单要按「应用」。草稿的开关由上面的 onChange 在生效后同步，
-                // 失败时就不会留下一个假的「有未应用的修改」。
                 Task { await state.applyLANSharing(next) }
             }
         )
@@ -256,5 +295,55 @@ struct SharingView: View {
         guard !value.isEmpty, !draft.allowedCIDRs.contains(value) else { return }
         draft.allowedCIDRs.append(value)
         newCIDR = ""
+    }
+}
+
+// MARK: - 已接入设备小子视图（高频数据只在子视图内读）
+
+struct LANClientsTile: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        let clients = state.lanClients
+        let activeCount = clients.filter { $0.stats.activeConnections > 0 }.count
+        TileCard(
+            "已接入设备",
+            symbol: "laptopcomputer.and.iphone",
+            detail: clients.isEmpty ? nil : "\(activeCount) 活跃 / 共 \(clients.count) 设备",
+            height: nil
+        ) {
+            if !state.lanSharing.enabled {
+                TileEmptyNote(symbol: "laptopcomputer.and.iphone", text: "开启共享后在此显示接入设备")
+            } else if clients.isEmpty {
+                TileEmptyNote(symbol: "laptopcomputer.and.iphone", text: "暂无设备接入")
+            } else {
+                ForEach(clients) { client in
+                    clientRow(client, showsDivider: client.id != clients.last?.id)
+                }
+            }
+        }
+    }
+
+    private func clientRow(_ client: LANClientLiveStats, showsDivider: Bool) -> some View {
+        let active = client.stats.activeConnections > 0
+        let subtitle = active
+            ? "\(client.stats.activeConnections) 条连接"
+            : "已断开 · 最后活动 \(client.stats.lastActiveAt.formatted(date: .omitted, time: .shortened))"
+        return TileRow(
+            symbol: active ? "wifi" : "wifi.slash",
+            client.address,
+            subtitle: subtitle,
+            monospaced: true,
+            showsDivider: showsDivider
+        ) {
+            VStack(alignment: .trailing, spacing: 1) {
+                Text("↑ \(Theme.rateOrDash(client.uploadRate))  ↓ \(Theme.rateOrDash(client.downloadRate))")
+                    .font(.callout.monospacedDigit())
+                    .foregroundStyle(client.totalRate > 0 ? Theme.textPrimary : Theme.textSecondary)
+                Text("累计 \(Theme.bytesOrDash(client.stats.total))")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(Theme.textTertiary)
+            }
+        }
     }
 }

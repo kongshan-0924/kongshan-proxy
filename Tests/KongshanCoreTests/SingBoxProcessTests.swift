@@ -60,6 +60,10 @@ final class SingBoxProcessTests: XCTestCase {
         XCTAssertTrue(SingBoxProcess.isRunning(sleeper.processIdentifier, executablePath: "/bin/sleep"))
         XCTAssertFalse(SingBoxProcess.isRunning(sleeper.processIdentifier, executablePath: "/usr/local/bin/sing-box"))
         XCTAssertFalse(SingBoxProcess.isRunning(0, executablePath: "/bin/sleep"))
+        // 自己的子进程即使可执行文件对不上也认得出（内核 exec 成别的程序时补杀靠它）。
+        XCTAssertTrue(SingBoxProcess.isOwnChild(sleeper.processIdentifier))
+        XCTAssertFalse(SingBoxProcess.isOwnChild(1))
+        XCTAssertFalse(SingBoxProcess.isOwnChild(0))
     }
 
     func testSingBoxProcessStartsAndStops() async throws {

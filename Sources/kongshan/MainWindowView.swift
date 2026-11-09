@@ -13,6 +13,10 @@ final class MainWindowContentHost {
     init(state: AppState) {
         self.state = state
         hostingView = NSHostingView(rootView: AnyView(EmptyView()))
+        // 窗口大小只由用户和 window.minSize（820×560）决定，内容不反向撑窗口。
+        // 默认 sizingOptions 会把页面的最小 / 理想尺寸变成窗口约束：日志页 200 条事件时把 640 高的窗口
+        // 撑到 749（加页内顶栏后 801），2026-11-09 实测；各页内容都按窗口给的高度布局、长列表卡内滚动。
+        hostingView.sizingOptions = []
         attachIfNeeded()
     }
 
@@ -33,6 +37,7 @@ struct MainWindowView: View {
     @Environment(AppState.self) private var state
     @State private var selection: SidebarPage?
     @State private var sidebarCollapsed = false
+    @FocusState private var sidebarFocused: Bool
 
     init(initialPage: SidebarPage = .dashboard) {
         _selection = State(initialValue: initialPage)
@@ -45,16 +50,20 @@ struct MainWindowView: View {
     var body: some View {
         HStack(spacing: 0) {
             if !sidebarCollapsed {
-                // 侧栏 132pt：窗口默认 1008 宽的约 1/8，与内容区 7:1，符合紧凑单窗范式。
+                // 侧栏 188pt（960 窗口配套收窄）：与内容同底色，不再是独立的灰色栏。
                 customSidebar
-                    .frame(width: 132)
+                    .frame(width: 188)
             }
 
+            // 详情列顶到窗口上缘：各页的页内顶栏（PageTopBar）落在红绿灯那一行。
             detailCanvas
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .environment(\.pageTopBarLeadingInset, sidebarCollapsed ? 96 : 0)
+                .ignoresSafeArea(.container, edges: .top)
         }
         .background(Theme.canvasBackground)
         .tint(Theme.accent)
+        // 窗口工具栏只放这一个固定项：项集合不随页面变，切页不触发 NSToolbar 重建（页面按钮在 PageTopBar）。
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Button {
@@ -64,14 +73,6 @@ struct MainWindowView: View {
                 }
                 .help(sidebarCollapsed ? "显示侧边栏" : "隐藏侧边栏")
                 .accessibilityLabel(sidebarCollapsed ? "显示侧边栏" : "隐藏侧边栏")
-            }
-            if activePage == .dashboard {
-                ToolbarItem(placement: .automatic) {
-                    DashboardToolbarMenu()
-                }
-            }
-            ToolbarItem(placement: .automatic) {
-                NativeNoticeToolbarItem(selection: $selection)
             }
         }
         // 顶栏不画自己的底衬：与下方冷云灰画布融为一体，去掉横贯窗口的分割带。
@@ -105,32 +106,30 @@ struct MainWindowView: View {
         .navigationTitle("kongshan")
     }
 
-    // MARK: - 定制侧边栏（宽 132pt，冷银灰底 + 纯白圆角浮起选区 + 细线分段）
+    // MARK: - 定制侧边栏（宽 188pt，与内容同底色 + 白底描边选中项 + 组间只留间距）
 
     private var customSidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
             ScrollView(.vertical, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 3) {
+                // 项间距 2、组间距 12；第一项与红绿灯/工具栏下方保持 12pt 左右间距。
+                VStack(alignment: .leading, spacing: 2) {
                     sidebarButton(.dashboard)
 
-                    sidebarDivider
+                    Spacer().frame(height: 10)
 
                     sidebarButton(.nodes)
                     sidebarButton(.policyGroups)
                     sidebarButton(.routing)
 
-                    sidebarDivider
+                    Spacer().frame(height: 10)
 
                     sidebarButton(.connections)
                     sidebarButton(.records)
                     sidebarButton(.diagnostics)
-
-                    sidebarDivider
-
                     sidebarButton(.settings)
                 }
-                .padding(.horizontal, 9)
-                .padding(.top, 10)
+                .padding(.horizontal, 12)
+                .padding(.top, 12)
                 .padding(.bottom, 10)
             }
 
@@ -141,6 +140,7 @@ struct MainWindowView: View {
         .background(Theme.sidebarFill.ignoresSafeArea(edges: .top))
         // 自绘侧栏没有系统 List 的方向键切换：点过侧栏后 ↑↓ 按侧栏顺序切页。
         .focusable()
+        .focused($sidebarFocused)
         .focusEffectDisabled()
         .onMoveCommand { direction in
             let pages = SidebarPage.allCases
@@ -156,13 +156,8 @@ struct MainWindowView: View {
         }
     }
 
-    private var sidebarDivider: some View {
-        Divider()
-            .opacity(0.5)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-    }
-
+    /// 导航项：32pt 高、圆角 7、实心 SF Symbol 13pt + 13pt 文字；
+    /// 选中项白底 + 1.5pt 强调色描边 + 强调色图标文字（原型骨架）。
     private func sidebarButton(_ page: SidebarPage) -> some View {
         let isSelected = activePage == page
         return Button {
@@ -170,13 +165,15 @@ struct MainWindowView: View {
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: page.symbol)
-                    .font(.callout.weight(isSelected ? .semibold : .regular))
-                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
-                    .frame(width: 18, alignment: .center)
+                    // 有实心变体的符号自动填实；没有变体的（network 等）保持原样。
+                    .symbolVariant(.fill)
+                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                    .foregroundStyle(isSelected ? Theme.accent : Theme.textSecondary)
+                    .frame(width: 13, height: 13, alignment: .center)
 
                 Text(page.title)
-                    .font(.callout.weight(isSelected ? .semibold : .regular))
-                    .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                    .foregroundStyle(isSelected ? Theme.accent : Theme.textPrimary)
                     .lineLimit(1)
 
                 Spacer(minLength: 2)
@@ -185,16 +182,17 @@ struct MainWindowView: View {
                     SidebarNoticeBadge()
                 }
             }
-            .padding(.horizontal, 9)
-            .padding(.vertical, 6.5)
-            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .padding(.horizontal, 10)
+            .frame(height: 32)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
             .background {
                 if isSelected {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
                         .fill(Theme.cardFill)
                         .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .strokeBorder(Theme.cardStroke, lineWidth: 1)
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .strokeBorder(Theme.accent, lineWidth: 1.5)
                         )
                 }
             }
@@ -237,7 +235,7 @@ struct MainWindowView: View {
 }
 
 /// 仪表盘顶栏的检测入口：探测出口与网络自检收进一个菜单，顶栏不再散落两枚孤立图标。
-private struct DashboardToolbarMenu: View {
+struct DashboardToolbarMenu: View {
     @Environment(AppState.self) private var state
 
     var body: some View {
@@ -261,118 +259,13 @@ private struct DashboardToolbarMenu: View {
             Image(systemName: "waveform.path.ecg")
         }
         .menuIndicator(.hidden)
+        .menuStyle(.borderlessButton)
+        .fixedSize()
         .help("网络检测：探测出口（⌘R）、网络自检")
+        .accessibilityLabel("网络检测")
     }
 }
 
-/// 原生 macOS 工具栏通知组件。
-private struct NativeNoticeToolbarItem: View {
-    @Environment(AppState.self) private var state
-    @Binding var selection: SidebarPage?
-    @State private var showingPopover = false
-
-    private var hasNotice: Bool {
-        state.errorMessage != nil || !state.warnings.isEmpty
-    }
-
-    private var noticeColor: Color {
-        if state.errorMessage != nil { return .red }
-        if !state.warnings.isEmpty { return .orange }
-        return .secondary
-    }
-
-    private var totalCount: Int {
-        (state.errorMessage != nil ? 1 : 0) + state.warnings.count
-    }
-
-    var body: some View {
-        if hasNotice && (selection ?? .dashboard) != .records {
-            Button {
-                showingPopover.toggle()
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "bell.badge.fill")
-                        .symbolRenderingMode(.palette)
-                        .foregroundStyle(noticeColor, .primary)
-                    Text("\(totalCount)")
-                        .font(.caption.weight(.bold).monospacedDigit())
-                        .foregroundStyle(noticeColor)
-                }
-            }
-            .help("有 \(totalCount) 条通知提醒")
-            .popover(isPresented: $showingPopover, arrowEdge: .bottom) {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack {
-                        Text("通知提醒")
-                            .font(.headline)
-                        Text("\(totalCount)")
-                            .font(.caption2.weight(.bold).monospacedDigit())
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(noticeColor, in: Capsule(style: .circular))
-                        Spacer()
-                        Button("全部清除") {
-                            state.dismissError()
-                            state.clearWarnings()
-                            showingPopover = false
-                        }
-                        .buttonStyle(.plain)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    }
-
-                    Divider()
-
-                    if let error = state.errorMessage {
-                        noticeRow(text: error, symbol: "exclamationmark.octagon.fill", tint: .red)
-                    }
-                    if let warning = state.warnings.last {
-                        noticeRow(text: warning, symbol: "exclamationmark.triangle.fill", tint: .orange)
-                    }
-
-                    Divider()
-
-                    Button {
-                        showingPopover = false
-                        selection = .records
-                    } label: {
-                        HStack {
-                            Text("前往消息中心查看全部")
-                                .font(.caption.weight(.medium))
-                            Spacer()
-                            Image(systemName: "arrow.right")
-                                .font(.caption2.weight(.semibold))
-                        }
-                        .foregroundStyle(Color.accentColor)
-                        .padding(.vertical, 2)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                }
-                .padding(12)
-                .frame(width: 280)
-            }
-        }
-    }
-
-    private func noticeRow(text: String, symbol: String, tint: Color) -> some View {
-        HStack(alignment: .top, spacing: 6) {
-            Image(systemName: symbol)
-                .font(.caption)
-                .foregroundStyle(tint)
-                .padding(.top, 1)
-            Text(text)
-                .font(.caption)
-                .lineLimit(3)
-                .foregroundStyle(.primary)
-                .textSelection(.enabled)
-        }
-        .padding(7)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-    }
-}
 
 /// 侧栏「日志」项上的未读数。独立视图：错误与告警变化只刷新这枚徽标。
 private struct SidebarNoticeBadge: View {
@@ -381,18 +274,14 @@ private struct SidebarNoticeBadge: View {
     var body: some View {
         let count = (state.errorMessage != nil ? 1 : 0) + state.warnings.count
         if count > 0 {
-            let tint: Color = state.errorMessage != nil ? .red : .orange
-            Text("\(count)")
-                .font(.caption2.weight(.semibold).monospacedDigit())
-                .foregroundStyle(tint)
-                .padding(.horizontal, 5.5)
-                .padding(.vertical, 1)
-                .background(tint.opacity(0.14), in: Capsule(style: .circular))
+            // 原型：橙色计数徽标；有错误时仍用红色强调更重的级别。
+            NoticeCountBadge(count: count, style: state.errorMessage != nil ? Theme.danger : Theme.warningBadge)
         }
     }
 }
 
-/// 侧栏底部紧凑状态条：接管状态 · 出站模式 · 当前节点，点击前往代理页。
+/// 侧栏底部白色状态卡：第一行状态点 + 「接管方式 / 出站模式」，第二行「地区 节点名」+ 彩色延迟。
+/// 点击前往代理页。
 private struct SidebarStatusFooter: View {
     @Environment(AppState.self) private var state
     let onTap: () -> Void
@@ -404,47 +293,81 @@ private struct SidebarStatusFooter: View {
         return state.activeModes.contains(.tun) ? "TUN" : "系统代理"
     }
 
+    private var statusStyle: Theme.SemanticColors {
+        switch state.status {
+        case .on: Theme.current
+        case .starting, .stopping: Theme.warning
+        case .failed: Theme.danger
+        case .off: Theme.neutral
+        }
+    }
+
+    /// 「美国 DMIT-洛杉矶 Reality」：有地区码时前缀地区中文名。
+    private var nodeLine: String {
+        guard let node = state.selectedNode else { return "未选择节点" }
+        let code = state.nodeCatalog.metadataByNodeID[node.id]?.regionCode
+            ?? NodeNameMetadata.parse(node.name).regionCode
+        // 与菜单面板同一套规则：去国旗、港澳台简称、名字已含地区不重复前缀。
+        return MenuBarPanelDirectory.nodeTitle(node.name, regionCode: code ?? "")
+    }
+
     var body: some View {
         Button(action: onTap) {
-            VStack(alignment: .leading, spacing: 6) {
-                Divider().opacity(0.55)
-
-                HStack(spacing: 7) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
                     Circle()
-                        .fill(state.statusTint)
-                        .frame(width: 6.5, height: 6.5)
-
-                    VStack(alignment: .leading, spacing: 1) {
-                        HStack(spacing: 4) {
-                            Text(shortStatus)
-                                .font(.caption.weight(.medium))
-                                .foregroundStyle(.primary)
-                                .lineLimit(1)
-                            Text("·")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                            Text(state.outboundMode.displayName)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .fixedSize(horizontal: true, vertical: false)
-                        }
-                        Text(state.selectedNode?.name ?? "未选择节点")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                    }
-
+                        .fill(statusStyle.icon)
+                        .frame(width: 7, height: 7)
+                    Text(state.isOn ? "\(shortStatus) / \(state.outboundMode.displayName)" : shortStatus)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Theme.textPrimary)
+                        .lineLimit(1)
                     Spacer(minLength: 0)
                 }
-                .padding(.horizontal, 3)
+                HStack(spacing: 6) {
+                    Text(nodeLine)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.textSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Spacer(minLength: 4)
+                    SidebarFooterDelay()
+                }
             }
-            .padding(.horizontal, 10)
-            .padding(.bottom, 10)
-            .contentShape(Rectangle())
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.cardFill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(Theme.cardStroke, lineWidth: 0.5)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.bottom, 12)
         .help("点击前往代理页切换节点")
+    }
+}
+
+/// 状态卡第二行右侧的延迟：高频回填只刷新这一小块文字。
+private struct SidebarFooterDelay: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        if let id = state.selectedNode?.id, let delay = state.delays[id] {
+            // fixedSize：侧栏收窄到 188 后第二行更紧，延迟保持完整，节点名先截断。
+            if let milliseconds = delay {
+                Text("\(milliseconds)ms")
+                    .font(.system(size: 11).monospacedDigit())
+                    .foregroundStyle(Theme.delayColor(milliseconds))
+                    .fixedSize()
+            } else {
+                Text("超时")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.danger.text)
+                    .fixedSize()
+            }
+        }
     }
 }

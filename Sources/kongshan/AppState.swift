@@ -179,6 +179,9 @@ final class AppState {
     @ObservationIgnored var proxyPageClickedMember: [String: String] = [:]
 
     @ObservationIgnored private var nodesRevision = 0
+    /// 每个订阅的可用节点数（去掉套餐信息条目）。`configItems` 是计算属性，配置页每行、生效名、
+    /// 当前配置卡都会读，原先每读一次就把全部节点按名字关键词筛一遍（2026-11-09 切页采样占主线程约 3%）。
+    @ObservationIgnored private var sourceNodeCountCache: (revision: Int, counts: [UUID: Int])?
     @ObservationIgnored private var nodeCatalogCache: (revision: Int, configID: UUID?, catalog: NodeCatalog)?
     @ObservationIgnored private var discoveredGroupsRevision = 0
     @ObservationIgnored private var primaryGroupNameCache: (revision: Int, configID: UUID?, name: String?)?
@@ -469,12 +472,24 @@ final class AppState {
     }
 
     /// 全部配置：每个订阅一项，另有自建节点时追加「本地节点」。
+    private var sourceNodeCounts: [UUID: Int] {
+        let currentNodes = nodes   // 照常登记对 nodes 的观察
+        if let cached = sourceNodeCountCache, cached.revision == nodesRevision { return cached.counts }
+        var counts: [UUID: Int] = [:]
+        for node in currentNodes where !node.isSubscriptionInfo {
+            if let id = node.sourceID { counts[id, default: 0] += 1 }
+        }
+        sourceNodeCountCache = (nodesRevision, counts)
+        return counts
+    }
+
     var configItems: [ConfigItem] {
+        let counts = sourceNodeCounts
         var items = subscriptions.map { source in
             ConfigItem(
                 id: source.id,
                 name: source.name,
-                nodeCount: nodes.filter { $0.sourceID == source.id && !$0.isSubscriptionInfo }.count,
+                nodeCount: counts[source.id] ?? 0,
                 isLocal: false,
                 usage: source.usage,
                 lastUpdatedAt: source.lastUpdatedAt,
@@ -6211,6 +6226,14 @@ final class AppState {
     }
 
     /// 测试用：注入登录项状态（真实值来自 SMAppService，单测不能依赖宿主注册情况）。
+    /// 测试：直接灌入日志行（跳过日志页可见与 200 ms 批量刷新），切页基准用它模拟满载的 2000 行。
+    func appendLiveLogsForTesting(_ entries: [CoreLogEntry]) {
+        liveLogs.append(contentsOf: entries.map { LiveLogEntry(entry: $0) })
+        if liveLogs.count > KernelLogStore.defaultBufferedLineLimit {
+            liveLogs.removeFirst(liveLogs.count - KernelLogStore.defaultBufferedLineLimit)
+        }
+    }
+
     func setLoginItemStatusForTesting(_ status: LoginItemStatus) {
         loginItemStatus = status
     }

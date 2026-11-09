@@ -1,35 +1,26 @@
+import AppKit
 import Charts
 import KongshanCore
 import SwiftUI
 
-/// 双主卡目标高度，由 `DashboardView` 量出可视区后下发，两张主卡各自读取。
-private enum DashboardCardHeightKey: EnvironmentKey {
-    static let defaultValue: CGFloat = 320
-}
-
-private extension EnvironmentValues {
-    var dashboardCardHeight: CGFloat {
-        get { self[DashboardCardHeightKey.self] }
-        set { self[DashboardCardHeightKey.self] = newValue }
-    }
-}
-
-/// 仪表盘比例规范（参考 ClashX / Surge / V2rayU 等主流代理客户端的紧凑单窗范式）。
+/// 仪表盘比例规范（2026-11-09 原型：头卡 + 中部两卡撑满到底）。
 ///
-/// 核心思路：**默认窗口按 4:3，内容贴紧不撑满，卡片高宽成比、间距统一，窄了竖排**——
-/// 这样窗口怎么拉，内容始终维持固有比例，多出的空间统一留成外边距，画面不会"怪"。
-/// 所有尺寸集中在这里，调比例只动这一处。
+/// 头卡自适应内容高度；「网络流量 / 链路健康」两卡吃掉剩余可视高度（窗口拉高图也跟着高），
+/// 内容装不下时整页滚动。所有尺寸集中在这里，调比例只动这一处。
 private enum DashboardLayout {
-    /// 卡片统一圆角与间距节奏（8 的倍数）。
+    /// 卡片统一间距。
     static let cardGap: CGFloat = 16
-    /// 双主卡宽比 3:2；右侧只保留链路健康，技术遥测默认收进「运行详情」。
-    static let trafficShare: CGFloat = 0.6
-    static let overviewShare: CGFloat = 0.4
-    static let overviewMinWidth: CGFloat = 260
-    static let horizontalPadding: CGFloat = 20
+    /// 双主卡宽比 ≈ 63:37（原型 511:297）；右侧只保留链路健康，技术遥测默认收进「运行详情」。
+    static let trafficShare: CGFloat = 0.63
+    static let overviewShare: CGFloat = 0.37
+    /// 右卡最窄 240：960×640 窗口内容宽 732 仍保持两列（280 时阈值 772 会退成单列）。
+    static let overviewMinWidth: CGFloat = 240
+    static let pagePadding: CGFloat = 20
     static var twoColumnMinWidth: CGFloat { overviewMinWidth / overviewShare + cardGap }
-    /// 有数据时让图表利用可视高度；没有数据时由 `cardHeight` 使用紧凑占位。
-    static let reservedVertical: CGFloat = 230
+    /// 头卡（状态行 + 链路卡 + 控制行）的近似高度，用于推算中部两卡的撑满高度。
+    static let headerBlockHeight: CGFloat = 214
+    /// 中部两卡的最小高度：窗口再矮也保得住图表与链路信息的可读性。
+    static let middleMinHeight: CGFloat = 300
 }
 
 /// 仪表盘（简洁大气、零嵌套灰块的原生 macOS 架构）。
@@ -42,25 +33,31 @@ struct DashboardView: View {
 
     var body: some View {
         let _ = Self.noteBodyEvaluation()
-        // 链路模型读 delays / 出口检测，放进 RouteHeaderView 自己构造：整页只看接管与否，
+        // 链路模型读 delays / 出口检测，放进 RouteHeaderView 自己构造：整页只看开关状态，
         // 测延迟每回填一批只重算头部卡，不带着整页重排。
-        let hasTakeover = state.isOn && !state.activeModes.isEmpty
+        // 布局与接管状态无关（2026-11-09 用户决定）：开关代理只改卡内数值与空态文案，不换卡。
         return GeometryReader { geo in
-            let contentWidth = max(0, geo.size.width - DashboardLayout.horizontalPadding * 2)
+            let contentWidth = max(0, geo.size.width - DashboardLayout.pagePadding * 2)
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: DashboardLayout.cardGap) {
                     RouteHeaderView(isCompact: contentWidth < 680)
                     coreOnlyBanner
-                    if !hasTakeover, !state.nodes.isEmpty {
-                        DashboardIdleContent()
-                    }
-                    metrics(gridWidth: contentWidth, hasTakeover: hasTakeover)
+                    metrics(gridWidth: contentWidth, viewportHeight: geo.size.height)
 
                     if state.nodes.isEmpty {
                         ContentUnavailableView {
-                            Label("还没有节点", systemImage: "point.3.connected.trianglepath.dotted")
+                            Label {
+                                Text("还没有节点")
+                                    .font(.system(size: 15, weight: .medium))
+                                    .foregroundStyle(Theme.textPrimary)
+                            } icon: {
+                                Image(systemName: "point.3.connected.trianglepath.dotted")
+                                    .foregroundStyle(Theme.textSecondary)
+                            }
                         } description: {
                             Text("导入 Clash 订阅，或手动添加一个 Hysteria2 节点。")
+                                .font(.system(size: 12))
+                                .foregroundStyle(Theme.textTertiary)
                         } actions: {
                             Button("前往配置页") { state.requestPage(.nodes) }
                                 .buttonStyle(.pillProminent)
@@ -68,17 +65,17 @@ struct DashboardView: View {
                         .frame(maxWidth: .infinity, minHeight: 150)
                     }
                 }
-                .padding(.horizontal, DashboardLayout.horizontalPadding)
-                .padding(.top, 20)
-                .padding(.bottom, 30)
+                .padding(DashboardLayout.pagePadding)
+                // 中部两卡撑满到底：页面内容至少占满可视高，多出的高度由流量/健康两卡吸收。
+                .frame(minHeight: max(0, geo.size.height - DashboardLayout.pagePadding * 2), alignment: .top)
             }
-            .environment(\.dashboardCardHeight, cardHeight(viewportHeight: geo.size.height))
         }
         .background(Theme.canvasBackground)
+        .foregroundStyle(Theme.textPrimary)
         .groupBoxStyle(CardGroupBoxStyle())
+        .labeledContentStyle(CardRowLabeledContentStyle())
         .buttonStyle(.pill)
-        .navigationTitle("仪表盘")
-        .navigationSubtitle(subtitle)
+        .pageTopBar { DashboardToolbarMenu() }
         .onAppear {
             state.startDashboardMonitoring()
             if state.isOn, state.exitDiagnostics == nil {
@@ -88,41 +85,35 @@ struct DashboardView: View {
         .onDisappear { state.stopDashboardMonitoring() }
     }
 
-    private var subtitle: String {
-        guard state.isOn else { return state.statusText }
-        return "\(state.statusText) · \(state.selectedNode?.name ?? "未选择节点")"
-    }
-
-    private func cardHeight(viewportHeight: CGFloat) -> CGFloat {
-        min(320, max(260, viewportHeight - DashboardLayout.reservedVertical))
-    }
 
     // MARK: - 第二层：流量与链路健康
 
-    @ViewBuilder
-    private func metrics(gridWidth: CGFloat, hasTakeover: Bool) -> some View {
-        if hasTakeover {
-            let metricColumns = gridWidth >= DashboardLayout.twoColumnMinWidth ? 2 : 1
-            let shareWidth = gridWidth - DashboardLayout.cardGap
-            Group {
-                if metricColumns == 2 {
-                    HStack(alignment: .top, spacing: DashboardLayout.cardGap) {
-                        DashboardTrafficGroup()
-                            .frame(width: shareWidth * DashboardLayout.trafficShare)
-                        OverviewCardBox()
-                            .frame(width: shareWidth * DashboardLayout.overviewShare)
-                    }
-                    // 两卡取较高者等高：左卡没数据时的紧凑占位不再把右卡压扁。
-                    .fixedSize(horizontal: false, vertical: true)
-                } else {
-                    VStack(spacing: DashboardLayout.cardGap) {
-                        DashboardTrafficGroup()
-                        OverviewCardBox()
-                    }
+    /// 中部两卡无条件显示（2026-11-09 用户决定：开关代理不换布局）。
+    /// 未接管时各卡用卡内空状态：流量数值为「—」、图表区显示空态文案、链路健康保留行骨架。
+    private func metrics(gridWidth: CGFloat, viewportHeight: CGFloat) -> some View {
+        let metricColumns = gridWidth >= DashboardLayout.twoColumnMinWidth ? 2 : 1
+        let shareWidth = gridWidth - DashboardLayout.cardGap
+        // 两卡撑满到窗口底：行高至少吃掉头卡以下的全部可视高度。
+        let rowMinHeight = max(
+            DashboardLayout.middleMinHeight,
+            viewportHeight - DashboardLayout.pagePadding * 2 - DashboardLayout.headerBlockHeight - DashboardLayout.cardGap
+        )
+        return Group {
+            if metricColumns == 2 {
+                HStack(alignment: .top, spacing: DashboardLayout.cardGap) {
+                    DashboardTrafficGroup()
+                        .frame(width: shareWidth * DashboardLayout.trafficShare)
+                    LinkHealthCard()
+                        .frame(width: shareWidth * DashboardLayout.overviewShare)
+                }
+            } else {
+                VStack(spacing: DashboardLayout.cardGap) {
+                    DashboardTrafficGroup()
+                    LinkHealthCard()
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .frame(maxWidth: .infinity, minHeight: metricColumns == 2 ? rowMinHeight : 0, alignment: .topLeading)
     }
 
     @ViewBuilder
@@ -130,17 +121,17 @@ struct DashboardView: View {
         if state.isOn, state.activeModes.isEmpty {
             HStack(spacing: 9) {
                 Image(systemName: "info.circle.fill")
-                    .foregroundStyle(.blue)
+                    .foregroundStyle(Theme.info.icon)
                 Text("内核正在运行但未接管网络（仅用于测延迟）。")
                     .font(.callout)
+                    .foregroundStyle(Theme.info.text)
                 Spacer(minLength: 8)
                 Button("停止内核") { Task { await state.stop() } }
                     .controlSize(.small)
                     .disabled(state.isBusy)
             }
             .padding(12)
-            .background(Theme.cardFill, in: RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous).strokeBorder(Color.blue.opacity(0.30), lineWidth: 1))
+            .background(Theme.info.soft, in: RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
         }
     }
 
@@ -148,49 +139,36 @@ struct DashboardView: View {
 
     private struct DashboardTrafficGroup: View {
         @State private var range: TrafficRange = .recent
-        @Environment(AppState.self) private var state
-        @Environment(\.dashboardCardHeight) private var cardHeight
-
-        private var hasData: Bool {
-            !state.trafficHistory.isEmpty || !state.trafficMinutes.isEmpty
-        }
 
         var body: some View {
-            GroupBox {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(alignment: .center, spacing: 8) {
-                        Text("网络流量")
-                            .font(.headline)
-                            .fixedSize(horizontal: true, vertical: false)
-                        Spacer(minLength: 6)
-                        TrafficLegend()
-                        CapsuleSegmentedPicker(options: TrafficRange.allCases, selection: $range) { $0.title }
-                            .fixedSize()
-                    }
-
-                    Divider()
-
-                    if hasData {
-                        TrafficStatsRow(range: range)
-                        TrafficPlot(range: range)
-                    } else {
-                        ContentUnavailableView {
-                            Label("等待流量数据", systemImage: "chart.xyaxis.line")
-                        } description: {
-                            Text("内核推送第一批数据后开始绘制波形。")
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    }
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .center, spacing: 10) {
+                    Text("网络流量")
+                        .font(.system(size: 14, weight: .semibold))
+                        .lineLimit(1)
+                        .layoutPriority(2)
+                    TrafficLegend()
+                    Spacer(minLength: 6)
+                    CapsuleSegmentedPicker(options: TrafficRange.allCases, selection: $range) { $0.title }
+                        .controlSize(.small)
+                        .frame(width: 146)  // 原型宽度，不撑满标题行
+                        .layoutPriority(1)
                 }
-                .padding(4)
-                .frame(
-                    maxWidth: .infinity,
-                    minHeight: hasData ? cardHeight : 160,
-                    // 没数据时可以被右卡撑高（两卡等高），有数据时图表固定高度。
-                    maxHeight: hasData ? cardHeight : .infinity,
-                    alignment: .topLeading
-                )
+
+                // 未接管也保留统计行与图表骨架（2026-11-09 用户决定：布局不随开关跳动）：
+                // 统计数值为 0 时 Theme 的 …OrDash 显示「—」；图表区由 TrafficPlot 自己的
+                // 空态覆盖层占位（「开启系统代理或 TUN 后显示实时流量波形」）。
+                TrafficStatsRow(range: range)
+                TrafficPlot(range: range)
             }
+            .padding(16)
+            .frame(
+                maxWidth: .infinity,
+                minHeight: DashboardLayout.middleMinHeight - 32,
+                maxHeight: .infinity,
+                alignment: .topLeading
+            )
+            .background(Theme.cardFill, in: RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
         }
     }
 }
@@ -228,60 +206,50 @@ struct TrafficChartPoint: Identifiable, Equatable {
     }
 }
 
+/// 图例：原型只有下/上两个彩色小箭头，文字由统计行与悬浮卡承担。
 private struct TrafficLegend: View {
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 6) {
             legend(symbol: "arrow.down", color: Theme.downloadTint, title: "下载")
             legend(symbol: "arrow.up", color: Theme.uploadTint, title: "上传")
         }
-        .fixedSize(horizontal: true, vertical: false)
     }
 
     private func legend(symbol: String, color: Color, title: String) -> some View {
-        HStack(spacing: 3) {
-            Image(systemName: symbol)
-                .font(.caption2.weight(.bold))
-                .foregroundStyle(color)
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-        }
+        Image(systemName: symbol)
+            .font(.system(size: 10, weight: .bold))
+            .foregroundStyle(color)
+            .accessibilityLabel(title)
     }
 }
 
-/// 统计行：直接排在白卡上，不套灰色胶囊壳，大号等宽数字清晰大气。
+/// 统计行：原型三列「本次会话 / 峰值速率 / 平均速率」，11pt 灰标签 + 15pt 半粗大数 + 11pt 附注，列间距 28、无竖线。
 private struct TrafficStatsRow: View {
     @Environment(AppState.self) private var state
     let range: TrafficRange
 
     var body: some View {
-        let points = TrafficChartPoint.series(range, state: state)
-        let downPeak = points.map(\.downloadPeak).max() ?? 0
-        let upPeak = points.map(\.uploadPeak).max() ?? 0
-        let downAverage = points.isEmpty ? 0 : points.map(\.download).reduce(0, +) / Int64(points.count)
-        let upAverage = points.isEmpty ? 0 : points.map(\.upload).reduce(0, +) / Int64(points.count)
-        HStack(alignment: .top, spacing: 0) {
+        let isOff = !state.isOn
+        let points = isOff ? [] : TrafficChartPoint.series(range, state: state)
+        let downPeak = isOff ? 0 : (points.map(\.downloadPeak).max() ?? 0)
+        let upPeak = isOff ? 0 : (points.map(\.uploadPeak).max() ?? 0)
+        let downAverage = isOff || points.isEmpty ? 0 : points.map(\.download).reduce(0, +) / Int64(points.count)
+        let upAverage = isOff || points.isEmpty ? 0 : points.map(\.upload).reduce(0, +) / Int64(points.count)
+        HStack(alignment: .top, spacing: 28) {
             stat(
                 title: "本次会话",
-                value: Theme.bytesOrDash(state.sessionTotal),
-                detail: "↓ \(Theme.bytesOrDash(state.sessionDownload))  ↑ \(Theme.bytesOrDash(state.sessionUpload))"
+                value: isOff ? "—" : Theme.bytesOrDash(state.sessionTotal),
+                detail: isOff ? "↓ —  ↑ —" : "↓ \(Theme.bytesOrDash(state.sessionDownload))  ↑ \(Theme.bytesOrDash(state.sessionUpload))"
             )
-            Spacer(minLength: 12)
-            Divider().frame(height: 36)
-            Spacer(minLength: 12)
             stat(
                 title: "峰值速率",
-                value: "↓ \(Theme.rateOrDash(downPeak))",
-                detail: "↑ \(Theme.rateOrDash(upPeak))"
+                value: isOff ? "—" : "↓ \(Theme.rateOrDash(downPeak))",
+                detail: isOff ? "↑ —" : "↑ \(Theme.rateOrDash(upPeak))"
             )
-            Spacer(minLength: 12)
-            Divider().frame(height: 36)
-            Spacer(minLength: 12)
             stat(
                 title: "平均速率",
-                value: "↓ \(Theme.rateOrDash(downAverage))",
-                detail: "↑ \(Theme.rateOrDash(upAverage))"
+                value: isOff ? "—" : "↓ \(Theme.rateOrDash(downAverage))",
+                detail: isOff ? "↑ —" : "↑ \(Theme.rateOrDash(upAverage))"
             )
             Spacer(minLength: 0)
         }
@@ -290,14 +258,14 @@ private struct TrafficStatsRow: View {
     private func stat(title: String, value: String, detail: String) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.textSecondary)
             Text(value)
-                .font(.callout.weight(.semibold).monospacedDigit())
+                .font(.system(size: 15, weight: .semibold).monospacedDigit())
                 .lineLimit(1)
             Text(detail)
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.tertiary)
+                .font(.system(size: 11).monospacedDigit())
+                .foregroundStyle(Theme.textSecondary)
                 .lineLimit(1)
         }
     }
@@ -311,24 +279,27 @@ private struct TrafficPlot: View {
 
     var body: some View {
         let points = TrafficChartPoint.series(range, state: state)
-        let hovered = hoverTime.flatMap { time in
-            points.min { abs($0.time.timeIntervalSince(time)) < abs($1.time.timeIntervalSince(time)) }
-        }
-        Chart {
+        if points.isEmpty {
+            emptyChartGrid
+        } else {
+            let hovered = hoverTime.flatMap { time in
+                points.min { abs($0.time.timeIntervalSince(time)) < abs($1.time.timeIntervalSince(time)) }
+            }
+            Chart {
             ForEach(points) { point in
                 AreaMark(
                     x: .value("时间", point.time),
                     y: .value("速率", point.download),
                     series: .value("方向", "下载")
                 )
-                .foregroundStyle(.green.opacity(0.20))
+                .foregroundStyle(Theme.downloadTint.opacity(0.20))
                 .interpolationMethod(.monotone)
                 LineMark(
                     x: .value("时间", point.time),
                     y: .value("速率", point.download),
                     series: .value("方向", "下载线")
                 )
-                .foregroundStyle(.green)
+                .foregroundStyle(Theme.downloadTint)
                 .lineStyle(StrokeStyle(lineWidth: 1.6))
                 .interpolationMethod(.monotone)
 
@@ -337,25 +308,25 @@ private struct TrafficPlot: View {
                     y: .value("速率", -point.upload),
                     series: .value("方向", "上传")
                 )
-                .foregroundStyle(.blue.opacity(0.18))
+                .foregroundStyle(Theme.uploadTint.opacity(0.18))
                 .interpolationMethod(.monotone)
                 LineMark(
                     x: .value("时间", point.time),
                     y: .value("速率", -point.upload),
                     series: .value("方向", "上传线")
                 )
-                .foregroundStyle(.blue)
+                .foregroundStyle(Theme.uploadTint)
                 .lineStyle(StrokeStyle(lineWidth: 1.6))
                 .interpolationMethod(.monotone)
             }
             if !points.isEmpty {
                 RuleMark(y: .value("零", 0))
-                    .foregroundStyle(.secondary.opacity(0.40))
+                    .foregroundStyle(Theme.separator)
                     .lineStyle(StrokeStyle(lineWidth: 0.5))
             }
             if let hovered {
                 RuleMark(x: .value("时间", hovered.time))
-                    .foregroundStyle(.secondary.opacity(0.6))
+                    .foregroundStyle(Theme.textTertiary)
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
                     .annotation(position: .top, alignment: .center, spacing: 4,
                                 overflowResolution: .init(x: .fit(to: .chart), y: .disabled)) {
@@ -366,27 +337,27 @@ private struct TrafficPlot: View {
         .chartLegend(.hidden)
         .chartYAxis {
             AxisMarks(position: .leading, values: .automatic(desiredCount: 5)) { value in
-                AxisGridLine().foregroundStyle(.quaternary)
+                AxisGridLine().foregroundStyle(Theme.separator)
                 AxisValueLabel {
                     if let bytes = value.as(Int64.self) {
                         Text(bytes == 0 ? "0" : Theme.rate(abs(bytes)))
                             .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Theme.textSecondary)
                     }
                 }
             }
         }
         .chartXAxis {
             AxisMarks(values: .automatic(desiredCount: 4)) {
-                AxisGridLine().foregroundStyle(.quaternary)
+                AxisGridLine().foregroundStyle(Theme.separator)
                 if range == .recent {
                     AxisValueLabel(format: .dateTime.minute().second())
                         .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.textSecondary)
                 } else {
                     AxisValueLabel(format: .dateTime.hour().minute())
                         .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.textSecondary)
                 }
             }
         }
@@ -408,30 +379,44 @@ private struct TrafficPlot: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .transaction { transaction in transaction.animation = nil }
-        .overlay {
-            if points.isEmpty {
-                ZStack {
-                    VStack(spacing: 46) {
-                        Divider().opacity(0.45)
-                        Divider().opacity(0.45)
-                        Divider().opacity(0.45)
-                    }
+            .transaction { transaction in transaction.animation = nil }
+        }
+    }
 
-                    VStack(spacing: 6) {
-                        Image(systemName: "chart.xyaxis.line")
-                            .font(.title3)
-                            .foregroundStyle(.tertiary)
-                        Text(emptyText)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+    private var emptyChartGrid: some View {
+        ZStack {
+            VStack(spacing: 0) {
+                ForEach(0..<5) { index in
+                    HStack(spacing: 8) {
+                        // 只在最底一条网格线标 0：五条都写 0 看着像坏了（2026-11-09 审计）。
+                        Text(index == 4 ? "0" : "")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(Theme.textSecondary)
+                            .frame(width: 28, alignment: .trailing)
+                        Theme.separator.frame(height: 0.5)
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .background(Theme.cardFill.opacity(0.92), in: Capsule(style: .circular))
+                    if index < 4 {
+                        Spacer()
+                    }
                 }
             }
+            .padding(.bottom, 22)
+
+            VStack(spacing: 6) {
+                Image(systemName: "chart.xyaxis.line")
+                    .font(.system(size: 16))
+                    .foregroundStyle(Theme.textSecondary)
+                Text(emptyText)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.textTertiary)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(Theme.cardFill, in: Capsule(style: .circular))
+            .overlay(Capsule(style: .circular).strokeBorder(Theme.cardStroke, lineWidth: 0.5))
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .transaction { transaction in transaction.animation = nil }
     }
 
     private var emptyText: String {
@@ -443,15 +428,19 @@ private struct TrafficPlot: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(point.time, format: .dateTime.hour().minute().second())
                 .font(.caption2)
-                .foregroundStyle(.secondary)
-            Text("↓ \(Theme.rateOrDash(point.download))")
-                .foregroundStyle(.green)
-            Text("↑ \(Theme.rateOrDash(point.upload))")
-                .foregroundStyle(.blue)
+                .foregroundStyle(Theme.textTertiary)
+            HStack(spacing: 3) {
+                Text("↓").foregroundStyle(Theme.downloadTint)
+                Text(Theme.rateOrDash(point.download)).foregroundStyle(Theme.textPrimary)
+            }
+            HStack(spacing: 3) {
+                Text("↑").foregroundStyle(Theme.uploadTint)
+                Text(Theme.rateOrDash(point.upload)).foregroundStyle(Theme.textPrimary)
+            }
             if range == .hour {
                 Text("峰值 ↓ \(Theme.rateOrDash(point.downloadPeak))")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.textSecondary)
             }
         }
         .font(.caption.monospacedDigit().weight(.medium))
@@ -463,54 +452,43 @@ private struct TrafficPlot: View {
     }
 }
 
-// MARK: - 右主卡：出口与运行状态（OverviewCardBox，全白卡内用十字细线分割，彻底去掉灰底小方块）
+// MARK: - 右主卡：链路健康（2026-11-09 原型：IP 大字 + 复制、DNS 绿条、风险、活跃连接、卡底警告条）
 
-private struct OverviewCardBox: View {
+private struct LinkHealthCard: View {
     @Environment(AppState.self) private var state
     @State private var showsRuntimeDetails = false
 
     var body: some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 10) {
-                headerRow
-                Divider()
-                exitSection
-                Divider()
-                Button {
-                    state.requestPage(.connections)
-                } label: {
-                    LabeledContent("活跃连接") { ActiveConnectionCountText() }
-                        .font(.callout)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                DisclosureGroup("运行详情", isExpanded: $showsRuntimeDetails) {
-                    RuntimeTelemetryGrid()
-                        .padding(.top, 8)
-                }
-                .font(.callout)
-                Spacer(minLength: 0)
-                Divider()
-                activityFooter
+        VStack(alignment: .leading, spacing: 12) {
+            headerRow
+            exitSection
+            Theme.separator.frame(height: 0.5)
+            connectionsRow
+            DisclosureGroup("运行详情", isExpanded: $showsRuntimeDetails) {
+                RuntimeTelemetryGrid()
+                    .padding(.top, 8)
             }
-            .padding(4)
-            // 高度不封顶：没流量数据时左卡只有 160 高，这里若跟着封顶，出口、运行详情与底栏会溢出卡外。
-            // 两卡等高由外层 HStack 的 fixedSize 统一，本卡只把多出的高度留给 Spacer。
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .font(.system(size: 12))
+            .foregroundStyle(Theme.textSecondary)
+            Spacer(minLength: 0)
+            activityFooter
         }
+        .padding(16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Theme.cardFill, in: RoundedRectangle(cornerRadius: Theme.cardRadius, style: .continuous))
     }
 
     private var headerRow: some View {
-        HStack(alignment: .center, spacing: 8) {
+        HStack(alignment: .center, spacing: 6) {
             Text("链路健康")
-                .font(.headline)
+                .font(.system(size: 14, weight: .semibold))
 
             if state.exitDiagnosticsIsStale {
-                StatusBadge(text: "切换前", tint: .orange)
+                StatusBadge(text: "切换前", style: Theme.warning)
                     .help("已切换节点，正在探测新出口")
             }
 
-            Spacer()
+            Spacer(minLength: 4)
 
             if state.isRefreshingExitDiagnostics {
                 ProgressView().controlSize(.small)
@@ -519,152 +497,230 @@ private struct OverviewCardBox: View {
                     Task { await state.refreshExitDiagnostics() }
                 } label: {
                     Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.textSecondary)
                 }
-                .buttonStyle(.borderless)
-                .controlSize(.small)
+                .buttonStyle(.plain)
                 .help("刷新出口 IP 与 DNS 检测")
+                .accessibilityLabel("刷新出口检测")
             }
 
             Button {
                 state.requestPage(.diagnostics)
             } label: {
-                HStack(spacing: 3) {
-                    Text("详细诊断")
-                    Image(systemName: "chevron.right")
-                        .font(.caption2)
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                Text("详细诊断")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.textSecondary)
             }
             .buttonStyle(.plain)
         }
     }
 
-    // 1. 出口 IP 与安全（直接排版在白卡上，不套灰框）
+    // 1. 出口 IP 与安全：IP 大字 + 复制、DNS 状态胶囊、位置 / 归属、风险行。
     @ViewBuilder
     private var exitSection: some View {
         if let report = state.exitDiagnostics {
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(report.exit.ip)
-                        .font(.title2.weight(.semibold).monospacedDigit())
-                        .foregroundStyle(state.exitDiagnosticsIsStale ? Color.secondary : Color.primary)
-                        .textSelection(.enabled)
+                        .font(.system(size: 20, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(state.exitDiagnosticsIsStale ? Theme.textSecondary : Theme.textPrimary)
                         .lineLimit(1)
-                    Spacer()
-                    StatusBadge(text: dnsStatusTitle(report.dns.status), tint: dnsStatusTint(report.dns.status))
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(report.exit.ip, forType: .string)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("复制 IP")
+                    .accessibilityLabel("复制出口 IP")
+                    Spacer(minLength: 0)
                 }
-                let loc = [report.exit.location, report.exit.organization].filter { !$0.isEmpty }.joined(separator: " · ")
+
+                // DNS 状态条：成功时绿点 + 绿字 + 浅绿胶囊底（原型）。
+                let dnsStyle = dnsStatusStyle(report.dns.status)
+                HStack(spacing: 6) {
+                    Circle().fill(dnsStyle.icon).frame(width: 6, height: 6)
+                    Text(dnsStatusTitle(report.dns.status))
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(dnsStyle.text)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(dnsStyle.soft, in: Capsule(style: .circular))
+
+                let loc = [report.exit.location, report.exit.organization].filter { !$0.isEmpty }.joined(separator: " / ")
                 Text(loc.isEmpty ? "地理位置与运营商未知" : loc)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.textSecondary)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+
                 if let rep = report.reputation, let risk = rep.risk {
                     HStack(spacing: 6) {
-                        Circle().fill(Theme.riskTint(risk)).frame(width: 6, height: 6)
+                        Circle().fill(Theme.riskStyle(risk).icon).frame(width: 6, height: 6)
                         Text(Theme.riskSummary(rep))
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(Theme.riskTint(risk))
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.textPrimary)
                             .lineLimit(1)
                     }
                 }
             }
-            .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
         } else {
-            HStack(alignment: .center, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(state.isRefreshingExitDiagnostics ? "正在探测出口网络…" : (state.exitDiagnosticsError == nil ? "未接管网络" : "出口探测未完成"))
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(state.exitDiagnosticsError == nil ? Color.primary : Color.orange)
-                    Text(state.exitDiagnosticsError ?? (state.isOn ? "点击右侧按钮检测当前出口 IP、归属地与 DNS 泄漏状态。" : "开启系统代理或 TUN 后会自动检测出口 IP 与 DNS。"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
+            // 未接管也保留与报告态相同的行骨架（IP 行 / DNS 胶囊 / 说明行 / 风险行），
+            // 只把数值换成占位，卡片高度与布局不随接管状态跳动（2026-11-09 用户决定）。
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("—")
+                        .font(.system(size: 20, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(Theme.textSecondary)
+                    Spacer(minLength: 0)
+                    if state.isRefreshingExitDiagnostics {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Button("立即检测") {
+                            Task { await state.refreshExitDiagnostics() }
+                        }
+                        .controlSize(.small)
+                        .fixedSize(horizontal: true, vertical: false)
+                    }
+                }
+
+                // DNS 胶囊占位：中性样式，未接管时没有检测结论。
+                HStack(spacing: 6) {
+                    Circle().fill(Theme.neutral.icon).frame(width: 6, height: 6)
+                    Text("DNS 未检测")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Theme.neutral.text)
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(Theme.neutral.soft, in: Capsule(style: .circular))
+
+                Text(idleExitDetail)
+                    .font(.system(size: 12))
+                    .foregroundStyle(state.exitDiagnosticsError == nil || state.isRefreshingExitDiagnostics ? Theme.textSecondary : Theme.warning.text)
+                    .lineLimit(2)
+
+                // 风险行占位：报告态这里是有声誉分时的风险摘要。
+                HStack(spacing: 6) {
+                    Circle().fill(Theme.neutral.icon).frame(width: 6, height: 6)
+                    Text("风险未评估")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.textSecondary)
+                        .lineLimit(1)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// 未接管时链路健康卡的说明：沿用原空态文案，按状态给提示或错误。
+    private var idleExitDetail: String {
+        if state.isRefreshingExitDiagnostics { return "正在探测出口网络…" }
+        if let error = state.exitDiagnosticsError { return error }
+        return state.isOn
+            ? "点击右侧按钮检测当前出口 IP、归属地与 DNS 泄漏状态。"
+            : "开启系统代理或 TUN 后会自动检测出口 IP 与 DNS。"
+    }
+
+    // 2. 活跃连接行：点击前往连接页。
+    private var connectionsRow: some View {
+        Button {
+            state.requestPage(.connections)
+        } label: {
+            HStack {
+                Text("活跃连接")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.textPrimary)
+                Spacer(minLength: 8)
+                ActiveConnectionCountText()
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.textPrimary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    // 3. 卡底警告条：错误红底、警告橙底、无通知时显示最新运行事件或「运行平稳」。
+    @ViewBuilder
+    private var activityFooter: some View {
+        if let error = state.errorMessage {
+            noticeBar(text: error, symbol: "exclamationmark.octagon.fill", style: Theme.danger)
+        } else if let warning = state.warnings.last {
+            noticeBar(text: warning, symbol: "exclamationmark.triangle.fill", style: Theme.warning)
+        } else {
+            HStack(spacing: 6) {
+                if let event = state.runtimeEvents.last {
+                    Image(systemName: "info.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.textSecondary)
+                    Text(event.detail.map { "\($0.isEmpty ? event.title : "\(event.title) · \($0)")" } ?? event.title)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.textSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                } else {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.success.icon)
+                    Text("运行平稳，无未处理告警")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.textSecondary)
                 }
                 Spacer(minLength: 8)
-                if !state.isRefreshingExitDiagnostics {
-                    Button("立即检测") {
-                        Task { await state.refreshExitDiagnostics() }
-                    }
-                    .controlSize(.small)
-                    .fixedSize(horizontal: true, vertical: false)
-                }
+                allLogsLink
             }
-            .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
         }
     }
 
-    // 3. 底部单行运行动态栏
-    private var noticeCount: Int {
-        (state.errorMessage != nil ? 1 : 0) + state.warnings.count
-    }
-
-    private var activityFooter: some View {
+    private func noticeBar(text: String, symbol: String, style: Theme.SemanticColors) -> some View {
         HStack(spacing: 8) {
-            if let error = state.errorMessage {
-                Image(systemName: "exclamationmark.octagon.fill")
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            } else if let warning = state.warnings.last {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                Text(warning)
-                    .font(.caption)
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            } else if let event = state.runtimeEvents.last {
-                Image(systemName: "info.circle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(event.detail.map { "\($0.isEmpty ? event.title : "\(event.title) · \($0)")" } ?? event.title)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            } else {
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.green)
-                Text("运行平稳，无未处理告警")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
+            Image(systemName: symbol)
+                .font(.system(size: 12))
+                .foregroundStyle(style.icon)
+            Text(text)
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.textPrimary)
+                .lineLimit(2)
+                .truncationMode(.tail)
             Spacer(minLength: 8)
-
-            if noticeCount > 0 {
-                Button("清除") {
-                    state.dismissError()
-                    state.clearWarnings()
-                }
-                .buttonStyle(.borderless)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: true, vertical: false)
-            }
-
-            Button {
-                state.requestPage(.records)
-            } label: {
-                HStack(spacing: 3) {
-                    Text("全部日志")
-                    Image(systemName: "chevron.right")
-                        .font(.caption2)
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            Button("清除") {
+                state.dismissError()
+                state.clearWarnings()
             }
             .buttonStyle(.plain)
-            .fixedSize(horizontal: true, vertical: false)
+            .font(.system(size: 11))
+            .foregroundStyle(Theme.textSecondary)
+            .fixedSize()
+            allLogsLink
         }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .background(style.soft, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private var allLogsLink: some View {
+        Button {
+            state.requestPage(.records)
+        } label: {
+            HStack(spacing: 2) {
+                Text("全部日志")
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+            }
+            .font(.system(size: 11))
+            .foregroundStyle(Theme.textSecondary)
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
     }
 
     private func dnsStatusTitle(_ status: DNSLeakStatus) -> String {
@@ -675,11 +731,11 @@ private struct OverviewCardBox: View {
         }
     }
 
-    private func dnsStatusTint(_ status: DNSLeakStatus) -> Color {
+    private func dnsStatusStyle(_ status: DNSLeakStatus) -> Theme.SemanticColors {
         switch status {
-        case .clear: .green
-        case .possible: .orange
-        case .indeterminate: .secondary
+        case .clear: Theme.success
+        case .possible: Theme.warning
+        case .indeterminate: Theme.neutral
         }
     }
 }
@@ -700,21 +756,21 @@ struct DashboardLiveRatePair: View {
     private func rateColumn(symbol: String, tint: Color, title: String, value: Int64) -> some View {
         HStack(spacing: 8) {
             Image(systemName: symbol)
-                .font(.callout.weight(.semibold))
+                .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(tint)
-                .frame(width: 16)
+                .frame(width: 14)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 1) {
                 Text(Theme.rateOrDash(value))
-                    .font(.title3.weight(.semibold).monospacedDigit())
+                    .font(.system(size: 16, weight: .semibold).monospacedDigit())
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                 Text(title)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.textSecondary)
             }
         }
-        .frame(width: 108, alignment: .leading)
+        .fixedSize()
     }
 }
 
@@ -768,14 +824,14 @@ private struct RuntimeTelemetryGrid: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("运行时长")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.textSecondary)
                     RuntimeDurationLabel()
                         .font(.title3.weight(.semibold).monospacedDigit())
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                     Text(state.isOn ? "本次持续接管" : "等待开启接管")
                         .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(Theme.textTertiary)
                         .lineLimit(1)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -794,7 +850,7 @@ private struct RuntimeTelemetryGrid: View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title)
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.textSecondary)
                 .lineLimit(1)
             Text(value)
                 .font(.title3.weight(.semibold).monospacedDigit())
@@ -802,7 +858,7 @@ private struct RuntimeTelemetryGrid: View {
                 .lineLimit(1)
             Text(subtitle)
                 .font(.caption2.monospacedDigit())
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(Theme.textTertiary)
                 .lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)

@@ -117,11 +117,14 @@ public actor SingBoxProcess {
         let binaryPath = binaryURL.resolvingSymlinksInPath().path
         process.interrupt()
         // 延迟补发前核对 PID 还是这个内核：它已经退出、PID 被系统复用给别的进程时不能误杀（2026-10-25 审计）。
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
-            if Self.isRunning(processID, executablePath: binaryPath) { kill(processID, SIGTERM) }
+        // 先看 Process 自己是否已回收：回收后 PID 可能复用给本进程新开的子进程，isOwnChild 会误判（2026-11-09 审计）。
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) { [process] in
+            guard process.isRunning else { return }
+            if Self.isOwnChild(processID) || Self.isRunning(processID, executablePath: binaryPath) { kill(processID, SIGTERM) }
         }
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.2) {
-            if Self.isRunning(processID, executablePath: binaryPath) { kill(processID, SIGKILL) }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.2) { [process] in
+            guard process.isRunning else { return }
+            if Self.isOwnChild(processID) || Self.isRunning(processID, executablePath: binaryPath) { kill(processID, SIGKILL) }
         }
         await Task.detached { [process] in process.waitUntilExit() }.value
         clearStreams()
@@ -138,6 +141,20 @@ public actor SingBoxProcess {
         var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
         guard proc_pidpath(pid, &buffer, UInt32(MAXPATHLEN)) > 0 else { return false }
         return String(cString: buffer) == executablePath
+    }
+
+    /// 仍是本进程未回收的子进程：子进程被回收前 PID 不会被系统复用，所以它一定就是我们启动的那个内核。
+    /// stop() 的补杀用它兜底：只按路径核对时，内核若 exec 成别的程序（测试里的假内核脚本会 exec tail），
+    /// 路径对不上就永远不补杀，stop() 卡死在 waitUntilExit（2026-11-09 在 M5 上全量测试挂起 30 分钟）。
+    nonisolated static func isOwnChild(_ pid: Int32) -> Bool {
+        pid > 0 && kill(pid, 0) == 0 && parentPID(of: pid) == getpid()
+    }
+
+    nonisolated static func parentPID(of pid: Int32) -> Int32? {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return nil }
+        return Int32(bitPattern: info.pbi_ppid)
     }
 
     /// 日志块交给**单一消费者**按到达顺序落盘。

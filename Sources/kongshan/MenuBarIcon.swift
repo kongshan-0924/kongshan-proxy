@@ -54,7 +54,8 @@ enum MenuBarIcon {
 
         let up = NSAttributedString(string: "↑\(uploadText)", attributes: textAttributes)
         let down = NSAttributedString(string: "↓\(downloadText)", attributes: textAttributes)
-        let gap: CGFloat = 3
+        // 合成图 18 + 4 + 44 = 66，再加状态项 6pt 余量固定为 72：窄值、宽值、「—」宽度一致。
+        let gap: CGFloat = 4
         let total = NSSize(width: canvas.width + gap + statusTextWidth, height: canvas.height)
 
         let image = NSImage(size: total, flipped: false) { rect in
@@ -72,11 +73,11 @@ enum MenuBarIcon {
     private static var statusCache: [String: NSImage] = [:]
 
     private static let textAttributes: [NSAttributedString.Key: Any] = [
-        .font: NSFont.monospacedDigitSystemFont(ofSize: 8, weight: .medium),
+        .font: NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .medium),
         .foregroundColor: NSColor.black
     ]
 
-    static let statusTextWidth: CGFloat = 39
+    static let statusTextWidth: CGFloat = 44
     static let widestRateSample = "↑999.9M"
 
     static func statusTextRenderedWidth(_ text: String) -> CGFloat {
@@ -86,7 +87,7 @@ enum MenuBarIcon {
     private static func draw(style: MenuBarIconStyle, state: State, in rect: NSRect) {
         // 关闭态整体压淡。模板图标用 alpha 通道当遮罩，所以降低 alpha 就是"变淡"，
         // 这是菜单栏里表达"未启用"的通行做法（系统的蓝牙/隔空投送都是这个路子）。
-        let alpha: CGFloat = state == .off ? 0.42 : 1
+        let alpha: CGFloat = state == .off ? 0.45 : 1
         NSColor.black.withAlphaComponent(alpha).setStroke()
         NSColor.black.withAlphaComponent(alpha).setFill()
 
@@ -96,11 +97,16 @@ enum MenuBarIcon {
         case .shield: drawShield(state: state, in: rect)
         }
 
-        // TUN 额外加一个实心点。TUN 是"接管整台机器"的强状态，值得一个独立标记；
-        // 点画在右上角的空处，不与山脊轮廓重叠。
+        // TUN 在底部加一条 12×2 实心横线：TUN 是"接管整台机器"的强状态，横线比旧方案
+        // 右上角的圆点更像"整机通道"——圆点在 18pt 下容易被读成通知角标。
+        // 三态由此只靠形状与不透明度区分：空心（off）→ 实心（systemProxy）→ 实心+横线（TUN）。
         if state == .tun {
-            let dot = NSBezierPath(ovalIn: NSRect(x: rect.maxX - 5.4, y: rect.maxY - 5.4, width: 3.6, height: 3.6))
-            dot.fill()
+            let bar = NSBezierPath(
+                roundedRect: NSRect(x: rect.midX - 6, y: rect.minY, width: 12, height: 2),
+                xRadius: 1,
+                yRadius: 1
+            )
+            bar.fill()
         }
     }
 

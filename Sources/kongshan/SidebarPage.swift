@@ -45,15 +45,18 @@ enum SidebarPage: String, CaseIterable, Identifiable {
     }
 
     var symbol: String {
+        // 原型用实心图标。有 .fill 变体的直接写变体名；没有的（gauge/network/branch/
+        // trianglepath/stethoscope 至今没有实心变体）保留原名，由侧栏渲染处的
+        // `.symbolVariant(.fill)` 在未来系统提供变体时自动填实。
         switch self {
         case .dashboard: "gauge.with.needle"
-        case .nodes: "square.stack.3d.up"
+        case .nodes: "square.stack.3d.up.fill"
         case .policyGroups: "network"
         case .routing: "arrow.triangle.branch"
         case .connections: "point.3.filled.connected.trianglepath.dotted"
-        case .records: "doc.plaintext"
+        case .records: "doc.plaintext.fill"
         case .diagnostics: "stethoscope"
-        case .settings: "gearshape"
+        case .settings: "gearshape.fill"
         }
     }
 }

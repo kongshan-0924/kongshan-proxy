@@ -2549,6 +2549,10 @@ final class AppStateTests: XCTestCase {
         let url = root.appending(path: "safe-test-core")
         let script = """
         #!/bin/sh
+        # 停内核时 SIGINT 可能落在 sh 还在等 cat 读完配置的那一刻：sh 等子进程正常退出后会忽略这次
+        # SIGINT 继续 exec tail，而 tail 换了可执行路径，SingBoxProcess 的 SIGTERM / SIGKILL 兜底按路径核对
+        # 不会补杀，测试就永远卡在 waitUntilExit（2026-11-09 在 M5 上复现，快机器才容易撞上）。显式 trap 立刻退出。
+        trap 'exit 0' INT TERM
         if [ "$1" = "check" ]; then
           /bin/cat >/dev/null
           exit 0

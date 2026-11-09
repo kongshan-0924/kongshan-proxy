@@ -37,13 +37,14 @@ struct ManualNodeSheet: View {
             HStack(spacing: 10) {
                 Image(systemName: "plus.circle.fill")
                     .font(.title3)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.textSecondary)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("添加自建节点")
                         .font(.headline)
+                        .foregroundStyle(Theme.textPrimary)
                     Text("保存后会生成独立的“自建”策略组")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.textSecondary)
                 }
                 Spacer()
             }
@@ -57,12 +58,12 @@ struct ManualNodeSheet: View {
 
             if mode == .paste { pasteForm } else { manualForm }
 
-            Divider()
+            Theme.separator.frame(height: 0.5)
             HStack {
                 if mode == .paste, !parsed.isEmpty {
                     Text("将添加 \(parsed.count) 个节点")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Theme.textSecondary)
                 }
                 Spacer()
                 Button("取消") { dismiss() }
@@ -75,6 +76,10 @@ struct ManualNodeSheet: View {
             .padding(16)
         }
         .frame(width: 470, height: 580)
+        .foregroundStyle(Theme.textPrimary)
+        .background(Theme.canvasBackground)
+        .tint(Theme.accent)
+        .buttonStyle(.pill)
     }
 
     // MARK: - 粘贴链接
@@ -84,6 +89,8 @@ struct ManualNodeSheet: View {
             CardSection {
                 TextEditor(text: $linkText)
                     .font(.caption.monospaced())
+                    .scrollContentBackground(.hidden)
+                    .inputField(isInvalid: localError != nil)
                     .frame(minHeight: 140)
                     .onChange(of: linkText) { _, _ in reparse() }
                 HStack {
@@ -96,7 +103,8 @@ struct ManualNodeSheet: View {
                     Spacer()
                     if !linkText.isEmpty {
                         Button("清空") { linkText = ""; parsed = []; localError = nil }
-                            .buttonStyle(.link)
+                            .buttonStyle(.pillAccent)
+                            .controlSize(.small)
                     }
                 }
             } header: {
@@ -114,9 +122,13 @@ struct ManualNodeSheet: View {
                                 Text(node.name)
                                     .font(.callout.weight(.medium))
                                     .lineLimit(1)
+                                    .help(node.name)
                                 Text("\(node.server):\(String(node.port))")
-                                    .font(.caption2.monospacedDigit())
-                                    .foregroundStyle(.secondary)
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(Theme.textSecondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .help("\(node.server):\(String(node.port))")
                             }
                             Spacer()
                         }
@@ -126,9 +138,15 @@ struct ManualNodeSheet: View {
 
             if let localError {
                 CardSection {
-                    Label(localError, systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.red)
-                        .font(.callout)
+                    Label {
+                        Text(localError).foregroundStyle(Theme.danger.text)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(Theme.danger.icon)
+                    }
+                    .font(.callout)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
                 }
             }
         }
@@ -178,25 +196,31 @@ struct ManualNodeSheet: View {
     private var manualForm: some View {
             CardForm {
                 CardSection("基本信息") {
-                    LabeledContent("名称") { TextField("名称", text: $name).labelsHidden().inputField().frame(maxWidth: 260) }
-                    LabeledContent("服务器") { TextField("服务器", text: $server).labelsHidden().inputField().frame(maxWidth: 260) }
-                    LabeledContent("端口") { TextField("端口", text: $port).labelsHidden().inputField().frame(maxWidth: 260) }
-                    LabeledContent("密码") { SecureField("密码", text: $password).labelsHidden().inputField().frame(maxWidth: 260) }
+                    LabeledContent("名称") { TextField("名称", text: $name, prompt: Theme.inputPrompt("名称")).labelsHidden().inputField().frame(maxWidth: 260) }
+                    LabeledContent("服务器") { TextField("服务器", text: $server, prompt: Theme.inputPrompt("服务器")).labelsHidden().font(.body.monospaced()).inputField().frame(maxWidth: 260) }
+                    LabeledContent("端口") { TextField("端口", text: $port, prompt: Theme.inputPrompt("端口")).labelsHidden().font(.body.monospaced()).inputField().frame(maxWidth: 260) }
+                    LabeledContent("密码") { SecureField("密码", text: $password, prompt: Theme.inputPrompt("密码")).labelsHidden().font(.body.monospaced()).inputField().frame(maxWidth: 260) }
                 }
                 CardSection("TLS") {
-                    LabeledContent("SNI") { TextField("SNI（可选）", text: $sni, prompt: Text("可选")).labelsHidden().inputField().frame(maxWidth: 260) }
+                    LabeledContent("SNI") { TextField("SNI（可选）", text: $sni, prompt: Theme.inputPrompt("可选")).labelsHidden().font(.body.monospaced()).inputField().frame(maxWidth: 260) }
                     Toggle("跳过证书验证", isOn: $skipCertificateVerification)
                 }
                 CardSection("可选参数") {
-                    LabeledContent("Obfs 密码") { TextField("Obfs 密码（salamander，可选）", text: $obfsPassword, prompt: Text("salamander，可选")).labelsHidden().inputField().frame(maxWidth: 260) }
-                    LabeledContent("上行 Mbps") { TextField("上行 Mbps（可选）", text: $uploadMbps, prompt: Text("可选")).labelsHidden().inputField().frame(maxWidth: 260) }
-                    LabeledContent("下行 Mbps") { TextField("下行 Mbps（可选）", text: $downloadMbps, prompt: Text("可选")).labelsHidden().inputField().frame(maxWidth: 260) }
+                    LabeledContent("Obfs 密码") { TextField("Obfs 密码（salamander，可选）", text: $obfsPassword, prompt: Theme.inputPrompt("salamander，可选")).labelsHidden().font(.body.monospaced()).inputField().frame(maxWidth: 260) }
+                    LabeledContent("上行 Mbps") { TextField("上行 Mbps（可选）", text: $uploadMbps, prompt: Theme.inputPrompt("可选")).labelsHidden().font(.body.monospaced()).inputField().frame(maxWidth: 260) }
+                    LabeledContent("下行 Mbps") { TextField("下行 Mbps（可选）", text: $downloadMbps, prompt: Theme.inputPrompt("可选")).labelsHidden().font(.body.monospaced()).inputField().frame(maxWidth: 260) }
                 }
                 if let localError {
                     CardSection {
-                        Label(localError, systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.red)
-                            .font(.callout)
+                        Label {
+                            Text(localError).foregroundStyle(Theme.danger.text)
+                        } icon: {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(Theme.danger.icon)
+                        }
+                        .font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
                     }
                 }
             }

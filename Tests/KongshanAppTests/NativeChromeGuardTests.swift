@@ -25,7 +25,7 @@ final class NativeChromeGuardTests: XCTestCase {
     private let viewFiles = [
         "Theme.swift", "MainWindowView.swift", "NodesView.swift", "SettingsView.swift", "ManualNodeSheet.swift",
         "DashboardView.swift", "DashboardRoute.swift", "RouteHeaderView.swift", "PolicyGroupsView.swift", "RoutingView.swift", "ConnectionsView.swift",
-        "LogsView.swift", "MessagesView.swift", "MenuBarPopoverView.swift"
+        "LogsView.swift", "MessagesView.swift"
     ]
 
     /// ⌘, 与 App 菜单「设置…」不得打开空白的 `Settings` 场景。
@@ -72,22 +72,31 @@ final class NativeChromeGuardTests: XCTestCase {
         }
     }
 
-    /// 页头由真标题栏承担：标题 `.navigationTitle`、统计 `.navigationSubtitle`、操作进 `.toolbar`。
-    func testPagesUseNativeTitleBarInsteadOfHandDrawnHeaders() throws {
+    /// 页面按钮在页内顶栏（PageTopBar），窗口工具栏只留固定的侧栏开关。
+    /// 各页各自声明 `.toolbar` / `.searchable` / `.navigationSubtitle` 时，每次切页 AppKit 都要拆掉重建整条工具栏，
+    /// 占切页耗时约三成（2026-11-09 iMac 采样，用户选方案 A）。
+    func testPagesUsePageTopBarInsteadOfWindowToolbar() throws {
         for file in viewFiles {
-            XCTAssertFalse(try source(file).contains("PageHeader("), "\(file) 不该再自绘页头")
+            let code = try source(file)
+            XCTAssertFalse(code.contains("PageHeader("), "\(file) 不该再自绘页头")
+            guard file != "MainWindowView.swift" else { continue }
+            XCTAssertFalse(code.contains(".toolbar {"), "\(file) 的按钮应放进 .pageTopBar")
+            XCTAssertFalse(code.contains(".searchable("), "\(file) 的搜索应用 TopBarSearchField")
+            XCTAssertFalse(code.contains(".navigationSubtitle("), "\(file)：标题栏隐藏，副标题看不见还会触发标题栏重排")
         }
-        // 配置页与设置页原先与主窗口同文件，2026-09-17 拆成 NodesView / SettingsView 各自一份。
-        for file in ["DashboardView.swift", "ConnectionsView.swift", "LogsView.swift",
-                     "MessagesView.swift", "PolicyGroupsView.swift", "RoutingView.swift",
-                     "NodesView.swift", "SettingsView.swift"] {
-            XCTAssertTrue(try source(file).contains(".navigationSubtitle("), "\(file) 应把统计放进副标题")
+        // 主窗口里的每一页都必须挂页内顶栏：详情列忽略顶部安全区，不挂的页面会顶进红绿灯那一行。
+        for file in ["DashboardView.swift", "NodesView.swift", "PolicyGroupsView.swift", "RoutingView.swift",
+                     "ConnectionsView.swift", "LogsView.swift", "DiagnosticsView.swift", "SettingsView.swift"] {
+            XCTAssertTrue(try source(file).contains(".pageTopBar"), "\(file) 应挂 .pageTopBar")
         }
+        let main = try source("MainWindowView.swift")
+        XCTAssertTrue(main.contains(".ignoresSafeArea(.container, edges: .top)"))
+        XCTAssertEqual(main.components(separatedBy: "ToolbarItem(").count - 1, 1, "窗口工具栏只能有固定的侧栏开关")
         let app = try source("KongshanApp.swift")
-        // 方案 A 极简顶栏：标题隐藏、去掉标题栏分割线，与侧栏融成一块。
+        XCTAssertTrue(app.contains(".fullSizeContentView"), "详情列要伸进标题栏高度带")
         XCTAssertTrue(app.contains("window.titleVisibility = .hidden"), "极简顶栏标题应隐藏")
         XCTAssertTrue(app.contains("window.titlebarSeparatorStyle = .none"), "极简顶栏应去掉分割线")
-        XCTAssertTrue(app.contains("window.toolbarStyle = .unified"), "统一工具栏")
+        XCTAssertTrue(app.contains("window.toolbarStyle = .unified"), "统一工具栏（高度带与页内顶栏等高）")
     }
 
     /// 主窗口隐藏了标题栏，`.navigationSubtitle` 不再显示；页面里看不到的常驻统计
@@ -118,11 +127,13 @@ final class NativeChromeGuardTests: XCTestCase {
         }
     }
 
-    /// 搜索用系统 `.searchable`，会进工具栏并自带快捷键；自绘搜索框没有这些。
-    func testSearchUsesSystemSearchable() throws {
-        XCTAssertFalse(try source("Theme.swift").contains("struct SearchField"))
+    /// 搜索统一用页内顶栏的 `TopBarSearchField`（⌘F 聚焦、Esc 清空），不再用会进窗口工具栏的 `.searchable`。
+    func testSearchUsesTopBarSearchField() throws {
+        let theme = try source("Theme.swift")
+        XCTAssertTrue(theme.contains(".keyboardShortcut(\"f\", modifiers: .command)"), "搜索框要保留 ⌘F")
+        XCTAssertTrue(theme.contains(".onExitCommand"), "搜索框要保留 Esc 清空")
         for file in ["ConnectionsView.swift", "LogsView.swift", "PolicyGroupsView.swift", "RoutingView.swift"] {
-            XCTAssertTrue(try source(file).contains(".searchable("), "\(file) 应使用 .searchable")
+            XCTAssertTrue(try source(file).contains("TopBarSearchField("), "\(file) 应使用 TopBarSearchField")
         }
     }
 
@@ -150,13 +161,14 @@ final class NativeChromeGuardTests: XCTestCase {
         XCTAssertTrue(dashboard.contains("transaction.animation = nil"), "图表必须关动画")
     }
 
-    /// 首页以 RouteRail 为主，只在实际接管时展开监控，避免关闭后仍摆一整页空指标。
-    func testDashboardUsesRouteHeaderAndOnlyShowsMetricsDuringTakeover() throws {
+    /// 仪表盘只有一套布局（2026-11-09 用户决定）：开不开代理，卡片数量、位置、尺寸、标题都不变，
+    /// 未接管用卡内空状态（数值「—」+ 占位文案），不再切换到「配置详情 / 最近活动」。
+    func testDashboardKeepsOneLayoutRegardlessOfTakeover() throws {
         let dashboard = try source("DashboardView.swift")
         XCTAssertTrue(dashboard.contains("RouteHeaderView(isCompact:"))
-        XCTAssertTrue(dashboard.contains("if hasTakeover"))
         XCTAssertTrue(dashboard.contains("DashboardTrafficGroup()"))
-        XCTAssertTrue(dashboard.contains("DashboardIdleContent()"), "未接管时要有配置与活动概览，不能只留空白")
+        XCTAssertFalse(dashboard.contains("DashboardIdleContent"), "未接管不再切换第二套布局")
+        XCTAssertFalse(dashboard.contains("if hasTakeover"), "中部两卡不得再按接管状态显隐")
         XCTAssertFalse(dashboard.contains("GridItem(.adaptive"), "双卡仍用显式比例，不用自适应缺角网格")
         XCTAssertTrue(dashboard.contains("DashboardLayout.trafficShare"), "双卡宽度应按比例规范分配")
     }
@@ -169,10 +181,10 @@ final class NativeChromeGuardTests: XCTestCase {
     }
 
     func testMenuBarCollapsesSecondaryPolicyGroups() throws {
-        let popover = try source("MenuBarPopoverView.swift")
-        XCTAssertTrue(popover.contains("preferredGroups"))
-        XCTAssertTrue(popover.contains("showsAllGroups"))
-        XCTAssertTrue(popover.contains("全部策略组"))
+        let panel = try source("MenuBarPanelView.swift")
+        XCTAssertTrue(panel.contains("groups.prefix(3)"), "主面板只直接展示前 3 个策略组")
+        XCTAssertTrue(panel.contains("groups.count > 3"))
+        XCTAssertTrue(panel.contains("title: \"更多策略组\""), "其余策略组必须收进更多策略组子面板")
     }
 
     func testSettingsCopyMatchesCurrentTUNBehavior() throws {
@@ -198,7 +210,15 @@ final class NativeChromeGuardTests: XCTestCase {
     func testPolicyGroupColumnDoesNotPaintSidebarMaterial() throws {
         let policy = try source("PolicyGroupsView.swift")
         XCTAssertFalse(policy.contains(".listStyle(.sidebar)"), "detail 里的第二层列表不该用侧栏材质")
-        XCTAssertTrue(policy.contains(".listStyle(.inset)"))
+        XCTAssertTrue(policy.contains("HuggingScrollStack("), "成员与策略组列表走懒加载贴合滚动")
+    }
+
+    /// 卡内长列表不能用 `ViewThatFits(in: .vertical)` 做「少时贴合、多时滚动」：它会把不滚动那份整列表
+    /// 非懒加载地建好量一遍，300 个成员时切到代理页 1 s、日志页 350 ms（2026-11-09 iMac 基准）。
+    func testCardListsDoNotMeasureWholeListWithViewThatFits() throws {
+        for file in ["PolicyGroupsView.swift", "NodesView.swift", "MessagesView.swift"] {
+            XCTAssertFalse(try source(file).contains("ViewThatFits(in: .vertical)"), file)
+        }
     }
 
     /// 连接表默认列必须能在最小窗口（760pt）里放下，不然只能横向翻。

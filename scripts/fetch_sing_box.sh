@@ -25,6 +25,9 @@ fi
 
 zsh scripts/build_sing_box.sh "$(kongshan_singbox_platform)" "$target"
 verified || {
-    print -u2 "编出的 sing-box 与钉住的 SHA-256 不一致（期望 $expected）：Go 版本、源码或补丁变了？"
+    print -u2 "编出的 sing-box 与钉住的 SHA-256 不一致（期望 $expected）。"
+    print -u2 "同一台机器同一套源码重编结果不变；换了编译机器、Xcode / SDK、Go 版本或补丁都会变。"
+    print -u2 "钉住的内核在 MacBook 的 Vendor/sing-box/ 各有一份（prepare-remote 会带到构建机），先找回那份；"
+    print -u2 "确实要换内核时用 zsh scripts/build_sing_box.sh all 两个架构一起重编并提交新的钉住值（之后要重装一次助手）。"
     exit 1
 }

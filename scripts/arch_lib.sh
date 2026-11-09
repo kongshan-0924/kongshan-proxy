@@ -1,10 +1,10 @@
 #!/bin/zsh
 # 主机架构相关的常量。build_app / release 的门禁与内核下载共用。
 #
-# 每次发布两个包：arm64 与 x86_64（release.sh prepare-remote 在 Intel 测试机上一起出）。
+# 每次发布两个包：arm64 与 x86_64（release.sh prepare-remote 在构建机上一起出，默认 m5）。
 
 # 目标架构默认是本机；KONGSHAN_TARGET_ARCH=arm64|x86_64 可交叉构建另一个架构
-# （iMac 上同时出 x86_64 自用与 arm64 给 MacBook，见 release.sh prepare-remote）。
+# （m5 上本机出 arm64、交叉出 x86_64；iMac 反之，见 release.sh prepare-remote）。
 # SwiftPM / Mach-O 里认的架构名（`lipo -archs`、`file` 的输出）。
 kongshan_host_arch() {
     case ${KONGSHAN_TARGET_ARCH:-$(uname -m)} in

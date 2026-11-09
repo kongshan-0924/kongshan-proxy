@@ -20,8 +20,10 @@
 import argparse
 import ipaddress
 import re
+import struct
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -129,6 +131,52 @@ def check_text(text, where, allow, deny):
     return problems
 
 
+# 二进制里只含 Swift 编译后类型名引用（mangled name 与符号引用字节交错）的段。里面的字符都来自源码里的类型标识符，
+# 源码已被 --tree 扫过；字符串字面量在 __cstring / __const 等段，照常扫描。
+# 2026-11-09：mangled 片段被符号引用字节切开后，恰好剩下一个与黑名单词相同的 4 字母片段，闸门误报拒绝发布
+# （用户确认跳过此段）。
+MANGLED_ONLY_SECTIONS = {(b"__TEXT", b"__swift5_typeref")}
+
+
+def _blank_mangled_sections(data: bytearray, base: int) -> None:
+    """把一个 64 位 Mach-O 切片里的纯类型名段清零。解析不了就原样保留（宁可多扫）。"""
+    if struct.unpack_from("<I", data, base)[0] != 0xFEEDFACF:
+        return
+    ncmds = struct.unpack_from("<I", data, base + 16)[0]
+    off = base + 32
+    for _ in range(ncmds):
+        cmd, cmdsize = struct.unpack_from("<II", data, off)
+        if cmd == 0x19:  # LC_SEGMENT_64
+            nsects = struct.unpack_from("<I", data, off + 64)[0]
+            sect = off + 72
+            for _ in range(nsects):
+                name = bytes(data[sect:sect + 16]).rstrip(b"\0")
+                seg = bytes(data[sect + 16:sect + 32]).rstrip(b"\0")
+                size = struct.unpack_from("<Q", data, sect + 40)[0]
+                fileoff = struct.unpack_from("<I", data, sect + 48)[0]
+                if (seg, name) in MANGLED_ONLY_SECTIONS and fileoff:
+                    start = base + fileoff
+                    data[start:start + size] = bytes(size)
+                sect += 80
+        off += cmdsize
+
+
+def binary_strings(path) -> str:
+    """strings -a 的结果，但先清掉只含 Swift 类型名引用的段（支持单架构与通用二进制）。"""
+    data = bytearray(Path(path).read_bytes())
+    if struct.unpack_from(">I", data, 0)[0] == 0xCAFEBABE:  # 通用二进制：大端 fat 头
+        for i in range(struct.unpack_from(">I", data, 4)[0]):
+            _blank_mangled_sections(data, struct.unpack_from(">I", data, 8 + i * 20 + 8)[0])
+    else:
+        _blank_mangled_sections(data, 0)
+    # 必须以文件形式交给 strings：从标准输入读时它不按 Mach-O 解析，会把符号表、调试路径也扫进来，与原行为不一致。
+    with tempfile.NamedTemporaryFile(suffix=".bin") as copy:
+        copy.write(data)
+        copy.flush()
+        out = subprocess.run(["strings", "-a", copy.name], capture_output=True, check=True)
+    return out.stdout.decode("utf-8", "replace")
+
+
 def is_binary(data: bytes) -> bool:
     return b"\0" in data[:8192]
 
@@ -187,7 +235,7 @@ def main():
     if args.message is not None:
         problems += check_text(args.message, "(提交说明)", allow, deny)
     for binary in args.binary:
-        text = subprocess.run(["strings", "-a", binary], capture_output=True, check=True).stdout.decode("utf-8", "replace")
+        text = binary_strings(binary)
         scanned += 1
         problems += check_text(text, f"(二进制 {Path(binary).name})", allow, deny)
 

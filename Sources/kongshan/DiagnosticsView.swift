@@ -2,16 +2,17 @@ import KongshanCore
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// 「诊断」页：出口 / 网络自检 / 规则命中 / 日志与导出 四个分段。
+/// 「诊断」页：一页看全的小窗布局（2026-11-06 由四段切换合并而来）。
 ///
 /// 2026-09-17 之前，排查能力散在六处：出口分析（独立页）、网络自检与限时诊断（设置→网络）、
 /// 规则命中测试（规则页折叠分区）、导出脱敏诊断（设置→更多）。
 /// 「出问题时去哪」因此没有唯一答案——这一页就是那个答案。
 ///
-/// **用 `.principal` 分段而不是四个 GroupBox 堆在一个滚动页里**：后者会让页面工具栏
-/// （重新自测 / 刷新出口 / 复制报告）只对第一个分区有效，用户滚到第三个分区时
-/// 工具栏仍显示与视野无关的按钮。分段切换后任意时刻只有一个子视图，工具栏归属明确。
+/// 2026-11-06 再改：四段切换让没检测时整页只剩一张空卡，分段控件又把标题顶歪。
+/// 合并成一页小窗后出口 / 自检 / 命中 / 导出各居其位，空态在小窗内占位，空间用满。
 struct DiagnosticsView: View {
+    /// 四段切换已合并成一页，枚举不再驱动界面；
+    /// 保留是因为 `SidebarShortcutTests` 锚定「出口仍是诊断页的一部分」（`case exit` 字样）。
     enum Tab: String, CaseIterable {
         case exit = "出口"
         case selfCheck = "网络自检"
@@ -19,23 +20,41 @@ struct DiagnosticsView: View {
         case deep = "日志与导出"
     }
 
-    @State private var tab: Tab = .exit
+    @Environment(AppState.self) private var state
 
     var body: some View {
-        // 结构化 switch：出口分析分段自带网络请求，常驻会让它在别的分段也跑。
-        Group {
-            switch tab {
-            case .exit: ExitAnalysisView()
-            case .selfCheck: NetworkSelfCheckView()
-            case .routeTest: RouteHitTestView()
-            case .deep: DeepDiagnosticsView()
+        TilePage {
+            TileMasonry(minColumnWidth: 320, maxColumns: 2) {
+                ExitAnalysisView()
+                SiteReachabilityCard()
+                RouteHitTestCard()
+                NetworkSelfCheckCard()
+                DeepDiagnosticsCard()
             }
         }
-        .navigationTitle("诊断")
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                CapsuleSegmentedPicker(options: Tab.allCases, selection: $tab) { $0.rawValue }
-                    .fixedSize()
+        // 原出口分段的两个动作整页通用，随合并挪到这里。
+        .pageTopBar {
+                Button {
+                    ExitAnalysisView.runFullCheck(state: state)
+                } label: {
+                    Label("全部重新检测", systemImage: "arrow.clockwise")
+                }
+                .keyboardShortcut("r", modifiers: .command)
+                .disabled(state.isRefreshingExitDiagnostics || state.isProbingSites)
+                .help("重新检测出口 IP、DNS 与站点可达性")
+
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(ExitAnalysisView.plainTextReport(state: state), forType: .string)
+                } label: {
+                    Label("复制报告", systemImage: "doc.on.doc")
+                }
+                .help("复制成纯文本，便于反馈问题时贴出来")
+        }
+        // 原出口分段的进场自检：代理已开但还没测过时补一次出口检测。
+        .onAppear {
+            if state.isOn, state.exitDiagnostics == nil {
+                Task { await state.refreshExitDiagnostics() }
             }
         }
     }
@@ -50,73 +69,15 @@ struct NetworkSelfCheckView: View {
     @Environment(AppState.self) private var state
 
     var body: some View {
-        CardForm {
-            CardSection {
-                Text("检查各网络服务是否残留 kongshan 的代理 / DNS 设置，清理后再验一次连通性。")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            if let report = state.networkRepairReport {
-                CardSection("检查结果") {
-                    ForEach(report.items) { item in
-                        HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Circle()
-                                .fill(Theme.networkCheckTint(item.severity))
-                                .frame(width: 7, height: 7)
-                                .padding(.top, 4)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(item.title).font(.callout.weight(.medium))
-                                Text(item.detail)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                            Spacer(minLength: 0)
-                        }
-                    }
-                }
-                if !report.services.isEmpty {
-                    // 优先级是 2026-09-16 那次断网事故的要害：排在前面的服务出问题会拖垮整机解析，
-                    // 而用户只会去看自己在用的那个（Wi-Fi）。这里把顺序摆出来。
-                    CardSection("网络服务优先级（macOS 按此顺序选用 DNS）") {
-                        ForEach(report.services) { svc in
-                            HStack(spacing: 8) {
-                                Text("\(svc.order)")
-                                    .font(.caption.monospacedDigit())
-                                    .foregroundStyle(.tertiary)
-                                    .frame(width: 16, alignment: .trailing)
-                                Text(svc.name).font(.caption)
-                                Spacer(minLength: 8)
-                                Text(svc.dnsServers.isEmpty ? "DNS 未设置" : svc.dnsServers.joined(separator: " "))
-                                    .font(.caption2.monospaced())
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                            }
-                        }
-                    }
-                }
-            } else if !state.isRepairingNetwork {
-                CardSection {
-                    ContentUnavailableView {
-                        Label("还没有自检", systemImage: "stethoscope")
-                    } description: {
-                        Text("检查接管残留、网络服务设置、残留内核进程与连通性，发现问题会就地修复。")
-                    } actions: {
-                        Button("开始自检") { Task { await state.runNetworkRepair() } }
-                            .buttonStyle(.pillProminent)
-                    }
-                }
+        TilePage {
+            TileMasonry(minColumnWidth: 300) {
+                NetworkSelfCheckCard()
             }
         }
-        .navigationSubtitle(subtitle)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if state.networkRepairReport != nil { PageStatusBar(subtitle) }
         }
-        .toolbar {
-            ToolbarItem(placement: .automatic) {
+        .pageTopBar {
                 Button {
                     Task { await state.runNetworkRepair() }
                 } label: {
@@ -125,12 +86,6 @@ struct NetworkSelfCheckView: View {
                 .keyboardShortcut("r", modifiers: .command)
                 .disabled(state.isRepairingNetwork)
                 .help("检查并修复接管残留，然后验一次连通性（⌘R）")
-            }
-        }
-        .overlay {
-            if state.isRepairingNetwork {
-                ProgressView("正在自检…").controlSize(.large)
-            }
         }
     }
 
@@ -140,11 +95,124 @@ struct NetworkSelfCheckView: View {
     }
 }
 
+/// 「网络自检」小窗：诊断页第二排与独立页共用。
+/// 「网络服务优先级」是同小窗里的第二段——顺序影响全机 DNS 解析，跟着自检结果一起看到才顺。
+struct NetworkSelfCheckCard: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        TileCard(
+            "网络自检", symbol: "stethoscope",
+            detail: state.networkRepairReport?.summary,
+            height: nil
+        ) {
+            Button {
+                Task { await state.runNetworkRepair() }
+            } label: {
+                Label("开始自检", systemImage: "stethoscope")
+            }
+            .buttonStyle(.pillProminent)
+            .disabled(state.isRepairingNetwork)
+            // 合并页里 ⌘R 是「全部重新检测」，这里不再提快捷键，避免误导。
+            .help("检查并修复接管残留，然后验一次连通性")
+        } fixedHeader: {
+            Text("检查接管残留、服务设置与连通性。")
+                .font(.caption)
+                .foregroundStyle(Theme.textSecondary)
+                .lineLimit(1)
+                .help("检查各网络服务是否残留 kongshan 的代理 / DNS 设置，清理后再验一次连通性；发现问题会就地修复。")
+        } content: {
+            if let report = state.networkRepairReport {
+                ForEach(report.items) { item in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Circle()
+                            .fill(networkCheckStyle(item.severity).icon)
+                            .frame(width: 7, height: 7)
+                            .padding(.top, 5)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(item.title)
+                                .font(.callout)
+                                .foregroundStyle(Theme.textPrimary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                            Text(item.detail)
+                                .font(.caption)
+                                .foregroundStyle(Theme.textSecondary)
+                                .lineLimit(2)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .help(item.detail)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.vertical, 7)
+                    if item.id != report.items.last?.id {
+                        Theme.separator.frame(height: 0.5)
+                    }
+                }
+
+                if !report.services.isEmpty {
+                    Text("网络服务优先级")
+                        .font(.callout.weight(.medium))
+                        .padding(.top, 10)
+                    Text("macOS 按此顺序选用 DNS")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                        .padding(.bottom, 4)
+                    // 服务顺序会影响全机 DNS 解析；保留完整列表并在小窗内滚动。
+                    ForEach(report.services) { svc in
+                        TileRow(
+                            symbol: "network", svc.name,
+                            subtitle: svc.dnsServers.isEmpty ? "DNS 未设置" : svc.dnsServers.joined(separator: " "),
+                            subtitleMonospaced: !svc.dnsServers.isEmpty,
+                            showsDivider: svc.id != report.services.last?.id
+                        ) {
+                            Text("\(svc.order)")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(Theme.textTertiary)
+                        }
+                    }
+                }
+            } else if state.isRepairingNetwork {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("正在自检并复核连通性…")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                .padding(.vertical, 20)
+            } else {
+                TileEmptyNote(text: "还没有自检")
+            }
+        }
+    }
+
+    private func networkCheckStyle(_ severity: NetworkCheckSeverity) -> Theme.SemanticColors {
+        switch severity {
+        case .ok: Theme.success
+        case .fixed: Theme.warning
+        case .problem: Theme.danger
+        }
+    }
+}
+
 // MARK: - 规则命中测试
 
 /// 迁自 规则页的 `routeTester` 折叠分区。
 /// 它不改任何配置，只回答「为什么这条流量走了那里」——是诊断工具，不是规则。
 struct RouteHitTestView: View {
+    var body: some View {
+        TilePage {
+            TileMasonry(minColumnWidth: 300) {
+                RouteHitTestCard()
+            }
+        }
+        .pageTopBar {}
+    }
+}
+
+/// 「规则命中测试」小窗：诊断页第三排与独立页共用。
+/// 原「测试」「命中结果」两张小窗合并成一张：控件在 fixedHeader 不滚动，结果在下面列表里。
+struct RouteHitTestCard: View {
     @Environment(AppState.self) private var state
     @State private var kind: RouteTestKind = .domain
     @State private var input = ""
@@ -152,15 +220,13 @@ struct RouteHitTestView: View {
     @State private var isTesting = false
 
     var body: some View {
-        CardForm {
-            CardSection {
-                CapsuleSegmentedPicker(options: RouteTestKind.allCases, selection: $kind) { $0.title }
-                    .fixedSize()
-
-                HStack(spacing: 10) {
-                    // `prompt` 作占位、`labelsHidden` 去掉左侧常驻标签：在 Form(.grouped) 里
-                    // `TextField("标题", text:)` 的标题会被当成左侧标签，可编辑区被挤到右边缘。
-                    TextField(kind.placeholder, text: $input, prompt: Text(kind.placeholder))
+        TileCard("规则命中测试", symbol: "scope", height: nil) {
+            // 标题行右侧留空：分段控件放标题行会把标题顶歪（2026-11-06 用户截图）。
+            EmptyView()
+        } fixedHeader: {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    TextField("输入域名或 IP，测试命中哪条规则", text: $input, prompt: Theme.inputPrompt("输入域名或 IP，测试命中哪条规则"))
                         .labelsHidden()
                         .inputField()
                         .font(.body.monospaced())
@@ -169,31 +235,31 @@ struct RouteHitTestView: View {
                         ProgressView().controlSize(.small)
                     }
                     Button("测试", action: run)
+                        .buttonStyle(.pill)
                         .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isTesting)
                 }
-            } footer: {
-                Text("按实际生成顺序解释本地可判定的规则；订阅规则集按已下载的内容判定。GEOIP 与内置国内规则要靠内核的 IP 库，不参与。")
-            }
 
+                CapsuleSegmentedPicker(options: RouteTestKind.allCases, selection: $kind) { $0.title }
+                    .fixedSize()
+            }
+        } content: {
             if let result {
-                CardSection("命中结果") {
-                    LabeledContent("来源") {
-                        Label(result.source.rawValue, systemImage: "checkmark.seal.fill")
-                    }
-                    LabeledContent("优先级", value: "\(result.priority)")
-                    LabeledContent("动作") {
-                        Text(result.action.displayName)
-                            .foregroundStyle(
-                                result.action == .direct ? .green
-                                    : result.action == .reject ? .red : Color.accentColor
-                            )
-                    }
-                    LabeledContent("目标", value: result.target)
-                    LabeledContent("命中", value: result.matchedValue)
+                TileRow(symbol: "checkmark.seal.fill", "来源", subtitle: result.source.rawValue, showsDivider: true)
+                TileRow(symbol: "list.number", "优先级", subtitle: "\(result.priority)", subtitleMonospaced: true, showsDivider: true)
+                TileRow(symbol: "arrow.triangle.branch", "动作", showsDivider: true) {
+                    Text(result.action.displayName)
+                        .font(.callout)
+                        .foregroundStyle(
+                            result.action == .direct ? Theme.success.text
+                                : result.action == .reject ? Theme.danger.text : Theme.textPrimary
+                        )
                 }
+                TileRow(symbol: "point.topleft.down.to.point.bottomright.curvepath", "目标", subtitle: result.target, subtitleMonospaced: true, showsDivider: true)
+                TileRow(symbol: "scope", "命中", subtitle: result.matchedValue, subtitleMonospaced: true, showsDivider: false)
+            } else {
+                TileEmptyNote(text: isTesting ? "正在匹配规则…" : "输入域名、IP 或进程名后测试")
             }
         }
-        .navigationSubtitle(result == nil ? "输入一个目标看它会走哪里" : "命中 \(result!.target)")
         .onChange(of: kind) { _, _ in result = nil }
         .onChange(of: input) { _, _ in result = nil }
     }
@@ -246,6 +312,21 @@ enum RouteTestKind: String, CaseIterable, Identifiable {
 /// 这是排查动线的最后一步：开 Debug → 复现 → 导出发给维护者。两者挨着才形成闭环。
 struct DeepDiagnosticsView: View {
     @Environment(AppState.self) private var state
+
+    var body: some View {
+        TilePage {
+            TileMasonry(minColumnWidth: 300) {
+                DeepDiagnosticsCard()
+            }
+        }
+        .pageTopBar {}
+    }
+}
+
+/// 「日志与导出」小窗：诊断页第三排与独立页共用。
+/// 限时诊断与导出诊断合在一张随内容高的小窗里，中间一条分隔线分两段。
+struct DeepDiagnosticsCard: View {
+    @Environment(AppState.self) private var state
     @State private var diagnosticDocument: TextExportDocument?
     @State private var showsExporter = false
     @State private var isPreparing = false
@@ -253,65 +334,100 @@ struct DeepDiagnosticsView: View {
     @State private var notice: String?
 
     var body: some View {
-        CardForm {
-            CardSection {
-                if state.isDiagnosticModeActive, let deadline = state.diagnosticModeEndsAt {
-                    LabeledContent("内核输出级别", value: "Debug（临时）")
-                    HStack {
-                        Text("剩余")
-                        Text(deadline, style: .timer).monospacedDigit()
-                        Spacer()
-                        Button("立即恢复") { Task { await state.disableDiagnosticMode() } }
-                            .disabled(state.isBusy)
-                    }
-                } else {
-                    LabeledContent("内核输出级别", value: "Info（普通）")
-                    HStack {
-                        Text("需要复现疑难网络问题时临时记录更多细节。")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Button("开启 15 分钟") { Task { await state.enableDiagnosticMode() } }
-                            .buttonStyle(.pillProminent)
-                            .disabled(state.isBusy || state.isTestingAllDelays)
-                    }
+        TileCard("日志与导出", symbol: "square.and.arrow.up", height: nil) {
+            // 第一段：限时诊断。
+            if state.isDiagnosticModeActive, let deadline = state.diagnosticModeEndsAt {
+                TileRow(symbol: "ladybug", "内核输出级别", subtitle: "Debug（临时）", showsDivider: true)
+                TileRow(symbol: "timer", "剩余", showsDivider: false) {
+                    DiagnosticCountdown(deadline: deadline)
                 }
-            } header: {
-                Text("详细日志")
-            } footer: {
-                // 「内核输出级别」而不是「内核日志」：日志页有一个同名但语义不同的「显示等级」，
-                // 那个只过滤已经收到的行。不区分就会出现「开了 Debug 却看不到 debug 行」的误解。
-                Text("与日志页的「显示等级」不同：这里决定内核产出多详细的行，那里只过滤已收到的行。"
-                     + "切换会重载内核并断开当前连接；到期自动恢复，截止时间随设置持久化。")
+                Label {
+                    Text("切换会重载内核并断开当前连接。")
+                        .foregroundStyle(Theme.textPrimary)
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle")
+                        .foregroundStyle(Theme.warning.icon)
+                }
+                .font(.caption)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.vertical, 8)
+                Button("立即恢复") { Task { await state.disableDiagnosticMode() } }
+                    .buttonStyle(.pill)
+                    .disabled(state.isBusy)
+                    .padding(.bottom, 8)
+            } else {
+                TileRow(symbol: "text.alignleft", "内核输出级别", subtitle: "Info（普通）", showsDivider: false)
+                Text("临时记录更多细节，15 分钟后自动恢复。")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.vertical, 8)
+                    .help("这里决定内核产出多详细的行，与日志页只过滤已收到行的「显示等级」不同；截止时间随设置持久化，到期自动恢复。")
+                Label {
+                    Text("开启会重载内核并断开当前连接。")
+                        .foregroundStyle(Theme.textPrimary)
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle")
+                        .foregroundStyle(Theme.warning.icon)
+                }
+                .font(.caption)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.bottom, 8)
+                Button("开启 15 分钟") { Task { await state.enableDiagnosticMode() } }
+                    .buttonStyle(.pill)
+                    .disabled(state.isBusy || state.isTestingAllDelays)
+                    .padding(.bottom, 8)
             }
 
-            CardSection {
-                HStack {
-                    Text("打包配置、运行事件与最近日志，排查问题时用。")
+            Theme.separator.frame(height: 0.5)
+                .padding(.vertical, 6)
+
+            // 第二段：导出诊断。
+            Text("导出诊断")
+                .font(.callout.weight(.medium))
+                .padding(.vertical, 2)
+            Text("打包配置、运行事件与最近日志。")
+                .font(.caption)
+                .foregroundStyle(Theme.textSecondary)
+                .lineLimit(1)
+                .padding(.vertical, 8)
+                .help("两版都不含订阅地址、节点凭据与本机用户名。完整版保留内核日志、节点服务器地址和规则，只发给信任的人；可公开分享版隐去这些信息。")
+            Text("两版都不含订阅地址、节点凭据与本机用户名。完整版保留内核日志、节点服务器地址和规则，只发给信任的人；可公开分享版隐去这些信息。")
+                .font(.caption)
+                .foregroundStyle(Theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.bottom, 8)
+            if isPreparing {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("正在准备诊断包…")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer(minLength: 8)
-                    if isPreparing {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Button("完整版…") { prepareExport(forSharing: false) }
-                            .help("含内核日志、节点地址与规则，只发给信任的人")
-                        Button("可公开分享版…") { prepareExport(forSharing: true) }
-                            .help("不含内核日志，隐去节点地址、规则内容、DNS 服务器、IP 与节点名")
-                    }
+                        .foregroundStyle(Theme.textSecondary)
                 }
-                if let notice {
-                    Text(notice).font(.caption).foregroundStyle(.secondary)
+                .padding(.bottom, 12)
+            } else {
+                HStack(spacing: 8) {
+                    Button("完整版…") { prepareExport(forSharing: false) }
+                        .help("含内核日志、节点地址与规则，只发给信任的人")
+                    Button("可分享版…") { prepareExport(forSharing: true) }
+                        .help("不含内核日志，隐去节点地址、规则内容、DNS 服务器、IP 与节点名")
+                    Spacer(minLength: 0)
                 }
-            } header: {
-                Text("导出诊断包")
-            } footer: {
-                Text("两版都不含订阅地址、节点凭据与本机用户名。完整版保留内核日志（访问过的网站与地址）、"
-                     + "节点服务器地址和规则，只发给信任的人；可公开分享版再去掉这些，可以贴到公开场合。")
+                .padding(.bottom, 8)
+            }
+            if let notice {
+                Text(notice)
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.bottom, 8)
             }
         }
-        .navigationSubtitle(state.isDiagnosticModeActive ? "详细日志已开启" : "按需开启详细日志")
+        // 导出面板挂在小窗上：独立页与合并页共用同一张小窗，面板跟着状态走。
         .fileExporter(
             isPresented: $showsExporter,
             document: diagnosticDocument,
@@ -340,5 +456,16 @@ struct DeepDiagnosticsView: View {
                 notice = "准备诊断包失败：\(error.localizedDescription)"
             }
         }
+    }
+}
+
+/// 倒计时每秒变化；隔离到叶子视图，避免两张诊断小窗跟着每秒重建。
+private struct DiagnosticCountdown: View {
+    let deadline: Date
+
+    var body: some View {
+        Text(deadline, style: .timer)
+            .font(.callout.monospacedDigit())
+            .foregroundStyle(Theme.textPrimary)
     }
 }

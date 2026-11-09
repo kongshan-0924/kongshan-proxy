@@ -6,7 +6,7 @@ import SwiftUI
 /// **此刻谁在用我的网络**；一个是本机进程，一个是局域网设备。
 /// 共享页原本只有四个小分区，其中「端口 / 来源白名单」是几个月一次的配置，已搬进设置→接管。
 ///
-/// 容器只提供 `.principal` 分段与 `.navigationTitle`；副标题、搜索与其余工具栏项由子视图声明。
+/// 容器只持有分段状态；搜索与操作在子视图的页内顶栏（PageTopBar）。
 struct ConnectionsPageView: View {
     enum Tab: String, CaseIterable {
         case local = "本机"
@@ -16,20 +16,6 @@ struct ConnectionsPageView: View {
     @State private var tab: Tab = .local
 
     var body: some View {
-        // 结构化 if：连接页与共享页各自有 onAppear/onDisappear 启停的监控，
-        // 常驻会让两条订阅同时跑。
-        Group {
-            switch tab {
-            case .local: ConnectionsView()
-            case .lan: SharingView()
-            }
-        }
-        .navigationTitle("连接")
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                CapsuleSegmentedPicker(options: Tab.allCases, selection: $tab) { $0.rawValue }
-                    .fixedSize()
-            }
-        }
+        ConnectionsView(scope: $tab)
     }
 }

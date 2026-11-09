@@ -68,6 +68,9 @@ final class KongshanAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
     /// 真机遇到过：`/Applications` 与工作区 `dist/` 两个副本同时在跑
     /// （构建产物被 Launch Services 记着，任何一次误启动就会拉起第二个）。
     func applicationWillFinishLaunching(_ notification: Notification) {
+        // 滚动条只在滚动时出现（细的浮层样式）：用鼠标时系统默认常显粗滚动条，压在小窗列表右侧很难看（用户 2026-11-06）。
+        // 写在本 App 自己的偏好域，只影响 kongshan、不改系统设置；必须在任何滚动视图创建之前设置。
+        UserDefaults.standard.set("WhenScrolling", forKey: "AppleShowScrollBars")
         // M4 launches a second, fully isolated no-node candidate while the
         // installed app keeps the user's network online. Only the tightly
         // scoped verifier directory may bypass single-instance protection.
@@ -182,13 +185,14 @@ final class KongshanAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         menuBarController?.stop()
     }
 
-    /// 主窗口默认外框尺寸：用户日常窗口实测 867×697（2026-10-24），首页比例按它适配。
-    private static let defaultWindowSize = NSSize(width: 867, height: 697)
+    /// 主窗口默认外框尺寸：960×640（2026-11-09 用户嫌 1080 太宽选定），侧栏 188 + 内容 772。
+    private static let defaultWindowSize = NSSize(width: 960, height: 640)
 
     private func makeMainWindowController() -> NSWindowController {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: Self.defaultWindowSize.width, height: Self.defaultWindowSize.height),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            // fullSizeContentView：详情列顶部伸进标题栏高度带，各页的页内顶栏与红绿灯同一行（PageTopBar）。
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
@@ -200,10 +204,13 @@ final class KongshanAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
         // 左侧只留三灯与侧栏开关、右侧留检测与铃铛，与侧栏融合成一整块。
         // 页面标题本来就在内容区（仪表盘顶部就是「已关闭 / 网络流量」），顶栏不缺信息。
         window.titleVisibility = .hidden
+        // macOS 26 起内容一滚到工具栏下面，标题栏就画一层不透明白底（不是画布灰），整条顶栏像白条 bug（用户 2026-11-05 截图）。
+        // `.toolbarBackground(.hidden)` 与滚动边缘效果修饰都管不到它；标题栏透明后顶栏始终透出窗口画布色。
+        window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .none
         window.toolbarStyle = .unified
-        // 最小尺寸跟着比例规范走：侧栏 132 + 内容最小约 560，小屏/分屏可用，再小就挤压卡片了。
-        window.minSize = NSSize(width: 692, height: 520)
+        // 最小尺寸：侧栏 188 + 内容最小约 632（用户要求不小于 820×560），小屏/分屏可用，再小就挤压卡片了。
+        window.minSize = NSSize(width: 820, height: 560)
         // 菜单栏应用关闭窗口后仍需常驻，窗口对象必须留存以便再次打开。
         window.isReleasedWhenClosed = false
         // 不做跨会话位置记忆：既不用 frameAutosaveName，也关掉 macOS 的窗口状态还原（Resume）。

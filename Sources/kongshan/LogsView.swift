@@ -13,6 +13,8 @@ struct LogsView: View {
     @State private var filterText = ""
     @State private var showsProblemsOnly = false
     @State private var groupsByConnection = false
+    @State private var scrollToBottomTrigger = 0
+    @State private var filterHovered = false
 
     private var filteredLogs: [LiveLogEntry] {
         let query = filterText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -31,78 +33,239 @@ struct LogsView: View {
     }
 
     var body: some View {
-        // 过滤只算一遍：日志每 200 ms 批量到达一次，body 跟着重算；`filteredLogs` 是对至多 2000 行的
-        // 全量过滤（含不区分大小写的子串匹配），原先一次求值里被访问三四遍。
+        // 过滤只算一遍：日志每 200 ms 批量到达一次，body 跟着重算；filteredLogs 是对至多 2000 行的
+        // 全量过滤（含不区分大小写的子串匹配），避免一次求值里被访问多次。
         let logs = filteredLogs
         let countText = "\(logs.count) / \(state.liveLogs.count) 行"
-        return logList(logs)
-            .navigationTitle("内核日志")
-            .navigationSubtitle(countText)
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                PageStatusBar(countText)
+        return VStack(alignment: .leading, spacing: Theme.cardGap) {
+            // 只有两个小窗：限 2 列平分宽度，宽窗口里不留空列。列宽下限 280：最小窗口（820 宽，内容约 592）
+            // 也保持两列，否则两卡竖排把内核日志卡挤到只剩标题行（2026-11-09 最小窗口快照）。
+            TileMasonry(minColumnWidth: 280, maxColumns: 2) {
+                MessagesView(tab: .constant(.warnings))
+                MessagesView(tab: .constant(.events))
             }
-            .searchable(text: $filterText, placement: .toolbar, prompt: "搜索日志或主机名")
-            .buttonStyle(.pill)
-            .toolbar {
-                ToolbarItemGroup(placement: .automatic) {
-                    // 这个选择器只是"过滤内核推来的日志"，不改内核自己的 log.level（那要重启内核）。
-                    // 内核按 info 输出，因此没有「调试」这一档可选——放上去只会是个点了没反应的死控件。
-                    CapsuleSegmentedPicker(options: [CoreLogLevel.info, .warning, .error], selection: logLevelBinding) { level in
-                        switch level {
-                        case .info: "信息"
-                        case .warning: "警告"
-                        default: "错误"
+            .fixedSize(horizontal: false, vertical: true)
+
+            kernelLogsCard(logs: logs, countText: countText)
+        }
+        .padding(Theme.pagePadding)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Theme.canvasBackground)
+        .buttonStyle(.pill)
+        // 原型取消了页面级底栏，原 PageStatusBar("\(countText) · 存档不受清除影响") 的统计信息与操作已直接置于内核日志卡底部
+        .pageTopBar {
+            TopBarSearchField(text: $filterText, prompt: "搜索日志或主机名", width: 220)
+        }
+        .onAppear { state.startLogMonitoring() }
+        .onDisappear { state.stopLogMonitoring() }
+        .fileExporter(
+            isPresented: $showsExporter,
+            document: exportDocument,
+            contentType: .plainText,
+            defaultFilename: "kongshan-logs"
+        ) { result in
+            if case let .failure(error) = result {
+                state.errorMessage = "导出日志失败：\(error.localizedDescription)"
+            }
+            exportDocument = nil
+        }
+    }
+
+    private func kernelLogsCard(logs: [LiveLogEntry], countText: String) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                IconTile(symbol: "terminal", size: 22)
+                CardHeader("内核日志", detail: countText) {
+                    kernelTrailingActions
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 12)
+            .padding(.bottom, 8)
+
+            if pausesAutomaticScroll {
+                kernelFixedHeader
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 8)
+            }
+
+            Theme.separator.frame(height: 0.5)
+
+            if logs.isEmpty {
+                VStack {
+                    Spacer()
+                    if !filterText.isEmpty {
+                        TileEmptyNote(text: "未找到匹配「\(filterText)」的日志")
+                    } else if state.isOn {
+                        TileEmptyNote(text: "等待内核日志（内存最多保留 2000 行）")
+                    } else {
+                        TileEmptyNote(text: "代理未启动，开启代理后连接实时日志")
+                    }
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                // ScrollViewReader 必须在 ScrollView 外面：原先套在 LazyVStack 里面，懒加载栈把它当成一个子视图，
+                // 2000 行日志全部当场建好——满载时切到日志页约 4 s、离开约 0.8 s（2026-11-09 iMac 基准）。
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            kernelLogRows(logs: logs)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 4)
+                    }
+                    .scrollIndicators(.automatic)
+                    .onChange(of: state.liveLogs.last?.id) {
+                        guard !pausesAutomaticScroll, let lastID = lastRowID(logs) else { return }
+                        proxy.scrollTo(lastID, anchor: .bottom)
+                    }
+                    .onChange(of: scrollToBottomTrigger) {
+                        if let lastID = lastRowID(logs) {
+                            proxy.scrollTo(lastID, anchor: .bottom)
                         }
                     }
-                    .fixedSize()
-                    .disabled(!state.isOn)
-                    .help("过滤显示的最低等级")
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            Theme.separator.frame(height: 0.5)
 
-                    // 三个过滤开关收进一个菜单：控制台的工具栏也是这么做的，
-                    // 勾选项在菜单里天然是原生形态。
-                    Menu {
-                        Toggle("只看问题", isOn: $showsProblemsOnly)
-                        Toggle("按连接聚合", isOn: $groupsByConnection)
-                        Divider()
-                        Toggle("暂停自动滚动", isOn: $pausesAutomaticScroll)
-                    } label: {
-                        Label("过滤", systemImage: showsProblemsOnly || groupsByConnection
-                              ? "line.3.horizontal.decrease.circle.fill"
-                              : "line.3.horizontal.decrease.circle")
-                    }
-                    .help("只看问题 / 按连接聚合 / 暂停自动滚动")
+            HStack {
+                Text("\(logs.count) 行 / 存档不受清除影响")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.textSecondary)
+                Spacer()
+                Button("在访达中显示") {
+                    state.revealArchivesInFinder()
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.textSecondary)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .background(Theme.cardFill, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Theme.cardStroke, lineWidth: 0.5)
+        )
+    }
 
-                    Button {
-                        state.clearLiveLogs()
-                    } label: {
-                        Label("清空显示", systemImage: "trash")
-                    }
-                    // 控制台 / 终端的「清屏」都是 ⌘K。
-                    .keyboardShortcut("k", modifiers: .command)
-                    .disabled(state.liveLogs.isEmpty)
-                    .help("清空当前显示的日志，不影响磁盘上的日志文件")
-
-                    Button {
-                        prepareExport()
-                    } label: {
-                        Label("导出", systemImage: "square.and.arrow.up")
-                    }
-                    .disabled(isPreparingExport)
-                    .help("导出内核日志")
+    private var kernelTrailingActions: some View {
+        HStack(spacing: 8) {
+            CapsuleSegmentedPicker(
+                options: [CoreLogLevel.info, .warning, .error],
+                selection: logLevelBinding
+            ) { level in
+                switch level {
+                case .info: "信息"
+                case .warning: "警告"
+                default: "错误"
                 }
             }
-            .onAppear { state.startLogMonitoring() }
-            .onDisappear { state.stopLogMonitoring() }
-            .fileExporter(
-                isPresented: $showsExporter,
-                document: exportDocument,
-                contentType: .plainText,
-                defaultFilename: "kongshan-logs"
-            ) { result in
-                if case let .failure(error) = result {
-                    state.errorMessage = "导出日志失败：\(error.localizedDescription)"
+            .fixedSize()
+            .disabled(!state.isOn)
+            .help("过滤显示的最低等级")
+
+            Menu {
+                Toggle("只看问题", isOn: $showsProblemsOnly)
+                Toggle("按连接聚合", isOn: $groupsByConnection)
+                Divider()
+                Toggle("暂停自动滚动", isOn: $pausesAutomaticScroll)
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: showsProblemsOnly || groupsByConnection
+                          ? "line.3.horizontal.decrease.circle.fill"
+                          : "line.3.horizontal.decrease.circle")
+                        .foregroundStyle(showsProblemsOnly || groupsByConnection ? Theme.accent : Theme.textSecondary)
+                    Text("过滤")
                 }
-                exportDocument = nil
+                .font(.caption)
+                .foregroundStyle(Theme.textPrimary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(filterHovered ? Theme.hoverFill : Theme.cardFill, in: Capsule(style: .circular))
+                .overlay(Capsule(style: .circular).strokeBorder(Theme.controlStroke, lineWidth: 1))
+                .contentShape(Capsule(style: .circular))
+                .onHover { filterHovered = $0 }
+            }
+            .menuStyle(.button)
+            .buttonStyle(.plain)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("只看问题 / 按连接聚合 / 暂停自动滚动")
+
+            Button {
+                state.clearLiveLogs()
+            } label: {
+                Label("清空显示", systemImage: "trash")
+                    .labelStyle(.titleOnly)
+            }
+            .controlSize(.small)
+            .keyboardShortcut("k", modifiers: .command)
+            .disabled(state.liveLogs.isEmpty)
+            .help("清空当前显示的日志，不影响磁盘上的日志文件")
+
+            Button {
+                prepareExport()
+            } label: {
+                Label("导出", systemImage: "square.and.arrow.up")
+                    .labelStyle(.titleOnly)
+            }
+            .controlSize(.small)
+            .disabled(isPreparingExport)
+            .help("导出内核日志")
+        }
+    }
+
+    @ViewBuilder
+    private var kernelFixedHeader: some View {
+        if pausesAutomaticScroll {
+            HStack {
+                Spacer()
+                Button {
+                    pausesAutomaticScroll = false
+                    scrollToBottomTrigger += 1
+                } label: {
+                    Label("恢复自动滚动", systemImage: "play.circle.fill")
+                        .font(.caption)
+                }
+                .controlSize(.small)
+                .foregroundStyle(Theme.accent)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func kernelLogRows(logs: [LiveLogEntry]) -> some View {
+            if logs.isEmpty {
+                EmptyView()
+            } else if groupsByConnection {
+                let groups = LogConnectionGrouping.groups(from: logs)
+                ForEach(groups) { group in
+                    LogConnectionRow(group: group)
+                        .id(group.id)
+                    if group.id != groups.last?.id {
+                        Theme.separator.frame(height: 0.5)
+                    }
+                }
+            } else {
+                ForEach(logs) { item in
+                    LogEntryRow(item: item)
+                        .id(item.id)
+                        .contextMenu {
+                            Button("复制消息") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(item.entry.message, forType: .string)
+                            }
+                        }
+                    if item.id != logs.last?.id {
+                        Theme.separator.frame(height: 0.5)
+                    }
+                }
             }
     }
 
@@ -112,82 +275,6 @@ struct LogsView: View {
             return LogConnectionGrouping.groups(from: logs).last.map { AnyHashable($0.id) }
         }
         return logs.last.map { AnyHashable($0.id) }
-    }
-
-    private func logList(_ logs: [LiveLogEntry]) -> some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    if groupsByConnection {
-                        // 按连接 ID 聚合：同一条连接的多行日志（入站 → 进程匹配 → 出站 → 失败原因）本来就是一个整体。
-                        ForEach(LogConnectionGrouping.groups(from: logs)) { group in
-                            LogConnectionRow(group: group)
-                                .id(group.id)
-                            Divider().opacity(0.4)
-                        }
-                    } else {
-                        ForEach(logs) { item in
-                            LogEntryRow(item: item)
-                                .id(item.id)
-                                .contextMenu {
-                                    Button("复制消息") {
-                                        NSPasteboard.general.clearContents()
-                                        NSPasteboard.general.setString(item.entry.message, forType: .string)
-                                    }
-                                }
-                            Divider().opacity(0.4)
-                        }
-                    }
-                }
-                .padding(.horizontal, 16)
-            }
-            .background(Color(nsColor: .textBackgroundColor))
-            .overlay {
-                if logs.isEmpty {
-                    if !filterText.isEmpty {
-                        ContentUnavailableView.search(text: filterText)
-                    } else if state.isOn {
-                        ContentUnavailableView(
-                            "等待内核日志",
-                            systemImage: "doc.text.magnifyingglass",
-                            description: Text("内核产生日志后将实时显示，内存最多保留 2000 行。")
-                        )
-                    } else {
-                        ContentUnavailableView {
-                            Label("代理未启动", systemImage: "doc.text.magnifyingglass")
-                        } description: {
-                            Text("开启代理后才会连接实时日志推送。")
-                        } actions: {
-                            Button("前往仪表盘") { state.requestPage(.dashboard) }
-                        }
-                    }
-                }
-                if pausesAutomaticScroll {
-                    VStack {
-                        Spacer()
-                        HStack {
-                            Spacer()
-                            Button {
-                                pausesAutomaticScroll = false
-                                if let lastID = lastRowID(logs) {
-                                    withAnimation { proxy.scrollTo(lastID, anchor: .bottom) }
-                                }
-                            } label: {
-                                Label("回到底部", systemImage: "arrow.down.circle.fill")
-                            }
-                            .controlSize(.small)
-                            .padding(.trailing, 24)
-                            .padding(.bottom, 12)
-                        }
-                    }
-                }
-            }
-            // 看最后一行的 ID 而不是行数：满 2000 行后每批都是删旧加新，行数恒定，按行数触发会停止跟随。
-            .onChange(of: state.liveLogs.last?.id) {
-                guard !pausesAutomaticScroll, let lastID = lastRowID(logs) else { return }
-                proxy.scrollTo(lastID, anchor: .bottom)
-            }
-        }
     }
 
     private var logLevelBinding: Binding<CoreLogLevel> {
@@ -269,13 +356,14 @@ private struct LogEntryRow: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Text(item.entry.receivedAt, format: .dateTime.hour().minute().second())
-                .foregroundStyle(.tertiary)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(Theme.textTertiary)
             Text(levelTitle)
-                .font(.caption2.weight(.bold).monospaced())
-                .foregroundStyle(levelColor)
+                .font(.caption.weight(.medium).monospaced())
+                .foregroundStyle(levelStyle.text)
                 .padding(.horizontal, 5)
                 .padding(.vertical, 2)
-                .background(levelColor.opacity(0.13), in: RoundedRectangle(cornerRadius: 4))
+                .background(levelStyle.soft, in: RoundedRectangle(cornerRadius: 4))
                 .frame(width: 52, alignment: .leading)
             Text(item.entry.message)
                 .textSelection(.enabled)
@@ -294,12 +382,12 @@ private struct LogEntryRow: View {
         }
     }
 
-    private var levelColor: Color {
+    /// DEBUG / INFO 退回中性，只有 WARN / ERROR 占用语义浅底。
+    private var levelStyle: Theme.SemanticColors {
         switch item.entry.level {
-        case .debug: .secondary
-        case .info: .blue
-        case .warning: .orange
-        case .error: .red
+        case .debug, .info: Theme.neutral
+        case .warning: Theme.warning
+        case .error: Theme.danger
         }
     }
 }
@@ -348,7 +436,7 @@ private struct LogConnectionRow: View {
                 HStack(spacing: 8) {
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(Theme.textTertiary)
                         .frame(width: 10)
                     Circle()
                         .fill(tint)
@@ -360,7 +448,7 @@ private struct LogConnectionRow: View {
                     Spacer(minLength: 8)
                     Text("\(group.entries.count) 行")
                         .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(Theme.textTertiary)
                 }
                 .padding(.vertical, 5)
                 .contentShape(Rectangle())
@@ -387,9 +475,9 @@ private struct LogConnectionRow: View {
 
     private var tint: Color {
         switch group.worstLevel {
-        case .error: .red
-        case .warning: .orange
-        default: .secondary
+        case .error: Theme.danger.icon
+        case .warning: Theme.warning.icon
+        default: Theme.neutral.icon
         }
     }
 }

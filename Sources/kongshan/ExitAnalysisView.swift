@@ -1,106 +1,27 @@
 import KongshanCore
 import SwiftUI
 
-/// 出口分析页。把「这是个什么 IP」和「这个 IP 现在到底能不能用」放在一起。
+/// 出口分析小窗组：「出口 IP」「IP 风险」「DNS」三张，外加站点可达性（`SiteReachabilityCard`）。
 ///
-/// 后者是这一页存在的理由：真机 2026-09-03～09-04，Codex 反复「正在重新连接」的真因是
-/// Cloudflare 对当前出口 IP 回 403 + `cf-mitigated: challenge`，而界面上只显示"超时"，
-/// 用户以为节点全死了、反复换节点也没用。有了这一页，换节点前就能判断值不值得换。
+/// 这一组小窗存在的理由是「这个 IP 现在到底能不能用」：真机 2026-09-03～09-04，Codex 反复
+/// 「正在重新连接」的真因是 Cloudflare 对当前出口 IP 回 403 + `cf-mitigated: challenge`，
+/// 而界面上只显示"超时"，用户以为节点全死了、反复换节点也没用。有了这组小窗，换节点前就能判断值不值得换。
+///
+/// 2026-11-06 起诊断页合并成一页：本视图不再自带页面容器、工具栏与整页空态，
+/// ⌘R「全部重新检测」与「复制报告」挪到诊断页工具栏。诊断页把它与其余四张诊断小窗
+/// 放进同一个瀑布流：出口三卡作为整体单元（内部竖叠），单元之间按最矮列放置，
+/// 矮卡下方不再留空。独立构造 `ExitAnalysisView()` 仍渲染出口三卡，
+/// 供 RenderSnapshotTests / SidebarShortcutTests 使用。
 struct ExitAnalysisView: View {
-    @Environment(AppState.self) private var state
-
-    /// 三种形态：什么都没有 → 一个空态 + 主按钮；正在跑第一次 → 进度；有任一结果 → 报告。
-    /// 之前空态是三张各自缩成一团的 GroupBox 分别写「点右上角…」，宽窄不一、飘在画面中央。
-    private var hasAnyResult: Bool {
-        state.exitDiagnostics != nil || !state.siteProbes.isEmpty || state.exitDiagnosticsError != nil
-    }
-
-    private var isRunningFirstPass: Bool {
-        !hasAnyResult && (state.isRefreshingExitDiagnostics || state.isProbingSites)
-    }
-
     var body: some View {
-        Group {
-            if isRunningFirstPass {
-                firstPassProgress
-            } else if !hasAnyResult {
-                emptyState
-            } else {
-                report
-            }
+        VStack(alignment: .leading, spacing: Theme.cardGap) {
+            ExitIPCard()
+            ExitDNSCard()
         }
-        .groupBoxStyle(CardGroupBoxStyle())
-        .navigationTitle("出口分析")
-        .navigationSubtitle(subtitle)
-        .buttonStyle(.pill)
-        .toolbar {
-            ToolbarItemGroup(placement: .automatic) {
-                Button(action: runFullCheck) {
-                    Label("全部重新检测", systemImage: "arrow.clockwise")
-                }
-                .keyboardShortcut("r", modifiers: .command)
-                .disabled(state.isRefreshingExitDiagnostics || state.isProbingSites)
-                .help("重新检测出口 IP、DNS 与站点可达性")
-
-                Button {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(plainTextReport, forType: .string)
-                } label: {
-                    Label("复制报告", systemImage: "doc.on.doc")
-                }
-                .help("复制成纯文本，便于反馈问题时贴出来")
-            }
-        }
-        .onAppear {
-            if state.isOn, state.exitDiagnostics == nil {
-                Task { await state.refreshExitDiagnostics() }
-            }
-        }
-    }
-
-    private var report: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                exitGroup
-                reputationGroup
-                reachabilityGroup
-                dnsGroup
-            }
-            // 报告是给人读的，限在可读列宽内居中；宽窗口下四张卡拉到 1800pt 宽，
-            // 每行只有开头几个字、右边全是空，反而比窄着更难看。
-            .frame(maxWidth: 720)
-            .frame(maxWidth: .infinity)
-            .padding(20)
-        }
-    }
-
-    private var emptyState: some View {
-        ContentUnavailableView {
-            Label("还没有检测", systemImage: "globe.asia.australia")
-        } description: {
-            Text(state.isOn
-                 ? "查出口 IP 的归属与风险，直接请求 ChatGPT、Claude 等站点看会不会被拦，并核对 DNS 有没有泄漏。"
-                 : "代理未开启，现在测到的是本机直连出口。开启代理后再测，结果才反映节点。")
-        } actions: {
-            Button("开始检测") { runFullCheck() }
-                .buttonStyle(.pillProminent)
-                .controlSize(.large)
-        }
-    }
-
-    private var firstPassProgress: some View {
-        VStack(spacing: 12) {
-            ProgressView()
-                .controlSize(.regular)
-            Text("正在检测出口与站点可达性…")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     /// 两项检测一起跑：站点自测和出口检测互不依赖，串行等一个再等一个只是让用户多等。
-    private func runFullCheck() {
+    static func runFullCheck(state: AppState) {
         Task {
             async let exit: Void = state.refreshExitDiagnostics()
             async let probes: Void = state.refreshSiteProbes()
@@ -108,330 +29,8 @@ struct ExitAnalysisView: View {
         }
     }
 
-    private var subtitle: String {
-        guard let report = state.exitDiagnostics else {
-            return state.isOn ? "尚未检测" : "代理未开启，检测的是本机直连出口"
-        }
-        return report.exit.location
-    }
-
-    // MARK: - 出口
-
-    private var exitGroup: some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 10) {
-                header("出口 IP", symbol: "globe.asia.australia")
-                if let report = state.exitDiagnostics {
-                    // IP 要能选中复制：用户去查询、去反馈时都需要它。
-                    row(
-                        state.exitDiagnosticsIsStale ? "IP 地址（切换前）" : "IP 地址",
-                        value: report.exit.ip, monospaced: true, selectable: true
-                    )
-                    row("位置", value: report.exit.location)
-                    row("归属", value: report.exit.organization.isEmpty ? "未知" : report.exit.organization)
-                    if let asn = report.reputation?.asnText {
-                        row("ASN", value: asn)
-                    }
-                    row("检测于", value: report.checkedAt.formatted(date: .omitted, time: .standard))
-                } else if state.isRefreshingExitDiagnostics {
-                    ProgressView().controlSize(.small)
-                } else if let error = state.exitDiagnosticsError {
-                    // 失败要说清楚、要能就地重试；把人支去右上角找按钮是把责任推回给用户。
-                    inlineAction(message: error, tint: .red, title: "重试") {
-                        Task { await state.refreshExitDiagnostics() }
-                    }
-                } else {
-                    inlineAction(message: "还没检测出口。", title: "检测出口") {
-                        Task { await state.refreshExitDiagnostics() }
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(4)
-        }
-    }
-
-    // MARK: - 风险评估
-
-    @ViewBuilder
-    private var reputationGroup: some View {
-        if let reputation = state.exitDiagnostics?.reputation,
-           reputation.fraudScore != nil || !reputation.labels.isEmpty {
-            GroupBox {
-                VStack(alignment: .leading, spacing: 10) {
-                    header("IP 风险评估", symbol: "shield.lefthalf.filled")
-
-                    if let score = reputation.fraudScore, let risk = reputation.risk {
-                        HStack(spacing: 10) {
-                            Text("\(score)%")
-                                .font(.title2.weight(.semibold).monospacedDigit())
-                                .foregroundStyle(Theme.riskTint(risk))
-                            Text(risk.title)
-                                .font(.callout.weight(.medium))
-                                .foregroundStyle(Theme.riskTint(risk))
-                            Spacer(minLength: 8)
-                        }
-                        // 进度条让"57 分"有直观位置感；纯数字看不出离两端多远。
-                        //
-                        // **不用 `ProgressView`**：macOS 上它的线性样式走系统强调色，
-                        // `.tint(_:)` 不生效——分数文字是橙的、条却是灰的，最显眼的那个元素
-                        // 反而不表达风险等级。自绘两条 Capsule 才能把颜色真正落上去。
-                        CapacityBar(fraction: Double(score) / 100, tint: Theme.riskTint(risk))
-                            .accessibilityLabel("风险评分")
-                            .accessibilityValue("\(score) 分，满分 100")
-                    }
-
-                    if !reputation.labels.isEmpty {
-                        HStack(spacing: 6) {
-                            ForEach(reputation.labels, id: \.self) { label in
-                                Text(label)
-                                    .font(.caption.weight(.medium))
-                                    .padding(.horizontal, 7)
-                                    .padding(.vertical, 3)
-                                    .background(Theme.canvasBackground, in: Capsule(style: .circular))
-                            }
-                            Spacer(minLength: 0)
-                        }
-                    }
-
-                    // 必须写明来源与局限：各家算法差异极大，把它当唯一判据会误导。
-                    Text("评分来自 \(IPReputationService.sourceName)，检测时会把当前出口 IP 发给该服务。"
-                        + "不同厂商算法差异很大，只作参考——真正管用的判据是上面的站点可达性。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(4)
-            }
-        }
-    }
-
-    // MARK: - 站点可达性
-
-    private var reachabilityGroup: some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 10) {
-                header("站点可达性", symbol: "checkmark.shield")
-                Text("直接请求这些站点看真实结果。比第三方「IP 风险分」准，也不必把你的出口 IP 交给额外的服务。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                if let summary = state.siteProbeSummary {
-                    Text(summary)
-                        .font(.callout)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(10)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Theme.canvasBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                }
-
-                if state.siteProbes.isEmpty {
-                    if state.isProbingSites {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        inlineAction(message: "还没自测。", title: "开始自测") {
-                            Task { await state.refreshSiteProbes() }
-                        }
-                    }
-                } else {
-                    ForEach(state.siteProbes) { result in
-                        probeRow(result)
-                    }
-                    if let checkedAt = state.siteProbesCheckedAt {
-                        Text("自测于 \(checkedAt.formatted(date: .omitted, time: .standard))")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(4)
-        }
-    }
-
-    private func probeRow(_ result: SiteProbeResult) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(tint(for: result.outcome))
-                    .frame(width: 7, height: 7)
-                Text(result.target.name)
-                    .font(.callout.weight(.medium))
-                Spacer(minLength: 8)
-                if let ms = result.elapsedMilliseconds {
-                    Text("\(ms) ms")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-                Text(label(for: result.outcome))
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(tint(for: result.outcome))
-            }
-            Text(result.target.impact)
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(.vertical, 3)
-    }
-
-    private func label(for outcome: SiteProbeOutcome) -> String {
-        switch outcome {
-        case let .ok(code): "可达（\(code)）"
-        case let .challenged(code, _): "需人机验证（\(code)）"
-        case let .rejected(code): "被拒（\(code)）"
-        case .failed: "连不上"
-        }
-    }
-
-    private func tint(for outcome: SiteProbeOutcome) -> Color {
-        switch outcome {
-        case .ok: .green
-        case .challenged: .orange
-        case .rejected, .failed: .red
-        }
-    }
-
-    // MARK: - DNS
-
-    private var dnsGroup: some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 10) {
-                header("DNS 泄漏", symbol: "list.bullet.rectangle")
-                if let report = state.exitDiagnostics {
-                    HStack(spacing: 6) {
-                        Circle().fill(dnsTint(report.dns.status)).frame(width: 7, height: 7)
-                        Text(dnsTitle(report.dns.status))
-                            .font(.callout.weight(.medium))
-                            .foregroundStyle(dnsTint(report.dns.status))
-                    }
-                    Text(report.dns.detail)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    if report.resolvers.isEmpty {
-                        emptyHint("没有探测到解析器")
-                    } else {
-                        // 解析器明细此前拿到了却从未展示。判断泄漏时，用户需要看到"到底是谁在解析"。
-                        Divider()
-                        Text("实际使用的解析器（\(report.resolvers.count) 个）")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(.secondary)
-                        ForEach(report.resolvers) { resolver in
-                            HStack(spacing: 8) {
-                                Text(resolver.ip)
-                                    .font(.caption.monospaced())
-                                    .textSelection(.enabled)
-                                Text(resolverLocation(resolver))
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                                Spacer(minLength: 6)
-                                if resolver.isMullvadDNS {
-                                    Text("检测服务自有")
-                                        .font(.caption2)
-                                        .foregroundStyle(.tertiary)
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    emptyHint("出口检测完成后才有 DNS 结论。")
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(4)
-        }
-    }
-
-    private func resolverLocation(_ resolver: DNSResolverInfo) -> String {
-        let place = [resolver.city, resolver.country].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", ")
-        let org = resolver.organization
-        return [place, org].filter { !$0.isEmpty }.joined(separator: " · ")
-    }
-
-    private func dnsTitle(_ status: DNSLeakStatus) -> String {
-        switch status {
-        case .clear: "未发现明显泄漏"
-        case .possible: "可能泄漏"
-        case .indeterminate: "无法判断"
-        }
-    }
-
-    private func dnsTint(_ status: DNSLeakStatus) -> Color {
-        switch status {
-        case .clear: .green
-        case .possible: .orange
-        case .indeterminate: .secondary
-        }
-    }
-
-    // MARK: - 通用
-
-    private func header(_ title: String, symbol: String) -> some View {
-        // 卡头图标统一中性灰：形状区分卡片、颜色不做彩色点缀（与全 App 口径一致）。
-        Label {
-            Text(title).font(.headline)
-        } icon: {
-            Image(systemName: symbol).foregroundStyle(.secondary)
-        }
-    }
-
-    private func row(
-        _ title: String,
-        value: String,
-        monospaced: Bool = false,
-        selectable: Bool = false
-    ) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Text(title)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .frame(width: 64, alignment: .leading)
-            Group {
-                if selectable {
-                    Text(value).textSelection(.enabled)
-                } else {
-                    Text(value)
-                }
-            }
-            .font(monospaced ? .callout.monospaced() : .callout)
-            .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
-        }
-    }
-
-    /// 卡片内的局部空态：一句话 + 一个就地按钮。
-    private func inlineAction(
-        message: String,
-        tint: Color = .secondary,
-        title: String,
-        action: @escaping () -> Void
-    ) -> some View {
-        HStack(spacing: 10) {
-            Text(message)
-                .font(.caption)
-                .foregroundStyle(tint == .secondary ? AnyShapeStyle(.tertiary) : AnyShapeStyle(tint))
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
-            Button(title, action: action)
-                .controlSize(.small)
-        }
-    }
-
-    private func emptyHint(_ text: String) -> some View {
-        Text(text)
-            .font(.caption)
-            .foregroundStyle(.tertiary)
-            .fixedSize(horizontal: false, vertical: true)
-    }
-
-    /// 纯文本报告。反馈问题时贴这一段，比截图更有用。
-    var plainTextReport: String {
+    /// 纯文本报告。反馈问题时贴这一段，比截图更有用；诊断页工具栏的「复制报告」也用它。
+    static func plainTextReport(state: AppState) -> String {
         var lines: [String] = ["kongshan 出口分析"]
         if let report = state.exitDiagnostics {
             lines.append("出口 IP：\(report.exit.ip)")
@@ -442,7 +41,7 @@ struct ExitAnalysisView: View {
                 let summary = Theme.riskSummary(reputation)
                 if !summary.isEmpty { lines.append("风险评估：\(summary)（来源 \(IPReputationService.sourceName)）") }
             }
-            lines.append("DNS：\(dnsTitle(report.dns.status))——\(report.dns.detail)")
+            lines.append("DNS：\(dnsStatusTitle(report.dns.status))——\(report.dns.detail)")
             if !report.resolvers.isEmpty {
                 lines.append("解析器：" + report.resolvers.map(\.ip).joined(separator: "、"))
             }
@@ -451,10 +50,421 @@ struct ExitAnalysisView: View {
             lines.append("站点可达性：")
             for result in state.siteProbes {
                 let ms = result.elapsedMilliseconds.map { " \($0) ms" } ?? ""
-                lines.append("  - \(result.target.name)：\(label(for: result.outcome))\(ms)")
+                lines.append("  - \(result.target.name)：\(probeOutcomeLabel(result.outcome))\(ms)")
             }
         }
         if let summary = state.siteProbeSummary { lines.append("结论：\(summary)") }
         return lines.joined(separator: "\n")
+    }
+}
+
+/// 出口 IP 小窗：无论是否检测过都在——合并成一页后，这块不能再整段消失只剩一张空卡。
+struct ExitIPCard: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        TileCard("出口 IP", symbol: "globe.asia.australia", height: nil) {
+            if let report = state.exitDiagnostics {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 8) {
+                        Text(report.exit.ip)
+                            .font(.system(size: 20, weight: .semibold, design: .monospaced))
+                            .foregroundStyle(Theme.textPrimary)
+                            .lineLimit(1)
+                            .textSelection(.enabled)
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(report.exit.ip, forType: .string)
+                        } label: {
+                            Image(systemName: "doc.on.doc")
+                                .font(.system(size: 11))
+                                .foregroundStyle(Theme.textSecondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("拷贝出口 IP")
+                    }
+
+                    Theme.separator.frame(height: 0.5)
+
+                    kvRow(label: "位置", value: report.exit.location)
+                    kvRow(label: "归属", value: report.exit.organization.isEmpty ? "未知" : report.exit.organization)
+                    if let asn = report.reputation?.asnText {
+                        kvRow(label: "ASN", value: asn)
+                    }
+                    kvRow(label: "检测时间", value: report.checkedAt.formatted(date: .omitted, time: .standard))
+
+                    if let reputation = report.reputation,
+                       let score = reputation.fraudScore,
+                       let risk = reputation.risk {
+                        Theme.separator.frame(height: 0.5)
+
+                        HStack(alignment: .center, spacing: 8) {
+                            Text("IP 风险")
+                                .font(.system(size: 12))
+                                .foregroundStyle(Theme.textSecondary)
+                                .frame(width: 72, alignment: .leading)
+
+                            Text("\(score)%")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(Theme.riskStyle(risk).text)
+
+                            Text(risk.title)
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(Theme.riskStyle(risk).text)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 2)
+                                .background(Theme.riskStyle(risk).soft, in: Capsule(style: .circular))
+
+                            if !reputation.labels.isEmpty {
+                                Text(reputation.labels.joined(separator: " · "))
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(Theme.textSecondary)
+                            }
+                        }
+
+                        CapacityBar(fraction: Double(score) / 100, tint: Theme.riskStyle(risk).icon, height: 4)
+                            .accessibilityLabel("风险评分")
+                            .accessibilityValue("\(score) 分，满分 100")
+
+                        Text("来源 \(IPReputationService.sourceName) / 仅作参考")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                }
+                .padding(.vertical, 8)
+            } else if state.isRefreshingExitDiagnostics {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("正在检测出口…")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                .padding(.vertical, 16)
+            } else if let error = state.exitDiagnosticsError {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(Theme.danger.text)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("重试") { Task { await state.refreshExitDiagnostics() } }
+                }
+                .padding(.vertical, 12)
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("—")
+                        .font(.system(size: 20, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(Theme.textTertiary)
+                    Text(state.isOn ? "检测出口归属、风险、DNS 与站点可达性。" : "代理未开启，测到的是本机直连出口。")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 8)
+                Button("立即检测") { ExitAnalysisView.runFullCheck(state: state) }
+                    .buttonStyle(.pillProminent)
+                    .padding(.bottom, 8)
+            }
+        }
+    }
+
+    private func kvRow(label: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 0) {
+            Text(label)
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.textSecondary)
+                .frame(width: 72, alignment: .leading)
+            Text(value)
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.textPrimary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+    }
+}
+
+/// IP 风险小窗：分数条、等级、标签；无数据时占位而不是整卡消失。
+struct ExitRiskCard: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        TileCard("IP 风险", symbol: "shield.lefthalf.filled", height: nil) {
+            if let reputation = state.exitDiagnostics?.reputation,
+               reputation.fraudScore != nil || !reputation.labels.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    if let score = reputation.fraudScore, let risk = reputation.risk {
+                        HStack(spacing: 10) {
+                            Text("\(score)%")
+                                .font(.system(size: 20, weight: .semibold))
+                                .foregroundStyle(Theme.riskStyle(risk).text)
+                            Text(risk.title)
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(Theme.riskStyle(risk).text)
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 3)
+                                .background(Theme.riskStyle(risk).soft, in: Capsule(style: .circular))
+                            Spacer(minLength: 8)
+                        }
+                        CapacityBar(fraction: Double(score) / 100, tint: Theme.riskStyle(risk).icon, height: 5)
+                            .accessibilityLabel("风险评分")
+                            .accessibilityValue("\(score) 分，满分 100")
+                    }
+
+                    HStack(spacing: 8) {
+                        if !reputation.labels.isEmpty {
+                            WrappingRiskLabels(labels: reputation.labels)
+                        }
+                        Spacer()
+                        Text("来源 \(IPReputationService.sourceName) / 仅作参考")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                }
+                .padding(.vertical, 8)
+            } else {
+                TileEmptyNote(text: "检测后显示")
+            }
+        }
+    }
+}
+
+/// DNS 小窗：解析器列表与泄漏结论；无数据时占位。
+struct ExitDNSCard: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        TileCard(
+            "DNS", symbol: "list.bullet.rectangle",
+            detail: state.exitDiagnostics.map { "\($0.resolvers.count) 个解析器" },
+            height: nil
+        ) {
+            if let report = state.exitDiagnostics {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        Circle().fill(dnsStatusStyle(report.dns.status).icon).frame(width: 7, height: 7)
+                        Text(dnsStatusTitle(report.dns.status))
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(dnsStatusStyle(report.dns.status).text)
+                        Spacer(minLength: 0)
+                    }
+                    Text(report.dns.detail)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.textSecondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.vertical, 6)
+
+                if report.resolvers.isEmpty {
+                    TileEmptyNote(text: "没有探测到解析器")
+                } else {
+                    ForEach(report.resolvers) { resolver in
+                        HStack(spacing: 8) {
+                            Image(systemName: "network")
+                                .font(.system(size: 11))
+                                .foregroundStyle(Theme.textSecondary)
+                            Text(resolver.ip)
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundStyle(Theme.textPrimary)
+                            Spacer()
+                            Text(resolverLocation(resolver))
+                                .font(.system(size: 11))
+                                .foregroundStyle(Theme.textSecondary)
+                        }
+                        .padding(.vertical, 4)
+                        if resolver.id != report.resolvers.last?.id {
+                            Theme.separator.frame(height: 0.5)
+                        }
+                    }
+                }
+            } else {
+                TileEmptyNote(text: "出口检测完成后才有 DNS 结论")
+            }
+        }
+    }
+}
+
+/// 站点可达性小窗：直接请求站点，核对真实可用性。
+/// 没检测时也把站点列出来（结果写「未检测」）：小窗不留空，也知道会测哪些。
+struct SiteReachabilityCard: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        TileCard(
+            "站点可达性", symbol: "checkmark.shield",
+            detail: state.siteProbesCheckedAt.map { "测于 \($0.formatted(date: .omitted, time: .shortened))" },
+            height: nil
+        ) {
+            EmptyView()
+        } fixedHeader: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("直接请求站点，核对真实可用性。比第三方 IP 风险分更接近真实结果，也不必把出口 IP 交给额外服务。")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let summary = state.siteProbeSummary {
+                    Text(summary)
+                        .font(.caption)
+                        .foregroundStyle(summaryTint)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .help(summary)
+                }
+            }
+        } content: {
+            if state.siteProbes.isEmpty {
+                if state.isProbingSites {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("正在检测站点…")
+                            .font(.caption)
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                    .padding(.vertical, 16)
+                } else {
+                    ForEach(SiteReachabilityProbe.defaultTargets) { target in
+                        untestedRow(target, showsDivider: target.id != SiteReachabilityProbe.defaultTargets.last?.id)
+                    }
+                }
+            } else {
+                ForEach(state.siteProbes) { result in
+                    probeRow(result, showsDivider: result.id != state.siteProbes.last?.id)
+                }
+            }
+        }
+    }
+
+    private var summaryTint: Color {
+        state.siteProbes.contains { if case .challenged = $0.outcome { return true } else { return false } }
+            ? Theme.warning.text : Theme.textSecondary
+    }
+
+    private func probeRow(_ result: SiteProbeResult, showsDivider: Bool) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(probeOutcomeStyle(result.outcome).icon)
+                    .frame(width: 7, height: 7)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(result.target.name)
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(result.target.impact)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.textSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 8)
+                VStack(alignment: .trailing, spacing: 1) {
+                    if let ms = result.elapsedMilliseconds {
+                        Text("\(ms) ms")
+                            .font(.system(size: 11).monospacedDigit())
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                    Text(probeOutcomeLabel(result.outcome))
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(probeOutcomeStyle(result.outcome).text)
+                        .lineLimit(1)
+                }
+                .fixedSize()
+            }
+            .padding(.vertical, 7)
+            if showsDivider {
+                Theme.separator.frame(height: 0.5)
+            }
+        }
+    }
+
+    private func untestedRow(_ target: SiteProbeTarget, showsDivider: Bool) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(Theme.textTertiary)
+                    .frame(width: 7, height: 7)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(target.name)
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(target.impact)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.textSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 8)
+                Text("未检测")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.textTertiary)
+            }
+            .padding(.vertical, 7)
+            if showsDivider {
+                Theme.separator.frame(height: 0.5)
+            }
+        }
+    }
+}
+
+// MARK: - 共享的判定与文案（小窗与纯文本报告共用）
+
+private func resolverLocation(_ resolver: DNSResolverInfo) -> String {
+    let place = [resolver.city, resolver.country].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", ")
+    let org = resolver.organization
+    return [place, org].filter { !$0.isEmpty }.joined(separator: " · ")
+}
+
+private func dnsStatusTitle(_ status: DNSLeakStatus) -> String {
+    switch status {
+    case .clear: "未发现明显泄漏"
+    case .possible: "可能泄漏"
+    case .indeterminate: "无法判断"
+    }
+}
+
+private func dnsStatusStyle(_ status: DNSLeakStatus) -> Theme.SemanticColors {
+    switch status {
+    case .clear: Theme.success
+    case .possible: Theme.warning
+    case .indeterminate: Theme.neutral
+    }
+}
+
+private func probeOutcomeLabel(_ outcome: SiteProbeOutcome) -> String {
+    switch outcome {
+    case let .ok(code): "可达（\(code)）"
+    case let .challenged(code, _): "需人机验证（\(code)）"
+    case let .rejected(code): "被拒（\(code)）"
+    case .failed: "连不上"
+    }
+}
+
+private func probeOutcomeStyle(_ outcome: SiteProbeOutcome) -> Theme.SemanticColors {
+    switch outcome {
+    case .ok: Theme.success
+    case .challenged: Theme.warning
+    case .rejected, .failed: Theme.danger
+    }
+}
+
+/// 风险标签可能不止一个；窄列中换行展示，不用横向滚动或截断状态信息。
+private struct WrappingRiskLabels: View {
+    let labels: [String]
+
+    var body: some View {
+        // 服务端标签通常只有一两个；这里用横向流式布局的思路保留全部文字，避免为了排版引入新状态。
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(labels, id: \.self) { label in
+                Text(label)
+                    .font(.caption.weight(.medium))
+                    .lineLimit(1)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Theme.controlFill, in: Capsule(style: .circular))
+            }
+        }
     }
 }

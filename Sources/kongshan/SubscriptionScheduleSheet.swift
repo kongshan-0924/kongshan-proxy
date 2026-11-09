@@ -33,16 +33,17 @@ struct SubscriptionScheduleSheet: View {
                     Text("按最近到期的订阅安排一次更新，完成后重新计算时间，不会持续轮询。"
                          + "失败时保留原节点和缓存，并尝试发送本地通知。")
                 }
-            }
-
-            Divider()
-            HStack {
                 if let message = sheetError {
                     Text(message)
                         .font(.caption)
-                        .foregroundStyle(.red)
-                        .lineLimit(2)
+                        .foregroundStyle(Theme.danger.text)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
                 }
+            }
+
+            Theme.separator.frame(height: 0.5)
+            HStack {
                 Button("放弃修改") { draft = state.subscriptionUpdateSettings }
                     .disabled(draft == state.subscriptionUpdateSettings)
                 Spacer()
@@ -63,9 +64,13 @@ struct SubscriptionScheduleSheet: View {
                 .buttonStyle(.pillProminent)
                 .disabled(state.isBusy || !state.isReady || draft == state.subscriptionUpdateSettings)
             }
-            .padding(14)
+            .padding(16)
         }
         .frame(width: 460)
+        .foregroundStyle(Theme.textPrimary)
+        .background(Theme.canvasBackground)
+        .tint(Theme.accent)
+        .buttonStyle(.pill)
         .onAppear { draft = state.subscriptionUpdateSettings }
     }
 }

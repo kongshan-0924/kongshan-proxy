@@ -122,22 +122,23 @@ final class UIResponsivenessTests: XCTestCase {
         window.orderFront(nil)
         pump(0.5)
 
-        let openBefore = DashboardView.bodyEvaluations
+        // 仪表盘主体已不读运行状态（2026-11-09 去掉看不见的副标题），跟随状态的是顶部链路卡，拿它当探针。
+        let openBefore = RouteHeaderView.bodyEvaluations
         state.status = .starting
         pump(0.2)
-        XCTAssertGreaterThan(DashboardView.bodyEvaluations, openBefore, "开着时必须跟着更新，否则下面的断言没有意义")
+        XCTAssertGreaterThan(RouteHeaderView.bodyEvaluations, openBefore, "开着时必须跟着更新，否则下面的断言没有意义")
 
         window.close()
         content.detach()
         pump(0.3)
-        let closedBefore = DashboardView.bodyEvaluations
+        let closedBefore = RouteHeaderView.bodyEvaluations
         for _ in 0..<5 {
             state.status = .stopping
             pump(0.1)
             state.status = .off
             pump(0.1)
         }
-        XCTAssertEqual(DashboardView.bodyEvaluations, closedBefore, "关着的窗口不该再重算页面")
+        XCTAssertEqual(RouteHeaderView.bodyEvaluations, closedBefore, "关着的窗口不该再重算页面")
 
         state.lastMainWindowPage = .policyGroups
         content.attachIfNeeded()

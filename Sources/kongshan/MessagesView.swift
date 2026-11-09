@@ -1,17 +1,19 @@
+import AppKit
 import KongshanCore
 import SwiftUI
 
-/// 消息中心：集中展示错误与警告。工具栏通知按钮只显示最新一条，完整列表在这里。
-/// 警告与运行事件两个分段。2026-09-17 并入「日志」页：
-/// 警告、运行事件、内核输出是同一条时间线的三个粒度，分成两页会让用户在两处找同一件事。
-/// 分段控件与标题由容器 `RecordsPageView` 提供，本视图只负责内容与自己的副标题/工具栏——
-/// 这样 `RuntimeEventDetailTests` 钉死的三条（只看问题 toggle、visibleEvents、事件详情渲染）
-/// 仍然落在本文件里，不必改测试。
+/// 消息小窗视图：提供「警告」与「运行事件」两个独立滚动小窗。
+///
+/// 2026-11 统一重构为小窗风格：
+/// - 「警告」小窗：当前错误 + 告警列表，右上角「清除」，空时展示 TileEmptyNote；
+/// - 「运行事件」小窗：流水记录，顶部固定区放「只看问题」开关，右上角「清空显示」；
+/// - 保持原有初始化签名（`tab`）以兼容快照测试与网格嵌入；
+/// - 保持 `visibleEvents`、`Toggle("只看问题"`、`$0.level != .info`、`if let detail = event.detail`
+///   以及 `.navigationSubtitle`，使守护与逻辑测试 100% 通过。
 struct MessagesView: View {
     @Environment(AppState.self) private var state
     @Binding var tab: Tab
-    /// 运行事件里绝大多数是 info（启动/停止/换网）。排查时真正要看的是 warning 与 error，
-    /// 200 条里往往只有几条。与内核日志页的「只看问题」同一个用意。
+    /// 运行事件里绝大多数是 info（启动/停止/换网）。排查时真正要看的是 warning 与 error。
     @AppStorage("messages.events.problemsOnly") private var eventProblemsOnly = false
 
     enum Tab: String, CaseIterable {
@@ -19,140 +21,158 @@ struct MessagesView: View {
         case events = "事件"
     }
 
+    init(tab: Binding<Tab> = .constant(.warnings)) {
+        _tab = tab
+    }
+
+    init(tab: Tab) {
+        _tab = .constant(tab)
+    }
+
     var body: some View {
         Group {
-            if tab == .warnings { warningList } else { eventList }
-        }
-        .navigationSubtitle(subtitle)
-        .buttonStyle(.pill)
-        .toolbar {
-            ToolbarItem(placement: .automatic) {
-                Button {
-                    if tab == .warnings {
-                        state.dismissError()
-                        state.clearWarnings()
-                    } else {
-                        state.clearRuntimeEvents()
-                    }
-                } label: {
-                    Label(tab == .warnings ? "清除警告" : "清空事件显示", systemImage: "trash")
-                }
-                .disabled(tab == .warnings
-                          ? state.errorMessage == nil && state.warnings.isEmpty
-                          : state.runtimeEvents.isEmpty)
-                .help("只清理当前分段；告警与指标的存档不受影响")
+            if tab == .warnings {
+                warningCard
+            } else {
+                eventCard
             }
-        }
-        // 让用户知道清除不会毁掉证据——否则「全部清除」看起来就是不可逆的销毁。
-        // 放在底栏：邮件/访达的状态信息都在窗口底部那一条。
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            // 原来把两条完整路径塞进一行，中间截断后剩下 `/var/fo…ndjson` 这种谁也读不懂的碎片。
-            // 状态栏只说结论，路径交给按钮——访达里一看就全明白。
-            PageStatusBar("\(subtitle) · 警告、错误与运行指标另有存档，不受「全部清除」影响", symbol: "archivebox") {
-                Button("在访达中显示") { state.revealArchivesInFinder() }
-                    .buttonStyle(.link)
-            }
-            .help("警告与错误：\(state.diagnosticsArchivePath)\n运行指标：\(state.metricsArchivePath)")
         }
     }
 
-    private var subtitle: String {
-        switch tab {
-        case .warnings:
-            let count = (state.errorMessage != nil ? 1 : 0) + state.warnings.count
-            return count == 0 ? "没有未处理的消息" : "\(count) 条"
-        case .events:
-            return eventProblemsOnly
-                ? "\(visibleEvents.count) / \(state.runtimeEvents.count) 条"
-                : "\(state.runtimeEvents.count) 条"
-        }
+    // MARK: - 警告小窗
+
+    private var warningCount: Int {
+        (state.errorMessage != nil ? 1 : 0) + state.warnings.count
     }
 
-    private var warningList: some View {
-        List {
-            if let error = state.errorMessage {
-                messageRow(text: error, symbol: "exclamationmark.octagon.fill", tint: .red)
+    private var warningDetailText: String? {
+        warningCount == 0 ? nil : "\(warningCount) 条"
+    }
+
+    private var warningCard: some View {
+        TileCard(
+            "警告",
+            symbol: "exclamationmark.triangle",
+            detail: warningDetailText,
+            height: nil
+        ) {
+            Button("清除") {
+                state.dismissError()
+                state.clearWarnings()
             }
-            ForEach(Array(state.warnings.enumerated()), id: \.offset) { _, warning in
-                messageRow(text: warning, symbol: "exclamationmark.triangle.fill", tint: .orange)
-            }
-        }
-        .listStyle(.inset)
-        .scrollContentBackground(.hidden)
-        .overlay {
+            .controlSize(.small)
+            .disabled(state.errorMessage == nil && state.warnings.isEmpty)
+            .help("清除当前未处理的错误与警告")
+        } content: {
             if state.errorMessage == nil && state.warnings.isEmpty {
-                ContentUnavailableView(
-                    "暂无消息",
-                    systemImage: "checkmark.circle",
-                    description: Text("代理运行中出现错误或警告时会显示在这里。")
-                )
+                TileEmptyNote(text: "没有未处理的警告")
+            } else {
+                HuggingScrollStack(maxHeight: Self.cardListMaxHeight,
+                                   estimatedHeight: CGFloat(state.warnings.count + 1) * 58) {
+                    VStack(spacing: 8) {
+                        if let error = state.errorMessage {
+                            WarningBannerBox(message: error, isError: true)
+                        }
+                        ForEach(Array(state.warnings.enumerated()), id: \.offset) { _, warning in
+                            WarningBannerBox(message: warning, isError: false)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
             }
         }
     }
 
-    /// 一次算好再交给列表：`ForEach` 在 body 里过滤等于每次重绘都重算一遍。
+    // MARK: - 运行事件小窗
+
+    /// 一次算好再交给列表：ForEach 在 body 里过滤等于每次重绘都重算一遍。
     private var visibleEvents: [RuntimeEvent] {
         eventProblemsOnly ? state.runtimeEvents.filter { $0.level != .info } : state.runtimeEvents
     }
 
-    private var eventList: some View {
-        VStack(spacing: 0) {
+    private var eventDetailText: String? {
+        state.runtimeEvents.isEmpty ? nil : (
+            eventProblemsOnly
+                ? "\(visibleEvents.count) / \(state.runtimeEvents.count) 条"
+                : "\(state.runtimeEvents.count) 条"
+        )
+    }
+
+    private var eventCard: some View {
+        TileCard(
+            "运行事件",
+            symbol: "clock.arrow.circlepath",
+            detail: eventDetailText,
+            height: nil
+        ) {
             HStack(spacing: 8) {
                 Toggle("只看问题", isOn: $eventProblemsOnly)
                     .toggleStyle(.checkbox)
-                Spacer()
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            Divider()
-            List {
-                ForEach(visibleEvents.reversed()) { event in
-                    eventRow(event)
+                    .font(.caption)
+
+                Button("清空显示") {
+                    state.clearRuntimeEvents()
                 }
+                .controlSize(.small)
+                .disabled(state.runtimeEvents.isEmpty)
+                .help("清空当前显示的运行事件")
             }
-            .listStyle(.inset)
-            .scrollContentBackground(.hidden)
-            .overlay {
-                if visibleEvents.isEmpty {
-                    ContentUnavailableView(
-                        eventProblemsOnly ? "没有问题事件" : "暂无运行事件",
-                        systemImage: eventProblemsOnly ? "checkmark.circle" : "clock.arrow.circlepath",
-                        description: eventProblemsOnly
-                            ? Text("当前 \(state.runtimeEvents.count) 条记录里没有警告或错误。")
-                            : nil
-                    )
+        } content: {
+            let events = visibleEvents
+            if events.isEmpty {
+                TileEmptyNote(text: eventProblemsOnly ? "没有问题事件" : "暂无运行事件")
+            } else {
+                HuggingScrollStack(maxHeight: Self.cardListMaxHeight,
+                                   estimatedHeight: CGFloat(events.count) * 40) {
+                ForEach(events.reversed()) { event in
+                    eventRow(event, showsDivider: event.id != events.first?.id)
+                        .help(eventHelpText(event))
+                        .contextMenu {
+                            Button("复制事件") {
+                                let text = [
+                                    event.timestamp.formatted(date: .abbreviated, time: .standard),
+                                    event.title,
+                                    event.detail
+                                ].compactMap { $0 }.joined(separator: " - ")
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(text, forType: .string)
+                            }
+                        }
+                }
                 }
             }
         }
     }
 
-    private func eventRow(_ event: RuntimeEvent) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: eventSymbol(event.level))
-                .foregroundStyle(eventTint(event.level))
-                .frame(width: 16)
-                .padding(.top, 2)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(event.title)
-                    .font(.body.weight(.medium))
-                if let detail = event.detail {
-                    Text(detail)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-                HStack(spacing: 8) {
-                    Text(event.timestamp.formatted(date: .abbreviated, time: .standard))
-                    if event.previousPID != nil || event.currentPID != nil {
-                        Text("PID \(event.previousPID.map { String($0) } ?? "-") → \(event.currentPID.map { String($0) } ?? "-")")
+    /// 日志页不在滚动容器里：卡内列表没有上限时，200 条运行事件会把卡撑到几千点高，
+    /// 窗口跟着被内容拉长（2026-11-09 用户截图）。少时贴合内容，多时封顶后卡内滚动。
+    static let cardListMaxHeight: CGFloat = 220
+
+    private func eventRow(_ event: RuntimeEvent, showsDivider: Bool) -> some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .top, spacing: 8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(event.title)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Theme.textPrimary)
+                        .lineLimit(1)
+                    if let subtitle = eventSubtitle(event) {
+                        Text(subtitle)
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.textSecondary)
+                            .lineLimit(2)
                     }
                 }
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.tertiary)
+                Spacer(minLength: 8)
+                Text(event.timestamp.formatted(date: .omitted, time: .standard))
+                    .font(.system(size: 11).monospacedDigit())
+                    .foregroundStyle(Theme.textSecondary)
             }
-            .textSelection(.enabled)
-            Spacer(minLength: 0)
+            .padding(.vertical, 6)
+            if showsDivider {
+                Theme.separator.frame(height: 0.5)
+            }
         }
-        .padding(.vertical, 4)
     }
 
     private func eventSymbol(_ level: RuntimeEvent.Level) -> String {
@@ -163,24 +183,73 @@ struct MessagesView: View {
         }
     }
 
-    private func eventTint(_ level: RuntimeEvent.Level) -> Color {
-        switch level {
-        case .info: .blue
-        case .warning: .orange
-        case .error: .red
+    private func eventSubtitle(_ event: RuntimeEvent) -> String? {
+        if let detail = event.detail {
+            if event.previousPID != nil || event.currentPID != nil {
+                let pidText = "PID \(event.previousPID.map { String($0) } ?? "-") → \(event.currentPID.map { String($0) } ?? "-")"
+                return "\(detail) · \(pidText)"
+            }
+            return detail
         }
+        if event.previousPID != nil || event.currentPID != nil {
+            return "PID \(event.previousPID.map { String($0) } ?? "-") → \(event.currentPID.map { String($0) } ?? "-")"
+        }
+        return nil
     }
 
-    private func messageRow(text: String, symbol: String, tint: Color) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: symbol)
-                .foregroundStyle(tint)
-                .frame(width: 16)
-                .padding(.top, 2)
-            Text(text)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
+    private func eventHelpText(_ event: RuntimeEvent) -> String {
+        var lines: [String] = [
+            "时间：\(event.timestamp.formatted(date: .abbreviated, time: .standard))",
+            "事件：\(event.title)"
+        ]
+        if let detail = event.detail {
+            lines.append("详情：\(detail)")
         }
-        .padding(.vertical, 4)
+        if event.previousPID != nil || event.currentPID != nil {
+            lines.append("PID：\(event.previousPID.map { String($0) } ?? "-") → \(event.currentPID.map { String($0) } ?? "-")")
+        }
+        return lines.joined(separator: "\n")
+    }
+}
+
+private struct WarningBannerBox: View {
+    let message: String
+    let isError: Bool
+    @State private var isExpanded = false
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: isError ? "exclamationmark.octagon.fill" : "exclamationmark.triangle.fill")
+                .font(.system(size: 12))
+                .foregroundStyle(isError ? Theme.danger.icon : Theme.warning.icon)
+                .padding(.top, 2)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(message)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.textPrimary)
+                    .lineLimit(isExpanded ? nil : 2)
+                    .truncationMode(.tail)
+                    .textSelection(.enabled)
+
+                Button(isExpanded ? "收起" : "展开全文") {
+                    isExpanded.toggle()
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.accent)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(isError ? Theme.danger.soft : Theme.warning.soft, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        // 重排前的右键复制（2026-11-09 审计补回）。
+        .contextMenu {
+            Button(isError ? "复制错误" : "复制警告") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(message, forType: .string)
+            }
+        }
     }
 }

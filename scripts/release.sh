@@ -63,31 +63,46 @@ prepare() {
     write_stamp
 }
 
-# 在另一台 Mac（默认 ssh 主机 imac，Intel）上构建，本机不跑 swift build：
-# 那边跑全量测试与 x86_64 门禁（M1–M4，产物留给测试机），再交叉构建 arm64；取回 arm64 的 App 与 DMG，
-# 本机做发布产物检查并写验证戳，之后照常 install / publish。arm64 产物没在真机上跑过 M1–M4，
-# install 装完会打开它，有问题当场能看到。
+# 在另一台 Mac 上构建，本机不跑 swift build（用户 11-09：编译测试迁到 M5，减轻 MacBook 内存与磁盘压力）。
+# 默认 ssh 主机 m5（Apple Silicon）：那边跑全量测试与 arm64 门禁（M1–M4），再交叉构建 x86_64；
+# 也可指定 imac（Intel）：跑 x86_64 门禁，再交叉构建 arm64。两种都取回 arm64 与 x86_64 的 App 与 DMG，
+# 本机做发布产物检查并写验证戳，之后照常 install / publish。交叉构建出的那个架构没在真机上跑过 M1–M4。
 prepare_remote() {
     [[ -z $(git status --porcelain) ]] \
         || fail "prepare 前工作区必须完全干净；验证戳必须绑定一个确定提交"
-    local host=${1:-${KONGSHAN_BUILD_HOST:-imac}}
+    # 不再读 KONGSHAN_BUILD_HOST：它现在专指内核在哪编（可为 local），见 build_sing_box.sh。
+    local host=${1:-m5}
     local remote=kongshan-test/src
+    source "$project_dir/scripts/remote_lib.sh"
+    kongshan_remote_setup "$host" || fail "连不上 $host"
     local expected=$(version)
     print -- "同步代码到 $host:$remote"
-    rsync -a --delete --exclude .git --exclude .build --exclude dist --exclude .vscode \
-        --exclude Vendor/sing-box/sing-box-amd64 ./ "$host:$remote/"
-    ssh -o ServerAliveInterval=30 "$host" "cd $remote && export KONGSHAN_KEEP_VERSION=1 \
+    rsync -e "$kongshan_rsh" -a --delete --exclude .git --exclude .build --exclude dist --exclude .vscode \
+        --exclude .worktrees --exclude .DS_Store --exclude Vendor/sing-box/sing-box-amd64 ./ "$host:$remote/"
+    # 钉住的 amd64 内核以本机这份为准，单独带过去（上面排除它，是为了本机没有时 --delete 不删掉构建机那份）。
+    # 构建机重编得到的 SHA-256 与 MacBook 编的不同，没有这份就会卡在内核校验上。
+    if [[ -f Vendor/sing-box/sing-box-amd64 ]]; then
+        rsync -e "$kongshan_rsh" -a Vendor/sing-box/sing-box-amd64 "$host:$remote/Vendor/sing-box/sing-box-amd64"
+    fi
+    # 本机架构的产物在 .build/kongshan.app（跑过全量与门禁），交叉构建的放到 .build/<另一架构>/。
+    local remote_arch=$("${kongshan_ssh[@]}" "$host" uname -m) cross_arch arm_app intel_app
+    case $remote_arch in
+        arm64) cross_arch=x86_64; arm_app=.build/kongshan.app; intel_app=.build/x86_64/kongshan.app ;;
+        x86_64) cross_arch=arm64; arm_app=.build/arm64/kongshan.app; intel_app=.build/kongshan.app ;;
+        *) fail "$host 架构不认识：$remote_arch" ;;
+    esac
+    "${kongshan_ssh[@]}" "$host" "cd $remote && export KONGSHAN_KEEP_VERSION=1 \
         && zsh scripts/verify_m4.sh && zsh scripts/make_dmg.sh \
-        && export KONGSHAN_TARGET_ARCH=arm64 KONGSHAN_APP_PATH=.build/arm64/kongshan.app \
+        && export KONGSHAN_TARGET_ARCH=$cross_arch KONGSHAN_APP_PATH=.build/$cross_arch/kongshan.app \
         && zsh scripts/build_app.sh && zsh scripts/make_dmg.sh" \
         || fail "$host 上的测试或构建失败"
     mkdir -p "$project_dir/.build" "$project_dir/dist"
-    rsync -a --delete "$host:$remote/.build/arm64/kongshan.app/" "$project_dir/.build/kongshan.app/"
-    rsync -a "$host:$remote/dist/kongshan-$expected.dmg" "$project_dir/dist/"
+    rsync -e "$kongshan_rsh" -a --delete "$host:$remote/$arm_app/" "$project_dir/.build/kongshan.app/"
+    rsync -e "$kongshan_rsh" -a "$host:$remote/dist/kongshan-$expected.dmg" "$project_dir/dist/"
     # Intel 包：发布时与 arm64 一起上传。
     mkdir -p "$project_dir/.build/x86_64"
-    rsync -a --delete "$host:$remote/.build/kongshan.app/" "$project_dir/.build/x86_64/kongshan.app/"
-    rsync -a "$host:$remote/dist/kongshan-$expected-x86_64.dmg" "$project_dir/dist/"
+    rsync -e "$kongshan_rsh" -a --delete "$host:$remote/$intel_app/" "$project_dir/.build/x86_64/kongshan.app/"
+    rsync -e "$kongshan_rsh" -a "$host:$remote/dist/kongshan-$expected-x86_64.dmg" "$project_dir/dist/"
     # 本地 dist 只留最新（与 make_dmg.sh 同规则）。
     local -a stale
     stale=("$project_dir"/dist/kongshan-*.dmg(N))
@@ -596,7 +611,7 @@ case ${1:-} in
     install) install_verified ;;
     publish) publish ;;
     *)
-        print -u2 -- "用法：scripts/release.sh prepare|prepare-remote [ssh 主机]|install|publish|sync-public "<说明>""
+        print -u2 -- "用法：scripts/release.sh prepare|prepare-remote [ssh 主机，默认 m5]|install|publish|sync-public "<说明>""
         exit 64
         ;;
 esac

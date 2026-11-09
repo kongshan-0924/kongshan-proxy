@@ -14,9 +14,9 @@ struct SpeedTestURLSheet: View {
         VStack(alignment: .leading, spacing: 0) {
             CardForm {
                 CardSection {
-                    TextField("测试 URL", text: $draft, prompt: Text("https://www.gstatic.com/generate_204"))
+                    TextField("测试 URL", text: $draft, prompt: Theme.inputPrompt("https://www.gstatic.com/generate_204"))
                         .labelsHidden()
-                        .inputField()
+                        .inputField(isInvalid: sheetError != nil)
                         .font(.body.monospaced())
                         .onSubmit(save)
                 } header: {
@@ -25,27 +25,33 @@ struct SpeedTestURLSheet: View {
                     Text("真实延迟测量经各个节点请求这个地址，测的是完整代理链路。"
                          + "建议用返回 204 空响应的地址：省掉服务端生成页面的时间，各地区节点之间才可比。")
                 }
-            }
-
-            Divider()
-            HStack {
                 if let message = sheetError {
                     Text(message)
                         .font(.caption)
-                        .foregroundStyle(.red)
-                        .lineLimit(2)
+                        .foregroundStyle(Theme.danger.text)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
                 }
+            }
+
+            Theme.separator.frame(height: 0.5)
+            HStack {
                 Spacer()
                 Button("取消") { dismiss() }
                     .keyboardShortcut(.cancelAction)
                 Button("保存") { save() }
                     .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.pillProminent)
                     .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                               || draft == state.testURLString)
             }
-            .padding(14)
+            .padding(16)
         }
         .frame(width: 460)
+        .foregroundStyle(Theme.textPrimary)
+        .background(Theme.canvasBackground)
+        .tint(Theme.accent)
+        .buttonStyle(.pill)
         .onAppear { draft = state.testURLString }
     }
 
