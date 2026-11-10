@@ -12,6 +12,16 @@ private final class MenuBarNonactivatingPanel: NSPanel {
 @MainActor @Observable
 final class MenuBarPanelNavigation {
     var highlighted: [Int: String] = [:]
+    /// 键盘刚把高亮移到的那一行：长列表据此滚到可视区。只有方向键会写它——鼠标悬停也改 `highlighted`，
+    /// 若跟着滚，停在半露的边缘行上时列表会在鼠标下自己挪动（2026-11-10 审计）。
+    /// `sequence` 每次递增，同一行被再次选中也算一次新请求。
+    var keyboardTarget: KeyboardTarget?
+
+    struct KeyboardTarget: Equatable {
+        let level: Int
+        let id: String
+        let sequence: Int
+    }
 }
 
 @MainActor
@@ -92,6 +102,7 @@ final class MenuBarPanelController: NSObject {
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         closeChildren(after: -1)
         navigation.highlighted.removeAll()
+        navigation.keyboardTarget = nil
         keyboardLevel = 0
         statusButton = nil
     }
@@ -436,6 +447,8 @@ extension MenuBarPanelController {
             ?? (delta > 0 ? -1 : 0)
         let next = rows[(index + delta + rows.count) % rows.count]
         navigation.highlighted[keyboardLevel] = next.id
+        navigation.keyboardTarget = .init(level: keyboardLevel, id: next.id,
+                                          sequence: (navigation.keyboardTarget?.sequence ?? 0) &+ 1)
         if let anchor = anchors[keyboardLevel]?[next.id]?.view { anchor.scrollToVisible(anchor.bounds) }
     }
 }

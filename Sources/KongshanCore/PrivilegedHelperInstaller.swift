@@ -1,5 +1,6 @@
 import Foundation
 import HelperProtocol
+import os
 import Security
 
 /// 助手安装状态（文件层 + 运行层综合判定）。
@@ -169,7 +170,35 @@ public enum PrivilegedHelperInstaller {
     }
 
     /// App 内置内核的 cdhash，与助手 status 回复比对，见 `HelperResponse.matches`。
-    public static var bundledSingBoxCDHashHex: String? { computeCDHashHex(at: bundledSingBoxURL) }
+    ///
+    /// 在后台线程算、算出来就记住：读签名信息要过一遍几十 MB 的内核，原先是同步属性、每次调用都重算，
+    /// 而调用方（AppState.helperIsHealthy）在主线程——启动恢复、开 TUN 各算一次，等助手就绪时每 200 ms 再算一次，
+    /// 系统日志里的 Security「不应在主线程调用」告警就是它（2026-11-10 审计）。
+    /// 内置内核在进程存活期间不会变（更新 App 必然重启），所以按路径缓存；算不出来（nil）不缓存，下次再试。
+    public static func bundledSingBoxCDHashHex() async -> String? {
+        await cdhashCache.value(at: bundledSingBoxURL)
+    }
+
+    static let cdhashCache = CDHashCache()
+
+    /// 按路径缓存 cdhash，计算放在后台线程。
+    final class CDHashCache: Sendable {
+        private let known = OSAllocatedUnfairLock<[String: String]>(initialState: [:])
+        /// 实际算了几次（测试用）。
+        private let computations = OSAllocatedUnfairLock(initialState: 0)
+        var computationCount: Int { computations.withLock { $0 } }
+
+        func value(at url: URL) async -> String? {
+            let path = url.path
+            if let cached = known.withLock({ $0[path] }) { return cached }
+            let computed = await Task.detached(priority: .userInitiated) { [computations] in
+                computations.withLock { $0 += 1 }
+                return PrivilegedHelperInstaller.computeCDHashHex(at: url)
+            }.value
+            if let computed { known.withLock { $0[path] = computed } }
+            return computed
+        }
+    }
 
     /// 证书签名时返回 App 的 designated requirement（含证书），ad-hoc 或读不到时返回 nil（回退钉 cdhash）。
     static func stableClientRequirement(at bundleURL: URL) -> String? {

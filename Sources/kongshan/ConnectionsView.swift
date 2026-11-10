@@ -17,6 +17,8 @@ struct ConnectionsView: View {
     @State private var columnCustomization = TableColumnCustomization<ConnectionLiveDetail>()
     @State private var selection: Set<ConnectionLiveDetail.ID> = []
     @State private var confirmsCloseAll = false
+    /// 局域网分段里没应用的草稿：切到「本机」再切回时接着改（离开连接页则不保留）。
+    @State private var parkedLANDraft: LANSharingSettings?
     @Binding var scope: ConnectionsPageView.Tab
 
     init(scope: Binding<ConnectionsPageView.Tab> = .constant(.local)) {
@@ -39,7 +41,7 @@ struct ConnectionsView: View {
             // 局域网分段就是完整的共享页（开关、接入方式、端口与来源白名单、已接入设备，设备监控随它启停）。
             // 原型重排时曾换成只有开关和设备列表的简版，端口 / 白名单失去入口、设备列表也不再刷新（2026-11-09 审计）。
             if scope == .lan {
-                SharingView()
+                SharingView(parkedDraft: $parkedLANDraft)
             } else {
                 localBody
             }

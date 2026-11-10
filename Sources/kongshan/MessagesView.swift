@@ -175,14 +175,6 @@ struct MessagesView: View {
         }
     }
 
-    private func eventSymbol(_ level: RuntimeEvent.Level) -> String {
-        switch level {
-        case .info: "clock.arrow.circlepath"
-        case .warning: "exclamationmark.triangle.fill"
-        case .error: "exclamationmark.octagon.fill"
-        }
-    }
-
     private func eventSubtitle(_ event: RuntimeEvent) -> String? {
         if let detail = event.detail {
             if event.previousPID != nil || event.currentPID != nil {

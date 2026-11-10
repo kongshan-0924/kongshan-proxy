@@ -2849,9 +2849,11 @@ final class AppState {
                         }
                     }
                 } catch {
-                    // 流断开（内核重启 / 网络抖动）：等一会再重订。
-                    try? await Task.sleep(for: .seconds(1.5))
+                    // 流断开（内核重启 / 网络抖动）：等一会再重订（见下）。
                 }
+                // 流结束后等一会再重订。正常收尾（服务端关流、没有抛错）也要等：
+                // 原先只有抛错才等，正常结束会不间断地立刻重订，可能空转（2026-11-10 审计）。
+                if !Task.isCancelled { try? await Task.sleep(for: .seconds(1.5)) }
             }
         }
     }
@@ -6054,10 +6056,18 @@ final class AppState {
         scheduleWakeVerification()
     }
 
+    /// 还在等「稳定 3 秒」的那次检查。连续唤醒时后来的顶掉先前的，只留最后一次——原先每次 didWake 各开一个任务，
+    /// 连续几次唤醒就叠出几次检查，各自把连接重置一遍（2026-11-10 审计）。
+    @ObservationIgnored private var pendingWakeVerification: Task<Void, Never>?
+
     private func scheduleWakeVerification() {
-        Task { [weak self] in
-            try? await Task.sleep(for: .seconds(3))
-            await self?.verifyCoreAfterWake()
+        // 只取消还在等待的；已经开始检查的不打断——取消会让检查里的请求报错，被当成内核假死。
+        pendingWakeVerification?.cancel()
+        pendingWakeVerification = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(3)) } catch { return }
+            guard let self, !Task.isCancelled else { return }
+            self.pendingWakeVerification = nil
+            await self.verifyCoreAfterWake()
         }
     }
 
@@ -7019,7 +7029,7 @@ final class AppState {
     private func helperIsHealthy() async -> Bool {
         guard let response = await helperClient.status() else { return false }
         // 助手版本落后或 root 内核副本不是 App 内置的这份：按「需重装」处理，不拿旧内核跑新配置。
-        return response.matches(bundledSingBoxCDHashHex: PrivilegedHelperInstaller.bundledSingBoxCDHashHex)
+        return response.matches(bundledSingBoxCDHashHex: await PrivilegedHelperInstaller.bundledSingBoxCDHashHex())
     }
 
     /// 轮询等待助手就绪。bootstrap 之后 helper 建 socket 有几十到几百毫秒的空档，

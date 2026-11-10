@@ -206,6 +206,9 @@ final class MenuBarPanelTests: XCTestCase {
         controller.mainContentView?.layoutSubtreeIfNeeded()
         for _ in 0..<4 { controller.handleKey(try key(125)) }
         XCTAssertEqual(controller.navigation.highlighted[0], "modes")
+        // 键盘移动要留下滚动目标（长列表据此滚到可视区）。
+        XCTAssertEqual(controller.navigation.keyboardTarget?.id, "modes")
+        XCTAssertEqual(controller.navigation.keyboardTarget?.level, 0)
         weak var childContent: NSView?
         try autoreleasepool {
             controller.handleKey(try key(124))
@@ -237,6 +240,9 @@ final class MenuBarPanelTests: XCTestCase {
         controller.hover(modeRow, level: 0, entered: true)
         for _ in 0..<100 where controller.loadedPanelCount < 2 { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertEqual(controller.loadedPanelCount, 2)
+        // 悬停会改高亮，但不能产生滚动目标：否则鼠标停在半露的边缘行上时列表会在鼠标下自己挪动（2026-11-10 审计）。
+        XCTAssertEqual(controller.navigation.highlighted[0], modeRow.id)
+        XCTAssertNil(controller.navigation.keyboardTarget)
         NotificationCenter.default.post(name: NSApplication.didResignActiveNotification, object: NSApp)
         XCTAssertFalse(controller.isShown)
         XCTAssertTrue(controller.contentViews.isEmpty)

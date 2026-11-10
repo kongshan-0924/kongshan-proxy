@@ -170,21 +170,6 @@ final class RenderSnapshotTests: XCTestCase {
             size: CGSize(width: 900, height: 700)
         )
         render(
-            NetworkSelfCheckView().environment(state),
-            name: "diagnostics-selfcheck",
-            size: CGSize(width: 900, height: 620)
-        )
-        render(
-            RouteHitTestView().environment(state),
-            name: "diagnostics-routetest",
-            size: CGSize(width: 900, height: 520)
-        )
-        render(
-            DeepDiagnosticsView().environment(state),
-            name: "diagnostics-deep",
-            size: CGSize(width: 900, height: 560)
-        )
-        render(
             SharingView().environment(state),
             name: "sharing",
             size: CGSize(width: 820, height: 720)
@@ -404,9 +389,6 @@ final class RenderSnapshotTests: XCTestCase {
         for tab in SettingsTab.allCases where tab != .general {
             render(SettingsView(initialTab: tab).environment(running), name: "user-settings-\(tab.rawValue)", size: detail)
         }
-        render(NetworkSelfCheckView().environment(running), name: "user-diag-selfcheck", size: detail)
-        render(RouteHitTestView().environment(running), name: "user-diag-route", size: detail)
-        render(DeepDiagnosticsView().environment(running), name: "user-diag-deep", size: detail)
         render(SharingView().environment(running), name: "user-sharing", size: detail)
         // 连接页「局域网」分段就是完整共享页（2026-11-09 审计：曾被换成缺端口 / 白名单的简版）。
         render(ConnectionsView(scope: .constant(.lan)).environment(running), name: "user-connections-lan", size: detail)

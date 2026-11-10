@@ -10,6 +10,13 @@ import SwiftUI
 struct SharingView: View {
     @Environment(AppState.self) private var state
     @State private var draft = LANSharingSettings.defaults
+    /// 离开本视图时把没应用的草稿交给上层保管，回来时接着改。连接页切到「本机」分段时本视图会被销毁，
+    /// 不交出去的话改到一半的端口、白名单就丢了（2026-11-10 审计）。
+    @Binding private var parkedDraft: LANSharingSettings?
+
+    init(parkedDraft: Binding<LANSharingSettings?> = .constant(nil)) {
+        _parkedDraft = parkedDraft
+    }
     @State private var newCIDR = ""
     /// 本机局域网地址。取一次要遍历网卡（`getifaddrs`）；设备列表每秒刷新会带着整页重算，
     /// 不能每次求值都取，进页面和监听端口变化时取一次即可。
@@ -28,12 +35,21 @@ struct SharingView: View {
             if state.lanSharing.enabled { PageStatusBar(subtitle) }
         }
         .onAppear {
-            draft = state.lanSharing
+            if var parked = parkedDraft {
+                // 与下面 onChange 同一条规则：开关是立即生效的，以当前状态为准，其余保留用户没应用的输入。
+                parked.enabled = state.lanSharing.enabled
+                draft = parked
+            } else {
+                draft = state.lanSharing
+            }
             lanAddresses = state.lanProxyAddresses
             state.startLANClientsMonitoring()
         }
         .onChange(of: state.lanSharingBoundPort) { lanAddresses = state.lanProxyAddresses }
-        .onDisappear { state.stopLANClientsMonitoring() }
+        .onDisappear {
+            state.stopLANClientsMonitoring()
+            parkedDraft = draft != state.lanSharing ? draft : nil
+        }
         // 草稿脏着（改了端口或白名单还没应用）时只同步开关，不冲掉输入。
         .onChange(of: state.lanSharing) { old, new in
             if draft == old { draft = new } else { draft.enabled = new.enabled }

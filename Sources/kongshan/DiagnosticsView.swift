@@ -62,40 +62,7 @@ struct DiagnosticsView: View {
 
 // MARK: - 本机网络自检
 
-/// 迁自 设置→网络·网络自检与修复。
-/// 它是「一次性动作 + 一份会长出来的报告」，不是可保存的配置——Form 不该承载这种模块，
-/// 放在设置里也等于把「出问题去哪」的答案藏进了低频区。
-struct NetworkSelfCheckView: View {
-    @Environment(AppState.self) private var state
-
-    var body: some View {
-        TilePage {
-            TileMasonry(minColumnWidth: 300) {
-                NetworkSelfCheckCard()
-            }
-        }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            if state.networkRepairReport != nil { PageStatusBar(subtitle) }
-        }
-        .pageTopBar {
-                Button {
-                    Task { await state.runNetworkRepair() }
-                } label: {
-                    Label("开始自检", systemImage: "stethoscope")
-                }
-                .keyboardShortcut("r", modifiers: .command)
-                .disabled(state.isRepairingNetwork)
-                .help("检查并修复接管残留，然后验一次连通性（⌘R）")
-        }
-    }
-
-    private var subtitle: String {
-        guard let report = state.networkRepairReport else { return "尚未自检" }
-        return "\(report.summary) · 自检于 \(report.checkedAt.formatted(date: .omitted, time: .standard))"
-    }
-}
-
-/// 「网络自检」小窗：诊断页第二排与独立页共用。
+/// 「网络自检」小窗（诊断页）。
 /// 「网络服务优先级」是同小窗里的第二段——顺序影响全机 DNS 解析，跟着自检结果一起看到才顺。
 struct NetworkSelfCheckCard: View {
     @Environment(AppState.self) private var state
@@ -197,20 +164,7 @@ struct NetworkSelfCheckCard: View {
 
 // MARK: - 规则命中测试
 
-/// 迁自 规则页的 `routeTester` 折叠分区。
-/// 它不改任何配置，只回答「为什么这条流量走了那里」——是诊断工具，不是规则。
-struct RouteHitTestView: View {
-    var body: some View {
-        TilePage {
-            TileMasonry(minColumnWidth: 300) {
-                RouteHitTestCard()
-            }
-        }
-        .pageTopBar {}
-    }
-}
-
-/// 「规则命中测试」小窗：诊断页第三排与独立页共用。
+/// 「规则命中测试」小窗（诊断页）。
 /// 原「测试」「命中结果」两张小窗合并成一张：控件在 fixedHeader 不滚动，结果在下面列表里。
 struct RouteHitTestCard: View {
     @Environment(AppState.self) private var state
@@ -283,7 +237,7 @@ struct RouteHitTestCard: View {
     }
 }
 
-/// 非 private：`RouteHitTestView` 与规则页都用得到（规则页只留跳转按钮，但类型共享）。
+/// 规则命中测试的输入类型。
 enum RouteTestKind: String, CaseIterable, Identifiable {
     case domain
     case ip
@@ -308,22 +262,7 @@ enum RouteTestKind: String, CaseIterable, Identifiable {
 
 // MARK: - 深度诊断
 
-/// 迁自 设置→网络·限时诊断 与 设置→更多·数据与日志·故障诊断。
-/// 这是排查动线的最后一步：开 Debug → 复现 → 导出发给维护者。两者挨着才形成闭环。
-struct DeepDiagnosticsView: View {
-    @Environment(AppState.self) private var state
-
-    var body: some View {
-        TilePage {
-            TileMasonry(minColumnWidth: 300) {
-                DeepDiagnosticsCard()
-            }
-        }
-        .pageTopBar {}
-    }
-}
-
-/// 「日志与导出」小窗：诊断页第三排与独立页共用。
+/// 「日志与导出」小窗（诊断页）。
 /// 限时诊断与导出诊断合在一张随内容高的小窗里，中间一条分隔线分两段。
 struct DeepDiagnosticsCard: View {
     @Environment(AppState.self) private var state

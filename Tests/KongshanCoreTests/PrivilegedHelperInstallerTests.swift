@@ -29,6 +29,25 @@ final class PrivilegedHelperInstallerC1Tests: XCTestCase {
         )
     }
 
+    /// cdhash 只算一次、算不出来不缓存：原先每次查助手状态都在主线程重读内核签名（2026-11-10 审计）。
+    func testCDHashCacheComputesOncePerPathAndDoesNotCacheFailure() async {
+        let cache = PrivilegedHelperInstaller.CDHashCache()
+        let signed = URL(fileURLWithPath: "/bin/ls")
+        let first = await cache.value(at: signed)
+        let second = await cache.value(at: signed)
+        XCTAssertNotNil(first)
+        XCTAssertEqual(first?.count, 40, "cdhash 是 20 字节的十六进制")
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(cache.computationCount, 1, "同一路径只算一次")
+
+        let missing = URL(fileURLWithPath: "/nonexistent/kongshan-kernel-\(UUID().uuidString)")
+        let none1 = await cache.value(at: missing)
+        let none2 = await cache.value(at: missing)
+        XCTAssertNil(none1)
+        XCTAssertNil(none2)
+        XCTAssertEqual(cache.computationCount, 3, "失败不缓存，下次重试")
+    }
+
     func testMakeTrustConfigPointsToRootOnlyCopyNotBundle() {
         // C① 验收要点：trust 里 singBoxExecutablePath 指向 root-only 拷贝路径，而非 bundle。
         let clientPath = "/Applications/kongshan.app/Contents/MacOS/kongshan"

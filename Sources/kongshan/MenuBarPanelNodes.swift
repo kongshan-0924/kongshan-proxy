@@ -333,8 +333,9 @@ private struct MenuBarPanelScrollsToHighlight: ViewModifier {
 
     func body(content: Content) -> some View {
         ScrollViewReader { proxy in
-            content.onChange(of: navigation.highlighted[level]) { _, id in
-                if let id { proxy.scrollTo(id) }
+            // 只跟键盘（keyboardTarget），不跟 highlighted：后者鼠标悬停也会改。
+            content.onChange(of: navigation.keyboardTarget) { _, target in
+                if let target, target.level == level { proxy.scrollTo(target.id) }
             }
         }
     }

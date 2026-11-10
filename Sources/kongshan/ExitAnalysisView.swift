@@ -184,51 +184,6 @@ struct ExitIPCard: View {
     }
 }
 
-/// IP 风险小窗：分数条、等级、标签；无数据时占位而不是整卡消失。
-struct ExitRiskCard: View {
-    @Environment(AppState.self) private var state
-
-    var body: some View {
-        TileCard("IP 风险", symbol: "shield.lefthalf.filled", height: nil) {
-            if let reputation = state.exitDiagnostics?.reputation,
-               reputation.fraudScore != nil || !reputation.labels.isEmpty {
-                VStack(alignment: .leading, spacing: 10) {
-                    if let score = reputation.fraudScore, let risk = reputation.risk {
-                        HStack(spacing: 10) {
-                            Text("\(score)%")
-                                .font(.system(size: 20, weight: .semibold))
-                                .foregroundStyle(Theme.riskStyle(risk).text)
-                            Text(risk.title)
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundStyle(Theme.riskStyle(risk).text)
-                                .padding(.horizontal, 9)
-                                .padding(.vertical, 3)
-                                .background(Theme.riskStyle(risk).soft, in: Capsule(style: .circular))
-                            Spacer(minLength: 8)
-                        }
-                        CapacityBar(fraction: Double(score) / 100, tint: Theme.riskStyle(risk).icon, height: 5)
-                            .accessibilityLabel("风险评分")
-                            .accessibilityValue("\(score) 分，满分 100")
-                    }
-
-                    HStack(spacing: 8) {
-                        if !reputation.labels.isEmpty {
-                            WrappingRiskLabels(labels: reputation.labels)
-                        }
-                        Spacer()
-                        Text("来源 \(IPReputationService.sourceName) / 仅作参考")
-                            .font(.system(size: 11))
-                            .foregroundStyle(Theme.textSecondary)
-                    }
-                }
-                .padding(.vertical, 8)
-            } else {
-                TileEmptyNote(text: "检测后显示")
-            }
-        }
-    }
-}
-
 /// DNS 小窗：解析器列表与泄漏结论；无数据时占位。
 struct ExitDNSCard: View {
     @Environment(AppState.self) private var state

@@ -1344,7 +1344,8 @@ private struct TopBarDragSurface: View {
                 .contentShape(Rectangle())
                 .gesture(WindowDragGesture())
                 .simultaneousGesture(TapGesture(count: 2).onEnded {
-                    if let window = NSApp.keyWindow { performTitlebarDoubleClick(window) }
+                    // 取这次点击所在的窗口，不用 keyWindow：状态栏面板也能成为 key 窗口。
+                    if let window = NSApp.currentEvent?.window ?? NSApp.mainWindow { performTitlebarDoubleClick(window) }
                 })
                 .allowsWindowActivationEvents(true)
         } else {

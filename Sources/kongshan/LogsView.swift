@@ -107,23 +107,26 @@ struct LogsView: View {
             } else {
                 // ScrollViewReader 必须在 ScrollView 外面：原先套在 LazyVStack 里面，懒加载栈把它当成一个子视图，
                 // 2000 行日志全部当场建好——满载时切到日志页约 4 s、离开约 0.8 s（2026-11-09 iMac 基准）。
+                // 分组与末行标识在这里算一次，行与自动跟随共用：原先自动跟随每来一批日志都把分组重算一遍（2026-11-10 审计）。
+                let groups = groupsByConnection ? LogConnectionGrouping.groups(from: logs) : nil
+                // 按连接聚合时行是分组（id 为连接 ID），用条目 id 去 scrollTo 对不上任何行。
+                let lastID: AnyHashable? = if let groups { groups.last.map { AnyHashable($0.id) } }
+                    else { logs.last.map { AnyHashable($0.id) } }
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 0) {
-                            kernelLogRows(logs: logs)
+                            kernelLogRows(logs: logs, groups: groups)
                         }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 4)
                     }
                     .scrollIndicators(.automatic)
                     .onChange(of: state.liveLogs.last?.id) {
-                        guard !pausesAutomaticScroll, let lastID = lastRowID(logs) else { return }
+                        guard !pausesAutomaticScroll, let lastID else { return }
                         proxy.scrollTo(lastID, anchor: .bottom)
                     }
                     .onChange(of: scrollToBottomTrigger) {
-                        if let lastID = lastRowID(logs) {
-                            proxy.scrollTo(lastID, anchor: .bottom)
-                        }
+                        if let lastID { proxy.scrollTo(lastID, anchor: .bottom) }
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -240,11 +243,10 @@ struct LogsView: View {
     }
 
     @ViewBuilder
-    private func kernelLogRows(logs: [LiveLogEntry]) -> some View {
+    private func kernelLogRows(logs: [LiveLogEntry], groups: [LogConnectionGroup]?) -> some View {
             if logs.isEmpty {
                 EmptyView()
-            } else if groupsByConnection {
-                let groups = LogConnectionGrouping.groups(from: logs)
+            } else if let groups {
                 ForEach(groups) { group in
                     LogConnectionRow(group: group)
                         .id(group.id)
@@ -267,14 +269,6 @@ struct LogsView: View {
                     }
                 }
             }
-    }
-
-    /// 最后一行的标识。按连接聚合时行是分组（id 为连接 ID），用条目 id 去 scrollTo 对不上任何行。
-    private func lastRowID(_ logs: [LiveLogEntry]) -> AnyHashable? {
-        if groupsByConnection {
-            return LogConnectionGrouping.groups(from: logs).last.map { AnyHashable($0.id) }
-        }
-        return logs.last.map { AnyHashable($0.id) }
     }
 
     private var logLevelBinding: Binding<CoreLogLevel> {
