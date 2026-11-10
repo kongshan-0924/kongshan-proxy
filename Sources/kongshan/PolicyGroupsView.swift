@@ -74,6 +74,9 @@ struct PolicyGroupsView: View {
                 } label: {
                     Label("测延迟选项", systemImage: "slider.horizontal.3")
                 }
+                // 必须定宽：无边框菜单会抢占可伸缩空间，真机上被拉成横贯顶栏的一长条——图标贴到左边，
+                // 点顶栏空白处弹出的是这个菜单、窗口也拖不动（2026-11-10 iMac 实测，辅助功能里宽 1250）。
+                .fixedSize()
                 .help("测延迟并选最快，以及怎么测：真实延迟经各节点访问测试地址，代理没开也能测；TCP 握手只测节点服务器能不能连上")
 
                 TopBarSearchField(text: $searchText, prompt: "搜索节点", width: 220)

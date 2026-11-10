@@ -1335,50 +1335,46 @@ extension View {
 }
 
 /// 顶栏空白处：按住拖动窗口，双击按系统设置缩放 / 最小化。
-/// macOS 15 起用 SwiftUI 的 `WindowDragGesture`：NSViewRepresentable 放在背景里时，
-/// NSHostingView 的命中测试不会把点击交给它（2026-11-09 离屏命中探针），拖不动。
-private struct TopBarDragSurface: View {
-    var body: some View {
-        if #available(macOS 15.0, *) {
-            Color.clear
-                .contentShape(Rectangle())
-                .gesture(WindowDragGesture())
-                .simultaneousGesture(TapGesture(count: 2).onEnded {
-                    // 取这次点击所在的窗口，不用 keyWindow：状态栏面板也能成为 key 窗口。
-                    if let window = NSApp.currentEvent?.window ?? NSApp.mainWindow { performTitlebarDoubleClick(window) }
-                })
-                .allowsWindowActivationEvents(true)
-        } else {
-            WindowDragArea()
-        }
-    }
-}
-
-/// 双击标题栏的系统行为（系统设置 → 桌面与程序坞 → 连按窗口标题栏）。
-@MainActor
-private func performTitlebarDoubleClick(_ window: NSWindow) {
-    switch UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick") {
-    case "Minimize": window.performMiniaturize(nil)
-    case "None": break
-    default: window.performZoom(nil)
-    }
-}
-
-/// macOS 14 的退路：AppKit 视图自己处理按下拖动与双击。
-private struct WindowDragArea: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView { DragView() }
+///
+/// 用 AppKit 视图自己处理鼠标事件，不用 SwiftUI 的 `WindowDragGesture` + `TapGesture(count: 2)` 组合：
+/// 那套组合里每次按下都会开一段系统拖动，双击的第二下一边开拖动一边缩放窗口，窗口放大后再双击
+/// 约四成会被系统当成「拖到屏幕顶」而进入全屏（2026-11-10 iMac 实测 12 次双击 2 次误入全屏）。
+/// 这里只有鼠标真的移动了才开始拖，双击那一下不拖、直接缩放，与原生标题栏一致。
+private struct TopBarDragSurface: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { WindowDragNSView() }
     func updateNSView(_ nsView: NSView, context: Context) {}
+}
 
-    private final class DragView: NSView {
-        override var mouseDownCanMoveWindow: Bool { true }
+/// 页内顶栏背后的拖动区。非 private：命中测试用类型名认它（`PageTopBarHitTests`）。
+final class WindowDragNSView: NSView {
+    /// 这次按下是否已经处理完（双击已缩放，或已交给系统拖动），之后的拖动事件不再处理。
+    private var handled = false
 
-        override func mouseDown(with event: NSEvent) {
-            guard let window else { return }
-            if event.clickCount == 2 {
-                performTitlebarDoubleClick(window)
-            } else {
-                window.performDrag(with: event)
-            }
+    // 自己决定何时开始拖：返回 true 的话系统在按下瞬间就接管，双击也会先开一段拖动。
+    override var mouseDownCanMoveWindow: Bool { false }
+    // 窗口不在最前时也能直接拖，和原生标题栏一样。
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        handled = false
+        guard event.clickCount == 2, let window else { return }
+        handled = true
+        Self.performTitlebarDoubleClick(window)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard !handled, let window else { return }
+        handled = true
+        window.performDrag(with: event)
+    }
+
+    /// 双击标题栏的系统行为（系统设置 → 桌面与程序坞 → 连按窗口标题栏）。
+    /// 用 `zoom` / `miniaturize`，不用 `performZoom`：后者是「模拟点绿灯」，绿灯在可全屏的窗口上是全屏键。
+    static func performTitlebarDoubleClick(_ window: NSWindow) {
+        switch UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick") {
+        case "Minimize": window.miniaturize(nil)
+        case "None": break
+        default: window.zoom(nil)
         }
     }
 }

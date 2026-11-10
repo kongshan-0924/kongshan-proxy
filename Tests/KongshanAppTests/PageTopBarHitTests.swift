@@ -8,7 +8,7 @@ import XCTest
 ///
 /// 2026-11-09 离屏命中测试发现：顶栏与页面滚动视图之间没有间隙时，macOS 26 把仪表盘、设置、诊断等
 /// 滚动页的 ScrollView 伸进工具栏高度带，盖一层滚动边缘效果视图（BackdropView），顶栏按钮与拖动全被截走。
-/// 修法是 `Theme.topBarGap`；这里钉住「顶栏高度带里的命中不落在任何滚动视图里」。
+/// 修法是 `Theme.topBarGap`；这里钉住「顶栏高度带里的命中不落在任何滚动视图里」，并且空白处命中的就是拖动区。
 @MainActor
 final class PageTopBarHitTests: XCTestCase {
     func testTopBarIsNotCoveredByPageScrollView() throws {
@@ -44,6 +44,10 @@ final class PageTopBarHitTests: XCTestCase {
                 view = current.superview
             }
             XCTAssertFalse(insideScrollView, "\(page.rawValue)：顶栏被页面滚动视图盖住，按钮与拖动会失效")
+            // 顶栏空白处命中的必须是拖动区本身：代理页的「测延迟选项」菜单曾在真机上被拉成横贯顶栏的一长条，
+            // 点空白处弹菜单、拖不动窗口（2026-11-10 iMac 实测）。
+            let hit = frameView.hitTest(point)
+            XCTAssertTrue(hit is WindowDragNSView, "\(page.rawValue)：顶栏空白处命中的是 \(hit.map { String(describing: type(of: $0)) } ?? "nil")，不是拖动区")
             window.orderOut(nil)
             content.detach()
         }
