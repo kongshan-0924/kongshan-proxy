@@ -1368,10 +1368,19 @@ final class AppState {
                 tunStarted = true
                 startedPID = record.pid
             } else {
+                // 清掉上一代的缓冲行：健康检查失败时要从里面找这一代内核自己报的错（见 kernelFailureReason）。
+                await kernelLogStore.clearRecentLines()
                 try await singBoxProcess.start(config: config)
                 startedPID = await singBoxProcess.currentPID
             }
-            try await verifyKernel(client, config: config)
+            do {
+                try await verifyKernel(client, config: config)
+            } catch AppStateError.coreHealthFailed(let message) where !usesTun {
+                // 只说「连不上控制接口」看不出原因；内核多半已经报了致命错误退出，把那一行带上，
+                // 别人截一张图就能定位（2026-11-12：别人机器上是 too many open files，要了日志才查出来）。
+                guard let reason = await kernelFailureReason() else { throw AppStateError.coreHealthFailed(message) }
+                throw AppStateError.coreHealthFailed("\(message)（内核报错：\(reason)）")
+            }
             if needsRelay {
                 guard let relayPort else { throw AppStateError.missingRuntimeState }
                 proxyRelay.setTarget(port: runtime.mixedPort)
@@ -5616,6 +5625,17 @@ final class AppState {
             clashPort: clashPort,
             secret: try RuntimeSecrets.secret()
         )
+    }
+
+    /// 这一代用户态内核最后报的致命错误（`FATAL[0000] start service: ...` 去掉前缀），没有就 nil。
+    private func kernelFailureReason() async -> String? {
+        let lines = await kernelLogStore.recentLines()
+        guard let line = lines.last(where: { $0.contains("FATAL") }) else { return nil }
+        let text = line.range(of: #"FATAL(\[\d+\])?\s*"#, options: .regularExpression)
+            .map { String(line[$0.upperBound...]) } ?? line
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return trimmed.count > 200 ? String(trimmed.prefix(200)) + "…" : trimmed
     }
 
     nonisolated private static func waitUntilHealthy(_ client: ClashAPIClient) async throws {

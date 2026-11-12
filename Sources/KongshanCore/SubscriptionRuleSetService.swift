@@ -108,7 +108,8 @@ public actor SubscriptionRuleSetService {
 
     // MARK: - 对外接口
 
-    /// 只读缓存：给规则页显示条数、给命中测试读内容。不建目录、不写文件、不联网。
+    /// 只读缓存：给规则页显示条数、给命中测试读内容。不建目录、不联网；
+    /// 唯一的写是把 0.3.2 及以前的平铺布局一次性迁成每份一个子目录（见 `migrateLegacyLayout`）。
     public func cached(
         providers: [SubscriptionRuleProvider],
         sourceID: UUID,
@@ -139,6 +140,10 @@ public actor SubscriptionRuleSetService {
         let missing = Set(result.missing)
         for provider in accepted {
             let files = Files(directory: directory, stem: Self.fileStem(for: provider.name))
+            try? FileManager.default.createDirectory(
+                at: files.folder, withIntermediateDirectories: true,
+                attributes: [.posixPermissions: NSNumber(value: Int16(0o700))]
+            )
             if missing.contains(provider.name) {
                 Self.placeIfAbsent(empty, at: files.route)
                 Self.placeIfAbsent(empty, at: files.dns)
@@ -279,6 +284,7 @@ public actor SubscriptionRuleSetService {
         var result = Result()
         let accepted = Self.limitCount(providers, warnings: &result.warnings)
         let directory = directory(for: sourceID)
+        Self.migrateLegacyLayout(in: directory)
         for provider in accepted {
             guard let cached = Self.cachedMetadata(for: provider, in: directory),
                   let prepared = Self.prepared(provider, metadata: cached, in: directory) else {
@@ -357,6 +363,7 @@ public actor SubscriptionRuleSetService {
             at: directory, withIntermediateDirectories: true,
             attributes: [.posixPermissions: NSNumber(value: Int16(0o700))]
         )
+        Self.migrateLegacyLayout(in: directory)
         removeOrphans(in: directory, keeping: Set(accepted.map { Self.fileStem(for: $0.name) }))
 
         // 先按缓存与决策分流；需要下载的并发进行（封顶），其余立即就绪。
@@ -491,6 +498,10 @@ public actor SubscriptionRuleSetService {
         }
 
         // 原子替换正式文件。内核监视的是正式路径，替换后自动重载，无需重启。
+        try FileManager.default.createDirectory(
+            at: files.folder, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: NSNumber(value: Int16(0o700))]
+        )
         try replace(files.route, with: stagedRoute)
         if let stagedDNS {
             try replace(files.dns, with: stagedDNS)
@@ -511,17 +522,54 @@ public actor SubscriptionRuleSetService {
 
     // MARK: - 缓存与文件
 
+    /// 一份规则集的四个文件，放在**它自己的子目录**里：`<订阅目录>/<stem>/<stem>.srs` 等。
+    ///
+    /// 不能平铺在订阅目录里：内核给每个本地规则集各开一个文件监视，监视的是文件所在目录；
+    /// macOS 上 kqueue 监视目录要给目录里每个文件各开一个描述符。平铺时 72 个规则集 × 148 个文件，
+    /// 内核光监视就占约 1.1 万个描述符（2026-11-12 iMac 实测 11003 个），进程上限低的机器上
+    /// 内核开不出端口直接退出，报「控制接口未就绪」（别人的 MacBook Air 实测 too many open files）。
+    /// 子目录里只有这一份的 4 个文件，72 个规则集合计约几百个描述符。
     struct Files {
+        let folder: URL
         let route: URL
         let dns: URL
         let source: URL
         let metadata: URL
 
         init(directory: URL, stem: String) {
-            route = directory.appending(path: "\(stem).srs")
-            dns = directory.appending(path: "\(stem).dns.srs")
-            source = directory.appending(path: "\(stem).json")
-            metadata = directory.appending(path: "\(stem).meta.json")
+            folder = directory.appending(path: stem, directoryHint: .isDirectory)
+            route = folder.appending(path: "\(stem).srs")
+            dns = folder.appending(path: "\(stem).dns.srs")
+            source = folder.appending(path: "\(stem).json")
+            metadata = folder.appending(path: "\(stem).meta.json")
+        }
+    }
+
+    /// 把 0.3.2 及以前平铺在订阅目录里的规则集文件搬进各自的子目录（见 `Files`）。
+    /// 只搬普通文件、只认这四种后缀；文件名在 `fileStem` 的安全字符集里，第一个「.」之前就是 stem。
+    /// 目标已存在（新布局里已有更新的那份）时丢弃旧的。目录不存在时什么都不做。
+    static func migrateLegacyLayout(in directory: URL) {
+        let manager = FileManager.default
+        guard let entries = try? manager.contentsOfDirectory(atPath: directory.path) else { return }
+        let suffixes = [".dns.srs", ".meta.json", ".srs", ".json"]
+        for entry in entries where !entry.hasPrefix(".") && suffixes.contains(where: entry.hasSuffix) {
+            let legacy = directory.appending(path: entry)
+            var isDirectory: ObjCBool = false
+            guard manager.fileExists(atPath: legacy.path, isDirectory: &isDirectory), !isDirectory.boolValue,
+                  let stem = entry.split(separator: ".").first.map(String.init), !stem.isEmpty else { continue }
+            let folder = directory.appending(path: stem, directoryHint: .isDirectory)
+            let target = folder.appending(path: entry)
+            do {
+                try manager.createDirectory(at: folder, withIntermediateDirectories: true,
+                                            attributes: [.posixPermissions: NSNumber(value: Int16(0o700))])
+                if manager.fileExists(atPath: target.path) {
+                    try manager.removeItem(at: legacy)
+                } else {
+                    try manager.moveItem(at: legacy, to: target)
+                }
+            } catch {
+                continue
+            }
         }
     }
 

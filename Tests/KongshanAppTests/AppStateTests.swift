@@ -2545,6 +2545,68 @@ final class AppStateTests: XCTestCase {
         )
     }
 
+    /// 内核起来就报致命错误退出时，报错要带上内核自己的那一行，不能只说「控制接口未就绪」。
+    /// 2026-11-12 别人的 MacBook Air 上就是这样：截图只有「Could not connect to the server.」，
+    /// 要回了内核日志才看到 too many open files。
+    func testStartFailureNamesKernelFatalError() async throws {
+        let root = temporaryDirectory()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = Storage(rootDirectory: root)
+        let ruleSetData = try await compiledRuleSet(in: root)
+        let network = AppNetworkSetupRecorder(recoveryURL: root.appending(path: "proxy-recovery.json"))
+        let runtime = try runtimeParameters()
+        var relayPort = try RuntimeSecrets.availableHighPort()
+        while relayPort == runtime.mixedPort { relayPort = try RuntimeSecrets.availableHighPort() }
+        let store = KernelLogStore(directory: root.appending(path: "logs"))
+        let fatal = "FATAL[0000] start service: start inbound: start inbound/mixed[mixed-in]: "
+            + "listen tcp 127.0.0.1:\(runtime.mixedPort): socket: too many open files"
+        let core = SingBoxProcess(binaryURL: try fatalCoreExecutable(in: root, line: fatal), logStore: store)
+        let state = AppState(
+            storage: storage,
+            subscriptionService: SubscriptionService(storage: storage) { _ in HTTPDownload(data: Data(), statusCode: 500) },
+            ruleSetService: RuleSetService(
+                storage: storage, binaryURL: singBoxURL,
+                loader: { _ in HTTPDownload(data: ruleSetData, statusCode: 200) }
+            ),
+            systemProxyManager: SystemProxyManager(storage: storage, runner: network.run(arguments:timeout:)),
+            systemDNSManager: SystemDNSManager(storage: storage, runner: network.run(arguments:timeout:)),
+            singBoxProcess: core,
+            kernelLogStore: store,
+            proxyRelay: FakeLocalTCPRelay(port: relayPort),
+            runtimeFactory: { _ in runtime },
+            automaticallyInitialize: false
+        )
+        state.nodes = [ProxyNode(name: "fatal-test", protocolType: .shadowsocks, server: "127.0.0.1", port: 9,
+                                 password: "secret", method: "aes-128-gcm")]
+        state.selectedNodeID = state.nodes[0].id
+        state.activeConfigID = AppState.localConfigID
+        await state.startSystemProxy()
+
+        XCTAssertNotEqual(state.status, .on)
+        let message = try XCTUnwrap(state.errorMessage)
+        XCTAssertTrue(message.contains("控制接口未就绪"), message)
+        XCTAssertTrue(message.contains("内核报错：start service: start inbound"), message)
+        XCTAssertTrue(message.contains("too many open files"), message)
+        XCTAssertFalse(message.contains("FATAL["), "前缀要去掉：\(message)")
+    }
+
+    /// 配置校验通过、一运行就在 stderr 报一行致命错误并退出的假内核。
+    private func fatalCoreExecutable(in root: URL, line: String) throws -> URL {
+        let url = root.appending(path: "fatal-test-core")
+        let script = """
+        #!/bin/sh
+        trap 'exit 0' INT TERM
+        /bin/cat >/dev/null
+        if [ "$1" = "check" ]; then exit 0; fi
+        if [ "$1" = "run" ]; then echo '\(line)' >&2; exit 1; fi
+        exit 64
+        """
+        try Data(script.utf8).write(to: url)
+        try FileManager.default.setAttributes([.posixPermissions: NSNumber(value: Int16(0o700))], ofItemAtPath: url.path)
+        return url
+    }
+
     private func safeCoreExecutable(in root: URL) throws -> URL {
         let url = root.appending(path: "safe-test-core")
         let script = """

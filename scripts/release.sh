@@ -4,6 +4,12 @@ set -euo pipefail
 project_dir=${0:A:h:h}
 cd "$project_dir"
 
+# 取回的 Intel App 放在带 .noindex 后缀的目录里：聚焦不索引、也就不会被系统当成一个可打开的应用。
+# 它是纯 x86_64，与正式版同一个 bundle ID；macOS 27 起系统按聚焦扫描「纯 Intel 应用」并弹窗提示
+# 「即将结束支持基于 Intel 的 App」，用正式版的最近使用时间把 kongshan 列进去（2026-11-12 用户截图，
+# ecosystemd 日志「Spotlight found 2 x86_64-only apps」读的正是旧路径 .build/x86_64/kongshan.app）。
+local_intel_app="$project_dir/.build/x86_64.noindex/kongshan.app"
+
 fail() {
     print -u2 -- "发布中止：$*"
     exit 1
@@ -33,7 +39,7 @@ verify_artifacts() {
     file "$app/Contents/Resources/sing-box" | grep -q arm64 || fail "sing-box 不是 arm64"
     hdiutil verify "$dmg" >/dev/null
     # Intel 包（prepare-remote 才有）：有就一并核对，发布时必须有。
-    local intel_app="$project_dir/.build/x86_64/kongshan.app" intel_dmg="$project_dir/dist/kongshan-$expected-x86_64.dmg"
+    local intel_app="$local_intel_app" intel_dmg="$project_dir/dist/kongshan-$expected-x86_64.dmg"
     if [[ -d "$intel_app" || -f "$intel_dmg" ]]; then
         [[ -d "$intel_app" && -f "$intel_dmg" ]] || fail "Intel 包不完整：App 与 DMG 要同时在"
         [[ $(app_version "$intel_app") == "$expected" ]] || fail "Intel App 与 VERSION 不一致"
@@ -100,8 +106,8 @@ prepare_remote() {
     rsync -e "$kongshan_rsh" -a --delete "$host:$remote/$arm_app/" "$project_dir/.build/kongshan.app/"
     rsync -e "$kongshan_rsh" -a "$host:$remote/dist/kongshan-$expected.dmg" "$project_dir/dist/"
     # Intel 包：发布时与 arm64 一起上传。
-    mkdir -p "$project_dir/.build/x86_64"
-    rsync -e "$kongshan_rsh" -a --delete "$host:$remote/$intel_app/" "$project_dir/.build/x86_64/kongshan.app/"
+    mkdir -p "${local_intel_app:h}"
+    rsync -e "$kongshan_rsh" -a --delete "$host:$remote/$intel_app/" "$local_intel_app/"
     rsync -e "$kongshan_rsh" -a "$host:$remote/dist/kongshan-$expected-x86_64.dmg" "$project_dir/dist/"
     # 本地 dist 只留最新（与 make_dmg.sh 同规则）。
     local -a stale
@@ -293,10 +299,16 @@ any_app_pid() {
 #
 # 构建产物只给门禁（M4 直接执行二进制，不经 LaunchServices）与发布（codesign/摘要校验）用，
 # 从来不该是启动目标。摘掉登记不影响这两者。
+#
+# Intel 那份也要摘：它被登记后，系统会把 kongshan 当成「在 Rosetta 上运行的 Intel App」弹窗提示（见文件头）。
+# 旧路径 .build/x86_64 是 0.3.2 及以前留下的，一并摘掉并移进废纸篓。
 unregister_build_app() {
     local lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
-    [[ -d "$project_dir/.build/kongshan.app" ]] || return 0
-    "$lsregister" -u "$project_dir/.build/kongshan.app" >/dev/null 2>&1 || true
+    local app
+    for app in "$project_dir/.build/kongshan.app" "$local_intel_app" "$project_dir/.build/x86_64/kongshan.app"; do
+        [[ -d "$app" ]] && { "$lsregister" -u "$app" >/dev/null 2>&1 || true }
+    done
+    if [[ -d "$project_dir/.build/x86_64" ]]; then trash "$project_dir/.build/x86_64" || true; fi
 }
 
 backup_configuration() {
@@ -509,7 +521,7 @@ publish() {
     local digest=$(shasum -a 256 "$dmg" | awk '{print $1}')
     # 每次都发两个包：Apple Silicon 与 Intel（prepare-remote 产出）。
     local intel_dmg="$project_dir/dist/kongshan-$expected-x86_64.dmg"
-    local intel_app="$project_dir/.build/x86_64/kongshan.app"
+    local intel_app="$local_intel_app"
     [[ -f "$intel_dmg" && -d "$intel_app" ]] || fail "缺少 Intel 包；用 scripts/release.sh prepare-remote 构建两个架构"
     local intel_digest=$(shasum -a 256 "$intel_dmg" | awk '{print $1}')
 

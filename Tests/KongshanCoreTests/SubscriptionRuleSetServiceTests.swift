@@ -68,6 +68,59 @@ final class SubscriptionRuleSetServiceTests: XCTestCase {
         await service.refresh(providers: providers, sourceID: sourceID ?? self.sourceID, force: false, now: now)
     }
 
+    // MARK: - 目录布局（内核文件监视的描述符开销）
+
+    /// 每份规则集一个子目录，订阅目录顶层没有平铺文件。内核给每个规则集各监视一次「文件所在目录」，
+    /// macOS 上目录里每个文件各占一个描述符；平铺时 72 份 × 148 个文件约 1.1 万个（2026-11-12 实测），
+    /// 进程上限低的机器上内核直接 too many open files 退出。子目录里只能有这一份的文件。
+    func testEachRuleSetLivesInItsOwnFolder() async throws {
+        server.serve("/direct.yaml", mixed)
+        server.serve("/proxy.yaml", ipOnly)
+        let result = await download([provider("direct"), provider("proxy")])
+        let directory = root.appending(path: "rule-sets/subscription/\(sourceID.uuidString.lowercased())")
+        for name in ["direct", "proxy"] {
+            let prepared = try XCTUnwrap(result.prepared[name], "\(result.warnings)")
+            XCTAssertEqual(prepared.routeFile.deletingLastPathComponent().lastPathComponent, name)
+            XCTAssertEqual(prepared.routeFile.deletingLastPathComponent().deletingLastPathComponent().standardizedFileURL,
+                           directory.standardizedFileURL)
+            let dns = try XCTUnwrap(prepared.dnsFile)
+            XCTAssertEqual(dns.deletingLastPathComponent(), prepared.routeFile.deletingLastPathComponent())
+            let siblings = try FileManager.default.contentsOfDirectory(atPath: prepared.routeFile.deletingLastPathComponent().path)
+            XCTAssertTrue(siblings.allSatisfy { $0.hasPrefix(name + ".") }, "子目录里只能有这一份的文件：\(siblings)")
+            XCTAssertLessThanOrEqual(siblings.count, 4)
+        }
+        let top = try FileManager.default.contentsOfDirectory(atPath: directory.path).filter { !$0.hasPrefix(".") }
+        for entry in top {
+            var isDirectory: ObjCBool = false
+            FileManager.default.fileExists(atPath: directory.appending(path: entry).path, isDirectory: &isDirectory)
+            XCTAssertTrue(isDirectory.boolValue, "订阅目录顶层不能有平铺文件：\(entry)")
+        }
+    }
+
+    /// 0.3.2 及以前的平铺缓存：升级后第一次读缓存就搬进子目录，照常可用、不联网，顶层不留平铺文件。
+    func testLegacyFlatCacheIsMigratedWithoutNetwork() async throws {
+        server.serve("/direct.yaml", mixed)
+        _ = await download([provider("direct")])
+        let directory = root.appending(path: "rule-sets/subscription/\(sourceID.uuidString.lowercased())")
+        let folder = directory.appending(path: "direct")
+        // 还原成旧布局：四个文件平铺在订阅目录里。
+        for file in try FileManager.default.contentsOfDirectory(atPath: folder.path) {
+            try FileManager.default.moveItem(at: folder.appending(path: file), to: directory.appending(path: file))
+        }
+        try FileManager.default.removeItem(at: folder)
+        let requests = server.requestCount
+
+        let result = await service.prepareForConfiguration(providers: [provider("direct")], sourceID: sourceID)
+        let prepared = try XCTUnwrap(result.prepared["direct"], "\(result.warnings)")
+        XCTAssertFalse(prepared.isPlaceholder, "旧缓存要被认出来，不能当成没有缓存放空占位")
+        XCTAssertEqual(prepared.entryCount, 3)
+        XCTAssertEqual(prepared.routeFile.deletingLastPathComponent().lastPathComponent, "direct")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: prepared.routeFile.path))
+        XCTAssertEqual(server.requestCount, requests, "迁移不联网")
+        let top = try FileManager.default.contentsOfDirectory(atPath: directory.path).filter { !$0.hasPrefix(".") }
+        XCTAssertEqual(top, ["direct"], "顶层只剩子目录：\(top)")
+    }
+
     // MARK: - 首次下载
 
     func testFirstDownloadCompilesAndReportsTags() async throws {
