@@ -50,6 +50,25 @@ final class ConnectionFeedWiringTests: XCTestCase {
         }
     }
 
+    /// 主窗口停在连接页却被挡住时，连接流降到 5 秒一帧；窗口一出来回到 1 秒并立刻刷新列表。
+    /// 真机 2026-11-12～19：CPU 超过 5% 的 250 分钟里 241 分钟是「连接页被挡住、仍每秒全量解析两百多条连接」。
+    @MainActor
+    func testConnectionsFeedSlowsDownWhileWindowIsHidden() throws {
+        XCTAssertEqual(AppState.connectionsFeedStreamInterval(windowVisible: true), 1_000)
+        XCTAssertEqual(AppState.connectionsFeedStreamInterval(windowVisible: false), 5_000)
+        let state = try source("AppState.swift")
+        let start = try XCTUnwrap(state.range(of: "func startConnectionsMonitoring()"))
+        let end = try XCTUnwrap(state.range(of: "func stopConnectionsMonitoring()", range: start.upperBound..<state.endIndex))
+        let loop = String(state[start.upperBound..<end.lowerBound])
+        XCTAssertTrue(loop.contains("client.connectionFeedStream(intervalMilliseconds: interval)"),
+                      "订阅时要按窗口可见性取间隔")
+        XCTAssertTrue(loop.contains("self.connections.isEmpty || publishNextFrame"),
+                      "重订后的第一帧要立刻上屏，窗口出来不能对着旧列表等降频的几秒")
+        let visible = try XCTUnwrap(state.range(of: "func setWindowContentVisible(_ visible: Bool) {"))
+        XCTAssertTrue(String(state[visible.upperBound...].prefix(200)).contains("restartConnectionsFeedIfIntervalChanged()"),
+                      "可见性一变就要换档——放在 guard visible 之后，遮挡时就不会降档")
+    }
+
     /// 连接页开着时卡顿检测用推流最近一帧，不再另拉一次；换内核时这帧要作废，免得拿旧内核的连接去判。
     func testStallCheckReusesFeedDetailsWhileConnectionsPageIsOpen() throws {
         let state = try source("AppState.swift")

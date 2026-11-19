@@ -2046,6 +2046,64 @@ final class AppStateTests: XCTestCase {
         "/direct.yaml": "payload:\n  - '+.direct.example'\n"
     ]
 
+    /// 改订阅链接：新链接下载成功才替换（同一个订阅 ID，节点换成新内容）；新链接不可用时什么都不动。
+    /// 2026-11-12 用户反馈：链接变了只能新增一份配置。
+    func testUpdateSubscriptionURLReplacesOnlyAfterNewLinkWorks() async throws {
+        let yaml: [String: String] = [
+            "/old.yaml": "proxies:\n  - {name: old-node, type: ss, server: old.example.com, port: 443, cipher: aes-128-gcm, password: a}\n",
+            "/new.yaml": "proxies:\n  - {name: new-node, type: ss, server: new.example.com, port: 443, cipher: aes-128-gcm, password: b}\n"
+        ]
+        let fixture = try await makeModeFixture(
+            initialMode: .systemProxy,
+            subscriptionLoader: { url in
+                guard let body = yaml[url.path] else { return HTTPDownload(data: Data(), statusCode: 500) }
+                return HTTPDownload(data: Data(body.utf8), statusCode: 200)
+            }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let state = fixture.state
+        await state.importSubscription(url: URL(string: "https://sub.example.com/old.yaml")!, name: "机场")
+        let id = try XCTUnwrap(state.subscriptions.first?.id)
+        XCTAssertEqual(state.nodes.filter { $0.sourceID == id }.map(\.name), ["old-node"])
+
+        // 新链接可用：链接、节点一起换，订阅 ID 与名称不变，并已写盘。
+        await state.updateSubscriptionURL(id: id, to: URL(string: "https://sub.example.com/new.yaml")!)
+        XCTAssertNil(state.errorMessage)
+        XCTAssertEqual(state.subscriptions.count, 1)
+        XCTAssertEqual(state.subscriptions.first?.id, id)
+        XCTAssertEqual(state.subscriptions.first?.name, "机场")
+        XCTAssertEqual(state.subscriptions.first?.url.path, "/new.yaml")
+        XCTAssertEqual(state.nodes.filter { $0.sourceID == id }.map(\.name), ["new-node"])
+        let saved = try String(contentsOf: fixture.root.appending(path: "subscriptions.json"), encoding: .utf8)
+        XCTAssertTrue(saved.contains("new.yaml"), "新链接要写盘")
+        XCTAssertFalse(saved.contains("old.yaml"))
+
+        // 新链接不可用（服务会退回旧缓存）：链接与节点保持原样，报错说明未修改。
+        await state.updateSubscriptionURL(id: id, to: URL(string: "https://sub.example.com/broken.yaml")!)
+        XCTAssertEqual(state.subscriptions.first?.url.path, "/new.yaml")
+        XCTAssertEqual(state.nodes.filter { $0.sourceID == id }.map(\.name), ["new-node"])
+        XCTAssertTrue(state.errorMessage?.contains("未修改") == true, state.errorMessage ?? "无报错")
+
+        // 不是 http / https 的链接直接拒绝，不发请求。
+        await state.updateSubscriptionURL(id: id, to: URL(string: "ftp://sub.example.com/x.yaml")!)
+        XCTAssertEqual(state.subscriptions.first?.url.path, "/new.yaml")
+        XCTAssertNotNil(state.errorMessage)
+    }
+
+    /// 关掉代理后设置页「内核」要显示内置内核版本，不能回到「—」（2026-11-12 用户截图）。
+    func testCoreVersionFallsBackToBundledVersionAfterStop() async throws {
+        let fixture = try await makeModeFixture(initialMode: .systemProxy)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let state = fixture.state
+        await state.loadBundledCoreVersionIfNeeded()
+        let bundled = state.coreVersion
+        XCTAssertNotEqual(bundled, "—", "测试内核应能读出版本")
+        XCTAssertFalse(bundled.hasPrefix("sing-box"), "只存版本号：\(bundled)")
+        await state.stop()
+        XCTAssertEqual(state.coreVersion, bundled, "关代理后回落到内置内核版本")
+        XCTAssertEqual(AppState.normalizedCoreVersion("sing-box 1.14.4-xhttp"), "1.14.4-xhttp")
+    }
+
     private func ruleSetFixture(
         initialMode: ProxyMode, server: RuleSetFakeServer, subscriptionOnline: OnlineSwitch? = nil
     ) async throws -> (fixture: ModeFixture, sourceID: UUID) {

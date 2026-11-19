@@ -86,10 +86,8 @@ struct NodesView: View {
                 .sheetChrome()
         }
         .sheet(item: $renamingSource) { source in
-            SubscriptionRenameSheet(source: source) { name in
-                Task { await state.renameSubscription(id: source.id, to: name) }
-            }
-            .sheetChrome()
+            SubscriptionEditSheet(source: source)
+                .sheetChrome()
         }
         .confirmationDialog(
             "删除配置“\(pendingDelete?.name ?? "")”？",
@@ -271,7 +269,7 @@ struct NodesView: View {
     @ViewBuilder
     private func rowMenuItems(_ item: AppState.ConfigItem) -> some View {
         if !item.isLocal, let source = state.subscriptions.first(where: { $0.id == item.id }) {
-            Button("重命名…") { renamingSource = source }
+            Button("编辑名称与链接…") { renamingSource = source }
             Button("立即更新") { Task { await state.refreshSubscription(id: source.id) } }
             Toggle("参与定时更新", isOn: Binding(
                 get: { source.autoUpdate },
@@ -295,6 +293,9 @@ struct NodesView: View {
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
+        // 必须定宽：无边框菜单会抢占剩余宽度，把左侧配置名、节点数、用量挤成一半并截断，
+        // 「…」看起来就贴在文字后面（2026-11-12 用户截图，与 0.3.2 代理页的同一个问题）。
+        .fixedSize()
         .accessibilityLabel("\(item.name)的配置操作")
         .disabled(state.isBusy)
     }
@@ -544,36 +545,124 @@ private struct SubscriptionImportSheet: View {
     }
 }
 
-private struct SubscriptionRenameSheet: View {
+/// 编辑订阅的名称与链接。链接变了先用新链接下载并解析，成功才保存（见 `AppState.updateSubscriptionURL`），
+/// 失败原因就地显示、弹窗不关；只改名称则立即保存。
+struct SubscriptionEditSheet: View {
+    @Environment(AppState.self) private var state
     @Environment(\.dismiss) private var dismiss
     let source: SubscriptionSource
-    let onConfirm: (String) -> Void
 
     @State private var name = ""
+    @State private var link = ""
+    @State private var isSaving = false
+    @State private var saveError: String?
+
+    private var trimmedName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var trimmedLink: String { link.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var linkChanged: Bool { trimmedLink != source.url.absoluteString }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("重命名订阅")
+        VStack(alignment: .leading, spacing: 0) {
+            Text("编辑订阅")
                 .font(.headline)
                 .foregroundStyle(Theme.textPrimary)
-            TextField("名称", text: $name, prompt: Theme.inputPrompt("名称"))
-                .inputField()
+                .padding(.horizontal, 20)
+                .padding(.top, 18)
+                .padding(.bottom, 12)
+
+            CardForm {
+                CardSection {
+                    LabeledContent("名称") {
+                        TextField("名称", text: $name, prompt: Theme.inputPrompt("名称"))
+                            .labelsHidden()
+                            .inputField()
+                            .frame(maxWidth: 300)
+                    }
+                    LabeledContent("订阅链接") {
+                        TextField("订阅链接", text: $link, prompt: Theme.inputPrompt("https://"))
+                            .labelsHidden()
+                            .inputField()
+                            .frame(maxWidth: 300)
+                    }
+                } footer: {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("改了链接会先用新链接下载并校验，成功后节点、策略组和规则一起换成新的；失败则保留原来的链接。")
+                            .font(.caption)
+                            .foregroundStyle(Theme.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if let saveError {
+                            Label {
+                                Text(saveError)
+                                    .foregroundStyle(Theme.danger.text)
+                                    .textSelection(.enabled)
+                            } icon: {
+                                Image(systemName: "exclamationmark.octagon.fill")
+                                    .foregroundStyle(Theme.danger.icon)
+                            }
+                            .font(.caption)
+                            .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+            }
+            .disabled(isSaving)
+
+            Theme.separator.frame(height: 0.5)
             HStack {
+                if isSaving {
+                    ProgressView().controlSize(.small)
+                    Text("正在用新链接下载并解析…")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                }
                 Spacer()
                 Button("取消") { dismiss() }
                     .keyboardShortcut(.cancelAction)
-                Button("保存") {
-                    onConfirm(name)
-                    dismiss()
-                }
-                .keyboardShortcut(.defaultAction)
-                .buttonStyle(.pillProminent)
-                .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Button("保存") { save() }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.pillProminent)
+                    .disabled(isSaving || trimmedName.isEmpty || trimmedLink.isEmpty)
             }
+            .padding(16)
         }
-        .padding(20)
-        .frame(width: 380)
+        .frame(width: 480)
         .tint(Theme.accent)
-        .onAppear { name = source.name }
+        .onAppear {
+            name = source.name
+            link = source.url.absoluteString
+        }
+    }
+
+    private func save() {
+        guard !isSaving else { return }
+        saveError = nil
+        var newURL: URL?
+        if linkChanged {
+            guard let url = URL(string: trimmedLink), let scheme = url.scheme?.lowercased(),
+                  ["http", "https"].contains(scheme), url.host != nil else {
+                saveError = "订阅链接无效：要以 http:// 或 https:// 开头"
+                return
+            }
+            newURL = url
+        }
+        isSaving = true
+        Task {
+            // 先改链接（可能失败），成功了再改名：失败时什么都不动，用户改的内容还留在弹窗里。
+            if let newURL {
+                await state.updateSubscriptionURL(id: source.id, to: newURL)
+                if let message = state.errorMessage {
+                    saveError = message
+                    // 错误已经就地显示，不再让全局横幅重复报一次。
+                    state.dismissError()
+                    isSaving = false
+                    return
+                }
+            }
+            if trimmedName != source.name {
+                await state.renameSubscription(id: source.id, to: trimmedName)
+            }
+            isSaving = false
+            dismiss()
+        }
     }
 }

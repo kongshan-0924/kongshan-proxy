@@ -104,6 +104,36 @@ final class SubscriptionUpdateSchedulerTests: XCTestCase {
         try await waitUntil { sleep.cancellationCount == 2 }
     }
 
+    /// 已经开始执行的更新不能被重排取消：执行途中重新 schedule，正在跑的那次照常跑完，
+    /// 新排的那次正常等待。2026-11-19 真机：更新途中一重排就把正在重载内核的这次取消，代理被撤掉。
+    func testRescheduleDoesNotCancelRunningAction() async throws {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let sleep = SchedulerSleepRecorder()
+        let scheduler = SubscriptionUpdateScheduler(now: { now }, sleeper: sleep.sleep)
+        let due = SubscriptionSource(name: "due", url: URL(string: "https://example.com/sub")!,
+                                     lastUpdatedAt: now.addingTimeInterval(-7_200))
+        let gate = SchedulerGate()
+        _ = await scheduler.schedule(
+            sources: [due],
+            settings: SubscriptionUpdateSettings(enabled: true, intervalHours: 1),
+            action: { await gate.run() }
+        )
+        try await waitUntil { gate.started }
+
+        // 执行途中重排（下一次在一小时后）：正在跑的这次不能被取消。
+        let fresh = SubscriptionSource(name: "fresh", url: URL(string: "https://example.com/sub")!, lastUpdatedAt: now)
+        _ = await scheduler.schedule(
+            sources: [fresh],
+            settings: SubscriptionUpdateSettings(enabled: true, intervalHours: 1),
+            action: {}
+        )
+        await scheduler.cancel()
+        gate.release()
+        try await waitUntil { gate.finished }
+        XCTAssertFalse(gate.wasCancelled, "正在执行的更新被重排取消了")
+        XCTAssertEqual(sleep.cancellationCount, 1, "取消的只能是还在等待的那次")
+    }
+
     private func waitUntil(
         _ condition: @escaping @Sendable () -> Bool,
         file: StaticString = #filePath,
@@ -143,5 +173,42 @@ private final class SchedulerActionRecorder: @unchecked Sendable {
 
     func fire() async {
         lock.withLock { storedCount += 1 }
+    }
+}
+
+/// 让 action 停在中途，便于在「执行中」重排。
+private final class SchedulerGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedStarted = false
+    private var storedFinished = false
+    private var storedCancelled = false
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var released = false
+
+    var started: Bool { lock.withLock { storedStarted } }
+    var finished: Bool { lock.withLock { storedFinished } }
+    var wasCancelled: Bool { lock.withLock { storedCancelled } }
+
+    func run() async {
+        lock.withLock { storedStarted = true }
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            let resumeNow = lock.withLock { () -> Bool in
+                if released { return true }
+                continuation = c
+                return false
+            }
+            if resumeNow { c.resume() }
+        }
+        let cancelled = Task.isCancelled
+        lock.withLock { storedCancelled = cancelled; storedFinished = true }
+    }
+
+    func release() {
+        let c = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            released = true
+            defer { continuation = nil }
+            return continuation
+        }
+        c?.resume()
     }
 }

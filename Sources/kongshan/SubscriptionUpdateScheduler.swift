@@ -80,18 +80,31 @@ actor SubscriptionUpdateScheduler {
         let scheduledDate = max(calculatedDate, notBefore ?? calculatedDate)
         let delay = max(0, scheduledDate.timeIntervalSince(currentDate))
         let sleeper = self.sleeper
-        scheduledTask = Task {
+        generation &+= 1
+        let token = generation
+        scheduledTask = Task { [weak self] in
             do {
                 if delay > 0 { try await sleeper(delay) }
                 guard !Task.isCancelled else { return }
-                await action()
-            } catch is CancellationError {
-                return
             } catch {
                 return
             }
+            // 开始执行就从「待取消」名单里摘掉：之后的 schedule / cancel 只取消还在等待的那次，
+            // 不打断正在跑的更新。原先执行途中（比如用户点了「更新全部」、切了「参与定时更新」）一重排
+            // 就把正在重载内核的这次取消掉——健康检查与回滚都抛 CancellationError，代理被整个撤掉
+            // （2026-11-19 11:38 真机：「当前配置应用与回滚均失败」，35 秒后才重新起来）。
+            await self?.detachRunningTask(token)
+            await action()
         }
         return scheduledDate
+    }
+
+    /// 每次 schedule 递增，用来认出「正在执行的是不是最近排的那次」。
+    private var generation = 0
+
+    private func detachRunningTask(_ token: Int) {
+        guard token == generation else { return }
+        scheduledTask = nil
     }
 
     func cancel() {

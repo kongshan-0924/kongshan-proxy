@@ -271,7 +271,11 @@ final class AppState {
     private(set) var downloadRate: Int64 = 0
     private(set) var activeConnectionCount = 0
     private(set) var coreMemory: UInt64 = 0
+    /// 内核版本号（如 `1.14.4-xhttp`，不带「sing-box」前缀）。运行时取内核 /version，没运行时用内置内核的版本。
     private(set) var coreVersion = "—"
+    /// 内置内核自报的版本（启动时跑一次 `sing-box version`）。启停代理时 `coreVersion` 回落到它，
+    /// 不能回到「—」：原先关一次代理，设置页「内核」就一直显示「—」到下次重开 App（2026-11-12 用户截图）。
+    @ObservationIgnored private var bundledCoreVersion: String?
     private(set) var isCheckingKernelUpdate = false
     /// 连接监控页的实时连接列表（仅该页可见时才轮询）。
     private(set) var connections: [ConnectionLiveDetail] = []
@@ -861,6 +865,8 @@ final class AppState {
     @ObservationIgnored private var logLinesSinceDiagnosticsTick = 0
     /// 连接页那条流正在兼供总量：此时不要再单开仪表盘的 `/connections` 订阅。
     @ObservationIgnored private var connectionsFeedActive = false
+    /// 连接页当前这条订阅的推送间隔（毫秒），换档判断用，见 `connectionsFeedStreamInterval`。
+    @ObservationIgnored private var connectionsFeedInterval = 0
     /// 仪表盘的 `/connections` 订阅单独存放，才能在连接页开合时精确接管 / 交还，
     /// 不用把流量流和版本查询一起重启。
     @ObservationIgnored private var dashboardConnectionTask: Task<Void, Never>?
@@ -2157,6 +2163,67 @@ final class AppState {
         }
     }
 
+    /// 改订阅链接：先用新链接下载并解析，**成功才替换**——节点、策略组、规则一并换成新内容；
+    /// 下载或解析失败就保留旧链接与旧节点，在 `errorMessage` 里说明原因。
+    /// 机场换域名、重置订阅令牌时用，不必删掉重新导入（订阅 ID 不变，所以节点选择记忆、定时更新开关都保留）。
+    /// 2026-11-12 用户反馈：链接变了只能新增一份配置。
+    func updateSubscriptionURL(id: UUID, to url: URL) async {
+        guard !isBusy else {
+            errorMessage = "正在启停或应用设置，请稍后再改"
+            return
+        }
+        guard let index = subscriptions.firstIndex(where: { $0.id == id }) else { return }
+        guard subscriptions[index].url != url else {
+            errorMessage = nil
+            return
+        }
+        guard let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme), url.host != nil else {
+            errorMessage = "订阅链接必须是 http 或 https 地址"
+            return
+        }
+        if scheme == "http" {
+            appendWarning(
+                "订阅「\(url.host ?? url.absoluteString)」使用明文 HTTP：订阅链接通常带鉴权令牌，"
+                    + "同网络上的其他人可以看到它。若机场支持，请换成 https 链接"
+            )
+        }
+        let previousActiveContent = activeRuntimeContent
+        var candidate = subscriptions[index]
+        candidate.url = url
+        do {
+            let result = try await subscriptionService.refresh(candidate)
+            // 新链接下载失败时服务会退回旧缓存（缓存按订阅 ID 存）：那不是新链接的内容，不能当成功。
+            guard !result.usedCache else {
+                let reason = result.warnings.last.map { "：\($0)" } ?? ""
+                errorMessage = "新链接下载失败，订阅链接未修改\(reason)"
+                return
+            }
+            // 等待下载期间订阅可能被删了或改过，按 ID 重新定位。
+            guard let current = subscriptions.firstIndex(where: { $0.id == id }) else { return }
+            candidate.name = subscriptions[current].name
+            candidate.autoUpdate = subscriptions[current].autoUpdate
+            candidate.lastUpdatedAt = now()
+            candidate.usage = result.usage
+            subscriptions[current] = candidate
+            replaceNodes(result.nodes, for: id)
+            discoveredPolicyGroups[id] = result.policyGroups
+            discoveredRules[id] = result.subscriptionRules
+            discoveredRuleProviders[id] = result.ruleProviders
+            discoveredMatchTargets[id] = result.matchTarget
+            clearWarnings(withPrefix: Self.subscriptionFailurePrefix(candidate.name))
+            appendWarnings(Self.attributed(result.warnings, to: candidate.name))
+            ensureActiveConfig()
+            if id == activeConfigID { scheduleRuleSetDownload(for: id) }
+            try await persistSubscriptions()
+            try await persistSettings()
+            errorMessage = nil
+        } catch {
+            errorMessage = "新链接不可用，订阅链接未修改：\(error.localizedDescription)"
+            return
+        }
+        await reloadAfterActiveContentChange(from: previousActiveContent)
+    }
+
     func setSubscriptionAutoUpdate(id: UUID, enabled: Bool) async {
         guard let index = subscriptions.firstIndex(where: { $0.id == id }),
               subscriptions[index].autoUpdate != enabled else { return }
@@ -2601,7 +2668,11 @@ final class AppState {
             await stop(reason: activeConfigNodes.isEmpty ? "当前配置已无可用节点" : "已取消全部接管")
             return status == .off
         }
-        return await applyRoutingSettings(routingSettings, operation: "当前配置")
+        // 放进独立任务：调用方（订阅定时更新、规则集到期刷新等）的任务被取消时，不能把正在进行的
+        // 「校验 → 重启 → 健康检查 → 失败回滚」从中间打断——取消会让健康检查与回滚一起抛 CancellationError，
+        // 内核与系统代理被整个撤掉（2026-11-19 11:38 真机）。非结构化 Task 不继承取消，仍在主 actor 上执行。
+        let settings = routingSettings
+        return await Task { await self.applyRoutingSettings(settings, operation: "当前配置") }.value
     }
 
     // 内置策略组用固定 ID：PolicyGroup(name:) 默认每次生成新 UUID，
@@ -2756,13 +2827,22 @@ final class AppState {
 
     /// 启动时读取打包内核版本（运行 `sing-box version`），让"关于"页即使没开代理也显示版本号。
     func loadBundledCoreVersionIfNeeded() async {
-        guard coreVersion == "—" else { return }
+        guard bundledCoreVersion == nil else { return }
         let url = Self.singBoxBinaryURL()
         guard let result = try? await ProcessRunner.run(executable: url, arguments: ["version"], timeout: 5),
               result.exitCode == 0 else { return }
         // "sing-box version 1.13.14 (...)" → 取第三段
         let parts = result.stdout.split(separator: "\n").first?.split(separator: " ") ?? []
-        if parts.count >= 3 { coreVersion = String(parts[2]) }
+        guard parts.count >= 3 else { return }
+        bundledCoreVersion = String(parts[2])
+        if coreVersion == "—" { coreVersion = String(parts[2]) }
+    }
+
+    /// 内核 /version 返回「sing-box 1.14.4-xhttp」，与内置版本号统一成不带名字的形式。
+    nonisolated static func normalizedCoreVersion(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefix = "sing-box "
+        return trimmed.lowercased().hasPrefix(prefix) ? String(trimmed.dropFirst(prefix.count)) : trimmed
     }
 
     /// 检查 sing-box 最新发布版本。内核内置于 App、随 App 构建更新；有新版就提示并打开发布页。
@@ -2823,9 +2903,13 @@ final class AppState {
                     continue
                 }
                 do {
-                    let stream = await client.connectionFeedStream()
+                    let interval = Self.connectionsFeedStreamInterval(windowVisible: self.windowContentIsVisible)
+                    self.connectionsFeedInterval = interval
+                    let stream = await client.connectionFeedStream(intervalMilliseconds: interval)
                     // P1：自上次把列表推给界面以来累计的帧数。
                     var framesSincePublish = 0
+                    // 新订阅的第一帧（页面刚开、窗口刚从遮挡里出来）立刻上屏，不等降频的那几秒。
+                    var publishNextFrame = true
                     for try await feed in stream {
                         guard !Task.isCancelled else { break }
                         // 这条流兼供总量：连接页开着时仪表盘那条 /connections 订阅是关掉的
@@ -2845,11 +2929,12 @@ final class AppState {
                         framesSincePublish += 1
                         // 列表还是空的说明页面刚打开，这一帧必须立刻上屏——降频是为了省掉
                         // 持续刷新的开销，不是让用户对着空列表等上两三秒。
-                        guard self.connections.isEmpty
+                        guard self.connections.isEmpty || publishNextFrame
                             || framesSincePublish >= Self.connectionPublishStride(for: tracked.count) else {
                             continue
                         }
                         framesSincePublish = 0
+                        publishNextFrame = false
                         let sorted = tracked
                             .sorted { ($0.download + $0.upload) > ($1.download + $1.upload) }
                         if self.connections != sorted {
@@ -2878,6 +2963,26 @@ final class AppState {
         case ..<151: 2
         default: 3
         }
+    }
+
+    /// 连接页订阅的推送间隔：窗口看得见时 1 秒一帧；被遮挡或 App 在后台时与仪表盘后台同档，5 秒一帧。
+    ///
+    /// 真机 2026-11-12～19 一周里 CPU 超过 5% 的 250 分钟有 241 分钟是同一种情况：主窗口停在连接页
+    /// 但被别的窗口挡住，内核仍每秒推一份整张连接表（约 211 条），`ConnectionDetail(payload:)` 解析占一半 CPU。
+    /// 看不见时界面本来就不刷新，只剩会话累计量与卡顿检测要喂，5 秒一帧都够用。
+    static func connectionsFeedStreamInterval(windowVisible: Bool) -> Int {
+        windowVisible ? 1_000 : backgroundConnectionStreamInterval
+    }
+
+    /// 窗口可见性变了而连接页开着：间隔在订阅时就定了，只能收掉旧订阅按新间隔重订。
+    /// 不走 stop/start——那会清空列表、交还仪表盘订阅，窗口一出来列表先空一下。
+    private func restartConnectionsFeedIfIntervalChanged() {
+        guard connectionsTask != nil,
+              connectionsFeedInterval != Self.connectionsFeedStreamInterval(windowVisible: windowContentIsVisible)
+        else { return }
+        connectionsTask?.cancel()
+        connectionsTask = nil
+        startConnectionsMonitoring()
     }
 
     func stopConnectionsMonitoring() {
@@ -3863,6 +3968,7 @@ final class AppState {
 
     func setWindowContentVisible(_ visible: Bool) {
         windowContentIsVisible = visible
+        restartConnectionsFeedIfIntervalChanged()
         guard visible else {
             discardPendingLogs()
             return
@@ -4913,7 +5019,7 @@ final class AppState {
         }
         let versionTask = Task { [weak self] in
             guard let version = try? await client.version(), !Task.isCancelled else { return }
-            self?.coreVersion = version
+            self?.coreVersion = Self.normalizedCoreVersion(version)
         }
         dashboardTasks = [trafficTask, versionTask]
     }
@@ -5320,7 +5426,7 @@ final class AppState {
         downloadRate = 0
         activeConnectionCount = 0
         coreMemory = 0
-        coreVersion = "—"
+        coreVersion = bundledCoreVersion ?? "—"
         trafficHistory.removeAll(keepingCapacity: true)
         recentTrafficPoints.removeAll(keepingCapacity: true)
         recentTrafficSampleCount = 0
@@ -5334,7 +5440,7 @@ final class AppState {
         downloadRate = 0
         activeConnectionCount = 0
         coreMemory = 0
-        coreVersion = "—"
+        coreVersion = bundledCoreVersion ?? "—"
         runtimeStartedAt = nil
         trafficHistory.removeAll(keepingCapacity: false)
         recentTrafficPoints.removeAll(keepingCapacity: false)

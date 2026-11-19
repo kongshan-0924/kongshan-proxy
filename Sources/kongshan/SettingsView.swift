@@ -260,8 +260,8 @@ struct SettingsView: View {
 
                 LabeledContent("内核") {
                     HStack(spacing: 8) {
-                        // coreVersion 是内核 /version 的原样返回，已经带名字（`sing-box 1.13.14`）。
-                        Text(state.coreVersion)
+                        // coreVersion 只有版本号（运行时取内核 /version 并去掉名字，没运行时是内置内核自报的版本）。
+                        Text(state.coreVersion == "—" ? "—" : "sing-box \(state.coreVersion)")
                             .font(.system(size: 12).monospacedDigit())
                             .lineLimit(1)
                             .truncationMode(.middle)

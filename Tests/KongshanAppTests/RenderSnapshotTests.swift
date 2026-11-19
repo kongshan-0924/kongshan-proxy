@@ -396,6 +396,10 @@ final class RenderSnapshotTests: XCTestCase {
         // 弹层：与真实弹出时同样挂胶囊按钮。
         render(ManualNodeSheet().environment(running).sheetChrome(), name: "user-sheet-manual", size: CGSize(width: 470, height: 580))
         render(SpeedTestURLSheet().environment(running).sheetChrome(), name: "user-sheet-speedtest", size: CGSize(width: 460, height: 220))
+        if let source = running.subscriptions.first {
+            render(SubscriptionEditSheet(source: source).environment(running).sheetChrome(), name: "user-sheet-edit-subscription",
+                   size: CGSize(width: 480, height: 300))
+        }
         render(SubscriptionScheduleSheet().environment(running).sheetChrome(), name: "user-sheet-schedule", size: CGSize(width: 460, height: 300))
         render(RuleSetDatabaseSheet().environment(running).sheetChrome(), name: "user-sheet-ruleset", size: CGSize(width: 520, height: 420))
     }
@@ -418,7 +422,9 @@ final class RenderSnapshotTests: XCTestCase {
                 expiresAt: Date(timeIntervalSince1970: 1_817_800_000)
             )
         )
-        state.subscriptions = [source]
+        var dated = source
+        dated.lastUpdatedAt = Date(timeIntervalSince1970: 1_810_000_000)
+        state.subscriptions = [dated]
         state.snapshotSourceID = source.id
         let names = [
             "491.89 G | 500.00 G", "Traffic Reset：10 Days Left", "Expire Date：2027/08/07",
